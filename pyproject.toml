@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-island"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7",
+    "psutil>=5.9",
+    "watchdog>=4.0",
+    "transitions>=0.9",
+    "platformdirs>=4.0",
+]
+
+[project.optional-dependencies]
+dev = ["import-linter>=2.1"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["claude_island*"]
+
+[tool.importlinter]
+root_packages = ["claude_island"]
+include_external_packages = true
+
+# P2: Core never touches UI frameworks or OS-specific libs
+[[tool.importlinter.contracts]]
+name = "core must not import UI frameworks"
+type = "forbidden"
+source_modules = ["claude_island.core"]
+forbidden_modules = ["PySide6", "PyQt6", "PyQt5"]
+
+# P4: Acyclic — core is the stable centre, platform_ and ui are leaves
+[[tool.importlinter.contracts]]
+name = "core must not import platform layer"
+type = "forbidden"
+source_modules = ["claude_island.core"]
+forbidden_modules = ["claude_island.platform_"]
+
+[[tool.importlinter.contracts]]
+name = "ui must not import platform layer"
+type = "forbidden"
+source_modules = ["claude_island.ui"]
+forbidden_modules = ["claude_island.platform_"]
+
+[[tool.importlinter.contracts]]
+name = "platform must not import ui layer"
+type = "forbidden"
+source_modules = ["claude_island.platform_"]
+forbidden_modules = ["claude_island.ui"]
