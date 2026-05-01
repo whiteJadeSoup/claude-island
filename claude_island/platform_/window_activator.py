@@ -47,15 +47,21 @@ class WindowActivator:
             )
             return False
 
-        # claude.exe is a console child with no HWND. Walk up through the
-        # shell (powershell/cmd) to the terminal host (WindowsTerminal.exe,
-        # conhost.exe, etc.) and take the first ancestor whose pid owns a
-        # visible window.
-        candidate_pids = _ancestor_pids(pid)
-        if not candidate_pids:
-            return False
+        # Preferred: AttachConsole→GetConsoleWindow→walk GW_OWNER. This
+        # correctly distinguishes between multiple Windows Terminal windows
+        # under the same WT process — the parent-walk approach picks the
+        # topmost WT and surfaces the wrong one when the session lives in a
+        # different WT window.
+        hwnd = _resolve_console_window(pid, win32gui)
 
-        hwnd = _find_window_for_pids(candidate_pids, win32gui, win32process)
+        # Fallback: ancestor-pid walk. Used when console detection fails
+        # (legacy conhost, processes started without a console, etc.) or
+        # when the terminal isn't WT.
+        if hwnd is None:
+            candidate_pids = _ancestor_pids(pid)
+            if candidate_pids:
+                hwnd = _find_window_for_pids(candidate_pids, win32gui, win32process)
+
         if hwnd is None:
             return False
 
@@ -86,6 +92,63 @@ class WindowActivator:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _resolve_console_window(pid: int, win32gui) -> int | None:
+    """Find the visible host window that owns the given pid's console.
+
+    Critical for the multi-Windows-Terminal case: a single WT process can
+    own multiple top-level windows, and parent-pid walking can only return
+    "some WT window" — not the specific one hosting this pid's tab. This
+    function uses AttachConsole + GetConsoleWindow to obtain the pseudo-
+    console HWND of the target pid, then walks the GW_OWNER chain up to
+    the visible host (WindowsTerminal.exe / conhost.exe).
+
+    Returns None for non-console targets or if AttachConsole fails (already
+    attached, target has no console, access denied).
+
+    Side effect: temporarily detaches our process from its own console.
+    Re-attaches to the parent console afterwards. Calls during the gap
+    cannot use stdio, but our caller doesn't print anything until after
+    this function returns.
+    """
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    ATTACH_PARENT_PROCESS = 0xFFFFFFFF
+    GW_OWNER = 4
+
+    kernel32.FreeConsole()
+    console_hwnd = 0
+    try:
+        if kernel32.AttachConsole(pid):
+            try:
+                console_hwnd = kernel32.GetConsoleWindow()
+            finally:
+                kernel32.FreeConsole()
+    finally:
+        # Best-effort restoration of our original console.
+        try:
+            kernel32.AttachConsole(ATTACH_PARENT_PROCESS)
+        except Exception:
+            pass
+
+    if not console_hwnd:
+        return None
+
+    # The console HWND is typically a hidden ConPTY pseudo-console window.
+    # Walk GW_OWNER (and GetParent as a fallback) to find a visible host.
+    h = console_hwnd
+    for _ in range(_MAX_ANCESTOR_DEPTH):
+        if not h:
+            return None
+        if win32gui.IsWindowVisible(h) and win32gui.GetWindowText(h):
+            return h
+        nxt = win32gui.GetWindow(h, GW_OWNER) or win32gui.GetParent(h)
+        if not nxt or nxt == h:
+            return None
+        h = nxt
+    return None
+
 
 def _ancestor_pids(pid: int) -> list[int]:
     """Return [pid, parent_pid, grandparent_pid, ...] up to _MAX_ANCESTOR_DEPTH.
