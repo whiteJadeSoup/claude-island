@@ -13,29 +13,44 @@ _DIRECT_NAMES = {"claude", "claude.exe"}
 _NODE_NAMES = {"node", "node.exe"}
 
 
-def _is_claude(info: dict) -> bool:
-    name = (info.get("name") or "").lower()
-    if name in _DIRECT_NAMES:
-        return True
-    if name in _NODE_NAMES:
-        cmdline = info.get("cmdline") or []
-        return any("claude" in arg.lower() for arg in cmdline)
-    return False
-
-
 class ProcessScanner:
     """Enumerates running Claude Code processes using psutil.
 
     Uses the process working directory as the project path — Claude Code is
     always started from the project root, so cwd is the authoritative path.
+
+    Two-pass enumeration for cost: the cheap first pass requests only
+    ``["pid", "name", "create_time"]`` from every process on the system —
+    these are O(1) reads from psutil's per-process snapshot. Only processes
+    named ``node[.exe]`` need a follow-up ``cmdline()`` call to confirm
+    they're hosting Claude Code; ``claude[.exe]`` is a direct name hit.
+    Pulling cmdline eagerly across all processes (the previous behaviour)
+    triggered a per-process NtQueryInformationProcess on Windows that
+    measurably contributed to scan-tick CPU on busy machines (500+ procs).
     """
 
     def scan(self) -> list[Session]:
         sessions: list[Session] = []
-        for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
+        for proc in psutil.process_iter(["pid", "name", "create_time"]):
             try:
                 info = proc.info
-                if not _is_claude(info):
+                name = (info.get("name") or "").lower()
+
+                if name in _DIRECT_NAMES:
+                    session = self._build(proc, info)
+                    if session:
+                        sessions.append(session)
+                    continue
+
+                if name not in _NODE_NAMES:
+                    continue
+
+                # Node process — only now pay the cmdline cost.
+                try:
+                    cmdline = proc.cmdline()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+                if not any("claude" in arg.lower() for arg in cmdline):
                     continue
                 session = self._build(proc, info)
                 if session:
