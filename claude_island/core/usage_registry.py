@@ -121,30 +121,40 @@ class UsageRegistry:
     # ------------------------------------------------------------------
 
     def get_totals(self, period: str) -> UsageTotals:
+        # Aggregate per model so each (model, token-class) pair is priced with
+        # its own rate. Cost is recomputed on read rather than read from the
+        # stored cost_usd column — this also auto-corrects records written
+        # under stale pricing tables (e.g. old Opus rates).
         delta = _PERIOD_DELTA.get(period, timedelta(days=1))
         since = (datetime.now(timezone.utc) - delta).isoformat()
         with self._lock:
-            row = self._conn.execute(
+            rows = self._conn.execute(
                 """
                 SELECT
+                    model,
                     COALESCE(SUM(input_tokens),          0),
                     COALESCE(SUM(output_tokens),         0),
                     COALESCE(SUM(cache_creation_tokens), 0),
-                    COALESCE(SUM(cache_read_tokens),     0),
-                    COALESCE(SUM(cost_usd),              0.0)
+                    COALESCE(SUM(cache_read_tokens),     0)
                 FROM usage_records
                 WHERE timestamp >= ?
+                GROUP BY model
                 """,
                 (since,),
-            ).fetchone()
-        return UsageTotals(
-            period=period,
-            input_tokens=row[0],
-            output_tokens=row[1],
-            cache_creation_tokens=row[2],
-            cache_read_tokens=row[3],
-            cost_usd=row[4],
-        )
+            ).fetchall()
+
+        totals = UsageTotals(period=period)
+        for model, in_tok, out_tok, cw_tok, cr_tok in rows:
+            p = _resolve_pricing(model)
+            totals.input_tokens          += in_tok
+            totals.output_tokens         += out_tok
+            totals.cache_creation_tokens += cw_tok
+            totals.cache_read_tokens     += cr_tok
+            totals.input_cost            += in_tok / 1_000_000 * p.input_per_mtok
+            totals.output_cost           += out_tok / 1_000_000 * p.output_per_mtok
+            totals.cache_creation_cost   += cw_tok / 1_000_000 * p.input_per_mtok * 1.25
+            totals.cache_read_cost       += cr_tok / 1_000_000 * p.input_per_mtok * 0.1
+        return totals
 
     # ------------------------------------------------------------------
     # Incremental parse offsets

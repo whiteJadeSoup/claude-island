@@ -152,9 +152,13 @@ class ExpandedWindow(QWidget):
         usage_title.setStyleSheet(_STYLE_TITLE)
         root.addWidget(usage_title)
 
+        # Monospace so the token / cost columns line up.
         self._usage_label = QLabel("—")
-        self._usage_label.setStyleSheet("color: #ccc; font-size: 12px;")
-        self._usage_label.setWordWrap(True)
+        self._usage_label.setStyleSheet(
+            "color: #ccc; font-size: 11px; font-family: 'Consolas', 'Menlo', monospace;"
+        )
+        self._usage_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._usage_label.setWordWrap(False)
         root.addWidget(self._usage_label)
 
         # Period selector
@@ -198,13 +202,20 @@ class ExpandedWindow(QWidget):
         self._position()
 
     def refresh_usage_bar(self, _: object = None) -> None:
-        totals = self._get_usage_totals(self._period)
-        in_tok = _fmt_tokens(totals.input_tokens)
-        out_tok = _fmt_tokens(totals.output_tokens)
-        self._usage_label.setText(
-            f"In: {in_tok}  Out: {out_tok}\n"
-            f"Cost: ${totals.cost_usd:.4f}"
-        )
+        t = self._get_usage_totals(self._period)
+        rows = [
+            ("Input  ", t.input_tokens,          t.input_cost),
+            ("Output ", t.output_tokens,         t.output_cost),
+            ("Cache W", t.cache_creation_tokens, t.cache_creation_cost),
+            ("Cache R", t.cache_read_tokens,     t.cache_read_cost),
+        ]
+        lines = [
+            f"{label}  {_fmt_tokens(tok):>6}  ${cost:>9.4f}"
+            for label, tok, cost in rows
+        ]
+        lines.append("─" * 27)
+        lines.append(f"Total           ${t.cost_usd:>9.4f}")
+        self._usage_label.setText("\n".join(lines))
 
     def _on_state_changed(self, state: str) -> None:
         if state == "expanded":
