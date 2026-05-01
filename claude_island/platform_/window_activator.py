@@ -107,26 +107,47 @@ def _ancestor_pids(pid: int) -> list[int]:
 
 
 def _force_foreground(hwnd: int, win32con, win32gui, win32process) -> bool:
-    """SetForegroundWindow with the AttachThreadInput workaround.
+    """Bring the target HWND to the foreground.
 
-    Windows blocks SetForegroundWindow from foreign processes unless the
-    caller's thread is "attached" to either the current foreground thread
-    or the target thread's input queue. We attach to both, do the dance,
-    then detach. This is the documented pattern for working around the
-    foreground-lock policy.
+    Precondition: the calling process is currently the foreground process
+    (Win32 only allows SetForegroundWindow from the foreground process,
+    and our expanded panel takes foreground via activateWindow before the
+    user can click a row).
+
+    If SetForegroundWindow still fails after that, we fall back to the
+    AttachThreadInput dance and finally to SwitchToThisWindow (undocumented
+    but used by the Windows task switcher). On total failure we log enough
+    state to diagnose: GetLastError, who currently holds the foreground,
+    and the calling thread vs target thread.
     """
-    import win32api  # part of pywin32; deferred so import errors stay localised
+    import ctypes
+    import win32api
 
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    # Restore if the window is minimised.
+    try:
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    except Exception:
+        pass
+
+    # Pass 1: direct SetForegroundWindow (works when we are foreground).
+    if _try_set_foreground(hwnd):
+        return True
+
+    # Pass 2: AttachThreadInput fallback for cases where the panel briefly
+    # lost foreground between show() and the row click.
     our_thread = win32api.GetCurrentThreadId()
     target_thread, _ = win32process.GetWindowThreadProcessId(hwnd)
-
     fg_hwnd = win32gui.GetForegroundWindow()
     fg_thread = 0
     if fg_hwnd:
         try:
             fg_thread, _ = win32process.GetWindowThreadProcessId(fg_hwnd)
         except Exception:
-            fg_thread = 0
+            pass
 
     attached: list[int] = []
     try:
@@ -137,19 +158,8 @@ def _force_foreground(hwnd: int, win32con, win32gui, win32process) -> bool:
                     attached.append(tid)
                 except Exception:
                     pass
-
-        try:
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        except Exception:
-            pass
-        try:
-            win32gui.BringWindowToTop(hwnd)
-        except Exception:
-            pass
-        try:
-            ok = bool(win32gui.SetForegroundWindow(hwnd))
-        except Exception:
-            ok = False
+        if _try_set_foreground(hwnd):
+            return True
     finally:
         for tid in attached:
             try:
@@ -157,12 +167,44 @@ def _force_foreground(hwnd: int, win32con, win32gui, win32process) -> bool:
             except Exception:
                 pass
 
-    if not ok:
-        print(
-            f"[claude-island] SetForegroundWindow failed for HWND {hwnd}",
-            file=sys.stderr,
-        )
-    return ok
+    # Pass 3: SwitchToThisWindow (undocumented, used by Alt+Tab).
+    try:
+        user32.SwitchToThisWindow(hwnd, True)
+        if user32.GetForegroundWindow() == hwnd:
+            return True
+    except Exception:
+        pass
+
+    # All passes failed — surface enough state to debug.
+    last_err = kernel32.GetLastError()
+    fg_owner = ""
+    if fg_hwnd:
+        try:
+            title = win32gui.GetWindowText(fg_hwnd) or "<no title>"
+            fg_owner = f"{title!r}(hwnd={fg_hwnd})"
+        except Exception:
+            fg_owner = f"hwnd={fg_hwnd}"
+    print(
+        f"[claude-island] could not surface HWND {hwnd}: "
+        f"GetLastError={last_err}, foreground={fg_owner}, "
+        f"our_thread={our_thread}, target_thread={target_thread}, "
+        f"fg_thread={fg_thread}",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _try_set_foreground(hwnd: int) -> bool:
+    import ctypes
+    user32 = ctypes.windll.user32
+    try:
+        user32.BringWindowToTop(hwnd)
+    except Exception:
+        pass
+    try:
+        return bool(user32.SetForegroundWindow(hwnd))
+    except Exception:
+        return False
 
 
 def _find_window_for_pids(pids: list[int], win32gui, win32process) -> int | None:

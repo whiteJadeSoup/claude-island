@@ -112,7 +112,11 @@ class ExpandedWindow(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        # Intentionally NOT setting WA_ShowWithoutActivating: that attribute
+        # sets WS_EX_NOACTIVATE, which makes WM_MOUSEACTIVATE return
+        # MA_NOACTIVATE — clicks deliver but never make us the foreground
+        # process, so SetForegroundWindow on the target terminal then fails
+        # the "calling process must be foreground" rule.
         self.setFixedWidth(_PANEL_W)
         self.hide()
 
@@ -224,6 +228,9 @@ class ExpandedWindow(QWidget):
             self._position()
             self.show()
             self.raise_()
+            # Explicitly take foreground so subsequent SetForegroundWindow
+            # calls from row clicks are allowed by Win32.
+            self.activateWindow()
         else:
             self.hide()
 
