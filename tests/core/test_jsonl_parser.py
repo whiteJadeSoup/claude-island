@@ -271,3 +271,84 @@ def test_file_growth_without_truncation_unchanged(env):
     parser.parse_file(jsonl)
 
     assert _row_count(reg) == 2  # both lines, no double-counting
+
+
+# --------------------------------------------------------------------------
+# Q7: timestamp normalisation
+# --------------------------------------------------------------------------
+
+def _line_with_ts(ts: str, input_tokens: int = 10) -> bytes:
+    """Like _line but lets the test pick the raw timestamp string."""
+    payload = (
+        '{"type":"assistant","timestamp":"' + ts + '",'
+        '"message":{"model":"claude-sonnet-4-5",'
+        '"usage":{"input_tokens":' + str(input_tokens)
+        + ',"output_tokens":5,"cache_creation_input_tokens":0,'
+        '"cache_read_input_tokens":0}}}\n'
+    )
+    return payload.encode("utf-8")
+
+
+def test_parse_ts_handles_z_suffix():
+    from claude_island.core.jsonl_parser import _parse_ts
+    ts = _parse_ts({"timestamp": "2025-01-01T12:34:56.789Z"})
+    assert ts is not None
+    assert ts.tzinfo is not None
+    assert ts.utcoffset().total_seconds() == 0
+
+
+def test_parse_ts_handles_explicit_offset():
+    from claude_island.core.jsonl_parser import _parse_ts
+    ts = _parse_ts({"timestamp": "2025-01-01T12:34:56.789+02:00"})
+    assert ts is not None
+    # Normalised to UTC: 12:34 +02:00 → 10:34 UTC
+    assert ts.hour == 10
+    assert ts.utcoffset().total_seconds() == 0
+
+
+def test_parse_ts_assumes_utc_for_naive_input():
+    """Q7 trap (b): naive datetime stored as ISO without +00:00 suffix
+    sorts BEFORE timestamps that have the suffix in lex order, so
+    'today' rows would silently fall outside the daily window."""
+    from claude_island.core.jsonl_parser import _parse_ts
+    ts = _parse_ts({"timestamp": "2025-01-01T12:34:56"})
+    assert ts is not None
+    assert ts.tzinfo is not None
+    # The serialised form must include the offset so str >= filtering works.
+    assert "+00:00" in ts.isoformat()
+
+
+def test_parse_ts_truncates_excess_fractional_digits():
+    """Q7 trap (a): fromisoformat rejects 7+ fractional digits."""
+    from claude_island.core.jsonl_parser import _parse_ts
+    # Nanosecond precision (9 digits): would raise without the truncation.
+    ts = _parse_ts({"timestamp": "2025-01-01T12:34:56.123456789Z"})
+    assert ts is not None
+    # Truncated to microseconds (6 digits).
+    assert ts.microsecond == 123456
+
+
+def test_parse_ts_returns_none_for_invalid():
+    from claude_island.core.jsonl_parser import _parse_ts
+    assert _parse_ts({"timestamp": "not a timestamp"}) is None
+    assert _parse_ts({"timestamp": None}) is None
+    assert _parse_ts({}) is None
+
+
+def test_naive_timestamp_row_is_included_in_daily_totals(env):
+    """End-to-end: a JSONL line with a naive timestamp (no Z, no offset)
+    parsed today must show up in get_totals('daily'). Without Q7 it would
+    silently drop out due to lex-order comparison against the +00:00 cutoff."""
+    reg, parser, jsonl = env
+
+    # Use today's date (so the row falls inside the 24h window) without a Z.
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    naive_iso = now.replace(tzinfo=None).isoformat()  # no +00:00
+    jsonl.write_bytes(_line_with_ts(naive_iso, input_tokens=42))
+
+    parser.parse_file(jsonl)
+
+    totals = reg.get_totals("daily")
+    assert totals.input_tokens == 42, (
+        "naive-timestamp row dropped from daily totals due to lex-order bug"
+    )

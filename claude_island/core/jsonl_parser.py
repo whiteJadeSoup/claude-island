@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from .events import Event
 from .usage_registry import UsageRegistry
+
+# Pre-compiled: trim fractional seconds to ≤6 digits so datetime.fromisoformat
+# accepts the string. Claude Code today uses ms (3 digits), but a future
+# precision bump to ns would otherwise silently drop every line.
+_FRACTIONAL_OVERFLOW = re.compile(r"(\.\d{6})\d+")
 
 
 class JsonlParser:
@@ -162,13 +168,34 @@ class JsonlParser:
 
 
 def _parse_ts(entry: dict) -> datetime | None:
+    """Parse a Claude Code JSONL timestamp into a UTC tz-aware datetime.
+
+    Two latent traps the normalisation closes:
+
+    1. fromisoformat rejects 7+ fractional digits ('Invalid isoformat
+       string'). Truncate to 6 — the same precision Python natively stores.
+
+    2. A naive datetime (no 'Z', no offset) round-tripped through
+       .isoformat() produces a string with no '+00:00' suffix. The DB
+       stores it as TEXT and get_totals does a string >= comparison
+       against `datetime.now(utc).isoformat()` which always has the
+       suffix. Lex order: '...12:34:56' < '...12:34:56+00:00' (the
+       suffix character '+' comes after EOS), so naive-stamped rows
+       fall outside their time window and silently drop out of totals.
+       Force every output to be UTC tz-aware so the stored string
+       always carries the offset.
+    """
     ts_str = entry.get("timestamp")
     if not isinstance(ts_str, str):
         return None
+    normalised = _FRACTIONAL_OVERFLOW.sub(r"\1", ts_str.replace("Z", "+00:00"))
     try:
-        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        ts = datetime.fromisoformat(normalised)
     except ValueError:
         return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
 
 
 def _extract_usage(entry: dict) -> tuple[dict, str]:
