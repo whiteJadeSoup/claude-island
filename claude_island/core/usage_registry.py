@@ -8,9 +8,16 @@ from pathlib import Path
 from .events import Event
 from .models import PRICING, DEFAULT_PRICING, PricingTable, UsageTotals
 
+# INTEGER PRIMARY KEY (without AUTOINCREMENT) is automatically the ROWID
+# alias on SQLite — same monotonic behaviour without the sqlite_sequence
+# overhead. cost_usd is intentionally absent: get_totals recomputes cost
+# from token columns + live PRICING on every read, so storing the cost
+# was redundant and could disagree with display when prices change.
+# Composite (timestamp, model) lets get_totals' "WHERE timestamp >= ?
+# GROUP BY model" stream from the index without a sort step.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage_records (
-    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                    INTEGER PRIMARY KEY,
     timestamp             TEXT    NOT NULL,
     project_path          TEXT    NOT NULL,
     session_uuid          TEXT    NOT NULL,
@@ -18,10 +25,10 @@ CREATE TABLE IF NOT EXISTS usage_records (
     input_tokens          INTEGER NOT NULL,
     output_tokens         INTEGER NOT NULL,
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
-    cost_usd              REAL
+    cache_read_tokens     INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_records(timestamp);
+CREATE INDEX IF NOT EXISTS idx_usage_timestamp_model
+    ON usage_records(timestamp, model);
 
 CREATE TABLE IF NOT EXISTS parse_offsets (
     file_path      TEXT    PRIMARY KEY,
@@ -29,6 +36,18 @@ CREATE TABLE IF NOT EXISTS parse_offsets (
     last_parsed_at TEXT    NOT NULL
 );
 """
+
+# Migration applied on every open. Each step is idempotent so re-running
+# is safe; uses PRAGMA introspection to detect old layouts. Steps:
+# - Drop legacy cost_usd column (SQLite 3.35+, ships with Python 3.11+).
+# - Drop the timestamp-only index in favour of the composite one.
+# - The legacy AUTOINCREMENT can't be dropped without rebuilding the table;
+#   leave the historical id column as-is and rely on new tables having
+#   plain INTEGER PRIMARY KEY going forward.
+_MIGRATIONS = [
+    "ALTER TABLE usage_records DROP COLUMN cost_usd",
+    "DROP INDEX IF EXISTS idx_usage_timestamp",
+]
 
 # Rolling windows, not calendar periods — "monthly" is the trailing 30 days,
 # not the current calendar month. Avoids month-boundary edge cases (28 vs 29
@@ -39,6 +58,26 @@ _PERIOD_DELTA: dict[str, timedelta] = {
     "weekly":  timedelta(weeks=1),
     "monthly": timedelta(days=30),
 }
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Run idempotent schema migrations on every open.
+
+    Each statement either succeeds or fails for a known reason (column
+    already gone, index already missing). Unknown failures propagate so
+    we don't silently mask schema corruption. Called once during __init__
+    after CREATE TABLE IF NOT EXISTS, so brand-new databases see this as
+    a series of no-ops.
+    """
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            # "no such column" / "no such index" → migration already applied.
+            if "no such column" in msg or "no such index" in msg:
+                continue
+            raise
 
 
 def _resolve_pricing(model: str) -> PricingTable:
@@ -56,21 +95,6 @@ def _resolve_pricing(model: str) -> PricingTable:
     return DEFAULT_PRICING
 
 
-def _compute_cost(
-    input_tokens: int,
-    output_tokens: int,
-    cache_creation_tokens: int,
-    cache_read_tokens: int,
-    pricing: PricingTable,
-) -> float:
-    return (
-        input_tokens / 1_000_000 * pricing.input_per_mtok
-        + output_tokens / 1_000_000 * pricing.output_per_mtok
-        + cache_creation_tokens / 1_000_000 * pricing.input_per_mtok * 1.25
-        + cache_read_tokens / 1_000_000 * pricing.input_per_mtok * 0.1
-    )
-
-
 class UsageRegistry:
     """SQLite-backed store for per-turn token usage and incremental parse offsets.
 
@@ -84,6 +108,7 @@ class UsageRegistry:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
+        _apply_migrations(self._conn)
         self._conn.commit()
         self._lock = threading.Lock()
 
@@ -143,15 +168,12 @@ class UsageRegistry:
         counting on the next start) or vice versa (which would cause data
         loss). This is the per-file durability guarantee S2 calls for.
         """
-        rows = []
-        for e in entries:
-            pricing = _resolve_pricing(e["model"])
-            cost = _compute_cost(
-                e["input_tokens"], e["output_tokens"],
-                e["cache_creation_tokens"], e["cache_read_tokens"],
-                pricing,
-            )
-            rows.append((
+        # cost_usd is intentionally NOT stored — get_totals recomputes from
+        # token columns + live PRICING so price-table updates retroactively
+        # apply. Storing it would create a dual source of truth; the column
+        # was dropped from the schema in S1.
+        rows = [
+            (
                 e["timestamp"].isoformat(),
                 e["project_path"],
                 e["session_uuid"],
@@ -160,8 +182,9 @@ class UsageRegistry:
                 e["output_tokens"],
                 e["cache_creation_tokens"],
                 e["cache_read_tokens"],
-                cost,
-            ))
+            )
+            for e in entries
+        ]
 
         if not rows and advance_offset is None:
             return
@@ -175,8 +198,8 @@ class UsageRegistry:
                         INSERT INTO usage_records
                             (timestamp, project_path, session_uuid, model,
                              input_tokens, output_tokens,
-                             cache_creation_tokens, cache_read_tokens, cost_usd)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             cache_creation_tokens, cache_read_tokens)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         rows,
                     )
