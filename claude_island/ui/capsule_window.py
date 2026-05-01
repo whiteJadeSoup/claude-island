@@ -81,6 +81,9 @@ class CapsuleWindow(QWidget):
     def _on_state_changed(self, state: str) -> None:
         if self._hidden_by_user:
             return
+        # Three controller states collapse to two capsule visuals: 'dot' is
+        # the minimal presence; both 'collapsed' and 'expanded' show the
+        # full pill (the expanded panel is a separate window stacked below).
         if state == "dot":
             self._apply_dot()
         else:

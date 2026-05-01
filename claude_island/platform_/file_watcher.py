@@ -7,7 +7,7 @@ from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileSystemEvent
 from watchdog.observers import Observer
 
 
-class _JssonlHandler(FileSystemEventHandler):
+class _JsonlHandler(FileSystemEventHandler):
     def __init__(self, callback: Callable[[Path], None]) -> None:
         self._callback = callback
 
@@ -30,7 +30,7 @@ class FileWatcher:
         self._observer = Observer()
 
     def watch(self, path: Path, callback: Callable[[Path], None]) -> None:
-        self._observer.schedule(_JssonlHandler(callback), str(path), recursive=True)
+        self._observer.schedule(_JsonlHandler(callback), str(path), recursive=True)
 
     def start(self) -> None:
         self._observer.start()

@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS parse_offsets (
 );
 """
 
+# Rolling windows, not calendar periods — "monthly" is the trailing 30 days,
+# not the current calendar month. Avoids month-boundary edge cases (28 vs 29
+# vs 30 vs 31 days, year wraps) at the cost of a small UI label ambiguity
+# ("Monthly" reads as either "this month" or "last 30d" depending on user).
 _PERIOD_DELTA: dict[str, timedelta] = {
     "daily":   timedelta(days=1),
     "weekly":  timedelta(weeks=1),
@@ -38,6 +42,13 @@ _PERIOD_DELTA: dict[str, timedelta] = {
 
 
 def _resolve_pricing(model: str) -> PricingTable:
+    # Substring match on lowercased model id so we survive Anthropic's
+    # version-suffixing convention ("claude-3-5-sonnet-20241022" → "sonnet").
+    # Iteration order is the dict's insertion order (haiku, sonnet, opus);
+    # since these tokens don't appear in each other's names, order is safe.
+    # Unknown / empty model silently falls back to DEFAULT_PRICING (sonnet
+    # rates) — preferable to crashing, but means an unknown future family
+    # gets priced as sonnet until the table is updated.
     lower = model.lower()
     for key, pricing in PRICING.items():
         if key in lower:

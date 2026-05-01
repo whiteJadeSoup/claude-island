@@ -57,10 +57,6 @@ class IslandController(QObject):
         if self.state != prev:
             self.state_changed.emit(self.state)
 
-    def on_permission_required(self, _: None) -> None:
-        # Placeholder: show onboarding panel (v2)
-        pass
-
     # ------------------------------------------------------------------
     # Called by UI (capsule click)
     # ------------------------------------------------------------------

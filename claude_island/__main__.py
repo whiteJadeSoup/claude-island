@@ -80,15 +80,22 @@ expanded = ExpandedWindow(
 # QtBridge marshals the emit from background thread → Qt main thread.
 # ---------------------------------------------------------------------------
 _wiring = [
-    (session_registry.sessions_changed,    controller.on_sessions_updated),
-    (session_registry.sessions_changed,    capsule.refresh_sessions),
-    (session_registry.sessions_changed,    expanded.refresh_sessions),
-    (session_registry.permission_required, controller.on_permission_required),
-    (usage_registry.totals_changed,        expanded.refresh_usage_bar),
+    (session_registry.sessions_changed, controller.on_sessions_updated),
+    (session_registry.sessions_changed, capsule.refresh_sessions),
+    (session_registry.sessions_changed, expanded.refresh_sessions),
+    (usage_registry.totals_changed,     expanded.refresh_usage_bar),
 ]
-_bridges = [QtBridge(event) for event, _ in _wiring]
-for bridge, (_, slot) in zip(_bridges, _wiring):
+# Group by source event so we don't create N redundant QtBridge instances
+# subscribing to the same Event (sessions_changed has 3 slots — they should
+# share one bridge, not three). Matches the QtBridge docstring's example.
+_bridges_by_event: dict[object, QtBridge] = {}
+for event, slot in _wiring:
+    bridge = _bridges_by_event.get(id(event))
+    if bridge is None:
+        bridge = QtBridge(event)
+        _bridges_by_event[id(event)] = bridge
     bridge.connect_to(slot)
+_bridges = list(_bridges_by_event.values())  # keep references alive
 
 # core → core direct subscription: JSONL activity feeds the session registry's
 # override map. update_activity is thread-safe and does not emit, so there is

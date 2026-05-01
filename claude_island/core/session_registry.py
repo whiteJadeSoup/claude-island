@@ -25,7 +25,6 @@ class SessionRegistry:
 
     def __init__(self) -> None:
         self.sessions_changed: Event[list[Session]] = Event()
-        self.permission_required: Event[None] = Event()
         self._sessions: list[Session] = []
         self._activity_overrides: dict[str, datetime] = {}
         # Sentinel != any real list (None never compares equal to a list)
@@ -62,9 +61,6 @@ class SessionRegistry:
             existing = self._activity_overrides.get(proj_hash)
             if existing is None or ts > existing:
                 self._activity_overrides[proj_hash] = ts
-
-    def require_permission(self) -> None:
-        self.permission_required.emit(None)
 
     @property
     def sessions(self) -> list[Session]:
