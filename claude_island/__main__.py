@@ -102,25 +102,41 @@ expanded.session_activated.connect(window_activator.activate)
 # ---------------------------------------------------------------------------
 # Start background services
 # ---------------------------------------------------------------------------
+_backfill_thread: threading.Thread | None = None
 if _CLAUDE_PROJECTS.exists():
     file_watcher.watch(_CLAUDE_PROJECTS, jsonl_parser.parse_file)
     file_watcher.start()
 
     # Backfill existing JSONL history in a daemon thread so startup is instant.
-    _backfill = threading.Thread(target=jsonl_parser.backfill_all, daemon=True)
-    _backfill.start()
+    _backfill_thread = threading.Thread(target=jsonl_parser.backfill_all, daemon=True)
+    _backfill_thread.start()
 
 session_discovery.start()
 capsule.show()
 
 # ---------------------------------------------------------------------------
 # Event loop + cleanup
+#
+# Order matters at shutdown: we must stop every producer of writes to the
+# SQLite connection BEFORE closing it, or background threads will raise
+# sqlite3.ProgrammingError on a closed connection. Order:
+#   1. session_discovery.stop()  — no more sessions_changed emits
+#   2. file_watcher.stop()       — no more parse_file callbacks
+#   3. jsonl_parser.request_stop() + join — backfill thread exits cleanly
+#   4. usage_registry.close()    — DB closed; nothing left to write to it
 # ---------------------------------------------------------------------------
 exit_code = app.exec()
 
 session_discovery.stop()
 if _CLAUDE_PROJECTS.exists():
     file_watcher.stop()
+jsonl_parser.request_stop()
+if _backfill_thread is not None:
+    # Bounded join: backfill checks the stop flag at each file boundary, so
+    # in the worst case we wait for the current file's parse to finish.
+    # 5 seconds is generous; if it ever exceeds, the daemon thread is killed
+    # at process exit anyway and SQLite close() will raise harmlessly.
+    _backfill_thread.join(timeout=5.0)
 usage_registry.close()
 
 sys.exit(exit_code)

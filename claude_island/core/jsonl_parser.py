@@ -37,6 +37,19 @@ class JsonlParser:
         self._usage = usage_registry
         self._projects_dir = claude_projects_dir
         self._lock = threading.Lock()
+        # Cooperative cancellation for backfill_all. Set by request_stop()
+        # at app shutdown so the daemon thread bails out before we close
+        # the SQLite connection — otherwise record_many / set_offset would
+        # raise sqlite3.ProgrammingError on a closed connection.
+        self._stop_event = threading.Event()
+
+    def request_stop(self) -> None:
+        """Signal backfill_all to abort at the next file boundary.
+
+        Idempotent. Used by the shutdown sequence in __main__.py: call this
+        before joining the backfill thread and closing the usage registry.
+        """
+        self._stop_event.set()
 
     def parse_file(self, file_path: Path) -> None:
         """Parse new bytes from *file_path*. Safe to call from any thread."""
@@ -47,9 +60,12 @@ class JsonlParser:
         """Parse every existing JSONL under the projects dir from stored offsets.
 
         Intended to run once at startup in a background thread; may take tens
-        of seconds on large history.
+        of seconds on large history. Checks the stop event between files so
+        shutdown doesn't have to wait for the entire history to finish.
         """
         for jsonl_file in self._projects_dir.rglob("*.jsonl"):
+            if self._stop_event.is_set():
+                return
             with self._lock:
                 self._parse_incremental(jsonl_file)
 

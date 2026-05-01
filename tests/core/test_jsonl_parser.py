@@ -166,3 +166,46 @@ def test_parsing_chunk_with_many_lines_emits_totals_once(env):
 
     assert _row_count(reg) == 60
     assert len(received) == 1
+
+
+# --------------------------------------------------------------------------
+# B3: backfill cooperative cancellation
+# --------------------------------------------------------------------------
+
+def test_request_stop_aborts_backfill_at_next_file(env, tmp_path):
+    """If shutdown signals stop while backfill is iterating, it must bail
+    at the next file boundary — otherwise we close() the SQLite connection
+    while the daemon thread is still mid-write, and it raises
+    ProgrammingError (or worse, leaves inconsistent rows + offsets behind)."""
+    reg, parser, _ = env
+
+    # Drop several JSONL files into the projects dir so backfill has work.
+    project_dir = parser._projects_dir / "proj-hash"
+    for i in range(20):
+        f = project_dir / f"sess-{i}.jsonl"
+        f.write_bytes(_line(f"2025-01-01T00:00:{i:02d}Z", 10, 5))
+
+    # Stop BEFORE backfill runs — it should process zero files.
+    parser.request_stop()
+    parser.backfill_all()
+    assert _row_count(reg) == 0
+
+
+def test_backfill_runs_to_completion_when_not_stopped(env):
+    """Sanity: without request_stop, backfill processes everything."""
+    reg, parser, _ = env
+
+    project_dir = parser._projects_dir / "proj-hash"
+    for i in range(5):
+        f = project_dir / f"sess-{i}.jsonl"
+        f.write_bytes(_line(f"2025-01-01T00:00:{i:02d}Z", 10, 5))
+
+    parser.backfill_all()
+    assert _row_count(reg) == 5
+
+
+def test_request_stop_is_idempotent(env):
+    """Calling stop twice should not raise. Shutdown code may be defensive."""
+    _, parser, _ = env
+    parser.request_stop()
+    parser.request_stop()  # must not raise
