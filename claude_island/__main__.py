@@ -43,6 +43,7 @@ jsonl_parser = JsonlParser(
 # ---------------------------------------------------------------------------
 from claude_island.platform_.file_watcher import FileWatcher
 from claude_island.platform_.process_scanner import ProcessScanner
+from claude_island.platform_.quota_provider import QuotaProvider
 from claude_island.platform_.session_discovery import SessionDiscovery
 from claude_island.platform_.window_activator import WindowActivator
 
@@ -53,17 +54,40 @@ session_discovery = SessionDiscovery(
     scanner=process_scanner,
     registry=session_registry,
 )
+# QuotaProvider hits Anthropic's private /api/oauth/usage with the OAuth
+# token Claude Code already maintains. Cache lives next to our usage DB
+# so all per-user state stays in one platformdirs-resolved location.
+quota_provider = QuotaProvider(
+    credentials_path=Path.home() / ".claude" / ".credentials.json",
+    cache_path=Path(user_data_dir(_APP_NAME, appauthor=False)) / "usage-cache.json",
+    enabled=True,
+)
 
 # ---------------------------------------------------------------------------
 # Section 3: UI layer (Qt)
 # ---------------------------------------------------------------------------
+from PySide6.QtCore import QTimer
+
 app = QApplication(sys.argv)
 app.setQuitOnLastWindowClosed(False)
+
+from dataclasses import replace
 
 from claude_island.ui.capsule_window import CapsuleWindow
 from claude_island.ui.controller import IslandController
 from claude_island.ui.expanded_window import ExpandedWindow
 from claude_island.ui.qt_bridge import QtBridge
+
+
+def _build_session_usage():
+    """Combine the local 5h block with the (optional) remote quota
+    snapshot. Lives here because it's cross-layer wiring: core gives
+    the local block, platform gives the remote quota, UI consumes
+    the combined record. Neither layer should know about the other."""
+    base = usage_registry.get_session_window()
+    snap = quota_provider.get()
+    return replace(base, quota=snap)
+
 
 controller = IslandController()
 capsule = CapsuleWindow(controller)
@@ -71,6 +95,7 @@ expanded = ExpandedWindow(
     capsule=capsule,
     controller=controller,
     get_usage_totals=usage_registry.get_totals,
+    get_session_usage=_build_session_usage,
 )
 
 # ---------------------------------------------------------------------------
@@ -122,6 +147,13 @@ file_watcher.start()
 # Backfill existing JSONL history in a daemon thread so startup is instant.
 _backfill_thread = threading.Thread(target=jsonl_parser.backfill_all, daemon=True)
 _backfill_thread.start()
+
+# 60s heartbeat: tick the 5h reset countdown and pull a fresh quota
+# snapshot. QuotaProvider gates HTTP internally on its 300s TTL, so this
+# only issues a network call every 5 min.
+_usage_heartbeat = QTimer()
+_usage_heartbeat.timeout.connect(expanded.refresh_usage_bar)
+_usage_heartbeat.start(60_000)
 
 session_discovery.start()
 capsule.show()

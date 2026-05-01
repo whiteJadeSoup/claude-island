@@ -260,3 +260,126 @@ def test_migration_is_idempotent(tmp_path):
         assert "cost_usd" not in _column_names(reg, "usage_records")
     finally:
         reg.close()
+
+
+# --------------------------------------------------------------------------
+# W1-W5: 5h session window detection
+# --------------------------------------------------------------------------
+from datetime import timedelta
+
+
+def _entry_at(when: datetime, *, model: str = "claude-sonnet-4-5",
+              input_tokens: int = 100, output_tokens: int = 50) -> dict:
+    return {
+        "timestamp": when,
+        "project_path": "proj",
+        "session_uuid": "sess",
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+    }
+
+
+def test_session_window_empty_db_returns_nones(registry):
+    """W1: zero records → SessionUsage with None timestamps and empty totals."""
+    su = registry.get_session_window()
+    assert su.start_time is None
+    assert su.end_time is None
+    assert su.by_model == ()
+    assert su.total_cost_usd == 0.0
+    assert su.quota is None
+
+
+def test_session_window_single_recent_record(registry):
+    """W2: one record 1h ago → start_time at that record, end_time +5h."""
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    registry.record_many([_entry_at(one_hour_ago)])
+
+    su = registry.get_session_window()
+    assert su.start_time is not None
+    # Compare to seconds-precision; ISO round-trip preserves microseconds
+    assert abs((su.start_time - one_hour_ago).total_seconds()) < 1
+    assert (su.end_time - su.start_time) == timedelta(hours=5)
+    assert len(su.by_model) == 1
+    assert su.by_model[0].input_tokens == 100
+
+
+def test_session_window_block_break_after_long_gap(registry):
+    """W3: 6h-old record + 30min-old record → 5.5h gap breaks the block,
+    so session_start = the 30min-old record (only it counts)."""
+    now = datetime.now(timezone.utc)
+    registry.record_many([
+        _entry_at(now - timedelta(hours=6), input_tokens=999),
+        _entry_at(now - timedelta(minutes=30), input_tokens=42),
+    ])
+
+    su = registry.get_session_window()
+    # Window starts at the most-recent block-start = the 30-min-ago record
+    assert abs((su.start_time - (now - timedelta(minutes=30))).total_seconds()) < 1
+    # Only the 30-min row counts, not the 6h-ago one
+    assert len(su.by_model) == 1
+    assert su.by_model[0].input_tokens == 42
+
+
+def test_session_window_continuous_block(registry):
+    """W4: 4h-old record + 1h-old record (only 3h apart, < 5h gap)
+    → both belong to the same block; session_start = 4h-old record."""
+    now = datetime.now(timezone.utc)
+    registry.record_many([
+        _entry_at(now - timedelta(hours=4), input_tokens=10),
+        _entry_at(now - timedelta(hours=1), input_tokens=20),
+    ])
+
+    su = registry.get_session_window()
+    assert abs((su.start_time - (now - timedelta(hours=4))).total_seconds()) < 1
+    # Both rows aggregated under the same model
+    assert len(su.by_model) == 1
+    assert su.by_model[0].input_tokens == 30
+
+
+def test_session_window_all_old_returns_expired_block(registry):
+    """W5: every record is ≥ 5h old → still returns the last block, but
+    end_time is in the past (caller decides how to render 'expired')."""
+    now = datetime.now(timezone.utc)
+    registry.record_many([
+        _entry_at(now - timedelta(hours=10)),
+        _entry_at(now - timedelta(hours=8)),
+    ])
+
+    su = registry.get_session_window()
+    # Most-recent block-start is the 10h record (the 8h one is within
+    # 5h of it, same block — start = 10h ago).
+    assert abs((su.start_time - (now - timedelta(hours=10))).total_seconds()) < 1
+    assert su.end_time < now      # block already expired
+
+
+# --------------------------------------------------------------------------
+# M1-M2: per-model breakdown
+# --------------------------------------------------------------------------
+
+def test_totals_by_model_returns_each_model_priced(registry):
+    """M1: rows from multiple models → tuple ordered by cost desc, each
+    ModelTotals priced via the model's PRICING entry."""
+    now = datetime.now(timezone.utc)
+    registry.record_many([
+        _entry_at(now, model="claude-sonnet-4-5",
+                  input_tokens=1_000_000, output_tokens=0),  # $3 input
+        _entry_at(now, model="claude-haiku-4-5",
+                  input_tokens=1_000_000, output_tokens=0),  # $1 input
+    ])
+
+    rows = registry.get_totals_by_model("today")
+    # Two distinct models, sorted by cost descending
+    assert len(rows) == 2
+    assert rows[0].cost_usd > rows[1].cost_usd
+    assert "sonnet" in rows[0].model.lower()
+    assert "haiku" in rows[1].model.lower()
+    # Sonnet input rate = $3/Mtok → 1M input = $3
+    assert abs(rows[0].cost_usd - 3.0) < 1e-6
+
+
+def test_totals_by_model_empty_returns_empty_tuple(registry):
+    """M2: empty DB → empty tuple, no exception."""
+    assert registry.get_totals_by_model("today") == ()

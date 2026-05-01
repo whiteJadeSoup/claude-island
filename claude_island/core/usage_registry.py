@@ -6,7 +6,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .events import Event
-from .models import PRICING, DEFAULT_PRICING, PricingTable, UsageTotals
+from .models import (
+    PRICING,
+    DEFAULT_PRICING,
+    ModelTotals,
+    PricingTable,
+    SessionUsage,
+    UsageTotals,
+)
+
+# Anthropic consumer-plan session window (must match what Claude Code's
+# /status reports). Long-lived constant so tests can mock it cleanly.
+_SESSION_WINDOW_HOURS = 5
 
 # INTEGER PRIMARY KEY (without AUTOINCREMENT) is automatically the ROWID
 # alias on SQLite — same monotonic behaviour without the sqlite_sequence
@@ -60,6 +71,12 @@ _PERIOD_DELTA: dict[str, timedelta] = {
 }
 
 
+def _today_cutoff() -> datetime:
+    """Midnight UTC of the current calendar day."""
+    now = datetime.now(timezone.utc)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Run idempotent schema migrations on every open.
 
@@ -78,6 +95,37 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             if "no such column" in msg or "no such index" in msg:
                 continue
             raise
+
+
+def _rows_to_model_totals(
+    rows: list[tuple[str, int, int, int, int]],
+) -> tuple[ModelTotals, ...]:
+    """Convert SUM-aggregated SQL rows into priced ModelTotals.
+
+    Cost formula matches ``get_totals``: input + output use the model's
+    direct rates; cache write is ×1.25 input, cache read is ×0.1 input.
+    Returned tuple is sorted by cost descending so callers can show the
+    top spender first.
+    """
+    out: list[ModelTotals] = []
+    for model, in_tok, out_tok, cw_tok, cr_tok in rows:
+        p = _resolve_pricing(model)
+        cost = (
+            in_tok / 1_000_000 * p.input_per_mtok
+            + out_tok / 1_000_000 * p.output_per_mtok
+            + cw_tok / 1_000_000 * p.input_per_mtok * 1.25
+            + cr_tok / 1_000_000 * p.input_per_mtok * 0.1
+        )
+        out.append(ModelTotals(
+            model=model,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_creation_tokens=cw_tok,
+            cache_read_tokens=cr_tok,
+            cost_usd=cost,
+        ))
+    out.sort(key=lambda m: m.cost_usd, reverse=True)
+    return tuple(out)
 
 
 def _resolve_pricing(model: str) -> PricingTable:
@@ -232,8 +280,11 @@ class UsageRegistry:
         # its own rate. Cost is recomputed on read rather than read from the
         # stored cost_usd column — this also auto-corrects records written
         # under stale pricing tables (e.g. old Opus rates).
-        delta = _PERIOD_DELTA.get(period, timedelta(days=1))
-        since = (datetime.now(timezone.utc) - delta).isoformat()
+        if period == "today":
+            since = _today_cutoff().isoformat()
+        else:
+            delta = _PERIOD_DELTA.get(period, timedelta(days=1))
+            since = (datetime.now(timezone.utc) - delta).isoformat()
         with self._lock:
             rows = self._conn.execute(
                 """
@@ -262,6 +313,109 @@ class UsageRegistry:
             totals.cache_creation_cost   += cw_tok / 1_000_000 * p.input_per_mtok * 1.25
             totals.cache_read_cost       += cr_tok / 1_000_000 * p.input_per_mtok * 0.1
         return totals
+
+    def get_totals_by_model(self, period: str) -> tuple[ModelTotals, ...]:
+        """Same time window as get_totals(period), but keep the model
+        dimension so the UI can show "Sonnet $2.54 · Haiku $0.13".
+
+        Returns a tuple sorted by cost descending — top spender first
+        — so callers can ``[0:N]`` if they want a top-N display.
+        """
+        if period == "today":
+            since = _today_cutoff().isoformat()
+        else:
+            delta = _PERIOD_DELTA.get(period, timedelta(days=1))
+            since = (datetime.now(timezone.utc) - delta).isoformat()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    model,
+                    COALESCE(SUM(input_tokens),          0),
+                    COALESCE(SUM(output_tokens),         0),
+                    COALESCE(SUM(cache_creation_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens),     0)
+                FROM usage_records
+                WHERE timestamp >= ?
+                GROUP BY model
+                """,
+                (since,),
+            ).fetchall()
+        return _rows_to_model_totals(rows)
+
+    def get_session_window(self) -> SessionUsage:
+        """Return the current 5-hour Anthropic-style session block.
+
+        A "block" starts at a request preceded by ≥5h of inactivity
+        (or the very first request ever). ``session_start`` is the
+        most recent such block-start; ``session_end = session_start + 5h``.
+
+        ``end_time`` may be in the past (no active session) — caller
+        decides how to render that case (e.g. dot turns gray).
+
+        ``quota`` is left as None — the QuotaProvider lives in the
+        platform layer and core can't import it. The wiring layer
+        (``__main__.py``) replaces this with a populated QuotaSnapshot
+        when available.
+
+        SQL uses LAG over (ORDER BY timestamp) which requires
+        SQLite ≥3.25 (2018). julianday() arithmetic gives us the
+        gap in days; multiply by 24 for hours.
+        """
+        # Two queries (block-start search, then aggregation). Holding
+        # the lock once for both keeps the snapshot consistent against
+        # concurrent writes from JsonlParser.
+        with self._lock:
+            start_row = self._conn.execute(
+                f"""
+                WITH ordered AS (
+                    SELECT timestamp,
+                           LAG(timestamp) OVER (ORDER BY timestamp) AS prev_ts
+                    FROM usage_records
+                )
+                SELECT MAX(timestamp)
+                FROM ordered
+                WHERE prev_ts IS NULL
+                   OR (julianday(timestamp) - julianday(prev_ts)) * 24
+                       >= {_SESSION_WINDOW_HOURS}
+                """
+            ).fetchone()
+
+            start_ts_str = start_row[0] if start_row else None
+            if start_ts_str is None:
+                return SessionUsage(
+                    start_time=None, end_time=None,
+                    by_model=(), total_cost_usd=0.0, quota=None,
+                )
+
+            agg_rows = self._conn.execute(
+                """
+                SELECT
+                    model,
+                    COALESCE(SUM(input_tokens),          0),
+                    COALESCE(SUM(output_tokens),         0),
+                    COALESCE(SUM(cache_creation_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens),     0)
+                FROM usage_records
+                WHERE timestamp >= ?
+                GROUP BY model
+                """,
+                (start_ts_str,),
+            ).fetchall()
+
+        start_time = datetime.fromisoformat(start_ts_str)
+        end_time = start_time + timedelta(hours=_SESSION_WINDOW_HOURS)
+
+        by_model = _rows_to_model_totals(agg_rows)
+        total_cost = sum(m.cost_usd for m in by_model)
+
+        return SessionUsage(
+            start_time=start_time,
+            end_time=end_time,
+            by_model=tuple(by_model),
+            total_cost_usd=total_cost,
+            quota=None,
+        )
 
     # ------------------------------------------------------------------
     # Incremental parse offsets

@@ -47,7 +47,7 @@ DEFAULT_PRICING = PricingTable(input_per_mtok=3.0, output_per_mtok=15.0)
 
 @dataclass
 class UsageTotals:
-    period: str  # "daily" | "weekly" | "monthly"
+    period: str  # "today" | "daily" | "weekly" | "monthly"
     input_tokens: int = 0
     output_tokens: int = 0
     cache_creation_tokens: int = 0
@@ -61,3 +61,57 @@ class UsageTotals:
     def cost_usd(self) -> float:
         return (self.input_cost + self.output_cost
                 + self.cache_creation_cost + self.cache_read_cost)
+
+
+@dataclass(frozen=True)
+class ModelTotals:
+    """Per-model aggregation inside a single time window.
+
+    The cost is recomputed from tokens × pricing on read (same as
+    UsageTotals) so price-table updates retroactively apply.
+    """
+    model: str   # canonical key from PRICING ("haiku" | "sonnet" | "opus") or raw model id
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    cost_usd: float
+
+
+@dataclass(frozen=True)
+class QuotaSnapshot:
+    """One snapshot of Anthropic's private /api/oauth/usage endpoint.
+
+    Mirrors what Claude Code's /status command shows: the user's
+    consumer-plan 5-hour-session and 7-day usage percentages plus when
+    each window resets. Reverse-engineered — Anthropic does not
+    advertise this as a public API and the call may break or be
+    blocked at any time, hence the ``is_stale`` flag for callers that
+    want to display a degraded indicator instead of going dark.
+    """
+    five_hour_pct: float            # 0..100
+    five_hour_resets_at: datetime
+    seven_day_pct: float
+    seven_day_resets_at: datetime
+    fetched_at: datetime
+    is_stale: bool                  # True when fetched_at is older than 3*TTL
+
+
+@dataclass(frozen=True)
+class SessionUsage:
+    """A snapshot of the current 5-hour session window.
+
+    ``start_time`` / ``end_time`` are the locally-derived block
+    boundaries — earliest request preceded by ≥5h of idle, plus 5h.
+    Both are None when the database has never seen any usage.
+
+    ``quota`` carries the server-authoritative percentage when
+    available; None means we couldn't reach the endpoint (disabled,
+    no credentials, network error, no cache yet) and the UI should
+    just hide the progress bar.
+    """
+    start_time: datetime | None
+    end_time: datetime | None
+    by_model: tuple[ModelTotals, ...]
+    total_cost_usd: float
+    quota: QuotaSnapshot | None

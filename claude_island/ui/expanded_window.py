@@ -10,13 +10,14 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from claude_island.core.models import Session, UsageTotals
+from claude_island.core.models import Session, SessionUsage, UsageTotals
 from .controller import IslandController
 
 _PANEL_W = 320
@@ -105,6 +106,62 @@ _STYLE_PERIOD_BTN = """
     QPushButton:checked { color: white; border-color: #888; background: #2a2a2a; }
 """
 
+# --------------------------------------------------------------------------
+# USAGE region typography + cards
+# --------------------------------------------------------------------------
+#
+# Two stacked cards: the (highlighted) 5h-session card on top, the period
+# card below. Same bg-contrast language as the session list (group bg
+# darker than standalone) so both regions speak the same visual dialect.
+
+_STYLE_USAGE_SESSION_CARD = f"""
+    QFrame#usage_session_card {{
+        background: {_BG_GROUP};
+        border-radius: 8px;
+    }}
+"""
+_STYLE_USAGE_PERIOD_CARD = f"""
+    QFrame#usage_period_card {{
+        background: {_BG_SINGLE};
+        border-radius: 8px;
+    }}
+"""
+_STYLE_USAGE_AMOUNT = "color: #f5f5f5; font-size: 18px; font-weight: 500;"
+_STYLE_USAGE_HEADER = "color: #c9c9c9; font-size: 11px; letter-spacing: 0.5px;"
+_STYLE_USAGE_RESET = "color: #6b7280; font-size: 11px;"
+_STYLE_USAGE_PCT = "color: #9ca3af; font-size: 11px;"
+_STYLE_USAGE_PCT_STALE = "color: #facc15; font-size: 11px;"  # ⚠ tone
+_STYLE_USAGE_MODEL = "color: #6b7280; font-size: 11px;"
+_STYLE_USAGE_PERIOD_NAME = "color: #c9c9c9; font-size: 12px;"
+_STYLE_USAGE_PERIOD_TOTAL = "color: #f5f5f5; font-size: 13px; font-weight: 500;"
+_STYLE_USAGE_TOKEN_ROW = "color: #9ca3af; font-size: 11px;"
+
+_STYLE_PROGRESS_BAR = """
+    QProgressBar {
+        border: none;
+        background: #2a2a2a;
+        border-radius: 3px;
+        height: 6px;
+        text-align: center;
+    }
+    QProgressBar::chunk {
+        background: #4ade80;
+        border-radius: 3px;
+    }
+"""
+_STYLE_PROGRESS_BAR_STALE = """
+    QProgressBar {
+        border: none;
+        background: #2a2a2a;
+        border-radius: 3px;
+        height: 6px;
+    }
+    QProgressBar::chunk {
+        background: #6b7280;
+        border-radius: 3px;
+    }
+"""
+
 
 def _fmt_tokens(n: int) -> str:
     if n >= 1_000_000:
@@ -140,6 +197,63 @@ def _activity_color(dt: datetime) -> str:
     if h < 24:
         return _DOT_YELLOW
     return _DOT_GRAY
+
+
+def _fmt_reset(end_time: datetime | None) -> str:
+    """Render the time-until-reset for the 5h session header.
+
+    end_time None     → "—" (no DB activity yet)
+    end_time in past  → "expired"
+    < 60s remaining   → "in <Ns>" (special-case so the user sees the rollover)
+    < 1h remaining    → "in Xm"
+    otherwise         → "Xh Ym"
+    """
+    if end_time is None:
+        return "—"
+    now = datetime.now(timezone.utc)
+    remaining = (end_time.astimezone(timezone.utc) - now).total_seconds()
+    if remaining <= 0:
+        return "expired"
+    if remaining < 60:
+        return f"in {int(remaining)}s"
+    if remaining < 3600:
+        return f"in {int(remaining // 60)}m"
+    h = int(remaining // 3600)
+    m = int((remaining % 3600) // 60)
+    return f"{h}h {m}m"
+
+
+def _fmt_model_label(model: str) -> str:
+    """Friendly model label for the per-model breakdown line.
+
+    Picks up the canonical family name (sonnet/haiku/opus) when the
+    raw id contains it, otherwise truncates an unknown id so it
+    doesn't overflow the row.
+    """
+    lower = (model or "").lower()
+    for known in ("haiku", "sonnet", "opus"):
+        if known in lower:
+            return known.capitalize()
+    if not model:
+        return "?"
+    return model[:12] + ("…" if len(model) > 12 else "")
+
+
+def _fmt_money(amount: float) -> str:
+    """Compact money formatting that switches precision by magnitude.
+
+    < $0.01   → "$0.001" (preserve some signal)
+    < $10     → "$1.23"
+    < $1000   → "$123"
+    otherwise → "$1.2K"
+    """
+    if amount < 0.01:
+        return f"${amount:.3f}"
+    if amount < 10:
+        return f"${amount:.2f}"
+    if amount < 1000:
+        return f"${amount:.0f}"
+    return f"${amount / 1000:.1f}K"
 
 
 # --------------------------------------------------------------------------
@@ -242,12 +356,18 @@ class ExpandedWindow(QWidget):
         capsule: QWidget,
         controller: IslandController,
         get_usage_totals: Callable[[str], UsageTotals],
+        get_session_usage: Callable[[], SessionUsage] | None = None,
     ) -> None:
         super().__init__()
         self._capsule = capsule
         self._controller = controller
         self._get_usage_totals = get_usage_totals
-        self._period = "daily"
+        # Optional: when wired (in __main__.py), provides the 5h session
+        # block + remote quota for the top USAGE card. When None
+        # (e.g. legacy callers, tests), the session card renders an
+        # empty placeholder so existing tests aren't broken.
+        self._get_session_usage = get_session_usage
+        self._period = "today"
         # Diff-based row update: keep widget references keyed by pid so that
         # session ticks (every ~10s) don't tear down rows the user might be
         # hovering. The placeholder widget (no sessions) is tracked separately
@@ -315,20 +435,24 @@ class ExpandedWindow(QWidget):
         usage_title.setStyleSheet(_STYLE_TITLE)
         root.addWidget(usage_title)
 
-        # Monospace so the token / cost columns line up.
-        self._usage_label = QLabel("—")
-        self._usage_label.setStyleSheet(
-            "color: #ccc; font-size: 11px; font-family: 'Consolas', 'Menlo', monospace;"
-        )
-        self._usage_label.setTextFormat(Qt.TextFormat.PlainText)
-        self._usage_label.setWordWrap(False)
-        root.addWidget(self._usage_label)
+        # ── 5h session card (top, highlighted) ────────────────────────
+        self._session_card = self._build_session_card()
+        root.addWidget(self._session_card)
+
+        # ── Period card (bottom, switches with period buttons) ────────
+        self._period_card = self._build_period_card()
+        root.addWidget(self._period_card)
 
         # Period selector
         period_row = QHBoxLayout()
         period_row.setSpacing(6)
         self._period_btns: dict[str, QPushButton] = {}
-        for label, key in [("Daily", "daily"), ("Weekly", "weekly"), ("Monthly", "monthly")]:
+        for label, key in [
+            ("Today",   "today"),
+            ("Daily",   "daily"),
+            ("Weekly",  "weekly"),
+            ("Monthly", "monthly"),
+        ]:
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setStyleSheet(_STYLE_PERIOD_BTN)
@@ -393,20 +517,211 @@ class ExpandedWindow(QWidget):
         self._position()
 
     def refresh_usage_bar(self, _: object = None) -> None:
+        """Refresh both USAGE cards. Kept the legacy method name so the
+        existing ``totals_changed`` signal wire-up in __main__.py
+        continues to fire this on every DB change."""
+        self._refresh_session_card()
+        self._refresh_period_card()
+
+    # ------------------------------------------------------------------
+    # USAGE: session card (top, 5h Anthropic block)
+    # ------------------------------------------------------------------
+
+    def _build_session_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("usage_session_card")
+        card.setStyleSheet(_STYLE_USAGE_SESSION_CARD)
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
+
+        # Header row: ● dot · "Current 5h session" · stretch · "Resets …"
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        self._session_dot = QLabel("●")
+        self._session_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
+        hdr.addWidget(self._session_dot)
+        hdr_label = QLabel("Current 5h session")
+        hdr_label.setStyleSheet(_STYLE_USAGE_HEADER)
+        hdr.addWidget(hdr_label)
+        hdr.addStretch()
+        self._session_reset = QLabel("—")
+        self._session_reset.setStyleSheet(_STYLE_USAGE_RESET)
+        self._session_reset.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        hdr.addWidget(self._session_reset)
+        layout.addLayout(hdr)
+
+        # Amount row: $X.XX · stretch · [progress bar] · "53% used"
+        amt = QHBoxLayout()
+        amt.setSpacing(8)
+        self._session_amount = QLabel("—")
+        self._session_amount.setStyleSheet(_STYLE_USAGE_AMOUNT)
+        amt.addWidget(self._session_amount)
+        amt.addStretch()
+        self._session_bar = QProgressBar()
+        self._session_bar.setRange(0, 100)
+        self._session_bar.setFixedWidth(110)
+        self._session_bar.setFixedHeight(6)
+        self._session_bar.setTextVisible(False)
+        self._session_bar.setStyleSheet(_STYLE_PROGRESS_BAR)
+        self._session_bar.hide()      # hidden until quota arrives
+        amt.addWidget(self._session_bar)
+        self._session_pct = QLabel("")
+        self._session_pct.setStyleSheet(_STYLE_USAGE_PCT)
+        self._session_pct.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        amt.addWidget(self._session_pct)
+        layout.addLayout(amt)
+
+        # Per-model breakdown one-liner
+        self._session_models = QLabel("")
+        self._session_models.setStyleSheet(_STYLE_USAGE_MODEL)
+        layout.addWidget(self._session_models)
+
+        return card
+
+    def _refresh_session_card(self) -> None:
+        if self._get_session_usage is None:
+            # No provider wired — leave the card in its placeholder state.
+            return
+        s = self._get_session_usage()
+
+        if s.start_time is None:
+            # Empty DB — render a "no active session" state.
+            self._session_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
+            self._session_reset.setText("—")
+            self._session_amount.setText("No active session")
+            self._session_bar.hide()
+            self._session_pct.setText("")
+            self._session_models.setText("")
+            return
+
+        # Dot color: green when the session window is still open. Trust
+        # the Anthropic endpoint's resets_at when we have it (it's the
+        # authoritative server boundary); otherwise fall back to the
+        # local-derived end_time. Without this fallback, a session that
+        # crossed 5h since its first JSONL entry but is still active per
+        # Anthropic's accounting would render as gray.
+        now = datetime.now(timezone.utc)
+        if s.quota is not None:
+            active = s.quota.five_hour_resets_at > now
+        else:
+            active = s.end_time is not None and s.end_time > now
+        self._session_dot.setStyleSheet(
+            _STYLE_DOT.format(color=_DOT_GREEN if active else _DOT_GRAY)
+        )
+
+        # Reset countdown — prefer the (more authoritative) Anthropic
+        # endpoint reset time when we have it, fall back to the local
+        # session_end (start_time + 5h) otherwise.
+        if s.quota is not None:
+            self._session_reset.setText(
+                "Resets " + _fmt_reset(s.quota.five_hour_resets_at)
+            )
+        else:
+            self._session_reset.setText("Resets " + _fmt_reset(s.end_time))
+
+        # Main amount
+        self._session_amount.setText(_fmt_money(s.total_cost_usd))
+
+        # Quota progress bar — only when the provider returned something.
+        if s.quota is not None:
+            pct = max(0, min(100, int(round(s.quota.five_hour_pct))))
+            self._session_bar.setValue(pct)
+            self._session_bar.setStyleSheet(
+                _STYLE_PROGRESS_BAR_STALE if s.quota.is_stale
+                else _STYLE_PROGRESS_BAR
+            )
+            self._session_bar.show()
+            stale_marker = " ⚠" if s.quota.is_stale else ""
+            self._session_pct.setStyleSheet(
+                _STYLE_USAGE_PCT_STALE if s.quota.is_stale
+                else _STYLE_USAGE_PCT
+            )
+            self._session_pct.setText(f"{pct}% used{stale_marker}")
+        else:
+            self._session_bar.hide()
+            self._session_pct.setText("")
+
+        # Model breakdown — top 3 by spend, joined with "·"
+        if s.by_model:
+            top = s.by_model[:3]
+            chunks = [f"{_fmt_model_label(m.model)} {_fmt_money(m.cost_usd)}"
+                      for m in top]
+            self._session_models.setText("  ·  ".join(chunks))
+        else:
+            self._session_models.setText("")
+
+    # ------------------------------------------------------------------
+    # USAGE: period card (bottom, today / 24h / 7d / 30d)
+    # ------------------------------------------------------------------
+
+    def _build_period_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("usage_period_card")
+        card.setStyleSheet(_STYLE_USAGE_PERIOD_CARD)
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+
+        # Header: period name · stretch · total
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        self._period_name_label = QLabel("Today")
+        self._period_name_label.setStyleSheet(_STYLE_USAGE_PERIOD_NAME)
+        hdr.addWidget(self._period_name_label)
+        hdr.addStretch()
+        self._period_total_label = QLabel("—")
+        self._period_total_label.setStyleSheet(_STYLE_USAGE_PERIOD_TOTAL)
+        self._period_total_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        hdr.addWidget(self._period_total_label)
+        layout.addLayout(hdr)
+
+        # Thin separator
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(_STYLE_SEP)
+        layout.addWidget(sep)
+
+        # Two compact token rows
+        self._period_tokens_io = QLabel("")
+        self._period_tokens_io.setStyleSheet(_STYLE_USAGE_TOKEN_ROW)
+        layout.addWidget(self._period_tokens_io)
+        self._period_tokens_cache = QLabel("")
+        self._period_tokens_cache.setStyleSheet(_STYLE_USAGE_TOKEN_ROW)
+        layout.addWidget(self._period_tokens_cache)
+
+        return card
+
+    def _refresh_period_card(self) -> None:
         t = self._get_usage_totals(self._period)
-        rows = [
-            ("Input  ", t.input_tokens,          t.input_cost),
-            ("Output ", t.output_tokens,         t.output_cost),
-            ("Cache W", t.cache_creation_tokens, t.cache_creation_cost),
-            ("Cache R", t.cache_read_tokens,     t.cache_read_cost),
-        ]
-        lines = [
-            f"{label}  {_fmt_tokens(tok):>6}  ${cost:>9.4f}"
-            for label, tok, cost in rows
-        ]
-        lines.append("─" * 27)
-        lines.append(f"Total           ${t.cost_usd:>9.4f}")
-        self._usage_label.setText("\n".join(lines))
+        self._period_name_label.setText(self._period_label())
+        self._period_total_label.setText(_fmt_money(t.cost_usd))
+        self._period_tokens_io.setText(
+            f"Input  {_fmt_tokens(t.input_tokens)}  ·  "
+            f"Output  {_fmt_tokens(t.output_tokens)}"
+        )
+        self._period_tokens_cache.setText(
+            f"Cache W {_fmt_tokens(t.cache_creation_tokens)}  ·  "
+            f"Cache R {_fmt_tokens(t.cache_read_tokens)}"
+        )
+
+    def _period_label(self) -> str:
+        """Friendly name for the current period selection."""
+        if self._period == "today":
+            return "Today"
+        if self._period == "daily":
+            return "Past 24 hours"
+        if self._period == "weekly":
+            return "Past 7 days"
+        return "Past 30 days"
 
     def _on_state_changed(self, state: str) -> None:
         if state == "expanded":

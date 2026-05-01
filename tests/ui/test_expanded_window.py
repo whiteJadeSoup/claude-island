@@ -52,6 +52,23 @@ def panel(qtbot):
     yield panel
 
 
+def _panel_with_session(qtbot, get_session_usage):
+    """Build a panel wired with a stub get_session_usage."""
+    from claude_island.ui.expanded_window import ExpandedWindow
+    capsule = QWidget()
+    capsule.show()
+    controller = IslandController()
+    p = ExpandedWindow(
+        capsule=capsule,
+        controller=controller,
+        get_usage_totals=lambda period: UsageTotals(period=period),
+        get_session_usage=get_session_usage,
+    )
+    qtbot.addWidget(p)
+    qtbot.addWidget(capsule)
+    return p
+
+
 def test_first_refresh_creates_one_row_per_session(panel):
     panel.refresh_sessions([_session(1, "/a"), _session(2, "/b")])
     assert set(panel._rows.keys()) == {1, 2}
@@ -297,3 +314,163 @@ def test_row_widget_preserved_when_moving_between_card_and_standalone(panel):
     panel.refresh_sessions([_session(1, "/proj", window_handle=0xAAAA)])
 
     assert panel._rows[1] is btn1  # same widget instance preserved
+
+
+# --------------------------------------------------------------------------
+# USAGE region: session card + period card (U1-U7)
+# --------------------------------------------------------------------------
+
+from claude_island.core.models import (
+    ModelTotals as _ModelTotals,
+    QuotaSnapshot as _QuotaSnapshot,
+    SessionUsage as _SessionUsage,
+)
+
+
+def _make_session_usage(
+    *,
+    start_offset_h: float | None = 1.0,   # hours ago
+    end_offset_h: float | None = 4.0,     # hours from now (positive=future)
+    quota: _QuotaSnapshot | None = None,
+    by_model: tuple[_ModelTotals, ...] = (),
+    total_cost: float = 2.67,
+):
+    now = datetime.now(timezone.utc)
+    start = (now - timedelta(hours=start_offset_h)) if start_offset_h is not None else None
+    end = (now + timedelta(hours=end_offset_h)) if end_offset_h is not None else None
+    return _SessionUsage(
+        start_time=start,
+        end_time=end,
+        by_model=by_model,
+        total_cost_usd=total_cost,
+        quota=quota,
+    )
+
+
+def _make_quota(*, five_pct: float = 53.0, is_stale: bool = False):
+    now = datetime.now(timezone.utc)
+    return _QuotaSnapshot(
+        five_hour_pct=five_pct,
+        five_hour_resets_at=now + timedelta(hours=3, minutes=25),
+        seven_day_pct=17.0,
+        seven_day_resets_at=now + timedelta(days=4),
+        fetched_at=now if not is_stale else now - timedelta(hours=1),
+        is_stale=is_stale,
+    )
+
+
+def test_session_card_active_with_quota_shows_amount_bar_and_pct(qtbot):
+    """U1: active session + quota present → amount text rendered, progress
+    bar visible with the right value, % text shown."""
+    su = _make_session_usage(quota=_make_quota(five_pct=53.0))
+    p = _panel_with_session(qtbot, lambda: su)
+    p.refresh_usage_bar()
+
+    assert "$" in p._session_amount.text()
+    assert p._session_bar.isVisibleTo(p._session_card)
+    assert p._session_bar.value() == 53
+    assert "53%" in p._session_pct.text()
+
+
+def test_session_card_active_without_quota_hides_bar(qtbot):
+    """U2: active session but quota=None → main amount renders, but
+    progress bar and pct text are hidden/empty."""
+    su = _make_session_usage(quota=None, total_cost=1.50)
+    p = _panel_with_session(qtbot, lambda: su)
+    p.refresh_usage_bar()
+
+    assert "$" in p._session_amount.text()
+    assert not p._session_bar.isVisibleTo(p._session_card)
+    assert p._session_pct.text() == ""
+
+
+def test_session_card_quota_stale_marks_warning(qtbot):
+    """U3: quota.is_stale=True → progress bar still shown but % text
+    carries the ⚠ marker so the user knows the value is old."""
+    su = _make_session_usage(quota=_make_quota(five_pct=20.0, is_stale=True))
+    p = _panel_with_session(qtbot, lambda: su)
+    p.refresh_usage_bar()
+
+    assert "⚠" in p._session_pct.text()
+
+
+def test_session_card_expired_session_dot_gray_reset_expired(qtbot):
+    """U4: end_time in the past → dot uses gray colour, reset text
+    reads 'expired' (when no quota overrides), amount still rendered."""
+    su = _make_session_usage(
+        start_offset_h=10.0,        # 10h ago
+        end_offset_h=-5.0,          # 5h ago — expired
+        quota=None,
+    )
+    p = _panel_with_session(qtbot, lambda: su)
+    p.refresh_usage_bar()
+
+    # Dot stylesheet should reference the gray colour token
+    assert "#52525b" in p._session_dot.styleSheet()
+    assert "expired" in p._session_reset.text().lower()
+
+
+def test_session_card_empty_db_shows_no_active_session(qtbot):
+    """U5: SessionUsage with start_time=None → 'No active session' text,
+    no progress bar."""
+    su = _make_session_usage(start_offset_h=None, end_offset_h=None,
+                             quota=None, total_cost=0.0)
+    p = _panel_with_session(qtbot, lambda: su)
+    p.refresh_usage_bar()
+
+    assert "no active" in p._session_amount.text().lower()
+    assert not p._session_bar.isVisibleTo(p._session_card)
+
+
+def test_period_card_toggle_updates_total_and_token_rows(qtbot):
+    """U6: switching period (Today → Weekly) calls get_usage_totals with
+    the new key and the period_total + token rows update."""
+    capsule = QWidget()
+    capsule.show()
+
+    calls: list[str] = []
+
+    def fake_totals(period):
+        calls.append(period)
+        # Different totals per period so the assertion can prove an update
+        return UsageTotals(
+            period=period,
+            input_tokens=1000 if period == "today" else 9999,
+            output_tokens=2000,
+        )
+
+    p = ExpandedWindow(
+        capsule=capsule,
+        controller=IslandController(),
+        get_usage_totals=fake_totals,
+    )
+    qtbot.addWidget(p)
+    qtbot.addWidget(capsule)
+    p.refresh_usage_bar()
+
+    today_text = p._period_tokens_io.text()
+    p._on_period("weekly")
+    weekly_text = p._period_tokens_io.text()
+
+    assert today_text != weekly_text
+    assert "today" in calls
+    assert "weekly" in calls
+
+
+def test_session_card_model_breakdown_shows_top_models(qtbot):
+    """U7: by_model populated → first 3 entries shown joined with ' · '
+    using friendly labels (Sonnet/Haiku/Opus); unknown ids truncated."""
+    by_model = (
+        _ModelTotals(model="claude-sonnet-4-5", input_tokens=0, output_tokens=0,
+                     cache_creation_tokens=0, cache_read_tokens=0, cost_usd=2.54),
+        _ModelTotals(model="claude-haiku-4-5", input_tokens=0, output_tokens=0,
+                     cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.13),
+    )
+    su = _make_session_usage(by_model=by_model, total_cost=2.67, quota=None)
+    p = _panel_with_session(qtbot, lambda: su)
+    p.refresh_usage_bar()
+
+    text = p._session_models.text()
+    assert "Sonnet" in text
+    assert "Haiku" in text
+    assert "·" in text
