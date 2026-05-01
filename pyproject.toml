@@ -16,7 +16,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["import-linter>=2.1"]
+dev = [
+    "import-linter>=2.1",
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
 
 [tool.setuptools.packages.find]
 where = ["."]
