@@ -100,6 +100,38 @@ class WindowActivator:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
+def walk_to_visible_host(conpty_hwnd: int, win32gui) -> int | None:
+    """Walk the GW_OWNER chain from a (typically hidden) conPTY HWND up to
+    the first visible top-level window with a non-empty title.
+
+    Used in two places:
+    - At click time: ``_resolve_console_window`` pairs this with the
+      console title to drive tab selection + foreground.
+    - At scan time: ``ProcessScanner`` calls this to label each session
+      with its hosting wt_hwnd, so the UI can group same-tab sessions
+      visually (PR2 grouping).
+
+    Returns ``None`` when the chain breaks before reaching a visible
+    host within bounded depth (``_MAX_ANCESTOR_DEPTH`` = 10).
+    """
+    GW_OWNER = 4
+    h = conpty_hwnd
+    for _ in range(_MAX_ANCESTOR_DEPTH):
+        if not h:
+            return None
+        try:
+            if win32gui.IsWindowVisible(h) and win32gui.GetWindowText(h):
+                return h
+            nxt = win32gui.GetWindow(h, GW_OWNER) or win32gui.GetParent(h)
+        except Exception:
+            # Invalid / destroyed HWND mid-walk → treat as no host.
+            return None
+        if not nxt or nxt == h:
+            return None
+        h = nxt
+    return None
+
+
 def _resolve_console_window(pid: int, win32gui) -> tuple[int, str] | None:
     """Find the visible host window that owns the given pid's console, and
     capture the console title for use in tab selection.
@@ -120,28 +152,16 @@ def _resolve_console_window(pid: int, win32gui) -> tuple[int, str] | None:
     that (the tab_selector returns False on empty title).
     Returns ``None`` for non-console targets or if AttachConsole fails.
     """
-    GW_OWNER = 4
-
     info = win32_console.get_console_info(pid)
     if info is None:
         return None
     console_hwnd, console_title = info
     if not console_hwnd:
         return None
-
-    # The console HWND is typically a hidden ConPTY pseudo-console window.
-    # Walk GW_OWNER (and GetParent as a fallback) to find a visible host.
-    h = console_hwnd
-    for _ in range(_MAX_ANCESTOR_DEPTH):
-        if not h:
-            return None
-        if win32gui.IsWindowVisible(h) and win32gui.GetWindowText(h):
-            return (h, console_title)
-        nxt = win32gui.GetWindow(h, GW_OWNER) or win32gui.GetParent(h)
-        if not nxt or nxt == h:
-            return None
-        h = nxt
-    return None
+    host = walk_to_visible_host(console_hwnd, win32gui)
+    if host is None:
+        return None
+    return (host, console_title)
 
 
 def _ancestor_pids(pid: int) -> list[int]:

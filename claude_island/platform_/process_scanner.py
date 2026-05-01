@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import psutil
 
 from claude_island.core.models import Session
-from claude_island.platform_ import win32_console
+from claude_island.platform_ import win32_console, window_activator
 
 # Claude Code is a Node.js CLI; on Windows it may appear as node.exe wrapping
 # the claude script, or as a bundled "claude.exe".
@@ -102,12 +103,20 @@ class ProcessScanner:
 # ---------------------------------------------------------------------------
 
 def _filter_orphans(sessions: list[Session]) -> list[Session]:
-    """Drop sessions whose process has no console attached.
+    """Drop orphan sessions and label live ones with their host wt_hwnd.
 
-    A claude.exe whose hosting WT pane was closed becomes a no-tty
-    zombie: its conPTY pipe is broken, AttachConsole(pid) refuses to
-    attach (the kernel reports "process has no console"). That's a
-    genuine orphan — drop it.
+    Two passes per session in one loop:
+    1. ``get_console_info(pid)``: if AttachConsole fails the process has
+       no console attached — its conPTY pipe was severed when its WT
+       pane closed. Drop it.
+    2. ``walk_to_visible_host(conpty_hwnd)``: walks GW_OWNER from the
+       conPTY HWND up to the visible WT main window. The result is
+       stored on ``Session.window_handle`` so the UI can group sessions
+       sharing the same wt_hwnd into one card (same-tab proxy).
+
+    The wt_hwnd is the same HWND ``WindowActivator`` resolves at click
+    time, but caching it on the Session lets the UI render groups
+    without doing its own AttachConsole walk.
 
     Sanity tripwire: if every session would be filtered (system-wide
     AttachConsole brokenness, scan-thread race with our own console
@@ -117,11 +126,27 @@ def _filter_orphans(sessions: list[Session]) -> list[Session]:
     if not sessions:
         return sessions
 
+    win32gui = None
+    try:
+        import win32gui as _w32g
+        win32gui = _w32g
+    except ImportError:
+        pass  # walk_to_visible_host needs win32gui; without it we keep
+              # the orphan filter active but skip the wt_hwnd labelling.
+
     kept: list[Session] = []
     for s in sessions:
-        if win32_console.get_console_info(s.pid) is not None:
-            kept.append(s)
-        # else: AttachConsole failed → no console attached → orphan.
+        info = win32_console.get_console_info(s.pid)
+        if info is None:
+            # AttachConsole failed → no console attached → orphan.
+            continue
+        conpty_hwnd, _title = info
+
+        wt_hwnd: int | None = None
+        if win32gui is not None and conpty_hwnd:
+            wt_hwnd = window_activator.walk_to_visible_host(conpty_hwnd, win32gui)
+
+        kept.append(replace(s, window_handle=wt_hwnd))
 
     if not kept:
         return sessions  # tripwire: don't wipe everything silently

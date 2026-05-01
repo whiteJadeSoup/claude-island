@@ -40,6 +40,26 @@ _STYLE_SESSION_BTN = """
     QPushButton:hover { background: #2e2e2e; }
     QPushButton:pressed { background: #383838; }
 """
+# Multi-session group: the rounded background lives on the card frame.
+# Inner rows render as flat (transparent) buttons separated by 1px lines.
+_STYLE_GROUP_CARD = """
+    QFrame#group_card {
+        background: #1e1e1e;
+        border-radius: 8px;
+    }
+"""
+_STYLE_FLAT_ROW_BTN = """
+    QPushButton {
+        color: #e0e0e0;
+        background: transparent;
+        border: none;
+        padding: 10px 12px;
+        text-align: left;
+        font-size: 12px;
+    }
+    QPushButton:hover { background: #2e2e2e; }
+    QPushButton:pressed { background: #383838; }
+"""
 _STYLE_PERIOD_BTN = """
     QPushButton {
         color: #666;
@@ -70,6 +90,64 @@ def _fmt_ago(dt: datetime) -> str:
     if s < 3600:
         return f"{s // 60}m ago"
     return f"{s // 3600}h ago"
+
+
+# --------------------------------------------------------------------------
+# Same-tab grouping (PR2)
+# --------------------------------------------------------------------------
+#
+# Two sessions are visually merged into one rounded card when their
+# (window_handle, project_path) pair matches. window_handle is the WT
+# main HWND populated by ProcessScanner; project_path is the cwd of the
+# claude.exe at scan time. The pair stands in for "same WT tab" because
+# WT's UIA tree doesn't expose pid→tab for inactive panes — and panes in
+# one tab almost always share both wt_hwnd and cwd.
+#
+# Sessions whose window_handle is None (couldn't resolve to a WT host —
+# pythonw, sandboxed shells, non-Windows) are always rendered standalone
+# so they don't accidentally collapse together.
+
+def _group_key(s: Session) -> tuple[int, str] | None:
+    if s.window_handle is None:
+        return None
+    return (s.window_handle, str(s.project_path))
+
+
+def _session_sort_key(s: Session) -> tuple:
+    """Sort sessions so that members of the same group are adjacent.
+    Ungroupable sessions (window_handle=None) sort to the end and stay
+    in pid order so their position is stable across refreshes."""
+    key = _group_key(s)
+    if key is None:
+        return (1, 0, "", s.pid)
+    wt, path = key
+    return (0, wt, path, s.pid)
+
+
+def _consecutive_groups(sessions: list[Session]) -> list[list[Session]]:
+    """Collapse consecutive same-key sessions into a sublist; ungroupable
+    (None-key) sessions form singleton sublists each."""
+    out: list[list[Session]] = []
+    cur: list[Session] = []
+    cur_key: object = object()  # sentinel that no real key matches
+    for s in sessions:
+        key = _group_key(s)
+        if key is None:
+            if cur:
+                out.append(cur)
+                cur = []
+            out.append([s])
+            cur_key = object()
+        elif key == cur_key:
+            cur.append(s)
+        else:
+            if cur:
+                out.append(cur)
+            cur = [s]
+            cur_key = key
+    if cur:
+        out.append(cur)
+    return out
 
 
 class ExpandedWindow(QWidget):
@@ -193,53 +271,48 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
 
     def refresh_sessions(self, sessions: list[Session]) -> None:
-        """Diff against the current row set keyed by pid.
+        """Render sessions as a list of cards.
 
-        - Pids in the new list but not in self._rows: insert a new row.
-        - Pids in self._rows but not in the new list: remove and deleteLater.
-        - Pids in both: update the row's label text in-place.
-        Order in the layout follows the order of `sessions`.
+        Sessions sharing the same ``(window_handle, project_path)`` key
+        are merged into one rounded card with thin internal separators —
+        the iOS-Settings-style group. A session whose ``window_handle``
+        is None (couldn't resolve to a WT host) is rendered as its own
+        standalone rounded button. Single-session groups also render as
+        standalone buttons (visually identical to the flat-list mode).
+
+        Why ``(window_handle, project_path)`` rather than tab id: WT's
+        UIA tree only exposes the *active* pane's title in
+        TabItem.Name, so we cannot directly determine which tab an
+        inactive split-pane belongs to. The wt_hwnd + cwd pair is a
+        practical proxy: split panes inside one tab almost always
+        share both. The known false-positive — same project opened in
+        two separate tabs of the same WT window — is rare in practice.
+
+        Row widgets are cached by pid to preserve hover/pressed state
+        across the 10s scan tick. Cards are rebuilt every refresh
+        (cheap; just QFrame + QVBoxLayout).
         """
-        new_pids = [s.pid for s in sessions]
-        new_pid_set = set(new_pids)
+        self._clear_session_layout()
 
-        # Drop placeholder if we now have sessions, or remove all rows if not.
         if not sessions:
-            for pid, w in list(self._rows.items()):
-                self._session_box.removeWidget(w)
-                w.deleteLater()
-            self._rows.clear()
-            if self._placeholder is None:
-                self._placeholder = QLabel("No active sessions")
-                self._placeholder.setStyleSheet("color: #555; font-size: 12px;")
-                self._session_box.addWidget(self._placeholder)
-        else:
-            if self._placeholder is not None:
-                self._session_box.removeWidget(self._placeholder)
-                self._placeholder.deleteLater()
-                self._placeholder = None
+            self._show_placeholder()
+            self._gc_rows(set())
+            self.adjustSize()
+            self._position()
+            return
 
-            # Remove rows whose pid is gone.
-            for pid in list(self._rows.keys()):
-                if pid not in new_pid_set:
-                    w = self._rows.pop(pid)
-                    self._session_box.removeWidget(w)
-                    w.deleteLater()
+        self._hide_placeholder()
 
-            # Add or update + reorder.
-            for index, session in enumerate(sessions):
-                btn = self._rows.get(session.pid)
-                if btn is None:
-                    btn = self._make_row(session)
-                    self._rows[session.pid] = btn
-                    self._session_box.insertWidget(index, btn)
-                else:
-                    self._update_row(btn, session)
-                    # Ensure the layout order matches the new sessions order.
-                    current_index = self._session_box.indexOf(btn)
-                    if current_index != index:
-                        self._session_box.removeWidget(btn)
-                        self._session_box.insertWidget(index, btn)
+        sorted_sessions = sorted(sessions, key=_session_sort_key)
+        groups = _consecutive_groups(sorted_sessions)
+
+        needed_pids: set[int] = set()
+        for group in groups:
+            self._session_box.addWidget(self._make_group_widget(group))
+            for s in group:
+                needed_pids.add(s.pid)
+
+        self._gc_rows(needed_pids)
 
         self.adjustSize()
         self._position()
@@ -285,7 +358,6 @@ class ExpandedWindow(QWidget):
 
     def _make_row(self, session: Session) -> QPushButton:
         btn = QPushButton()
-        btn.setStyleSheet(_STYLE_SESSION_BTN)
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         btn.setFixedHeight(52)
         # Carry the current Session so the click handler always emits the
@@ -304,6 +376,97 @@ class ExpandedWindow(QWidget):
         if btn.text() != text:
             btn.setText(text)
         btn.setProperty("_session", session)
+
+    # ------------------------------------------------------------------
+    # Card composition (PR2: same-tab grouping)
+    # ------------------------------------------------------------------
+
+    def _make_group_widget(self, group: list[Session]) -> QWidget:
+        """One group → one widget. Single-session groups render as a
+        standalone rounded button; multi-session groups render as a
+        rounded card with flat internal rows + thin separators."""
+        if len(group) == 1:
+            row = self._get_or_create_row(group[0], in_card=False)
+            row.setParent(None)  # detach from any prior parent
+            return row
+        return self._make_multi_card(group)
+
+    def _make_multi_card(self, sessions: list[Session]) -> QFrame:
+        card = QFrame()
+        card.setObjectName("group_card")
+        card.setStyleSheet(_STYLE_GROUP_CARD)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        for i, session in enumerate(sessions):
+            if i > 0:
+                sep = QFrame()
+                sep.setFixedHeight(1)
+                sep.setStyleSheet(_STYLE_SEP)
+                layout.addWidget(sep)
+            row = self._get_or_create_row(session, in_card=True)
+            row.setParent(None)
+            layout.addWidget(row)
+        return card
+
+    def _get_or_create_row(self, session: Session, *, in_card: bool) -> QPushButton:
+        """Cached factory: same pid keeps the same QPushButton across
+        refreshes (preserves hover/pressed state). Style is reapplied
+        each call because a row can move between standalone (rounded)
+        and in-card (flat) layouts as group membership changes."""
+        btn = self._rows.get(session.pid)
+        if btn is None:
+            btn = self._make_row(session)
+            self._rows[session.pid] = btn
+        btn.setStyleSheet(_STYLE_FLAT_ROW_BTN if in_card else _STYLE_SESSION_BTN)
+        self._update_row(btn, session)
+        return btn
+
+    # ------------------------------------------------------------------
+    # Layout housekeeping
+    # ------------------------------------------------------------------
+
+    def _clear_session_layout(self) -> None:
+        """Remove every top-level item from session_box. Cached row
+        buttons are detached (kept alive in self._rows for reuse);
+        cards and the placeholder are deleted."""
+        cached = set(self._rows.values())
+        while self._session_box.count():
+            item = self._session_box.takeAt(0)
+            widget = item.widget()
+            if widget is None:
+                continue
+            if widget in cached:
+                widget.setParent(None)
+                continue
+            # Card: detach any cached rows inside before deleting it,
+            # so they survive for the next group composition.
+            for child in widget.findChildren(QPushButton):
+                if child in cached:
+                    child.setParent(None)
+            if widget is self._placeholder:
+                self._placeholder = None
+            widget.deleteLater()
+
+    def _show_placeholder(self) -> None:
+        # Drop any cached rows: there are no sessions to back them.
+        for btn in self._rows.values():
+            btn.deleteLater()
+        self._rows.clear()
+        if self._placeholder is None:
+            self._placeholder = QLabel("No active sessions")
+            self._placeholder.setStyleSheet("color: #555; font-size: 12px;")
+        self._session_box.addWidget(self._placeholder)
+
+    def _hide_placeholder(self) -> None:
+        if self._placeholder is not None:
+            self._placeholder.deleteLater()
+            self._placeholder = None
+
+    def _gc_rows(self, needed_pids: set[int]) -> None:
+        for pid in list(self._rows.keys()):
+            if pid not in needed_pids:
+                self._rows.pop(pid).deleteLater()
 
     def _on_row_clicked(self, session: Session) -> None:
         # Activate first, then collapse — order matters: while our panel is

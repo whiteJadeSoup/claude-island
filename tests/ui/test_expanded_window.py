@@ -24,12 +24,15 @@ from claude_island.ui.controller import IslandController
 from claude_island.ui.expanded_window import ExpandedWindow
 
 
-def _session(pid: int, cwd: str, ago_minutes: int = 0) -> Session:
+def _session(
+    pid: int, cwd: str, ago_minutes: int = 0,
+    window_handle: int | None = None,
+) -> Session:
     return Session(
         pid=pid,
         project_path=Path(cwd),
         session_uuid="",
-        window_handle=None,
+        window_handle=window_handle,
         last_activity=datetime.now(timezone.utc) - timedelta(minutes=ago_minutes),
     )
 
@@ -124,3 +127,108 @@ def test_session_click_emits_latest_session_snapshot(panel, qtbot):
 
     assert len(received) == 1
     assert received[0].last_activity == fresh.last_activity
+
+
+# --------------------------------------------------------------------------
+# Same-tab grouping (PR2)
+# --------------------------------------------------------------------------
+
+def _top_level_widgets(panel) -> list:
+    """Return the widgets actually placed at the session_box top level
+    (cards or standalone buttons), in layout order."""
+    box = panel._session_box
+    return [box.itemAt(i).widget() for i in range(box.count())]
+
+
+def test_two_sessions_same_window_handle_and_path_share_one_card(panel):
+    """G-UI-1: split-pane proxy. Two sessions with the same wt_hwnd and
+    cwd are merged into a single rounded card containing both rows."""
+    from PySide6.QtWidgets import QFrame, QPushButton
+
+    panel.refresh_sessions([
+        _session(1, "/proj", window_handle=0xAAAA),
+        _session(2, "/proj", window_handle=0xAAAA),
+    ])
+
+    top = _top_level_widgets(panel)
+    assert len(top) == 1, f"expected one merged card, got {len(top)} widgets"
+
+    card = top[0]
+    assert isinstance(card, QFrame)
+    assert card.objectName() == "group_card"
+
+    rows_in_card = card.findChildren(QPushButton)
+    assert {r.property("_session").pid for r in rows_in_card} == {1, 2}
+
+
+def test_different_window_handles_render_as_separate_widgets(panel):
+    """G-UI-2: sessions in different WT windows must NOT be grouped,
+    even if their cwd matches."""
+    panel.refresh_sessions([
+        _session(1, "/proj", window_handle=0xAAAA),
+        _session(2, "/proj", window_handle=0xBBBB),
+    ])
+
+    top = _top_level_widgets(panel)
+    assert len(top) == 2  # two standalone widgets, not one card
+
+
+def test_same_window_handle_different_paths_render_as_separate_widgets(panel):
+    """G-UI-3: same WT but different cwds → different (proxy-)tabs →
+    two separate cards. The user's "agent-prompt" + "claude-island"
+    in one WT shouldn't collapse into one card."""
+    panel.refresh_sessions([
+        _session(1, "/a", window_handle=0xAAAA),
+        _session(2, "/b", window_handle=0xAAAA),
+    ])
+
+    top = _top_level_widgets(panel)
+    assert len(top) == 2
+
+
+def test_window_handle_none_renders_standalone(panel):
+    """G-UI-4: window_handle=None means we couldn't resolve a host
+    (pythonw, sandboxed shell, etc.). Such sessions are always
+    standalone — never merged with any other session, even if cwd
+    matches a grouped pair."""
+    panel.refresh_sessions([
+        _session(1, "/proj", window_handle=0xAAAA),
+        _session(2, "/proj", window_handle=0xAAAA),
+        _session(3, "/proj", window_handle=None),  # ungroupable
+    ])
+
+    top = _top_level_widgets(panel)
+    # 1 card (pids 1+2) + 1 standalone (pid 3) = 2 top-level widgets
+    assert len(top) == 2
+
+
+def test_grouped_row_click_still_emits_session(panel, qtbot):
+    """G-UI-5: clicking a row that lives inside a multi-session card
+    must still emit session_activated with the right Session."""
+    panel.refresh_sessions([
+        _session(1, "/proj", window_handle=0xAAAA),
+        _session(2, "/proj", window_handle=0xAAAA),
+    ])
+
+    received = []
+    panel.session_activated.connect(received.append)
+
+    panel._rows[2].click()
+
+    assert len(received) == 1
+    assert received[0].pid == 2
+
+
+def test_row_widget_preserved_when_moving_between_card_and_standalone(panel):
+    """G-UI-6: pid 1 starts grouped (with pid 2), then pid 2 disappears.
+    The pid-1 row widget should be the same instance (cached by pid)
+    in both refreshes — only its parent / style changes."""
+    panel.refresh_sessions([
+        _session(1, "/proj", window_handle=0xAAAA),
+        _session(2, "/proj", window_handle=0xAAAA),
+    ])
+    btn1 = panel._rows[1]
+
+    panel.refresh_sessions([_session(1, "/proj", window_handle=0xAAAA)])
+
+    assert panel._rows[1] is btn1  # same widget instance preserved
