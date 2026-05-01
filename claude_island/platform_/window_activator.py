@@ -59,12 +59,7 @@ class WindowActivator:
         if hwnd is None:
             return False
 
-        try:
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-            win32gui.SetForegroundWindow(hwnd)
-            return True
-        except Exception:
-            return False
+        return _force_foreground(hwnd, win32con, win32gui, win32process)
 
     # ------------------------------------------------------------------
     # macOS
@@ -109,6 +104,65 @@ def _ancestor_pids(pid: int) -> list[int]:
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
     return pids
+
+
+def _force_foreground(hwnd: int, win32con, win32gui, win32process) -> bool:
+    """SetForegroundWindow with the AttachThreadInput workaround.
+
+    Windows blocks SetForegroundWindow from foreign processes unless the
+    caller's thread is "attached" to either the current foreground thread
+    or the target thread's input queue. We attach to both, do the dance,
+    then detach. This is the documented pattern for working around the
+    foreground-lock policy.
+    """
+    import win32api  # part of pywin32; deferred so import errors stay localised
+
+    our_thread = win32api.GetCurrentThreadId()
+    target_thread, _ = win32process.GetWindowThreadProcessId(hwnd)
+
+    fg_hwnd = win32gui.GetForegroundWindow()
+    fg_thread = 0
+    if fg_hwnd:
+        try:
+            fg_thread, _ = win32process.GetWindowThreadProcessId(fg_hwnd)
+        except Exception:
+            fg_thread = 0
+
+    attached: list[int] = []
+    try:
+        for tid in (fg_thread, target_thread):
+            if tid and tid != our_thread and tid not in attached:
+                try:
+                    win32process.AttachThreadInput(our_thread, tid, True)
+                    attached.append(tid)
+                except Exception:
+                    pass
+
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        except Exception:
+            pass
+        try:
+            win32gui.BringWindowToTop(hwnd)
+        except Exception:
+            pass
+        try:
+            ok = bool(win32gui.SetForegroundWindow(hwnd))
+        except Exception:
+            ok = False
+    finally:
+        for tid in attached:
+            try:
+                win32process.AttachThreadInput(our_thread, tid, False)
+            except Exception:
+                pass
+
+    if not ok:
+        print(
+            f"[claude-island] SetForegroundWindow failed for HWND {hwnd}",
+            file=sys.stderr,
+        )
+    return ok
 
 
 def _find_window_for_pids(pids: list[int], win32gui, win32process) -> int | None:

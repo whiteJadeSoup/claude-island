@@ -244,8 +244,16 @@ class ExpandedWindow(QWidget):
         btn.setStyleSheet(_STYLE_SESSION_BTN)
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         btn.setFixedHeight(52)
-        btn.clicked.connect(lambda: self.session_activated.emit(session))
+        btn.clicked.connect(lambda: self._on_row_clicked(session))
         return btn
+
+    def _on_row_clicked(self, session: Session) -> None:
+        # Activate first, then collapse — order matters: while our panel is
+        # still on top (StaysOnTopHint) we are the foreground process, which
+        # is the only state in which SetForegroundWindow is allowed to
+        # surface another process's window.
+        self.session_activated.emit(session)
+        self._controller.toggle_expanded()
 
     # ------------------------------------------------------------------
     # Paint
