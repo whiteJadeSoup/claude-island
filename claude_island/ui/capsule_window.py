@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QWidget
 
 from .controller import IslandController
 
@@ -16,6 +16,19 @@ _STYLE_LABEL = "color: white; font-size: 12px; font-family: 'Segoe UI', sans-ser
 _BG_COLOR = QColor(18, 18, 18, 230)
 _DOT_COLOR = QColor(80, 80, 80, 200)
 
+_STYLE_MENU = """
+    QMenu {
+        background: #1e1e1e;
+        color: #e0e0e0;
+        border: 1px solid #333;
+        padding: 4px;
+        font-size: 12px;
+    }
+    QMenu::item { padding: 6px 18px; border-radius: 4px; }
+    QMenu::item:selected { background: #2e2e2e; }
+    QMenu::separator { height: 1px; background: #333; margin: 4px 6px; }
+"""
+
 
 class CapsuleWindow(QWidget):
     """Frameless, always-on-top pill anchored to the top-centre of the screen.
@@ -28,6 +41,10 @@ class CapsuleWindow(QWidget):
         super().__init__()
         self._controller = controller
         self._is_dot = True
+        # Once the user picks "Hide" from the right-click menu the capsule
+        # stays gone until the next process restart — there is no tray icon
+        # to bring it back, so all auto-show paths must respect this flag.
+        self._hidden_by_user = False
 
         self._setup_window()
 
@@ -62,6 +79,8 @@ class CapsuleWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _on_state_changed(self, state: str) -> None:
+        if self._hidden_by_user:
+            return
         if state == "dot":
             self._apply_dot()
         else:
@@ -87,6 +106,8 @@ class CapsuleWindow(QWidget):
 
     def refresh_sessions(self, sessions: object) -> None:
         """Called by bridge when sessions list changes (updates count label)."""
+        if self._hidden_by_user:
+            return
         if not self._is_dot:
             self._apply_capsule()
 
@@ -103,5 +124,25 @@ class CapsuleWindow(QWidget):
         path.addRoundedRect(0, 0, self.width(), self.height(), r, r)
         painter.fillPath(path, color)
 
-    def mousePressEvent(self, event: object) -> None:  # type: ignore[override]
-        self._controller.toggle_expanded()
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.RightButton:
+            self._show_context_menu(event.globalPosition().toPoint())
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._controller.toggle_expanded()
+
+    def _show_context_menu(self, global_pos: QPoint) -> None:
+        menu = QMenu(self)
+        menu.setStyleSheet(_STYLE_MENU)
+        menu.addAction("Hide until restart", self._hide_until_restart)
+        menu.addSeparator()
+        menu.addAction("Quit ClaudeIsland", QApplication.instance().quit)
+        menu.exec(global_pos)
+
+    def _hide_until_restart(self) -> None:
+        self._hidden_by_user = True
+        # Collapse first so the expanded panel also disappears via its own
+        # state_changed handler.
+        if self._controller.state == "expanded":
+            self._controller.toggle_expanded()
+        self.hide()
