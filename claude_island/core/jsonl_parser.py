@@ -159,9 +159,14 @@ class JsonlParser:
                 if last_activity is None or ts > last_activity:
                     last_activity = ts
 
-        if batch:
-            self._usage.record_many(batch)
-        self._usage.set_offset(path_str, new_offset - tail_len)
+        # Atomic per-file: records + offset commit together. If the process
+        # is killed mid-file, the whole transaction rolls back — no chance
+        # of committed rows with an unadvanced offset (which would re-parse
+        # them on next start, double-counting tokens).
+        self._usage.record_many(
+            batch,
+            advance_offset=(path_str, new_offset - tail_len),
+        )
 
         if last_activity is not None:
             self.activity_updated.emit((project_path, last_activity))

@@ -112,3 +112,54 @@ def test_get_totals_aggregates_across_batch_records(registry):
     totals = registry.get_totals("daily")
     assert totals.input_tokens == 1000
     assert totals.output_tokens == 500
+
+
+# --------------------------------------------------------------------------
+# S2: per-file atomicity (records + offset in one transaction)
+# --------------------------------------------------------------------------
+
+def test_record_many_with_advance_offset_writes_both(registry):
+    """Both INSERT rows and offset UPSERT must be visible after the call."""
+    entries = [_entry(input_tokens=10) for _ in range(3)]
+    registry.record_many(entries, advance_offset=("/path/to/x.jsonl", 1234))
+
+    assert _row_count(registry) == 3
+    assert registry.get_offset("/path/to/x.jsonl") == 1234
+
+
+def test_record_many_with_advance_offset_only_no_rows(registry):
+    """An empty batch with advance_offset still writes the offset (used by
+    the truncation-reset path or on a chunk that had no parseable rows)."""
+    received = []
+    registry.totals_changed.subscribe(received.append)
+
+    registry.record_many([], advance_offset=("/path/to/y.jsonl", 0))
+
+    assert _row_count(registry) == 0
+    assert registry.get_offset("/path/to/y.jsonl") == 0
+    # No emit when no rows were inserted.
+    assert received == []
+
+
+def test_record_many_atomic_rollback_on_partial_failure(registry):
+    """If the UPSERT for offset somehow raises after the INSERTs, the
+    whole transaction must roll back. We trigger a rollback by passing
+    a non-stringifiable file path to the offset binding."""
+    entries = [_entry(input_tokens=10) for _ in range(5)]
+
+    with pytest.raises(Exception):
+        registry.record_many(
+            entries,
+            advance_offset=(object(), 42),  # bad binding for TEXT column
+        )
+
+    # Records must NOT be committed because the offset write failed
+    # in the same transaction.
+    assert _row_count(registry) == 0
+
+
+def test_record_many_advance_offset_overwrites_previous(registry):
+    """UPSERT semantics: same file_path keeps last write."""
+    registry.record_many([], advance_offset=("/path/to/z.jsonl", 100))
+    registry.record_many([], advance_offset=("/path/to/z.jsonl", 500))
+    assert registry.get_offset("/path/to/z.jsonl") == 500

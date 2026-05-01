@@ -121,15 +121,28 @@ class UsageRegistry:
             "cache_read_tokens": cache_read_tokens,
         }])
 
-    def record_many(self, entries: list[dict]) -> None:
+    def record_many(
+        self,
+        entries: list[dict],
+        *,
+        advance_offset: tuple[str, int] | None = None,
+    ) -> None:
         """Batch-insert usage records under a single transaction and emit
         totals_changed exactly once at the end.
 
         Each entry dict must carry the same keys as record()'s kwargs.
-        Empty input is a no-op (no transaction, no emit).
+        Empty input is a no-op (no transaction, no emit) — but if
+        ``advance_offset`` is set, the offset is still written so callers
+        can checkpoint progress on a file with no parseable rows.
+
+        ``advance_offset=(file_path, byte_offset)``: write the parse-offset
+        UPSERT inside the same transaction as the record INSERTs. If the
+        process is killed mid-file (e.g. user quits during backfill), the
+        whole transaction rolls back atomically — no scenario where rows
+        are committed but the offset is not (which would cause double-
+        counting on the next start) or vice versa (which would cause data
+        loss). This is the per-file durability guarantee S2 calls for.
         """
-        if not entries:
-            return
         rows = []
         for e in entries:
             pricing = _resolve_pricing(e["model"])
@@ -149,19 +162,43 @@ class UsageRegistry:
                 e["cache_read_tokens"],
                 cost,
             ))
+
+        if not rows and advance_offset is None:
+            return
+
+        now_iso = datetime.now(timezone.utc).isoformat()
         with self._lock:
-            self._conn.executemany(
-                """
-                INSERT INTO usage_records
-                    (timestamp, project_path, session_uuid, model,
-                     input_tokens, output_tokens,
-                     cache_creation_tokens, cache_read_tokens, cost_usd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-            self._conn.commit()
-        self.totals_changed.emit(None)
+            try:
+                if rows:
+                    self._conn.executemany(
+                        """
+                        INSERT INTO usage_records
+                            (timestamp, project_path, session_uuid, model,
+                             input_tokens, output_tokens,
+                             cache_creation_tokens, cache_read_tokens, cost_usd)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        rows,
+                    )
+                if advance_offset is not None:
+                    file_path, byte_offset = advance_offset
+                    self._conn.execute(
+                        """
+                        INSERT INTO parse_offsets (file_path, byte_offset, last_parsed_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(file_path) DO UPDATE SET
+                            byte_offset    = excluded.byte_offset,
+                            last_parsed_at = excluded.last_parsed_at
+                        """,
+                        (file_path, byte_offset, now_iso),
+                    )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+        if rows:
+            self.totals_changed.emit(None)
 
     # ------------------------------------------------------------------
     # Read path
