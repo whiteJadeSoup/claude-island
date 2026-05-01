@@ -109,14 +109,19 @@ expanded.session_activated.connect(window_activator.activate)
 # ---------------------------------------------------------------------------
 # Start background services
 # ---------------------------------------------------------------------------
-_backfill_thread: threading.Thread | None = None
-if _CLAUDE_PROJECTS.exists():
-    file_watcher.watch(_CLAUDE_PROJECTS, jsonl_parser.parse_file)
-    file_watcher.start()
+# Ensure the projects dir exists so we can watch it unconditionally. First-
+# time users (no Claude Code history yet) had a gap: file_watcher.start was
+# skipped at boot, then if they ran claude mid-session and quit,
+# file_watcher.stop would raise RuntimeError("cannot stop unscheduled
+# observer"). mkdir + unconditional start/stop closes that gap.
+_CLAUDE_PROJECTS.mkdir(parents=True, exist_ok=True)
 
-    # Backfill existing JSONL history in a daemon thread so startup is instant.
-    _backfill_thread = threading.Thread(target=jsonl_parser.backfill_all, daemon=True)
-    _backfill_thread.start()
+file_watcher.watch(_CLAUDE_PROJECTS, jsonl_parser.parse_file)
+file_watcher.start()
+
+# Backfill existing JSONL history in a daemon thread so startup is instant.
+_backfill_thread = threading.Thread(target=jsonl_parser.backfill_all, daemon=True)
+_backfill_thread.start()
 
 session_discovery.start()
 capsule.show()
@@ -135,8 +140,7 @@ capsule.show()
 exit_code = app.exec()
 
 session_discovery.stop()
-if _CLAUDE_PROJECTS.exists():
-    file_watcher.stop()
+file_watcher.stop()
 jsonl_parser.request_stop()
 if _backfill_thread is not None:
     # Bounded join: backfill checks the stop flag at each file boundary, so

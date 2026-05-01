@@ -36,5 +36,10 @@ class FileWatcher:
         self._observer.start()
 
     def stop(self) -> None:
-        self._observer.stop()
-        self._observer.join()
+        # Idempotent: stop() on a never-started observer raises RuntimeError
+        # in watchdog. Only stop if start() was actually called. Required so
+        # __main__'s shutdown can be unconditional even when start() was
+        # skipped (e.g. mkdir for the projects dir failed).
+        if self._observer.is_alive():
+            self._observer.stop()
+            self._observer.join()
