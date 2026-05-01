@@ -31,7 +31,13 @@ def _fake_proc(pid: int, name: str, cmdline: list[str] | None = None,
 @pytest.fixture
 def patched_process_iter():
     """Yield a list that tests can populate with fake procs; patches
-    psutil.process_iter to return them when scan() asks."""
+    psutil.process_iter to return them when scan() asks.
+
+    Also patches _live_window_pids to return None so the orphan filter is
+    skipped by default, preserving the behaviour of tests that don't care
+    about orphan filtering. Tests that exercise S1–S5 supply their own
+    _live_window_pids patch inside the test body, which overrides this one.
+    """
     fake_procs: list = []
 
     def fake_iter(attrs=None):
@@ -39,8 +45,12 @@ def patched_process_iter():
         # (the test for that is below), just yield our fakes.
         return iter(fake_procs)
 
-    with patch("claude_island.platform_.process_scanner.psutil.process_iter",
-               side_effect=fake_iter):
+    with (
+        patch("claude_island.platform_.process_scanner.psutil.process_iter",
+              side_effect=fake_iter),
+        patch("claude_island.platform_.process_scanner._live_window_pids",
+              return_value=None),
+    ):
         yield fake_procs
 
 
@@ -135,3 +145,86 @@ def test_access_denied_during_cmdline_does_not_crash(patched_process_iter):
     patched_process_iter.append(node)
 
     assert ProcessScanner().scan() == []  # no crash, no session
+
+
+# --------------------------------------------------------------------------
+# S1–S5: orphan filter
+# --------------------------------------------------------------------------
+
+def test_live_session_with_window_ancestor_is_kept(patched_process_iter):
+    """S1: ancestor PID 200 owns a visible window → session is not an orphan."""
+    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/proj"))
+
+    with (
+        patch("claude_island.platform_.process_scanner._live_window_pids",
+              return_value={200}),
+        patch("claude_island.platform_.process_scanner._ancestor_pids",
+              return_value=[100, 200]),
+    ):
+        sessions = ProcessScanner().scan()
+
+    assert [s.pid for s in sessions] == [100]
+
+
+def test_orphan_with_no_window_ancestor_is_filtered(patched_process_iter):
+    """S2: ancestor chain has no PID in live_window_pids → orphan, filtered."""
+    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/proj"))
+
+    with (
+        patch("claude_island.platform_.process_scanner._live_window_pids",
+              return_value={999}),
+        patch("claude_island.platform_.process_scanner._ancestor_pids",
+              return_value=[100, 200, 300]),
+    ):
+        sessions = ProcessScanner().scan()
+
+    assert sessions == []
+
+
+def test_orphan_with_broken_ancestor_chain_is_filtered(patched_process_iter):
+    """S3: parent is already dead (NoSuchProcess); _ancestor_pids returns only
+    self; self is not in live_window_pids → orphan."""
+    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/proj"))
+
+    with (
+        patch("claude_island.platform_.process_scanner._live_window_pids",
+              return_value={999}),
+        patch("claude_island.platform_.process_scanner._ancestor_pids",
+              return_value=[100]),   # chain stops at self; parent already gone
+    ):
+        sessions = ProcessScanner().scan()
+
+    assert sessions == []
+
+
+def test_enum_windows_failure_returns_all_sessions_fail_open(patched_process_iter):
+    """S4: _live_window_pids() returns None (EnumWindows failure) → orphan
+    filter is skipped entirely (fail-open)."""
+    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/proj"))
+
+    with patch("claude_island.platform_.process_scanner._live_window_pids",
+               return_value=None):
+        sessions = ProcessScanner().scan()
+
+    assert [s.pid for s in sessions] == [100]
+
+
+def test_mixed_live_and_orphan_sessions(patched_process_iter):
+    """S5: 3 live + 2 orphan → only the 3 live sessions returned."""
+    for pid in [10, 20, 30, 40, 50]:
+        patched_process_iter.append(_fake_proc(pid, "claude.exe", cwd=f"/p{pid}"))
+
+    live_terminal_pids = {1001, 1002, 1003}
+
+    def fake_ancestors(pid: int) -> list[int]:
+        return {10: [10, 1001], 20: [20, 1002], 30: [30, 1003]}.get(pid, [pid])
+
+    with (
+        patch("claude_island.platform_.process_scanner._live_window_pids",
+              return_value=live_terminal_pids),
+        patch("claude_island.platform_.process_scanner._ancestor_pids",
+              side_effect=fake_ancestors),
+    ):
+        sessions = ProcessScanner().scan()
+
+    assert {s.pid for s in sessions} == {10, 20, 30}

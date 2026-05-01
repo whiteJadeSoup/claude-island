@@ -105,3 +105,130 @@ def test_returns_none_when_attach_fails(mock_kernel32):
     win32gui = _make_win32gui_stub()
     result = _resolve_console_window(pid=999, win32gui=win32gui)
     assert result is None
+
+
+# --------------------------------------------------------------------------
+# T8: _resolve_console_window returns (hwnd, title) tuple on success
+# --------------------------------------------------------------------------
+
+def test_resolve_returns_tuple_with_title(mock_kernel32):
+    """When AttachConsole succeeds and GetConsoleTitleW populates the buffer,
+    _resolve_console_window must return a (hwnd, title) tuple, not a bare int."""
+    import ctypes
+    from claude_island.platform_.window_activator import _resolve_console_window
+
+    mock_kernel32.GetConsoleWindow.side_effect = [0, 12345]
+    mock_kernel32.AttachConsole.return_value = 1
+
+    def _set_title(buf, size):
+        buf.value = "my tab"
+        return len("my tab")
+
+    mock_kernel32.GetConsoleTitleW.side_effect = _set_title
+
+    win32gui = _make_win32gui_stub(visible_title="WT Window")
+    result = _resolve_console_window(pid=999, win32gui=win32gui)
+
+    assert result is not None
+    hwnd, title = result
+    assert hwnd == 12345
+    assert title == "my tab"
+
+
+# --------------------------------------------------------------------------
+# T9: _resolve_console_window returns None when AttachConsole fails
+#     (T9 is satisfied by the existing test_returns_none_when_attach_fails,
+#      verified here to remain valid after the tuple-return change)
+# --------------------------------------------------------------------------
+
+def test_resolve_returns_none_on_attach_failure(mock_kernel32):
+    """T9 (regression): tuple-return refactor must not change the None path."""
+    from claude_island.platform_.window_activator import _resolve_console_window
+
+    mock_kernel32.GetConsoleWindow.return_value = 0
+    mock_kernel32.AttachConsole.return_value = 0
+
+    result = _resolve_console_window(pid=999, win32gui=_make_win32gui_stub())
+    assert result is None
+
+
+# --------------------------------------------------------------------------
+# T10: _activate_windows calls tab_selector when resolve succeeds
+# --------------------------------------------------------------------------
+
+def test_activate_calls_tab_selector_when_resolved():
+    """When _resolve_console_window returns (hwnd, title),
+    tab_selector.select_tab_by_title must be called with those exact args."""
+    from unittest.mock import patch
+    from claude_island.platform_.window_activator import WindowActivator
+
+    with (
+        patch(
+            "claude_island.platform_.window_activator._resolve_console_window",
+            return_value=(5678, "my-tab"),
+        ),
+        patch(
+            "claude_island.platform_.window_activator.tab_selector"
+        ) as mock_ts,
+        patch(
+            "claude_island.platform_.window_activator._force_foreground",
+            return_value=True,
+        ),
+        patch.dict(
+            "sys.modules",
+            {
+                "win32con": MagicMock(),
+                "win32gui": MagicMock(),
+                "win32process": MagicMock(),
+            },
+        ),
+    ):
+        result = WindowActivator()._activate_windows(pid=999)
+
+    mock_ts.select_tab_by_title.assert_called_once_with(5678, "my-tab")
+    assert result is True
+
+
+# --------------------------------------------------------------------------
+# T11: _activate_windows skips tab_selector on fallback path
+# --------------------------------------------------------------------------
+
+def test_activate_skips_tab_selector_on_fallback():
+    """When _resolve_console_window returns None (ancestor-walk fallback),
+    tab_selector must NOT be called, but _force_foreground still runs."""
+    from unittest.mock import patch
+    from claude_island.platform_.window_activator import WindowActivator
+
+    with (
+        patch(
+            "claude_island.platform_.window_activator._resolve_console_window",
+            return_value=None,
+        ),
+        patch(
+            "claude_island.platform_.window_activator._ancestor_pids",
+            return_value=[999, 1],
+        ),
+        patch(
+            "claude_island.platform_.window_activator._find_window_for_pids",
+            return_value=1111,
+        ),
+        patch(
+            "claude_island.platform_.window_activator.tab_selector"
+        ) as mock_ts,
+        patch(
+            "claude_island.platform_.window_activator._force_foreground",
+            return_value=True,
+        ),
+        patch.dict(
+            "sys.modules",
+            {
+                "win32con": MagicMock(),
+                "win32gui": MagicMock(),
+                "win32process": MagicMock(),
+            },
+        ),
+    ):
+        result = WindowActivator()._activate_windows(pid=999)
+
+    mock_ts.select_tab_by_title.assert_not_called()
+    assert result is True
