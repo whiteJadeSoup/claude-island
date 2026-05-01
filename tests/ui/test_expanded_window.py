@@ -457,6 +457,38 @@ def test_period_card_toggle_updates_total_and_token_rows(qtbot):
     assert "weekly" in calls
 
 
+@pytest.mark.parametrize("pct,expected_color", [
+    (0.0,   "#4ade80"),   # green tier — bottom of range
+    (10.0,  "#4ade80"),
+    (59.0,  "#4ade80"),   # still green just below threshold
+    (60.0,  "#facc15"),   # yellow tier — at threshold
+    (75.0,  "#facc15"),
+    (84.0,  "#facc15"),   # still yellow just below threshold
+    (85.0,  "#ef4444"),   # red tier — at threshold
+    (99.0,  "#ef4444"),
+    (100.0, "#ef4444"),
+])
+def test_session_card_progress_bar_color_thresholds(qtbot, pct, expected_color):
+    """U8: bar chunk colour escalates green → yellow → red at 60% / 85%.
+    The pct text is coloured to match so the signal reads either way."""
+    su = _make_session_usage(quota=_make_quota(five_pct=pct))
+    p = _panel_with_session(qtbot, lambda: su)
+    p.refresh_usage_bar()
+    assert expected_color in p._session_bar.styleSheet()
+    assert expected_color in p._session_pct.styleSheet()
+
+
+def test_session_card_stale_overrides_red(qtbot):
+    """U9: stale data wins over the percent-based colour — we want
+    "I don't trust this" to surface before "you're at the limit",
+    so a stale 95% reads gray, not red."""
+    su = _make_session_usage(quota=_make_quota(five_pct=95.0, is_stale=True))
+    p = _panel_with_session(qtbot, lambda: su)
+    p.refresh_usage_bar()
+    assert "#6b7280" in p._session_bar.styleSheet()    # _BAR_STALE
+    assert "#ef4444" not in p._session_bar.styleSheet()
+
+
 def test_session_card_model_breakdown_shows_top_models(qtbot):
     """U7: by_model populated → first 3 entries shown joined with ' · '
     using friendly labels (Sonnet/Haiku/Opus); unknown ids truncated."""

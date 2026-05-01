@@ -136,30 +136,33 @@ _STYLE_USAGE_PERIOD_NAME = "color: #c9c9c9; font-size: 12px;"
 _STYLE_USAGE_PERIOD_TOTAL = "color: #f5f5f5; font-size: 13px; font-weight: 500;"
 _STYLE_USAGE_TOKEN_ROW = "color: #9ca3af; font-size: 11px;"
 
-_STYLE_PROGRESS_BAR = """
-    QProgressBar {
+# Quota progress-bar colour thresholds. The bar's chunk colour escalates
+# from green to yellow to red as the user's 5h quota fills, so the user
+# can read "how worried should I be" at a glance without parsing the
+# percentage text. Stale data (cache > 3×TTL) overrides any colour to
+# gray — we don't want to alarm (or reassure) on a number we can't trust.
+#
+#   < 60%        green   — plenty of runway, large operations are fine
+#   60–85%       yellow  — over half spent, start sizing requests
+#   ≥ 85%        red     — only 15% headroom, defer big tasks past reset
+#   stale (any%) gray    — endpoint quiet for >15 min, value is old
+_BAR_GREEN  = "#4ade80"  # matches _DOT_GREEN
+_BAR_YELLOW = "#facc15"  # matches _DOT_YELLOW
+_BAR_RED    = "#ef4444"  # Tailwind red-500
+_BAR_STALE  = "#6b7280"
+
+_PROGRESS_BAR_TPL = """
+    QProgressBar {{
         border: none;
         background: #2a2a2a;
         border-radius: 3px;
         height: 6px;
         text-align: center;
-    }
-    QProgressBar::chunk {
-        background: #4ade80;
+    }}
+    QProgressBar::chunk {{
+        background: {color};
         border-radius: 3px;
-    }
-"""
-_STYLE_PROGRESS_BAR_STALE = """
-    QProgressBar {
-        border: none;
-        background: #2a2a2a;
-        border-radius: 3px;
-        height: 6px;
-    }
-    QProgressBar::chunk {
-        background: #6b7280;
-        border-radius: 3px;
-    }
+    }}
 """
 
 
@@ -237,6 +240,22 @@ def _fmt_model_label(model: str) -> str:
     if not model:
         return "?"
     return model[:12] + ("…" if len(model) > 12 else "")
+
+
+def _quota_color(pct: float, stale: bool) -> str:
+    """Pick the progress-bar / pct-text colour for a 5h quota reading.
+
+    Stale data wins regardless of percentage — we surface "I don't
+    trust this" before "how full is it". Thresholds documented at the
+    _BAR_* constants above.
+    """
+    if stale:
+        return _BAR_STALE
+    if pct >= 85:
+        return _BAR_RED
+    if pct >= 60:
+        return _BAR_YELLOW
+    return _BAR_GREEN
 
 
 def _fmt_money(amount: float) -> str:
@@ -566,7 +585,9 @@ class ExpandedWindow(QWidget):
         self._session_bar.setFixedWidth(110)
         self._session_bar.setFixedHeight(6)
         self._session_bar.setTextVisible(False)
-        self._session_bar.setStyleSheet(_STYLE_PROGRESS_BAR)
+        # Initial colour is green; _refresh_session_card replaces this
+        # with the real threshold-based colour as soon as quota arrives.
+        self._session_bar.setStyleSheet(_PROGRESS_BAR_TPL.format(color=_BAR_GREEN))
         self._session_bar.hide()      # hidden until quota arrives
         amt.addWidget(self._session_bar)
         self._session_pct = QLabel("")
@@ -629,19 +650,16 @@ class ExpandedWindow(QWidget):
         self._session_amount.setText(_fmt_money(s.total_cost_usd))
 
         # Quota progress bar — only when the provider returned something.
+        # Bar chunk + pct text share the same colour so the signal reads
+        # in either direction (eyes hit either the bar or the text first).
         if s.quota is not None:
             pct = max(0, min(100, int(round(s.quota.five_hour_pct))))
+            color = _quota_color(pct, stale=s.quota.is_stale)
             self._session_bar.setValue(pct)
-            self._session_bar.setStyleSheet(
-                _STYLE_PROGRESS_BAR_STALE if s.quota.is_stale
-                else _STYLE_PROGRESS_BAR
-            )
+            self._session_bar.setStyleSheet(_PROGRESS_BAR_TPL.format(color=color))
             self._session_bar.show()
             stale_marker = " ⚠" if s.quota.is_stale else ""
-            self._session_pct.setStyleSheet(
-                _STYLE_USAGE_PCT_STALE if s.quota.is_stale
-                else _STYLE_USAGE_PCT
-            )
+            self._session_pct.setStyleSheet(f"color: {color}; font-size: 11px;")
             self._session_pct.setText(f"{pct}% used{stale_marker}")
         else:
             self._session_bar.hide()
