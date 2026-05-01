@@ -84,18 +84,39 @@ def collect_wt_tab_titles() -> set[str] | None:
             tab_control = root.TabControl(searchDepth=10)
             if not tab_control.Exists(0.1):
                 continue
-            for child in tab_control.GetChildren():
-                # Only TabItems carry the tab name we want; ignore any
-                # other children (close buttons, scroll arrows, etc.).
-                if getattr(child, "ControlTypeName", "") != "TabItemControl":
-                    continue
-                name = getattr(child, "Name", "")
-                if name:
-                    titles.add(name)
+            # WinUI3 TabView wraps tabs inside an inner ListControl; tab
+            # buttons are not direct children of TabControl. BFS down a
+            # bounded depth to collect every TabItemControl.
+            _collect_tab_names(tab_control, titles, max_depth=4)
         except Exception:
             continue
 
     return titles if titles else None
+
+
+def _collect_tab_names(elem: object, sink: set[str], *, max_depth: int) -> None:
+    """Walk ``elem``'s subtree up to ``max_depth`` levels and add each
+    descendant TabItemControl's Name into ``sink``.
+
+    Iterative BFS so we don't blow the stack on a pathological tree.
+    """
+    frontier: list[tuple[object, int]] = [(elem, 0)]
+    while frontier:
+        node, depth = frontier.pop(0)
+        try:
+            children = node.GetChildren()
+        except Exception:
+            continue
+        for child in children:
+            if getattr(child, "ControlTypeName", "") == "TabItemControl":
+                name = getattr(child, "Name", "")
+                if name:
+                    sink.add(name)
+                # Don't descend into TabItemControl: its subtree is the
+                # tab's content (TermControl etc.), not more tabs.
+                continue
+            if depth + 1 < max_depth:
+                frontier.append((child, depth + 1))
 
 
 def select_tab_by_title(hwnd: int, title: str) -> bool:
