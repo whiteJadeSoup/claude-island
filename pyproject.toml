@@ -12,6 +12,7 @@ dependencies = [
     "watchdog>=4.0",
     "transitions>=0.9",
     "platformdirs>=4.0",
+    "pywin32>=306; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
