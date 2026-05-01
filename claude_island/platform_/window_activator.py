@@ -110,12 +110,24 @@ def _resolve_console_window(pid: int, win32gui) -> int | None:
     Re-attaches to the parent console afterwards. Calls during the gap
     cannot use stdio, but our caller doesn't print anything until after
     this function returns.
+
+    Defensive against pythonw / frozen .exe launches: if our process never
+    had a console to begin with (GetConsoleWindow returns 0), skip the
+    Free/Attach dance entirely. The dance can leave the process permanently
+    console-less if AttachConsole(ATTACH_PARENT_PROCESS) fails — which it
+    will when there is no parent console — breaking subsequent stderr
+    diagnostics from this very module.
     """
     import ctypes
 
     kernel32 = ctypes.windll.kernel32
     ATTACH_PARENT_PROCESS = 0xFFFFFFFF
     GW_OWNER = 4
+
+    # Capture our pre-existing console state so we know whether to attempt
+    # restoration. 0 means "this process has no console attached" — the
+    # pythonw / windowed-frozen-exe case.
+    original_console = kernel32.GetConsoleWindow()
 
     kernel32.FreeConsole()
     console_hwnd = 0
@@ -126,11 +138,15 @@ def _resolve_console_window(pid: int, win32gui) -> int | None:
             finally:
                 kernel32.FreeConsole()
     finally:
-        # Best-effort restoration of our original console.
-        try:
-            kernel32.AttachConsole(ATTACH_PARENT_PROCESS)
-        except Exception:
-            pass
+        # Only re-attach if we had a console to begin with. Calling
+        # AttachConsole(ATTACH_PARENT_PROCESS) when the parent had no
+        # console silently fails and leaves us console-less, which would
+        # break the stderr diagnostics in _force_foreground.
+        if original_console:
+            try:
+                kernel32.AttachConsole(ATTACH_PARENT_PROCESS)
+            except Exception:
+                pass
 
     if not console_hwnd:
         return None
