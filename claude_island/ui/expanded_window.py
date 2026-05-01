@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt, Signal
@@ -159,7 +160,29 @@ def _activity_color(dt: datetime) -> str:
 def _group_key(s: Session) -> tuple[int, str] | None:
     if s.window_handle is None:
         return None
-    return (s.window_handle, str(s.project_path))
+    return (s.window_handle, _normalize_project_path(s.project_path))
+
+
+def _normalize_project_path(path) -> str:
+    """Collapse Claude Code worktree paths back to their parent project.
+
+    Claude Code creates per-feature git worktrees under
+    ``<repo>/.claude/worktrees/<branch-name>``. Users routinely run
+    one claude session in the main repo and another in a worktree,
+    side-by-side as split panes in the same WT tab. With raw cwds the
+    grouping heuristic sees two different paths and fails to merge
+    them. Normalising the worktree back to the repo root restores the
+    "same tab" grouping (and, downstream, lets the activator find a
+    sibling whose console title IS in the WT TabItem set, fixing
+    click-to-switch on the inactive worktree pane).
+
+    Non-worktree paths pass through unchanged.
+    """
+    parts = path.parts
+    for i in range(len(parts) - 1):
+        if parts[i] == ".claude" and parts[i + 1] == "worktrees":
+            return str(Path(*parts[:i]))
+    return str(path)
 
 
 def _session_sort_key(s: Session) -> tuple:

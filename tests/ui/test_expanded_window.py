@@ -228,6 +228,62 @@ def test_grouped_row_click_still_emits_session(panel, qtbot):
     assert sibling_pids == {1}  # the other pane in the same group
 
 
+def test_worktree_groups_with_parent_repo(panel):
+    """G-UI-7: a session whose cwd is a Claude Code worktree
+    (``<repo>/.claude/worktrees/<branch>``) groups with another
+    session whose cwd is the parent repo, when both share the same
+    WT window. Common pattern: main repo in pane A, worktree in pane B,
+    side-by-side in one tab."""
+    panel.refresh_sessions([
+        _session(1, "/repo", window_handle=0xAAAA),
+        _session(2, "/repo/.claude/worktrees/feature-x", window_handle=0xAAAA),
+    ])
+
+    top = _top_level_widgets(panel)
+    assert len(top) == 1, "worktree should merge into the parent's card"
+
+    from PySide6.QtWidgets import QFrame, QPushButton
+    card = top[0]
+    assert isinstance(card, QFrame)
+    rows_in_card = card.findChildren(QPushButton)
+    assert {r.property("_session").pid for r in rows_in_card} == {1, 2}
+
+
+def test_worktree_normalizer_does_not_overreach():
+    """The normaliser must collapse ``.claude/worktrees/...`` only.
+    A path that mentions ``.claude`` for a different reason (e.g. a
+    file inside the user's home claude config) must pass through."""
+    from claude_island.ui.expanded_window import _normalize_project_path
+
+    # The actual case we want to collapse:
+    assert _normalize_project_path(
+        Path("D:/repo/.claude/worktrees/feat-x")
+    ) == "D:\\repo" or _normalize_project_path(
+        Path("D:/repo/.claude/worktrees/feat-x")
+    ) == "D:/repo"
+
+    # Regular project path: untouched.
+    raw = "D:/coding/project-a"
+    assert _normalize_project_path(Path(raw)) in (raw, raw.replace("/", "\\"))
+
+    # ``.claude`` without ``worktrees`` next to it: untouched.
+    p = Path("C:/Users/me/.claude/projects/some-file")
+    out = _normalize_project_path(p)
+    assert "projects" in out  # the .claude dir was kept
+
+
+def test_two_worktrees_of_same_repo_group_together(panel):
+    """G-UI-8: two different worktrees of the same repo should still
+    merge — both normalise to the same parent repo path."""
+    panel.refresh_sessions([
+        _session(1, "/repo/.claude/worktrees/feat-a", window_handle=0xAAAA),
+        _session(2, "/repo/.claude/worktrees/feat-b", window_handle=0xAAAA),
+    ])
+
+    top = _top_level_widgets(panel)
+    assert len(top) == 1
+
+
 def test_row_widget_preserved_when_moving_between_card_and_standalone(panel):
     """G-UI-6: pid 1 starts grouped (with pid 2), then pid 2 disappears.
     The pid-1 row widget should be the same instance (cached by pid)
