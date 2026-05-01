@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import psutil
 
 from claude_island.core.models import Session
-from claude_island.platform_.window_activator import _ancestor_pids
+from claude_island.platform_ import win32_console, wt_uia
 
 # Claude Code is a Node.js CLI; on Windows it may appear as node.exe wrapping
 # the claude script, or as a bundled "claude.exe".
@@ -29,14 +28,27 @@ class ProcessScanner:
     Pulling cmdline eagerly across all processes (the previous behaviour)
     triggered a per-process NtQueryInformationProcess on Windows that
     measurably contributed to scan-tick CPU on busy machines (500+ procs).
+
+    Orphan filter: a "live" Claude session must be currently rendered as
+    a visible Windows Terminal tab. We collect every WT TabItem.Name once
+    per scan via UIA, then for each candidate claude.exe we pull its
+    console title via AttachConsole+GetConsoleTitleW; if the title isn't
+    in the live-titles set, the process exists but has no visible host
+    pane — it's an orphan, dropped from the result.
+
+    Why title-set rather than process-tree liveness: the parent
+    powershell.exe of an orphan claude.exe is often still alive (only
+    its conPTY pipe to WT was closed). Process-tree judges miss that
+    case entirely. UIA tab titles are the ground truth for "what WT is
+    actually rendering right now".
+
+    Fail-open at three levels: (a) UIA unavailable / no WT → keep all;
+    (b) per-pid console read fails → keep that session; (c) sanity check
+    — if every session would be filtered (e.g. user manually renamed all
+    WT tabs so no titles match), return everything unchanged.
     """
 
     def scan(self) -> list[Session]:
-        # Collect window-owning PIDs once per scan tick (single EnumWindows
-        # pass). None means the check is unavailable; orphan filter is skipped
-        # to fail-open (show extra sessions rather than hide live ones).
-        live_window_pids = _live_window_pids()
-
         sessions: list[Session] = []
         for proc in psutil.process_iter(["pid", "name", "create_time"]):
             try:
@@ -65,10 +77,7 @@ class ProcessScanner:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 
-        if live_window_pids is not None:
-            sessions = [s for s in sessions
-                        if not _is_orphan(s.pid, live_window_pids)]
-        return sessions
+        return _filter_orphans(sessions)
 
     @staticmethod
     def _build(proc: psutil.Process, info: dict) -> Session | None:
@@ -93,50 +102,39 @@ class ProcessScanner:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
-def _live_window_pids() -> set[int] | None:
-    """Return PIDs of all processes that own a visible top-level window.
+def _filter_orphans(sessions: list[Session]) -> list[Session]:
+    """Drop sessions whose console title is not currently rendered as a
+    visible WT tab.
 
-    Returns None when the check cannot run (non-Windows, pywin32 absent,
-    or EnumWindows failure). scan() treats None as "skip orphan filter"
-    so we fail-open: better to show a stale session than to hide a live one.
+    Three fail-open exits, in order:
+    1. UIA returned ``None`` (no WT, library missing, enumeration fail) →
+       skip filter, return all. We can't tell.
+    2. UIA returned an empty set → same; treat as "unknown" not "no tabs".
+    3. After filtering, every session was dropped while we had >0 raw
+       sessions → the judge is probably wrong (user renamed every tab,
+       or our class-name filter missed a WT variant). Return originals.
     """
-    if sys.platform != "win32":
-        return None
-    try:
-        import win32gui
-        import win32process
-    except ImportError:
-        return None
+    if not sessions:
+        return sessions
 
-    pids: set[int] = set()
+    live_titles = wt_uia.collect_wt_tab_titles()
+    if not live_titles:  # None or empty → fail-open
+        return sessions
 
-    def _cb(hwnd: int, _: object) -> bool:
-        if not win32gui.IsWindowVisible(hwnd):
-            return True
-        if not win32gui.GetWindowText(hwnd):
-            return True
-        try:
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            pids.add(pid)
-        except Exception:
-            pass
-        return True
+    kept: list[Session] = []
+    for s in sessions:
+        info = win32_console.get_console_info(s.pid)
+        if info is None:
+            # Per-pid fail-open: couldn't read this title, don't filter it.
+            kept.append(s)
+            continue
+        _, title = info
+        if title and title in live_titles:
+            kept.append(s)
+        # else: orphan — the title doesn't match any visible WT tab, drop.
 
-    try:
-        win32gui.EnumWindows(_cb, None)
-    except Exception:
-        return None  # fail-open: caller skips the orphan filter entirely
-
-    return pids
-
-
-def _is_orphan(pid: int, live_window_pids: set[int]) -> bool:
-    """Return True if no ancestor of *pid* owns a visible window.
-
-    Live claude.exe chain:   claude → powershell → WindowsTerminal (visible) → not orphan
-    Orphan claude.exe chain: claude → (powershell dead, NoSuchProcess) → orphan
-    """
-    for ancestor_pid in _ancestor_pids(pid):
-        if ancestor_pid in live_window_pids:
-            return False
-    return True
+    if not kept:
+        # Sanity tripwire: rather than wipe the list silently, return the
+        # raw sessions and let the user see them. Better stale than blank.
+        return sessions
+    return kept

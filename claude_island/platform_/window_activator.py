@@ -7,7 +7,7 @@ import sys
 import psutil
 
 from claude_island.core.models import Session
-from claude_island.platform_ import tab_selector
+from claude_island.platform_ import win32_console, wt_uia
 
 _MAX_ANCESTOR_DEPTH = 10
 
@@ -59,7 +59,7 @@ class WindowActivator:
             hwnd, title = resolved
             # Best-effort tab switch; return value ignored — foreground is the
             # guaranteed fallback whether Select succeeds or not.
-            tab_selector.select_tab_by_title(hwnd, title)
+            wt_uia.select_tab_by_title(hwnd, title)
         else:
             # Fallback: ancestor-pid walk. Used when console detection fails
             # (legacy conhost, processes started without a console, etc.) or
@@ -104,66 +104,28 @@ def _resolve_console_window(pid: int, win32gui) -> tuple[int, str] | None:
     """Find the visible host window that owns the given pid's console, and
     capture the console title for use in tab selection.
 
-    Critical for the multi-Windows-Terminal case: a single WT process can
-    own multiple top-level windows, and parent-pid walking can only return
-    "some WT window" — not the specific one hosting this pid's tab. This
-    function uses AttachConsole + GetConsoleWindow to obtain the pseudo-
-    console HWND of the target pid, then walks the GW_OWNER chain up to
-    the visible host (WindowsTerminal.exe / conhost.exe).
+    Delegates the AttachConsole / GetConsoleTitleW dance to the shared
+    ``win32_console`` helper (lock-protected so the scanner thread and
+    the activator thread don't race on the global console state). Once
+    we have the conPTY pseudo-console HWND, we walk GW_OWNER up to the
+    visible host (WindowsTerminal.exe / conhost.exe).
 
-    Returns (host_hwnd, console_title) on success. console_title may be ""
-    if the process has not set a console title; the caller must handle that.
-    Returns None for non-console targets or if AttachConsole fails (already
-    attached, target has no console, access denied).
+    Critical for the multi-Windows-Terminal case: a single WT process
+    can own multiple top-level windows, and parent-pid walking can only
+    return "some WT window" — not the specific one hosting this pid's
+    tab. The conPTY's GW_OWNER chain pinpoints the correct WT window.
 
-    Side effect: temporarily detaches our process from its own console.
-    Re-attaches to the parent console afterwards. Calls during the gap
-    cannot use stdio, but our caller doesn't print anything until after
-    this function returns.
-
-    Defensive against pythonw / frozen .exe launches: if our process never
-    had a console to begin with (GetConsoleWindow returns 0), skip the
-    Free/Attach dance entirely. The dance can leave the process permanently
-    console-less if AttachConsole(ATTACH_PARENT_PROCESS) fails — which it
-    will when there is no parent console — breaking subsequent stderr
-    diagnostics from this very module.
+    Returns ``(host_hwnd, console_title)`` on success. ``console_title``
+    may be empty if the process never set one; the caller must handle
+    that (the tab_selector returns False on empty title).
+    Returns ``None`` for non-console targets or if AttachConsole fails.
     """
-    import ctypes
-
-    kernel32 = ctypes.windll.kernel32
-    ATTACH_PARENT_PROCESS = 0xFFFFFFFF
     GW_OWNER = 4
 
-    # Capture our pre-existing console state so we know whether to attempt
-    # restoration. 0 means "this process has no console attached" — the
-    # pythonw / windowed-frozen-exe case.
-    original_console = kernel32.GetConsoleWindow()
-
-    kernel32.FreeConsole()
-    console_hwnd = 0
-    console_title = ""
-    try:
-        if kernel32.AttachConsole(pid):
-            try:
-                console_hwnd = kernel32.GetConsoleWindow()
-                # Must be called while AttachConsole(pid) is active; after
-                # FreeConsole() the title reverts to our own process's title.
-                buf = ctypes.create_unicode_buffer(512)
-                kernel32.GetConsoleTitleW(buf, 512)
-                console_title = buf.value
-            finally:
-                kernel32.FreeConsole()
-    finally:
-        # Only re-attach if we had a console to begin with. Calling
-        # AttachConsole(ATTACH_PARENT_PROCESS) when the parent had no
-        # console silently fails and leaves us console-less, which would
-        # break the stderr diagnostics in _force_foreground.
-        if original_console:
-            try:
-                kernel32.AttachConsole(ATTACH_PARENT_PROCESS)
-            except Exception:
-                pass
-
+    info = win32_console.get_console_info(pid)
+    if info is None:
+        return None
+    console_hwnd, console_title = info
     if not console_hwnd:
         return None
 
