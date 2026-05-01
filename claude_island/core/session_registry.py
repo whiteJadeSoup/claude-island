@@ -28,13 +28,26 @@ class SessionRegistry:
         self.permission_required: Event[None] = Event()
         self._sessions: list[Session] = []
         self._activity_overrides: dict[str, datetime] = {}
+        # Sentinel != any real list (None never compares equal to a list)
+        # so the first update() always emits.
+        self._last_emitted: list[Session] | None = None
         self._lock = threading.Lock()
 
     def update(self, sessions: list[Session]) -> None:
-        """Replace the session list (typically called by the process scanner)."""
+        """Replace the session list (typically called by the process scanner).
+
+        Emits sessions_changed only if the *enriched* list differs from the
+        previously-emitted one. The scanner ticks every ~10s with usually
+        identical content; skipping the redundant emit avoids work in every
+        downstream UI subscriber (panel row diff, capsule label rebuild)
+        for a no-op update.
+        """
         with self._lock:
             self._sessions = list(sessions)
             enriched = self._apply_overrides_locked(sessions)
+            if enriched == self._last_emitted:
+                return
+            self._last_emitted = list(enriched)
         self.sessions_changed.emit(enriched)
 
     def update_activity(self, payload: tuple[str, datetime]) -> None:

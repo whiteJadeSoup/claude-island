@@ -95,6 +95,12 @@ class ExpandedWindow(QWidget):
         self._controller = controller
         self._get_usage_totals = get_usage_totals
         self._period = "daily"
+        # Diff-based row update: keep widget references keyed by pid so that
+        # session ticks (every ~10s) don't tear down rows the user might be
+        # hovering. The placeholder widget (no sessions) is tracked separately
+        # — its presence is mutually exclusive with any row.
+        self._rows: dict[int, QPushButton] = {}
+        self._placeholder: QLabel | None = None
 
         self._setup_window()
         self._build_ui()
@@ -187,20 +193,53 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
 
     def refresh_sessions(self, sessions: list[Session]) -> None:
-        # Clear existing rows
-        while self._session_box.count():
-            item = self._session_box.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
+        """Diff against the current row set keyed by pid.
 
+        - Pids in the new list but not in self._rows: insert a new row.
+        - Pids in self._rows but not in the new list: remove and deleteLater.
+        - Pids in both: update the row's label text in-place.
+        Order in the layout follows the order of `sessions`.
+        """
+        new_pids = [s.pid for s in sessions]
+        new_pid_set = set(new_pids)
+
+        # Drop placeholder if we now have sessions, or remove all rows if not.
         if not sessions:
-            placeholder = QLabel("No active sessions")
-            placeholder.setStyleSheet("color: #555; font-size: 12px;")
-            self._session_box.addWidget(placeholder)
+            for pid, w in list(self._rows.items()):
+                self._session_box.removeWidget(w)
+                w.deleteLater()
+            self._rows.clear()
+            if self._placeholder is None:
+                self._placeholder = QLabel("No active sessions")
+                self._placeholder.setStyleSheet("color: #555; font-size: 12px;")
+                self._session_box.addWidget(self._placeholder)
         else:
-            for session in sessions:
-                self._session_box.addWidget(self._make_row(session))
+            if self._placeholder is not None:
+                self._session_box.removeWidget(self._placeholder)
+                self._placeholder.deleteLater()
+                self._placeholder = None
+
+            # Remove rows whose pid is gone.
+            for pid in list(self._rows.keys()):
+                if pid not in new_pid_set:
+                    w = self._rows.pop(pid)
+                    self._session_box.removeWidget(w)
+                    w.deleteLater()
+
+            # Add or update + reorder.
+            for index, session in enumerate(sessions):
+                btn = self._rows.get(session.pid)
+                if btn is None:
+                    btn = self._make_row(session)
+                    self._rows[session.pid] = btn
+                    self._session_box.insertWidget(index, btn)
+                else:
+                    self._update_row(btn, session)
+                    # Ensure the layout order matches the new sessions order.
+                    current_index = self._session_box.indexOf(btn)
+                    if current_index != index:
+                        self._session_box.removeWidget(btn)
+                        self._session_box.insertWidget(index, btn)
 
         self.adjustSize()
         self._position()
@@ -245,14 +284,26 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _make_row(self, session: Session) -> QPushButton:
-        name = session.project_path.name or str(session.project_path)
-        ago = _fmt_ago(session.last_activity)
-        btn = QPushButton(f"  {name}\n  {ago}")
+        btn = QPushButton()
         btn.setStyleSheet(_STYLE_SESSION_BTN)
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         btn.setFixedHeight(52)
-        btn.clicked.connect(lambda: self._on_row_clicked(session))
+        # Carry the current Session so the click handler always emits the
+        # latest snapshot (project_path, last_activity may change).
+        btn.setProperty("_session", session)
+        self._update_row(btn, session)
+        btn.clicked.connect(lambda: self._on_row_clicked(btn.property("_session")))
         return btn
+
+    def _update_row(self, btn: QPushButton, session: Session) -> None:
+        """Refresh a row's visible text in-place. Called both on first build
+        and on every refresh_sessions tick so 'Xm ago' stays current."""
+        name = session.project_path.name or str(session.project_path)
+        ago = _fmt_ago(session.last_activity)
+        text = f"  {name}\n  {ago}"
+        if btn.text() != text:
+            btn.setText(text)
+        btn.setProperty("_session", session)
 
     def _on_row_clicked(self, session: Session) -> None:
         # Activate first, then collapse — order matters: while our panel is

@@ -141,3 +141,57 @@ def test_session_for_unrelated_project_not_overridden():
     reg.update([s])
 
     assert received[0][0].last_activity == started  # untouched
+
+
+# --------------------------------------------------------------------------
+# B6: skip emit when content unchanged (companion fix to ExpandedWindow diff)
+# --------------------------------------------------------------------------
+
+def test_update_with_identical_sessions_emits_only_once():
+    """Scanner ticks every ~10s with usually identical content. The redundant
+    emits force every UI subscriber to re-diff; skipping them at the source
+    is a free win."""
+    reg = SessionRegistry()
+    s = _session(pid=1, cwd="/home/x",
+                 started=datetime(2025, 1, 1, 9, 0, tzinfo=timezone.utc))
+
+    received: list[list[Session]] = []
+    reg.sessions_changed.subscribe(received.append)
+
+    reg.update([s])
+    reg.update([s])
+    reg.update([s])
+
+    assert len(received) == 1
+
+
+def test_update_emits_when_session_added():
+    reg = SessionRegistry()
+    s1 = _session(pid=1, cwd="/a", started=datetime(2025, 1, 1, tzinfo=timezone.utc))
+    s2 = _session(pid=2, cwd="/b", started=datetime(2025, 1, 1, tzinfo=timezone.utc))
+
+    received: list[list[Session]] = []
+    reg.sessions_changed.subscribe(received.append)
+
+    reg.update([s1])
+    reg.update([s1, s2])  # added one
+
+    assert len(received) == 2
+
+
+def test_update_emits_when_activity_override_changes_enriched_content():
+    reg = SessionRegistry()
+    s = _session(pid=1, cwd="/home/x",
+                 started=datetime(2025, 1, 1, 9, 0, tzinfo=timezone.utc))
+
+    received: list[list[Session]] = []
+    reg.sessions_changed.subscribe(received.append)
+
+    reg.update([s])  # emit 1
+    reg.update_activity((project_hash("/home/x"),
+                         datetime(2025, 1, 1, 14, 0, tzinfo=timezone.utc)))
+    reg.update([s])  # enriched changed (last_activity now 14:00) → emit 2
+
+    assert len(received) == 2
+    assert received[0][0].last_activity.hour == 9
+    assert received[1][0].last_activity.hour == 14
