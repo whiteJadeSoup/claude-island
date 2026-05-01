@@ -32,6 +32,12 @@ Thumbs.db
 *.sqlite
 *.log
 
+# Local dependency-resolver lockfiles (project ships with setuptools;
+# uv / pdm / poetry locks are personal and shouldn't enter VCS).
+uv.lock
+pdm.lock
+poetry.lock
+
 # Scratch files (commit message buffers, repro scripts)
 _*.txt
 _*.py
