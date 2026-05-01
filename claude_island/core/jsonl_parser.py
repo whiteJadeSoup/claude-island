@@ -70,9 +70,19 @@ class JsonlParser:
         session_uuid = file_path.stem
         project_path = file_path.parent.name  # hashed project id
 
+        # Tail-follow pattern: only commit offsets at fully-terminated line
+        # boundaries. If the chunk ends mid-line (writer is mid-flush), the
+        # trailing fragment must be left in the file — committing past it
+        # would silently lose the rest of the line on the next read.
+        parts = chunk.split(b"\n")
+        if chunk.endswith(b"\n"):
+            complete_lines, tail_len = parts, 0
+        else:
+            complete_lines, tail_len = parts[:-1], len(parts[-1])
+
         last_activity: datetime | None = None
 
-        for raw_line in chunk.split(b"\n"):
+        for raw_line in complete_lines:
             raw_line = raw_line.strip()
             if not raw_line:
                 continue
@@ -102,7 +112,7 @@ class JsonlParser:
                 if last_activity is None or ts > last_activity:
                     last_activity = ts
 
-        self._usage.set_offset(path_str, new_offset)
+        self._usage.set_offset(path_str, new_offset - tail_len)
 
         if last_activity is not None:
             self.activity_updated.emit((file_path, last_activity))
