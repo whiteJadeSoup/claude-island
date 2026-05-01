@@ -31,3 +31,7 @@ Thumbs.db
 *.db
 *.sqlite
 *.log
+
+# Scratch files (commit message buffers, repro scripts)
+_*.txt
+_*.py
