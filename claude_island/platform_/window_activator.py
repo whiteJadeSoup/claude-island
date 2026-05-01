@@ -21,10 +21,24 @@ class WindowActivator:
     Returns True if activation succeeded, False otherwise.
     """
 
-    def activate(self, session: Session) -> bool:
+    def activate(self, session: Session, siblings: list[Session] | None = None) -> bool:
+        """Bring the terminal hosting *session* to the foreground and switch
+        to the right WT tab.
+
+        ``siblings`` is the other sessions in the same UI group (same WT
+        window + same project_path). When the clicked session is an
+        inactive split pane, its console title doesn't appear in any
+        TabItem.Name; falling through to a sibling's title (which IS
+        the active pane's title — that's the one TabItem.Name reflects)
+        successfully selects the right tab.
+        """
+        sibling_pids: list[int] = []
+        if siblings:
+            sibling_pids = [s.pid for s in siblings]
+
         os_name = platform.system()
         if os_name == "Windows":
-            return self._activate_windows(session.pid)
+            return self._activate_windows(session.pid, sibling_pids)
         if os_name == "Darwin":
             return self._activate_macos(session.pid)
         return False
@@ -33,7 +47,7 @@ class WindowActivator:
     # Windows
     # ------------------------------------------------------------------
 
-    def _activate_windows(self, pid: int) -> bool:
+    def _activate_windows(self, pid: int, sibling_pids: list[int] | None = None) -> bool:
         try:
             import win32con
             import win32gui
@@ -57,9 +71,14 @@ class WindowActivator:
         hwnd: int | None = None
         if resolved is not None:
             hwnd, title = resolved
-            # Best-effort tab switch; return value ignored — foreground is the
-            # guaranteed fallback whether Select succeeds or not.
-            wt_uia.select_tab_by_title(hwnd, title)
+            # Best-effort tab switch. If our own title doesn't match any
+            # TabItem.Name (the inactive-split-pane case — WT only exposes
+            # the active pane's title via UIA), try each sibling's title:
+            # one of them IS the tab's active pane and its title will
+            # match the TabItem. Foreground is the guaranteed fallback
+            # whether Select succeeds or not.
+            if not wt_uia.select_tab_by_title(hwnd, title) and sibling_pids:
+                _select_tab_via_siblings(hwnd, sibling_pids)
         else:
             # Fallback: ancestor-pid walk. Used when console detection fails
             # (legacy conhost, processes started without a console, etc.) or
@@ -99,6 +118,24 @@ class WindowActivator:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _select_tab_via_siblings(wt_hwnd: int, sibling_pids: list[int]) -> bool:
+    """Try ``wt_uia.select_tab_by_title`` with each sibling's console
+    title. Returns True on the first success.
+
+    Used when the clicked row is an inactive split pane — its own
+    console title doesn't appear in any TabItem.Name, but one of its
+    siblings (the active pane in the same tab) has a title that does.
+    """
+    for sib_pid in sibling_pids:
+        info = win32_console.get_console_info(sib_pid)
+        if info is None:
+            continue
+        _, sib_title = info
+        if sib_title and wt_uia.select_tab_by_title(wt_hwnd, sib_title):
+            return True
+    return False
+
 
 def walk_to_visible_host(conpty_hwnd: int, win32gui) -> int | None:
     """Walk the GW_OWNER chain from a (typically hidden) conPTY HWND up to

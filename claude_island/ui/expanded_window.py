@@ -27,6 +27,14 @@ _STYLE_PANEL = """
 """
 _STYLE_TITLE = "color: #888; font-size: 10px; letter-spacing: 1px;"
 _STYLE_SEP = "background: #2a2a2a;"
+# In-card separator between split-pane sessions of the same group. Brighter
+# than the panel divider so the user can read "these rows are the same tab"
+# at a glance, plus horizontal margins so the line stops short of the rounded
+# card edges (cleaner than ending in a corner).
+_STYLE_GROUP_ROW_SEP = "background: #3d3d3d; margin-left: 14px; margin-right: 14px;"
+# Px gap between top-level entries (cards / standalone rows) — large enough
+# that users can distinguish "next card" from "next pane in the same card".
+_GROUP_GAP = 10
 _STYLE_SESSION_BTN = """
     QPushButton {
         color: #e0e0e0;
@@ -160,7 +168,10 @@ class ExpandedWindow(QWidget):
     so the UI layer never imports platform code directly.
     """
 
-    session_activated: Signal = Signal(Session)
+    # Args: clicked Session, siblings (list[Session] of other group members,
+    # may be empty). Siblings let the activator try sibling console titles
+    # as fallback when the clicked row is an inactive split pane.
+    session_activated: Signal = Signal(Session, list)
 
     def __init__(
         self,
@@ -226,7 +237,7 @@ class ExpandedWindow(QWidget):
 
         # Session list container
         self._session_box = QVBoxLayout()
-        self._session_box.setSpacing(4)
+        self._session_box.setSpacing(_GROUP_GAP)
         root.addLayout(self._session_box)
 
         # Separator
@@ -363,8 +374,12 @@ class ExpandedWindow(QWidget):
         # Carry the current Session so the click handler always emits the
         # latest snapshot (project_path, last_activity may change).
         btn.setProperty("_session", session)
+        btn.setProperty("_siblings", [])
         self._update_row(btn, session)
-        btn.clicked.connect(lambda: self._on_row_clicked(btn.property("_session")))
+        btn.clicked.connect(lambda: self._on_row_clicked(
+            btn.property("_session"),
+            btn.property("_siblings") or [],
+        ))
         return btn
 
     def _update_row(self, btn: QPushButton, session: Session) -> None:
@@ -386,7 +401,7 @@ class ExpandedWindow(QWidget):
         standalone rounded button; multi-session groups render as a
         rounded card with flat internal rows + thin separators."""
         if len(group) == 1:
-            row = self._get_or_create_row(group[0], in_card=False)
+            row = self._get_or_create_row(group[0], group, in_card=False)
             row.setParent(None)  # detach from any prior parent
             return row
         return self._make_multi_card(group)
@@ -402,24 +417,36 @@ class ExpandedWindow(QWidget):
             if i > 0:
                 sep = QFrame()
                 sep.setFixedHeight(1)
-                sep.setStyleSheet(_STYLE_SEP)
+                sep.setStyleSheet(_STYLE_GROUP_ROW_SEP)
                 layout.addWidget(sep)
-            row = self._get_or_create_row(session, in_card=True)
+            row = self._get_or_create_row(session, sessions, in_card=True)
             row.setParent(None)
             layout.addWidget(row)
         return card
 
-    def _get_or_create_row(self, session: Session, *, in_card: bool) -> QPushButton:
+    def _get_or_create_row(
+        self, session: Session, group: list[Session], *, in_card: bool
+    ) -> QPushButton:
         """Cached factory: same pid keeps the same QPushButton across
         refreshes (preserves hover/pressed state). Style is reapplied
         each call because a row can move between standalone (rounded)
-        and in-card (flat) layouts as group membership changes."""
+        and in-card (flat) layouts as group membership changes.
+
+        ``group`` is the full list of sessions in this row's group
+        (including the row itself). Stored on the button so the click
+        handler can pass siblings to the activator — needed for the
+        inactive-pane case where the row's own console title doesn't
+        appear in any TabItem.Name and we have to fall back to one of
+        the siblings' titles to actually switch the WT tab.
+        """
         btn = self._rows.get(session.pid)
         if btn is None:
             btn = self._make_row(session)
             self._rows[session.pid] = btn
         btn.setStyleSheet(_STYLE_FLAT_ROW_BTN if in_card else _STYLE_SESSION_BTN)
         self._update_row(btn, session)
+        siblings = [s for s in group if s.pid != session.pid]
+        btn.setProperty("_siblings", siblings)
         return btn
 
     # ------------------------------------------------------------------
@@ -468,12 +495,12 @@ class ExpandedWindow(QWidget):
             if pid not in needed_pids:
                 self._rows.pop(pid).deleteLater()
 
-    def _on_row_clicked(self, session: Session) -> None:
+    def _on_row_clicked(self, session: Session, siblings: list[Session]) -> None:
         # Activate first, then collapse — order matters: while our panel is
         # still on top (StaysOnTopHint) we are the foreground process, which
         # is the only state in which SetForegroundWindow is allowed to
         # surface another process's window.
-        self.session_activated.emit(session)
+        self.session_activated.emit(session, siblings)
         self._controller.toggle_expanded()
 
     # ------------------------------------------------------------------

@@ -145,3 +145,105 @@ def test_activate_skips_tab_select_on_fallback():
 
     mock_wt_uia.select_tab_by_title.assert_not_called()
     assert result is True
+
+
+# --------------------------------------------------------------------------
+# Inactive-pane fallback: when our own title doesn't match any TabItem,
+# try sibling pids' titles. One of them is the active pane and its title
+# IS the TabItem.Name, so the tab is selected correctly.
+# --------------------------------------------------------------------------
+
+def test_inactive_pane_falls_back_to_sibling_title():
+    """The clicked row is an inactive split pane: its own title doesn't
+    match any TabItem. The sibling's title does. Activator must try the
+    sibling and end up successfully selecting the right tab."""
+    from claude_island.platform_.window_activator import WindowActivator
+
+    select_calls: list[str] = []
+
+    def fake_select(hwnd, title):
+        select_calls.append(title)
+        return title == "active-pane-title"  # only this one matches
+
+    def fake_get_info(pid):
+        return {
+            999: (0xC0FFEE, "active-pane-title"),
+            998: (0xC0FFEF, "another-sibling-title"),
+        }.get(pid)
+
+    with (
+        patch(
+            "claude_island.platform_.window_activator._resolve_console_window",
+            return_value=(0xBEEF, "inactive-pane-title"),
+        ),
+        patch(
+            "claude_island.platform_.window_activator.wt_uia.select_tab_by_title",
+            side_effect=fake_select,
+        ),
+        patch(
+            "claude_island.platform_.window_activator.win32_console.get_console_info",
+            side_effect=fake_get_info,
+        ),
+        patch(
+            "claude_island.platform_.window_activator._force_foreground",
+            return_value=True,
+        ),
+        patch.dict(
+            "sys.modules",
+            {
+                "win32con": MagicMock(),
+                "win32gui": MagicMock(),
+                "win32process": MagicMock(),
+            },
+        ),
+    ):
+        ok = WindowActivator()._activate_windows(
+            pid=1000,                # the clicked pid (inactive pane)
+            sibling_pids=[999, 998],  # active sibling first, irrelevant second
+        )
+
+    # First attempted with own title, then fell through to siblings.
+    assert select_calls == ["inactive-pane-title", "active-pane-title"]
+    assert ok is True
+
+
+def test_no_sibling_fallback_when_own_title_matches():
+    """If our own title already matches a TabItem (active pane case),
+    siblings should never be probed — saves the AttachConsole cost."""
+    from claude_island.platform_.window_activator import WindowActivator
+
+    sib_calls: list[int] = []
+
+    def fake_get_info(pid):
+        sib_calls.append(pid)
+        return None  # value irrelevant; this should never be called
+
+    with (
+        patch(
+            "claude_island.platform_.window_activator._resolve_console_window",
+            return_value=(0xBEEF, "tab-name"),
+        ),
+        patch(
+            "claude_island.platform_.window_activator.wt_uia.select_tab_by_title",
+            return_value=True,  # own title matched
+        ),
+        patch(
+            "claude_island.platform_.window_activator.win32_console.get_console_info",
+            side_effect=fake_get_info,
+        ),
+        patch(
+            "claude_island.platform_.window_activator._force_foreground",
+            return_value=True,
+        ),
+        patch.dict(
+            "sys.modules",
+            {
+                "win32con": MagicMock(),
+                "win32gui": MagicMock(),
+                "win32process": MagicMock(),
+            },
+        ),
+    ):
+        WindowActivator()._activate_windows(pid=1000, sibling_pids=[999])
+
+    assert sib_calls == [], "siblings probed despite own-title match"

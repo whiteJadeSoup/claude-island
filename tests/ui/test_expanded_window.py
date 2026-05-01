@@ -121,12 +121,14 @@ def test_session_click_emits_latest_session_snapshot(panel, qtbot):
     fresh = _session(1, "/a", ago_minutes=0)
     panel.refresh_sessions([fresh])
 
-    received = []
-    panel.session_activated.connect(received.append)
+    received: list = []
+    panel.session_activated.connect(lambda s, sibs: received.append((s, sibs)))
     btn.click()
 
     assert len(received) == 1
-    assert received[0].last_activity == fresh.last_activity
+    session, siblings = received[0]
+    assert session.last_activity == fresh.last_activity
+    assert siblings == []  # singleton group → no siblings
 
 
 # --------------------------------------------------------------------------
@@ -204,19 +206,24 @@ def test_window_handle_none_renders_standalone(panel):
 
 def test_grouped_row_click_still_emits_session(panel, qtbot):
     """G-UI-5: clicking a row that lives inside a multi-session card
-    must still emit session_activated with the right Session."""
+    must still emit session_activated with the right Session, and
+    must include the OTHER group members as siblings (so the activator
+    can fall back to their console titles for inactive-pane fix)."""
     panel.refresh_sessions([
         _session(1, "/proj", window_handle=0xAAAA),
         _session(2, "/proj", window_handle=0xAAAA),
     ])
 
-    received = []
-    panel.session_activated.connect(received.append)
+    received: list = []
+    panel.session_activated.connect(lambda s, sibs: received.append((s, sibs)))
 
     panel._rows[2].click()
 
     assert len(received) == 1
-    assert received[0].pid == 2
+    session, siblings = received[0]
+    assert session.pid == 2
+    sibling_pids = {s.pid for s in siblings}
+    assert sibling_pids == {1}  # the other pane in the same group
 
 
 def test_row_widget_preserved_when_moving_between_card_and_standalone(panel):
