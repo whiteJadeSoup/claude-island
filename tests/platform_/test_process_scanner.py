@@ -38,10 +38,10 @@ def patched_process_iter():
     """Yield a list that tests can populate with fake procs; patches
     psutil.process_iter to return them when scan() asks.
 
-    Also makes the orphan filter a pass-through by default so tests
-    that don't care about orphan logic stay simple. Tests for S1-S6
-    override ``collect_wt_tab_titles`` / ``get_console_info`` inside
-    their own ``with patch(...)`` blocks.
+    Also stubs ``win32_console.get_console_info`` to a dummy success
+    value so the orphan filter is a pass-through by default. Tests
+    that exercise the orphan filter override this stub inside their
+    own ``with patch(...)`` blocks.
     """
     fake_procs: list = []
 
@@ -51,8 +51,8 @@ def patched_process_iter():
     with (
         patch("claude_island.platform_.process_scanner.psutil.process_iter",
               side_effect=fake_iter),
-        patch("claude_island.platform_.process_scanner.wt_uia.collect_wt_tab_titles",
-              return_value=None),
+        patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
+              return_value=(1, "any-title")),
     ):
         yield fake_procs
 
@@ -149,119 +149,75 @@ def test_access_denied_during_cmdline_does_not_crash(patched_process_iter):
 
 
 # ==========================================================================
-# S1-S6: orphan filter via UIA tab title set
+# S1-S4: orphan filter via AttachConsole-success probe
 # ==========================================================================
+#
+# Why AttachConsole-success rather than UIA tab-title matching: tab
+# titles have known false positives — a split pane only exposes the
+# *active* pane's title via TabItem.Name, so the inactive pane's
+# claude.exe title would never match. AttachConsole-success treats
+# every still-attached process as live regardless of pane visibility.
 
-def test_session_with_matching_title_is_kept(patched_process_iter):
-    """S1: console title is in live WT tab titles → session kept."""
+def test_attached_session_is_kept(patched_process_iter):
+    """S1: get_console_info returns a tuple (AttachConsole succeeded) →
+    session kept regardless of title contents."""
     patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/proj"))
 
-    with (
-        patch("claude_island.platform_.process_scanner.wt_uia.collect_wt_tab_titles",
-              return_value={"my-proj"}),
-        patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
-              return_value=(12345, "my-proj")),
+    with patch(
+        "claude_island.platform_.process_scanner.win32_console.get_console_info",
+        return_value=(12345, "any-title"),
     ):
         sessions = ProcessScanner().scan()
 
     assert [s.pid for s in sessions] == [100]
 
 
-def test_session_with_no_matching_title_is_filtered(patched_process_iter):
-    """S2: console title is NOT in live WT tab titles → session filtered.
-
-    This is the user's actual orphan case: claude.exe still runs but
-    its conPTY no longer surfaces as a visible WT tab.
-    """
-    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/proj"))
+def test_unattached_session_is_filtered(patched_process_iter):
+    """S2: get_console_info returns None (AttachConsole failed → process
+    has no console) → session filtered. This is the genuine orphan case."""
+    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/orphan"))
     patched_process_iter.append(_fake_proc(200, "claude.exe", cwd="/live"))
 
-    titles = {"live-proj"}
-
     def fake_get_info(pid):
-        return {100: (1, "orphan-title"), 200: (2, "live-proj")}.get(pid)
+        return {100: None, 200: (2, "live-title")}.get(pid)
 
-    with (
-        patch("claude_island.platform_.process_scanner.wt_uia.collect_wt_tab_titles",
-              return_value=titles),
-        patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
-              side_effect=fake_get_info),
+    with patch(
+        "claude_island.platform_.process_scanner.win32_console.get_console_info",
+        side_effect=fake_get_info,
     ):
         sessions = ProcessScanner().scan()
 
     assert [s.pid for s in sessions] == [200]
 
 
-def test_uia_unavailable_returns_all_sessions_fail_open(patched_process_iter):
-    """S3: collect_wt_tab_titles returns None (no WT, library missing,
-    enumeration failure) → orphan filter is skipped, all sessions kept."""
+def test_split_pane_inactive_with_attached_console_is_kept(patched_process_iter):
+    """S3 (regression): a split-pane inactive session has a live console
+    even though its title doesn't match any TabItem.Name. The simpler
+    AttachConsole-success judge must keep it (the previous title-set
+    judge dropped it as a false positive)."""
     patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/proj"))
 
+    # Even though the title would never match a TabItem (inactive pane),
+    # AttachConsole still works — keep the session.
     with patch(
-        "claude_island.platform_.process_scanner.wt_uia.collect_wt_tab_titles",
-        return_value=None,
+        "claude_island.platform_.process_scanner.win32_console.get_console_info",
+        return_value=(99, "✳ inactive-pane-title-not-in-any-tab"),
     ):
         sessions = ProcessScanner().scan()
 
     assert [s.pid for s in sessions] == [100]
-
-
-def test_empty_titles_set_returns_all_sessions_fail_open(patched_process_iter):
-    """S4: UIA found WT but reported zero tab names (degenerate state).
-    Treated identically to None — skip filter rather than wipe everything."""
-    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/proj"))
-
-    with patch(
-        "claude_island.platform_.process_scanner.wt_uia.collect_wt_tab_titles",
-        return_value=set(),
-    ):
-        sessions = ProcessScanner().scan()
-
-    assert [s.pid for s in sessions] == [100]
-
-
-def test_per_pid_console_read_failure_keeps_that_session(patched_process_iter):
-    """S5: get_console_info returns None for a specific pid → that
-    session is *not* filtered (per-pid fail-open). The mid-tier safety
-    so a single AttachConsole failure doesn't invisibly drop a session."""
-    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/a"))
-    patched_process_iter.append(_fake_proc(200, "claude.exe", cwd="/b"))
-
-    titles = {"b-proj"}
-
-    def fake_get_info(pid):
-        return {100: None, 200: (2, "b-proj")}.get(pid, None)
-
-    with (
-        patch("claude_island.platform_.process_scanner.wt_uia.collect_wt_tab_titles",
-              return_value=titles),
-        patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
-              side_effect=fake_get_info),
-    ):
-        sessions = ProcessScanner().scan()
-
-    # 100 kept (per-pid fail-open), 200 kept (matched title)
-    assert {s.pid for s in sessions} == {100, 200}
 
 
 def test_all_filtered_triggers_sanity_fail_open(patched_process_iter):
-    """S6: every session would be filtered (e.g. user manually renamed
-    every WT tab) → sanity check returns originals so the user sees
-    something instead of an empty list."""
+    """S4: every session reports None (all consoles unavailable —
+    system-wide AttachConsole brokenness or scan-thread race with our
+    own console state). Sanity tripwire returns originals untouched."""
     patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/a"))
     patched_process_iter.append(_fake_proc(200, "claude.exe", cwd="/b"))
 
-    titles = {"renamed-1", "renamed-2"}
-
-    def fake_get_info(pid):
-        # Both pids report titles that don't match any live tab.
-        return {100: (1, "stale-a"), 200: (2, "stale-b")}.get(pid)
-
-    with (
-        patch("claude_island.platform_.process_scanner.wt_uia.collect_wt_tab_titles",
-              return_value=titles),
-        patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
-              side_effect=fake_get_info),
+    with patch(
+        "claude_island.platform_.process_scanner.win32_console.get_console_info",
+        return_value=None,
     ):
         sessions = ProcessScanner().scan()
 
@@ -269,22 +225,20 @@ def test_all_filtered_triggers_sanity_fail_open(patched_process_iter):
     assert {s.pid for s in sessions} == {100, 200}
 
 
-def test_mixed_match_orphan_passes_filter_normally(patched_process_iter):
-    """S-bonus: 5 sessions, 3 match, 2 don't → the 3 are kept.
-    This exercises the *normal* filter path (no fail-open kicks in)."""
+def test_mixed_attached_and_orphan_passes_normal_filter(patched_process_iter):
+    """S-bonus: 5 sessions, 3 attached + 2 orphan → the 3 attached
+    survive. Exercises the normal filter path (no tripwire)."""
     for pid in [10, 20, 30, 40, 50]:
         patched_process_iter.append(_fake_proc(pid, "claude.exe", cwd=f"/p{pid}"))
 
-    titles = {"p10", "p20", "p30"}
-
     def fake_get_info(pid):
-        return (pid, f"p{pid}")
+        # Three live, two orphan
+        return {10: (1, "a"), 20: (2, "b"), 30: (3, "c"),
+                40: None, 50: None}.get(pid)
 
-    with (
-        patch("claude_island.platform_.process_scanner.wt_uia.collect_wt_tab_titles",
-              return_value=titles),
-        patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
-              side_effect=fake_get_info),
+    with patch(
+        "claude_island.platform_.process_scanner.win32_console.get_console_info",
+        side_effect=fake_get_info,
     ):
         sessions = ProcessScanner().scan()
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import psutil
 
 from claude_island.core.models import Session
-from claude_island.platform_ import win32_console, wt_uia
+from claude_island.platform_ import win32_console
 
 # Claude Code is a Node.js CLI; on Windows it may appear as node.exe wrapping
 # the claude script, or as a bundled "claude.exe".
@@ -29,23 +29,22 @@ class ProcessScanner:
     triggered a per-process NtQueryInformationProcess on Windows that
     measurably contributed to scan-tick CPU on busy machines (500+ procs).
 
-    Orphan filter: a "live" Claude session must be currently rendered as
-    a visible Windows Terminal tab. We collect every WT TabItem.Name once
-    per scan via UIA, then for each candidate claude.exe we pull its
-    console title via AttachConsole+GetConsoleTitleW; if the title isn't
-    in the live-titles set, the process exists but has no visible host
-    pane — it's an orphan, dropped from the result.
+    Orphan filter: a "live" Claude session must still have a console
+    attached. We probe each claude.exe with AttachConsole+GetConsoleWindow;
+    if the call fails (target has no console at all) the process is
+    detached — its conPTY pipe was severed when its WT pane closed,
+    leaving the binary as a no-tty zombie. Drop those.
 
-    Why title-set rather than process-tree liveness: the parent
-    powershell.exe of an orphan claude.exe is often still alive (only
-    its conPTY pipe to WT was closed). Process-tree judges miss that
-    case entirely. UIA tab titles are the ground truth for "what WT is
-    actually rendering right now".
+    Why AttachConsole-success rather than UIA tab-title matching:
+    matching against TabItem.Name false-positives split panes — only the
+    *active* pane's title is exposed in TabItem.Name; inactive panes are
+    indistinguishable from genuine orphans by name alone. AttachConsole
+    treats every still-attached process as live regardless of pane
+    visibility, which is what we want.
 
-    Fail-open at three levels: (a) UIA unavailable / no WT → keep all;
-    (b) per-pid console read fails → keep that session; (c) sanity check
-    — if every session would be filtered (e.g. user manually renamed all
-    WT tabs so no titles match), return everything unchanged.
+    Fail-open with a sanity tripwire: if every session would be filtered
+    (system-wide AttachConsole brokenness, race with shutdown, etc.),
+    return the originals unchanged — better stale than blank.
     """
 
     def scan(self) -> list[Session]:
@@ -103,38 +102,27 @@ class ProcessScanner:
 # ---------------------------------------------------------------------------
 
 def _filter_orphans(sessions: list[Session]) -> list[Session]:
-    """Drop sessions whose console title is not currently rendered as a
-    visible WT tab.
+    """Drop sessions whose process has no console attached.
 
-    Three fail-open exits, in order:
-    1. UIA returned ``None`` (no WT, library missing, enumeration fail) →
-       skip filter, return all. We can't tell.
-    2. UIA returned an empty set → same; treat as "unknown" not "no tabs".
-    3. After filtering, every session was dropped while we had >0 raw
-       sessions → the judge is probably wrong (user renamed every tab,
-       or our class-name filter missed a WT variant). Return originals.
+    A claude.exe whose hosting WT pane was closed becomes a no-tty
+    zombie: its conPTY pipe is broken, AttachConsole(pid) refuses to
+    attach (the kernel reports "process has no console"). That's a
+    genuine orphan — drop it.
+
+    Sanity tripwire: if every session would be filtered (system-wide
+    AttachConsole brokenness, scan-thread race with our own console
+    state, etc.), return the originals unchanged. Better stale than
+    blank — the user can still see and manually triage from the list.
     """
     if not sessions:
         return sessions
 
-    live_titles = wt_uia.collect_wt_tab_titles()
-    if not live_titles:  # None or empty → fail-open
-        return sessions
-
     kept: list[Session] = []
     for s in sessions:
-        info = win32_console.get_console_info(s.pid)
-        if info is None:
-            # Per-pid fail-open: couldn't read this title, don't filter it.
+        if win32_console.get_console_info(s.pid) is not None:
             kept.append(s)
-            continue
-        _, title = info
-        if title and title in live_titles:
-            kept.append(s)
-        # else: orphan — the title doesn't match any visible WT tab, drop.
+        # else: AttachConsole failed → no console attached → orphan.
 
     if not kept:
-        # Sanity tripwire: rather than wipe the list silently, return the
-        # raw sessions and let the user see them. Better stale than blank.
-        return sessions
+        return sessions  # tripwire: don't wipe everything silently
     return kept
