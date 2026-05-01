@@ -26,13 +26,15 @@ from claude_island.core.jsonl_parser import JsonlParser
 from claude_island.core.session_registry import SessionRegistry
 from claude_island.core.usage_registry import UsageRegistry
 
-# Resolve paths via platformdirs so they follow XDG / AppData conventions.
+# JSONL transcripts are the single source of truth — UsageRegistry is
+# in-memory and rebuilt from JSONL on every start, so there's no DB
+# file to resolve here. We still use platformdirs for the QuotaProvider
+# cache below.
 _APP_NAME = "ClaudeIsland"
 _CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
-_DB_PATH = Path(user_data_dir(_APP_NAME, appauthor=False)) / "usage.db"
 
 session_registry = SessionRegistry()
-usage_registry = UsageRegistry(db_path=_DB_PATH)
+usage_registry = UsageRegistry()
 jsonl_parser = JsonlParser(
     usage_registry=usage_registry,
     claude_projects_dir=_CLAUDE_PROJECTS,
@@ -72,6 +74,7 @@ app = QApplication(sys.argv)
 app.setQuitOnLastWindowClosed(False)
 
 from dataclasses import replace
+from datetime import timedelta
 
 from claude_island.ui.capsule_window import CapsuleWindow
 from claude_island.ui.controller import IslandController
@@ -83,9 +86,20 @@ def _build_session_usage():
     """Combine the local 5h block with the (optional) remote quota
     snapshot. Lives here because it's cross-layer wiring: core gives
     the local block, platform gives the remote quota, UI consumes
-    the combined record. Neither layer should know about the other."""
-    base = usage_registry.get_session_window()
+    the combined record. Neither layer should know about the other.
+
+    When a quota snapshot is available, we anchor the session window
+    to Anthropic's authoritative reset time: window = [resets_at - 5h,
+    resets_at]. Without it, the registry uses its local approximation
+    (earliest record in the last 5h, plus 5h).
+    """
     snap = quota_provider.get()
+    if snap is not None:
+        end_time = snap.five_hour_resets_at
+        since = end_time - timedelta(hours=5)
+        base = usage_registry.get_session_window(since=since, end_time=end_time)
+    else:
+        base = usage_registry.get_session_window()
     return replace(base, quota=snap)
 
 
@@ -175,11 +189,10 @@ session_discovery.stop()
 file_watcher.stop()
 jsonl_parser.request_stop()
 if _backfill_thread is not None:
-    # Bounded join: backfill checks the stop flag at each file boundary, so
-    # in the worst case we wait for the current file's parse to finish.
-    # 5 seconds is generous; if it ever exceeds, the daemon thread is killed
-    # at process exit anyway and SQLite close() will raise harmlessly.
+    # Bounded join: backfill checks the stop flag at each file boundary,
+    # so in the worst case we wait for the current file's parse to
+    # finish. UsageRegistry is in-memory now, so there's nothing to
+    # close — the GC reclaims the records list when the process exits.
     _backfill_thread.join(timeout=5.0)
-usage_registry.close()
 
 sys.exit(exit_code)

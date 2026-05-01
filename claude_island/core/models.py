@@ -30,6 +30,25 @@ class Session:
 
 
 @dataclass(frozen=True)
+class UsageRecord:
+    """One assistant turn parsed out of a Claude Code transcript.
+
+    The JSONL files at ``~/.claude/projects/<hash>/<session>.jsonl`` are
+    the single source of truth — there is no on-disk derived store; the
+    UsageRegistry holds these in memory for the life of the process and
+    rebuilds from JSONL on every start.
+    """
+    timestamp: datetime
+    project_path: str   # Claude Code's hashed project id (parent dir name)
+    session_uuid: str   # transcript filename stem
+    model: str          # raw API model id, e.g. "claude-sonnet-4-6"
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+
+
+@dataclass(frozen=True)
 class PricingTable:
     """Per-model pricing in USD per million tokens."""
     input_per_mtok: float

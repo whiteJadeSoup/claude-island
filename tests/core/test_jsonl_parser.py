@@ -26,31 +26,29 @@ def _line(timestamp: str, input_tokens: int, output_tokens: int) -> bytes:
 
 @pytest.fixture
 def env(tmp_path):
-    """Fresh UsageRegistry + JsonlParser pointed at tmp_path/projects/<hash>/."""
-    db_path = tmp_path / "usage.db"
+    """Fresh in-memory UsageRegistry + JsonlParser pointed at
+    tmp_path/projects/<hash>/. The registry needs no path arg now —
+    JSONL is the only source of truth and the registry is just a
+    Python list rebuilt at startup."""
     projects_dir = tmp_path / "projects"
     project_hash_dir = projects_dir / "proj-hash"
     project_hash_dir.mkdir(parents=True)
     jsonl = project_hash_dir / "session-uuid.jsonl"
     jsonl.write_bytes(b"")  # empty file
 
-    registry = UsageRegistry(db_path=db_path)
+    registry = UsageRegistry()
     parser = JsonlParser(usage_registry=registry, claude_projects_dir=projects_dir)
     yield registry, parser, jsonl
-    registry.close()
 
 
 def _row_count(reg: UsageRegistry) -> int:
     with reg._lock:
-        return reg._conn.execute("SELECT COUNT(*) FROM usage_records").fetchone()[0]
+        return len(reg._records)
 
 
 def _input_tokens_total(reg: UsageRegistry) -> int:
     with reg._lock:
-        row = reg._conn.execute(
-            "SELECT COALESCE(SUM(input_tokens), 0) FROM usage_records"
-        ).fetchone()
-    return row[0]
+        return sum(r.input_tokens for r in reg._records)
 
 
 # --------------------------------------------------------------------------
@@ -125,7 +123,7 @@ def test_partial_line_offset_rewinds_to_last_complete_boundary(env):
 
     # Stored offset should equal len(line1+line2), not full file size.
     expected_offset = len(line1) + len(line2)
-    assert reg.get_offset(str(jsonl)) == expected_offset
+    assert parser._offsets.get(str(jsonl), 0) == expected_offset
 
     # Finish line3.
     with open(jsonl, "ab") as f:
@@ -141,7 +139,7 @@ def test_chunk_ending_exactly_on_newline_advances_to_eof(env):
     line = _line("2025-01-01T00:00:00Z", 100, 50)
     jsonl.write_bytes(line)
     parser.parse_file(jsonl)
-    assert reg.get_offset(str(jsonl)) == len(line)
+    assert parser._offsets.get(str(jsonl), 0) == len(line)
     assert _row_count(reg) == 1
 
 
@@ -227,7 +225,7 @@ def test_truncation_resets_offset_and_reparses(env):
     jsonl.write_bytes(big)
     parser.parse_file(jsonl)
     assert _row_count(reg) == 5
-    offset_after_phase1 = reg.get_offset(str(jsonl))
+    offset_after_phase1 = parser._offsets.get(str(jsonl), 0)
     assert offset_after_phase1 == len(big)
 
     # Phase 2: simulate truncation — file shrinks to one fresh line.
@@ -238,7 +236,7 @@ def test_truncation_resets_offset_and_reparses(env):
     # The new line must have been parsed (would be missed without the fix).
     assert _row_count(reg) == 6
     # Stored offset should now reflect the new (smaller) file size.
-    assert reg.get_offset(str(jsonl)) == len(fresh)
+    assert parser._offsets.get(str(jsonl), 0) == len(fresh)
 
 
 def test_truncation_to_empty_file_is_safe(env):
@@ -254,7 +252,7 @@ def test_truncation_to_empty_file_is_safe(env):
 
     # No new rows; offset reset to 0.
     assert _row_count(reg) == 1
-    assert reg.get_offset(str(jsonl)) == 0
+    assert parser._offsets.get(str(jsonl), 0) == 0
 
 
 def test_file_growth_without_truncation_unchanged(env):
