@@ -76,9 +76,13 @@ class JsonlParser:
             raw_line = raw_line.strip()
             if not raw_line:
                 continue
+            # Decode explicitly as UTF-8 (Claude Code writes UTF-8). Passing raw
+            # bytes to json.loads triggers heuristic encoding detection, which
+            # picks utf-32-be when a line happens to start with \x00\x00 and
+            # then crashes the thread with UnicodeDecodeError on later bytes.
             try:
-                entry: dict = json.loads(raw_line)
-            except json.JSONDecodeError:
+                entry: dict = json.loads(raw_line.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
 
             ts = _parse_ts(entry)
