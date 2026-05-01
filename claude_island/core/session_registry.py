@@ -1,29 +1,54 @@
 from __future__ import annotations
 
+import dataclasses
 import threading
+from datetime import datetime
 
 from .events import Event
-from .models import Session
+from .models import Session, project_hash
 
 
 class SessionRegistry:
     """Live set of Claude Code sessions.
 
-    Multiple sources (process scanner, JSONL watcher) converge here.
-    All writes go through ``update()``, which always fires ``sessions_changed``
-    so subscribers stay in sync regardless of whether the list actually changed.
+    Two data sources converge here:
+    - ProcessScanner (every ~10s): produces the canonical session list with
+      pid, project_path (cwd), and a baseline last_activity = process start.
+    - JsonlParser: emits per-project activity timestamps as JSONL lines arrive.
+
+    JSONL activity does NOT itself trigger ``sessions_changed`` — it stores an
+    override keyed by Claude Code's project hash. The next ``update()`` cycle
+    merges the override into the session before emitting. This keeps the UI
+    refresh rate bounded by the scanner cadence and avoids a flood of
+    sessions_changed events while a session is actively producing turns.
     """
 
     def __init__(self) -> None:
         self.sessions_changed: Event[list[Session]] = Event()
         self.permission_required: Event[None] = Event()
         self._sessions: list[Session] = []
+        self._activity_overrides: dict[str, datetime] = {}
         self._lock = threading.Lock()
 
     def update(self, sessions: list[Session]) -> None:
+        """Replace the session list (typically called by the process scanner)."""
         with self._lock:
             self._sessions = list(sessions)
-        self.sessions_changed.emit(list(sessions))
+            enriched = self._apply_overrides_locked(sessions)
+        self.sessions_changed.emit(enriched)
+
+    def update_activity(self, payload: tuple[str, datetime]) -> None:
+        """Record a JSONL activity timestamp for a project.
+
+        Called via QtBridge from JsonlParser.activity_updated. Stores the
+        latest timestamp for the given project hash; does NOT emit. The next
+        ``update()`` (or any other emit path) will pick up the override.
+        """
+        proj_hash, ts = payload
+        with self._lock:
+            existing = self._activity_overrides.get(proj_hash)
+            if existing is None or ts > existing:
+                self._activity_overrides[proj_hash] = ts
 
     def require_permission(self) -> None:
         self.permission_required.emit(None)
@@ -31,4 +56,20 @@ class SessionRegistry:
     @property
     def sessions(self) -> list[Session]:
         with self._lock:
-            return list(self._sessions)
+            return self._apply_overrides_locked(self._sessions)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _apply_overrides_locked(self, sessions: list[Session]) -> list[Session]:
+        if not self._activity_overrides:
+            return list(sessions)
+        out: list[Session] = []
+        for s in sessions:
+            override = self._activity_overrides.get(project_hash(s.project_path))
+            if override is not None and override > s.last_activity:
+                out.append(dataclasses.replace(s, last_activity=override))
+            else:
+                out.append(s)
+        return out

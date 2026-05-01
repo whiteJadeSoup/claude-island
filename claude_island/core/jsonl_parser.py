@@ -19,6 +19,12 @@ class JsonlParser:
     Expected JSONL line shape (assistant turns):
         {"type": "assistant", "message": {"model": "...", "usage": {...}},
          "timestamp": "2025-01-01T00:00:00.000Z"}
+
+    activity_updated payload: (project_hash, timestamp).
+    project_hash is the parent directory name of the JSONL file (Claude Code's
+    per-project encoding of the cwd; see core.models.project_hash). This lets
+    SessionRegistry join activity to scanned sessions by recomputing the hash
+    of each session's cwd.
     """
 
     def __init__(
@@ -27,7 +33,7 @@ class JsonlParser:
         usage_registry: UsageRegistry,
         claude_projects_dir: Path,
     ) -> None:
-        self.activity_updated: Event[tuple[Path, datetime]] = Event()
+        self.activity_updated: Event[tuple[str, datetime]] = Event()
         self._usage = usage_registry
         self._projects_dir = claude_projects_dir
         self._lock = threading.Lock()
@@ -115,7 +121,7 @@ class JsonlParser:
         self._usage.set_offset(path_str, new_offset - tail_len)
 
         if last_activity is not None:
-            self.activity_updated.emit((file_path, last_activity))
+            self.activity_updated.emit((project_path, last_activity))
 
 
 def _parse_ts(entry: dict) -> datetime | None:

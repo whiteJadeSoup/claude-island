@@ -1,8 +1,23 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+
+def project_hash(cwd: Path | str) -> str:
+    """Convert a project working directory to Claude Code's project-id format.
+
+    Claude Code stores per-project session files under
+    ``~/.claude/projects/<hash>/<session_uuid>.jsonl``. The hash is the cwd
+    string with every non-[a-zA-Z0-9._] character replaced by '-'.
+
+    Examples:
+        D:\\coding projects\\common-learn  →  D--coding-projects-common-learn
+        /home/user/my.project              →  -home-user-my.project
+    """
+    return re.sub(r"[^a-zA-Z0-9._]", "-", str(cwd))
 
 
 @dataclass(frozen=True)

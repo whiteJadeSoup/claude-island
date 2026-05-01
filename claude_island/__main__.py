@@ -90,6 +90,11 @@ _bridges = [QtBridge(event) for event, _ in _wiring]
 for bridge, (_, slot) in zip(_bridges, _wiring):
     bridge.connect_to(slot)
 
+# core → core direct subscription: JSONL activity feeds the session registry's
+# override map. update_activity is thread-safe and does not emit, so there is
+# no need to marshal through Qt — the parser thread can call it directly.
+jsonl_parser.activity_updated.subscribe(session_registry.update_activity)
+
 # Platform → UI direct connection (session activation: UI emits, platform handles).
 # No bridge needed — session_activated fires on the Qt main thread already.
 expanded.session_activated.connect(window_activator.activate)
