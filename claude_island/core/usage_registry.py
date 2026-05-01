@@ -92,14 +92,54 @@ class UsageRegistry:
         cache_creation_tokens: int,
         cache_read_tokens: int,
     ) -> None:
-        pricing = _resolve_pricing(model)
-        cost = _compute_cost(
-            input_tokens, output_tokens,
-            cache_creation_tokens, cache_read_tokens,
-            pricing,
-        )
+        """Insert a single usage record. Convenience wrapper around record_many.
+
+        Prefer record_many for batch ingestion (e.g. backfill_all parsing
+        thousands of historical turns) — record() emits totals_changed once
+        per call, which floods the UI with redundant SELECT-and-redraw work
+        when called in a tight loop.
+        """
+        self.record_many([{
+            "timestamp": timestamp,
+            "project_path": project_path,
+            "session_uuid": session_uuid,
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
+            "cache_read_tokens": cache_read_tokens,
+        }])
+
+    def record_many(self, entries: list[dict]) -> None:
+        """Batch-insert usage records under a single transaction and emit
+        totals_changed exactly once at the end.
+
+        Each entry dict must carry the same keys as record()'s kwargs.
+        Empty input is a no-op (no transaction, no emit).
+        """
+        if not entries:
+            return
+        rows = []
+        for e in entries:
+            pricing = _resolve_pricing(e["model"])
+            cost = _compute_cost(
+                e["input_tokens"], e["output_tokens"],
+                e["cache_creation_tokens"], e["cache_read_tokens"],
+                pricing,
+            )
+            rows.append((
+                e["timestamp"].isoformat(),
+                e["project_path"],
+                e["session_uuid"],
+                e["model"],
+                e["input_tokens"],
+                e["output_tokens"],
+                e["cache_creation_tokens"],
+                e["cache_read_tokens"],
+                cost,
+            ))
         with self._lock:
-            self._conn.execute(
+            self._conn.executemany(
                 """
                 INSERT INTO usage_records
                     (timestamp, project_path, session_uuid, model,
@@ -107,11 +147,7 @@ class UsageRegistry:
                      cache_creation_tokens, cache_read_tokens, cost_usd)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    timestamp.isoformat(), project_path, session_uuid, model,
-                    input_tokens, output_tokens,
-                    cache_creation_tokens, cache_read_tokens, cost,
-                ),
+                rows,
             )
             self._conn.commit()
         self.totals_changed.emit(None)

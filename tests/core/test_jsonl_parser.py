@@ -143,3 +143,26 @@ def test_chunk_ending_exactly_on_newline_advances_to_eof(env):
     parser.parse_file(jsonl)
     assert reg.get_offset(str(jsonl)) == len(line)
     assert _row_count(reg) == 1
+
+
+# --------------------------------------------------------------------------
+# B4: parser uses record_many → exactly one totals_changed per parse
+# --------------------------------------------------------------------------
+
+def test_parsing_chunk_with_many_lines_emits_totals_once(env):
+    """A chunk holding 100 assistant turns must trigger a single
+    totals_changed (via record_many), not 100 emits. Otherwise backfill
+    floods the UI with redundant SELECT-and-redraw cycles."""
+    reg, parser, jsonl = env
+    received = []
+    reg.totals_changed.subscribe(received.append)
+
+    lines = b"".join(
+        _line(f"2025-01-01T00:00:{i:02d}Z", 10, 5)
+        for i in range(60)
+    )
+    jsonl.write_bytes(lines)
+    parser.parse_file(jsonl)
+
+    assert _row_count(reg) == 60
+    assert len(received) == 1

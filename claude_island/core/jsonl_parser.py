@@ -86,6 +86,11 @@ class JsonlParser:
         else:
             complete_lines, tail_len = parts[:-1], len(parts[-1])
 
+        # Accumulate this chunk's usage rows and emit a single totals_changed
+        # at the end (via record_many). Per-row record() in a tight loop
+        # would flood the UI with N redundant SELECT-and-redraw passes,
+        # which is observable during backfill_all over a large history.
+        batch: list[dict] = []
         last_activity: datetime | None = None
 
         for raw_line in complete_lines:
@@ -105,19 +110,21 @@ class JsonlParser:
             usage, model = _extract_usage(entry)
 
             if usage and ts:
-                self._usage.record(
-                    timestamp=ts,
-                    project_path=project_path,
-                    session_uuid=session_uuid,
-                    model=model,
-                    input_tokens=usage.get("input_tokens", 0),
-                    output_tokens=usage.get("output_tokens", 0),
-                    cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
-                    cache_read_tokens=usage.get("cache_read_input_tokens", 0),
-                )
+                batch.append({
+                    "timestamp": ts,
+                    "project_path": project_path,
+                    "session_uuid": session_uuid,
+                    "model": model,
+                    "input_tokens": usage.get("input_tokens", 0),
+                    "output_tokens": usage.get("output_tokens", 0),
+                    "cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
+                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+                })
                 if last_activity is None or ts > last_activity:
                     last_activity = ts
 
+        if batch:
+            self._usage.record_many(batch)
         self._usage.set_offset(path_str, new_offset - tail_len)
 
         if last_activity is not None:
