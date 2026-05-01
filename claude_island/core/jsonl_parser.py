@@ -75,14 +75,28 @@ class JsonlParser:
 
     def _parse_incremental(self, file_path: Path) -> None:
         path_str = str(file_path)
-        offset = self._usage.get_offset(path_str)
+        stored_offset = self._usage.get_offset(path_str)
 
         try:
+            # Detect truncation / rotation before seeking. seek(N) on a file
+            # smaller than N succeeds silently but read() returns b'' and
+            # tell() returns N — we'd then commit the same stale offset and
+            # all future writes (until the file grows past N) would be lost.
+            # Reset to 0 if the file shrank, treating it as a fresh file.
+            file_size = file_path.stat().st_size
+            offset = 0 if file_size < stored_offset else stored_offset
+
             with open(file_path, "rb") as fh:
                 fh.seek(offset)
                 chunk = fh.read()
                 new_offset = fh.tell()
         except OSError:
+            return
+
+        # Persist the truncation reset even if the new file has nothing to
+        # parse yet, so the stored offset reflects reality.
+        if not chunk and offset != stored_offset:
+            self._usage.set_offset(path_str, offset)
             return
 
         if not chunk:

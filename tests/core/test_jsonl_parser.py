@@ -209,3 +209,65 @@ def test_request_stop_is_idempotent(env):
     _, parser, _ = env
     parser.request_stop()
     parser.request_stop()  # must not raise
+
+
+# --------------------------------------------------------------------------
+# Q1: file truncation / rotation
+# --------------------------------------------------------------------------
+
+def test_truncation_resets_offset_and_reparses(env):
+    """User deletes ~/.claude/projects to clean up; a new session re-creates
+    the same path with a fresh, smaller file. Without truncation detection,
+    the stored offset would still point past the new file's EOF, and all
+    future writes (until size > old offset) would be silently lost."""
+    reg, parser, jsonl = env
+
+    # Phase 1: write 5 lines, parse, advance offset.
+    big = b"".join(_line(f"2025-01-01T00:00:{i:02d}Z", 10, 5) for i in range(5))
+    jsonl.write_bytes(big)
+    parser.parse_file(jsonl)
+    assert _row_count(reg) == 5
+    offset_after_phase1 = reg.get_offset(str(jsonl))
+    assert offset_after_phase1 == len(big)
+
+    # Phase 2: simulate truncation — file shrinks to one fresh line.
+    fresh = _line("2025-01-02T00:00:00Z", 100, 50)
+    jsonl.write_bytes(fresh)  # write_bytes truncates and rewrites
+    parser.parse_file(jsonl)
+
+    # The new line must have been parsed (would be missed without the fix).
+    assert _row_count(reg) == 6
+    # Stored offset should now reflect the new (smaller) file size.
+    assert reg.get_offset(str(jsonl)) == len(fresh)
+
+
+def test_truncation_to_empty_file_is_safe(env):
+    reg, parser, jsonl = env
+
+    jsonl.write_bytes(_line("2025-01-01T00:00:00Z", 10, 5))
+    parser.parse_file(jsonl)
+    assert _row_count(reg) == 1
+
+    # Truncate to empty.
+    jsonl.write_bytes(b"")
+    parser.parse_file(jsonl)  # must not raise
+
+    # No new rows; offset reset to 0.
+    assert _row_count(reg) == 1
+    assert reg.get_offset(str(jsonl)) == 0
+
+
+def test_file_growth_without_truncation_unchanged(env):
+    """Sanity: a normal append (file grows, doesn't shrink) must NOT
+    trigger the reset path."""
+    reg, parser, jsonl = env
+
+    jsonl.write_bytes(_line("2025-01-01T00:00:00Z", 10, 5))
+    parser.parse_file(jsonl)
+
+    # Append a second line.
+    with open(jsonl, "ab") as f:
+        f.write(_line("2025-01-01T00:00:01Z", 20, 10))
+    parser.parse_file(jsonl)
+
+    assert _row_count(reg) == 2  # both lines, no double-counting
