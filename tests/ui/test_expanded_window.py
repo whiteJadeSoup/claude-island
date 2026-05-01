@@ -88,14 +88,16 @@ def test_added_pid_inserts_new_widget(panel):
 
 
 def test_existing_row_text_updates_in_place(panel):
+    from PySide6.QtWidgets import QLabel
     panel.refresh_sessions([_session(1, "/a", ago_minutes=0)])
     btn = panel._rows[1]
-    text_before = btn.text()
+    age_before = btn.findChild(QLabel, "age_label").text()
 
-    # Same pid, same cwd, but newer activity timestamp would shift the "ago" label.
+    # Same pid, same cwd, but newer activity timestamp shifts the age label.
     panel.refresh_sessions([_session(1, "/a", ago_minutes=5)])
     assert panel._rows[1] is btn  # not recreated
-    assert btn.text() != text_before  # but text changed in place
+    age_after = btn.findChild(QLabel, "age_label").text()
+    assert age_after != age_before  # age label updated in place
 
 
 def test_empty_sessions_shows_placeholder(panel):

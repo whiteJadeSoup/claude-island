@@ -27,47 +27,70 @@ _STYLE_PANEL = """
 """
 _STYLE_TITLE = "color: #888; font-size: 10px; letter-spacing: 1px;"
 _STYLE_SEP = "background: #2a2a2a;"
-# In-card separator between split-pane sessions of the same group. Brighter
-# than the panel divider so the user can read "these rows are the same tab"
-# at a glance, plus horizontal margins so the line stops short of the rounded
-# card edges (cleaner than ending in a corner).
-_STYLE_GROUP_ROW_SEP = "background: #3d3d3d; margin-left: 14px; margin-right: 14px;"
-# Px gap between top-level entries (cards / standalone rows) — large enough
-# that users can distinguish "next card" from "next pane in the same card".
-_GROUP_GAP = 10
-_STYLE_SESSION_BTN = """
-    QPushButton {
-        color: #e0e0e0;
-        background: #1e1e1e;
+
+# --------------------------------------------------------------------------
+# Session row + card visual language
+# --------------------------------------------------------------------------
+#
+# Three elements have to read well at a glance:
+# 1. activity dot (●) on the left — green / yellow / gray = recent / today /
+#    older, so the user doesn't have to read the time text to tell which
+#    sessions are "live"
+# 2. group ↔ standalone — group cards sit on a darker background (#181818)
+#    than standalone rows (#1e1e1e); the contrast tells the eye "these rows
+#    are bracketed together" without explicit chrome
+# 3. one row per line — name on the left, age on the right, no second line;
+#    rows are 36px tall so the whole list scans top-to-bottom in one motion
+
+_BG_SINGLE = "#1e1e1e"
+_BG_GROUP = "#181818"          # darker → "this is a container, not a row"
+_BG_HOVER_SINGLE = "#2a2a2a"
+_BG_HOVER_IN_GROUP = "#222222"  # subtle hover that keeps the card identity
+_BG_PRESSED = "#333333"
+
+_DOT_GREEN = "#4ade80"   # < 1h since last activity
+_DOT_YELLOW = "#facc15"  # < 24h
+_DOT_GRAY = "#52525b"    # ≥ 24h
+
+_ROW_HEIGHT = 36
+_ROW_PAD_H = 12
+
+_STYLE_SINGLE_ROW = f"""
+    QPushButton {{
+        background: {_BG_SINGLE};
         border: none;
         border-radius: 8px;
-        padding: 10px 12px;
         text-align: left;
-        font-size: 12px;
-    }
-    QPushButton:hover { background: #2e2e2e; }
-    QPushButton:pressed { background: #383838; }
+    }}
+    QPushButton:hover {{ background: {_BG_HOVER_SINGLE}; }}
+    QPushButton:pressed {{ background: {_BG_PRESSED}; }}
 """
-# Multi-session group: the rounded background lives on the card frame.
-# Inner rows render as flat (transparent) buttons separated by 1px lines.
-_STYLE_GROUP_CARD = """
-    QFrame#group_card {
-        background: #1e1e1e;
+_STYLE_GROUP_CARD = f"""
+    QFrame#group_card {{
+        background: {_BG_GROUP};
         border-radius: 8px;
-    }
+    }}
 """
-_STYLE_FLAT_ROW_BTN = """
-    QPushButton {
-        color: #e0e0e0;
+_STYLE_GROUP_ROW = f"""
+    QPushButton {{
         background: transparent;
         border: none;
-        padding: 10px 12px;
         text-align: left;
-        font-size: 12px;
-    }
-    QPushButton:hover { background: #2e2e2e; }
-    QPushButton:pressed { background: #383838; }
+    }}
+    QPushButton:hover {{ background: {_BG_HOVER_IN_GROUP}; }}
+    QPushButton:pressed {{ background: {_BG_PRESSED}; }}
 """
+# Separator between rows of the same group. With the group sitting on
+# #181818, a #2a2a2a hairline is just barely visible — enough to read
+# as "two distinct rows" without competing with the dot/name typography.
+_STYLE_GROUP_ROW_SEP = "background: #2a2a2a; margin-left: 12px; margin-right: 12px;"
+# Px gap between top-level entries (cards / standalone rows). Bigger than
+# the in-group row spacing so "next card" reads as a different chunk.
+_GROUP_GAP = 8
+
+_STYLE_DOT = "color: {color}; font-size: 11px;"
+_STYLE_NAME = "color: #e8e8e8; font-size: 13px;"
+_STYLE_AGE = "color: #6b7280; font-size: 11px;"
 _STYLE_PERIOD_BTN = """
     QPushButton {
         color: #666;
@@ -91,13 +114,31 @@ def _fmt_tokens(n: int) -> str:
 
 
 def _fmt_ago(dt: datetime) -> str:
+    """Compact age label used on the right side of each row.
+    No "ago" suffix — a single column of "5m / 19h / 6d" reads as a
+    list of values, so the unit-only form is faster to compare."""
     delta = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
     s = int(delta.total_seconds())
     if s < 60:
-        return f"{s}s ago"
+        return f"{s}s"
     if s < 3600:
-        return f"{s // 60}m ago"
-    return f"{s // 3600}h ago"
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+def _activity_color(dt: datetime) -> str:
+    """Traffic-light dot color encoding how recent ``dt`` is.
+    Thresholds are chosen so a daily user sees mostly green (active),
+    yellow at the end of the day, and gray for stale sessions."""
+    delta = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
+    h = delta.total_seconds() / 3600.0
+    if h < 1:
+        return _DOT_GREEN
+    if h < 24:
+        return _DOT_YELLOW
+    return _DOT_GRAY
 
 
 # --------------------------------------------------------------------------
@@ -368,13 +409,46 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _make_row(self, session: Session) -> QPushButton:
+        """Build a click-target row with a 3-element horizontal layout:
+        ``● name ............... age``.
+
+        The QPushButton supplies the click target, hover/pressed
+        backgrounds, and rounded background. A QHBoxLayout inside the
+        button positions three QLabels (dot / name / age). Each label
+        has WA_TransparentForMouseEvents so clicks anywhere on the row
+        — dot, name, age, or the empty space between — fall through to
+        the button.
+        """
         btn = QPushButton()
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        btn.setFixedHeight(52)
-        # Carry the current Session so the click handler always emits the
-        # latest snapshot (project_path, last_activity may change).
+        btn.setFixedHeight(_ROW_HEIGHT)
         btn.setProperty("_session", session)
         btn.setProperty("_siblings", [])
+
+        layout = QHBoxLayout(btn)
+        layout.setContentsMargins(_ROW_PAD_H, 0, _ROW_PAD_H, 0)
+        layout.setSpacing(10)
+
+        dot = QLabel("●")
+        dot.setObjectName("activity_dot")
+        dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(dot)
+
+        name_label = QLabel()
+        name_label.setObjectName("name_label")
+        name_label.setStyleSheet(_STYLE_NAME)
+        name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # Elide long project names from the right so the age stays visible.
+        name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout.addWidget(name_label, 1)
+
+        age_label = QLabel()
+        age_label.setObjectName("age_label")
+        age_label.setStyleSheet(_STYLE_AGE)
+        age_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        age_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(age_label)
+
         self._update_row(btn, session)
         btn.clicked.connect(lambda: self._on_row_clicked(
             btn.property("_session"),
@@ -383,13 +457,23 @@ class ExpandedWindow(QWidget):
         return btn
 
     def _update_row(self, btn: QPushButton, session: Session) -> None:
-        """Refresh a row's visible text in-place. Called both on first build
-        and on every refresh_sessions tick so 'Xm ago' stays current."""
+        """Refresh dot color, name, and age on every refresh tick so the
+        traffic-light and "Xh" stay current without rebuilding the row."""
         name = session.project_path.name or str(session.project_path)
-        ago = _fmt_ago(session.last_activity)
-        text = f"  {name}\n  {ago}"
-        if btn.text() != text:
-            btn.setText(text)
+        age = _fmt_ago(session.last_activity)
+
+        dot = btn.findChild(QLabel, "activity_dot")
+        if dot is not None:
+            dot.setStyleSheet(_STYLE_DOT.format(color=_activity_color(session.last_activity)))
+
+        name_label = btn.findChild(QLabel, "name_label")
+        if name_label is not None and name_label.text() != name:
+            name_label.setText(name)
+
+        age_label = btn.findChild(QLabel, "age_label")
+        if age_label is not None and age_label.text() != age:
+            age_label.setText(age)
+
         btn.setProperty("_session", session)
 
     # ------------------------------------------------------------------
@@ -443,7 +527,7 @@ class ExpandedWindow(QWidget):
         if btn is None:
             btn = self._make_row(session)
             self._rows[session.pid] = btn
-        btn.setStyleSheet(_STYLE_FLAT_ROW_BTN if in_card else _STYLE_SESSION_BTN)
+        btn.setStyleSheet(_STYLE_GROUP_ROW if in_card else _STYLE_SINGLE_ROW)
         self._update_row(btn, session)
         siblings = [s for s in group if s.pid != session.pid]
         btn.setProperty("_siblings", siblings)
