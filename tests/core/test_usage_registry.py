@@ -217,6 +217,48 @@ def test_session_summary_unknown_session_returns_zero(registry):
     assert (cost, turns, sides) == (0.0, 0, 0)
 
 
+def test_session_per_model_splits_one_session_by_model(registry):
+    """P1: one session with two models → tuple has ModelTotals for
+    each. The detail popup uses this to render one row per model."""
+    registry.record_many([
+        UsageRecord(**{**_record(model="claude-sonnet-4-5",
+                                  input_tokens=1_000_000, output_tokens=0).__dict__,
+                       "session_uuid": "sess-x", "message_id": "m1"}),
+        UsageRecord(**{**_record(model="claude-haiku-4-5",
+                                  input_tokens=1_000_000, output_tokens=0).__dict__,
+                       "session_uuid": "sess-x", "message_id": "m2"}),
+        UsageRecord(**{**_record(model="claude-sonnet-4-5",
+                                  input_tokens=99, output_tokens=99).__dict__,
+                       "session_uuid": "other-sess", "message_id": "m3"}),
+    ])
+    rows = registry.get_session_per_model("sess-x")
+    assert len(rows) == 2
+    # Sorted by cost desc — Sonnet ($3 input rate) > Haiku ($1).
+    assert "sonnet" in rows[0].model.lower()
+    assert "haiku" in rows[1].model.lower()
+    # The other-sess record must NOT appear here.
+    assert all(r.input_tokens >= 1_000_000 for r in rows)
+
+
+def test_session_per_model_unknown_session_returns_empty(registry):
+    """P2: no records for that uuid → empty tuple."""
+    assert registry.get_session_per_model("nope") == ()
+
+
+def test_session_per_model_respects_message_id_dedup(registry):
+    """P3: same msg.id ingested twice → still one logical record →
+    per_model totals don't double-count."""
+    base = _record(model="claude-opus-4-7", input_tokens=10, output_tokens=20)
+    rec = UsageRecord(**{**base.__dict__,
+                         "session_uuid": "uuid-y",
+                         "message_id": "m-once"})
+    registry.record_many([rec])
+    registry.record_many([rec])  # duplicate batch
+    rows = registry.get_session_per_model("uuid-y")
+    assert len(rows) == 1
+    assert rows[0].input_tokens == 10  # NOT 20
+
+
 def test_opus_pricing_matches_anthropic_5_25_per_mtok(registry):
     """Regression for the bug a third-party tracker exposed: we had
     Opus at $15/$75 (legacy 3.x / 4.0/4.1 rates) but Anthropic dropped

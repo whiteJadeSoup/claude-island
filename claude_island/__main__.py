@@ -126,6 +126,7 @@ def _build_session_details(session):
     sess_uuid = state.get("sessionId") if isinstance(state.get("sessionId"), str) else session.session_uuid
     meta = jsonl_parser.get_session_metadata(sess_uuid) or {}
     cost, turns, sides = usage_registry.get_session_summary(sess_uuid)
+    per_model = usage_registry.get_session_per_model(sess_uuid)
     return SessionDetails(
         session=session,
         name=state.get("name") if isinstance(state.get("name"), str) else None,
@@ -138,6 +139,8 @@ def _build_session_details(session):
         cost_usd=cost,
         turn_count=turns,
         sidechain_count=sides,
+        per_model=per_model,
+        effective_uuid=sess_uuid or None,
     )
 
 

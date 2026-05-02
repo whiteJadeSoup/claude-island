@@ -277,60 +277,12 @@ def _escape_html(text: str) -> str:
                 .replace(">", "&gt;"))
 
 
-def _build_session_tooltip(d: SessionDetails | None, fallback: Session) -> str:
-    """Render a SessionDetails as the row's hover tooltip.
-
-    Designed for Qt's auto-tooltip (QWidget.setToolTip) which renders
-    a bounded subset of HTML. We use only <b> / <br> / <i> /
-    <span style='color:…'> — anything fancier won't survive Qt's
-    text engine. Returned string is safe to pass directly to setToolTip.
-
-    Falls back to a one-line cwd display when ``d`` is None (no
-    composer wired, or the session hasn't been parsed yet).
-    """
-    if d is None:
-        return _escape_html(str(fallback.project_path))
-
-    # Title block — name from sessions/<pid>.json wins, then aiTitle,
-    # then cwd basename. The "outside" row shows just the title; the
-    # tooltip is allowed to repeat it for context.
-    title = (d.name or d.ai_title
-             or fallback.project_path.name
-             or str(fallback.project_path))
-    branch = f"  ·  <span style='color:#9ca3af'>{_escape_html(d.git_branch)}</span>" if d.git_branch else ""
-
-    parts: list[str] = []
-    parts.append(f"<b>{_escape_html(title)}</b>{branch}")
-    parts.append(f"<span style='color:#9ca3af'>{_escape_html(str(fallback.project_path))}</span>")
-
-    meta_line: list[str] = []
-    if d.started_at is not None:
-        meta_line.append(_fmt_started(d.started_at))
-    if d.status:
-        meta_line.append(f"status: <b>{_escape_html(d.status)}</b>")
-    if meta_line:
-        parts.append(" · ".join(meta_line))
-
-    parts.append("<br>")
-    cost_line = f"This session: <b>{_fmt_money(d.cost_usd)}</b>"
-    if d.turn_count:
-        cost_line += f" · {d.turn_count} turn{'s' if d.turn_count != 1 else ''}"
-    if d.sidechain_count:
-        cost_line += f" · {d.sidechain_count} subagent call{'s' if d.sidechain_count != 1 else ''}"
-    parts.append(cost_line)
-
-    if d.last_prompt:
-        # Truncate long prompts so the tooltip stays a reasonable size.
-        snippet = d.last_prompt
-        if len(snippet) > 220:
-            snippet = snippet[:217] + "…"
-        parts.append("<br><i>Last prompt:</i>")
-        parts.append(f"<span style='color:#c9c9c9'>{_escape_html(snippet)}</span>")
-
-    if d.cc_version:
-        parts.append(f"<br><span style='color:#6b7280'>Claude Code {_escape_html(d.cc_version)}</span>")
-
-    return "<br>".join(parts)
+def _fmt_local_dt(dt: datetime | None) -> str:
+    """Local-timezone datetime for the popup's Created field.
+    e.g. ``"2026-05-01 13:00"``. Returns "—" on None."""
+    if dt is None:
+        return "—"
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
 def _quota_color(pct: float, stale: bool) -> str:
@@ -444,6 +396,286 @@ def _consecutive_groups(sessions: list[Session]) -> list[list[Session]]:
     if cur:
         out.append(cur)
     return out
+
+
+class SessionDetailPopup(QFrame):
+    """Frameless rounded popup that shows everything we know about
+    one session — opened by right-clicking a session row.
+
+    Visual language is intentionally borrowed from the main panel:
+    same outer ``_BG_GROUP`` rounded card, same inner ``_BG_SINGLE``
+    sub-cards, same ``_STYLE_NAME`` / ``_STYLE_AGE`` typography,
+    same dot tokens. Reads like a zoomed-in version of a row, not a
+    Qt-generic dialog.
+
+    Uses ``Qt.WindowType.Popup`` so Qt closes us automatically when
+    the user clicks anywhere outside, matching how a context menu
+    behaves on every desktop platform.
+    """
+
+    def __init__(
+        self,
+        details: SessionDetails | None,
+        fallback: Session,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        # Frameless + Popup = "I behave like a context menu":
+        # no titlebar, on top, dismissed by clicks outside.
+        self.setWindowFlags(
+            Qt.WindowType.Popup
+            | Qt.WindowType.FramelessWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedWidth(_PANEL_W)
+
+        self._details = details
+        self._fallback = fallback
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(_GROUP_GAP)
+
+        root.addWidget(self._build_header_card())
+        root.addWidget(self._build_meta_card())
+        root.addWidget(self._build_tokens_card())
+        prompt_card = self._build_prompt_card()
+        if prompt_card is not None:
+            root.addWidget(prompt_card)
+
+        self.setStyleSheet(_STYLE_PANEL)
+        self.adjustSize()
+
+    # paintEvent borrows from ExpandedWindow's: rounded translucent
+    # outer fill so the corners look like the main panel's instead
+    # of OS-default square ones.
+    def paintEvent(self, event: object) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, self.width(), self.height(), 16, 16)
+        painter.fillPath(path, QColor(18, 18, 18, 240))
+
+    # ------------------------------------------------------------------
+    # Section builders — each returns a rounded ``_BG_SINGLE`` sub-card
+    # ------------------------------------------------------------------
+
+    def _build_header_card(self) -> QFrame:
+        d = self._details
+        title = self._title_text()
+        subtitle = (d.ai_title if d and d.ai_title and d.ai_title != title else None)
+
+        card = self._sub_card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(2)
+
+        # First line: ● dot + title + (status pill on the right).
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        dot = QLabel("●")
+        dot.setStyleSheet(_STYLE_DOT.format(color=_activity_color(self._fallback.last_activity)))
+        head.addWidget(dot)
+        name = QLabel(title)
+        name.setStyleSheet(_STYLE_NAME)
+        head.addWidget(name, 1)
+        if d and d.status:
+            pill = QLabel(d.status)
+            pill.setStyleSheet(
+                "color: #c9c9c9; font-size: 10px; "
+                "background: #2a2a2a; border-radius: 6px; "
+                "padding: 2px 8px;"
+            )
+            pill.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            head.addWidget(pill)
+        layout.addLayout(head)
+
+        if subtitle:
+            sub = QLabel(subtitle)
+            sub.setStyleSheet("color: #9ca3af; font-size: 11px; font-style: italic;")
+            sub.setWordWrap(True)
+            layout.addWidget(sub)
+        return card
+
+    def _build_meta_card(self) -> QFrame:
+        """ID / Path / Branch / Created / Version block."""
+        d = self._details
+        sess_uuid = self._effective_uuid()
+
+        card = self._sub_card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
+
+        layout.addWidget(self._kv_row("ID", _shorten_uuid(sess_uuid) or "—"))
+        layout.addWidget(self._kv_row("Path", str(self._fallback.project_path)))
+        if d and d.git_branch:
+            layout.addWidget(self._kv_row("Branch", d.git_branch))
+        if d and d.started_at is not None:
+            layout.addWidget(self._kv_row(
+                "Created",
+                f"{_fmt_local_dt(d.started_at)}  ({_fmt_started(d.started_at)})",
+            ))
+        if d and d.cc_version:
+            layout.addWidget(self._kv_row("Version", f"Claude Code {d.cc_version}"))
+        return card
+
+    def _build_tokens_card(self) -> QFrame:
+        """TOKENS section — total + per-model breakdown."""
+        d = self._details
+        card = self._sub_card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+
+        # Section title: "TOKENS  ·  N turns" right-aligned tail.
+        head = QHBoxLayout()
+        title_lbl = QLabel("TOKENS")
+        title_lbl.setStyleSheet(_STYLE_TITLE)
+        head.addWidget(title_lbl)
+        head.addStretch()
+        if d:
+            extras: list[str] = []
+            if d.turn_count:
+                extras.append(f"{d.turn_count} turn{'s' if d.turn_count != 1 else ''}")
+            if d.sidechain_count:
+                extras.append(f"{d.sidechain_count} subagent")
+            if extras:
+                tail = QLabel(" · ".join(extras))
+                tail.setStyleSheet(_STYLE_AGE)
+                tail.setAlignment(Qt.AlignmentFlag.AlignRight)
+                head.addWidget(tail)
+        layout.addLayout(head)
+
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(_STYLE_SEP)
+        layout.addWidget(sep)
+
+        if d and d.per_model:
+            for m in d.per_model:
+                layout.addLayout(self._model_block(m))
+        elif d:
+            # Have details but zero per-model rows (composer unwired
+            # or session never recorded usage). Still show the total
+            # so the section isn't empty.
+            total = QLabel(_fmt_money(d.cost_usd))
+            total.setStyleSheet(_STYLE_USAGE_AMOUNT)
+            layout.addWidget(total)
+        else:
+            empty = QLabel("—")
+            empty.setStyleSheet(_STYLE_AGE)
+            layout.addWidget(empty)
+        return card
+
+    def _build_prompt_card(self) -> QFrame | None:
+        d = self._details
+        if not d or not d.last_prompt:
+            return None
+        snippet = d.last_prompt
+        # Allow more text than the old tooltip — popup has room.
+        if len(snippet) > 600:
+            snippet = snippet[:597] + "…"
+
+        card = self._sub_card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
+        head = QLabel("LAST PROMPT")
+        head.setStyleSheet(_STYLE_TITLE)
+        layout.addWidget(head)
+        body = QLabel(snippet)
+        body.setStyleSheet("color: #c9c9c9; font-size: 12px;")
+        body.setWordWrap(True)
+        layout.addWidget(body)
+        return card
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _sub_card(self) -> QFrame:
+        """One inner ``_BG_SINGLE`` rounded sub-card. Same recipe
+        used elsewhere in the panel — keeps the language consistent."""
+        f = QFrame()
+        f.setStyleSheet(
+            "QFrame { background: " + _BG_SINGLE + "; border-radius: 8px; }"
+        )
+        return f
+
+    def _kv_row(self, key: str, value: str) -> QWidget:
+        """Two-column ``Key   value`` row. Key is fixed-width gray,
+        value is white and wraps if long."""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        k = QLabel(key)
+        k.setStyleSheet("color: #6b7280; font-size: 11px;")
+        k.setFixedWidth(54)
+        k.setAlignment(Qt.AlignmentFlag.AlignTop)
+        h.addWidget(k)
+        v = QLabel(value)
+        v.setStyleSheet("color: #e8e8e8; font-size: 12px;")
+        v.setWordWrap(True)
+        h.addWidget(v, 1)
+        return row
+
+    def _model_block(self, m) -> QVBoxLayout:
+        """One model's three-line block: name + cost / in·out / cw·cr."""
+        block = QVBoxLayout()
+        block.setSpacing(2)
+        head = QHBoxLayout()
+        name = QLabel(_fmt_model_label(m.model))
+        name.setStyleSheet("color: #e8e8e8; font-size: 12px;")
+        head.addWidget(name)
+        head.addStretch()
+        cost = QLabel(_fmt_money(m.cost_usd))
+        cost.setStyleSheet("color: #e8e8e8; font-size: 12px;")
+        cost.setAlignment(Qt.AlignmentFlag.AlignRight)
+        head.addWidget(cost)
+        block.addLayout(head)
+
+        io = QLabel(
+            f"  in {_fmt_tokens(m.input_tokens)}  ·  "
+            f"out {_fmt_tokens(m.output_tokens)}"
+        )
+        io.setStyleSheet(_STYLE_AGE)
+        block.addWidget(io)
+
+        cache = QLabel(
+            f"  cw {_fmt_tokens(m.cache_creation_tokens)}  ·  "
+            f"cr {_fmt_tokens(m.cache_read_tokens)}"
+        )
+        cache.setStyleSheet(_STYLE_AGE)
+        block.addWidget(cache)
+        return block
+
+    def _title_text(self) -> str:
+        d = self._details
+        return (
+            (d.name if d and d.name else None)
+            or (d.ai_title if d and d.ai_title else None)
+            or self._fallback.project_path.name
+            or str(self._fallback.project_path)
+        )
+
+    def _effective_uuid(self) -> str:
+        """The session_uuid the composer actually used. Falls back to
+        the Session's own session_uuid field (often empty when coming
+        straight from ProcessScanner)."""
+        if self._details and self._details.effective_uuid:
+            return self._details.effective_uuid
+        return self._fallback.session_uuid or ""
+
+
+def _shorten_uuid(uuid: str) -> str:
+    """First 8 chars + ellipsis. UUIDs are unique enough at 8 chars
+    for the user's eye to spot them; full uuid in a tooltip would
+    just look like noise."""
+    if not uuid:
+        return ""
+    return uuid[:8] + ("…" if len(uuid) > 8 else "")
 
 
 class ExpandedWindow(QWidget):
@@ -903,14 +1135,17 @@ class ExpandedWindow(QWidget):
 
     def _make_row(self, session: Session) -> QPushButton:
         """Build a click-target row with a 3-element horizontal layout:
-        ``● name ............... age``.
+        ``● name ............... cost``.
 
         The QPushButton supplies the click target, hover/pressed
         backgrounds, and rounded background. A QHBoxLayout inside the
-        button positions three QLabels (dot / name / age). Each label
+        button positions three QLabels (dot / name / meta). Each label
         has WA_TransparentForMouseEvents so clicks anywhere on the row
-        — dot, name, age, or the empty space between — fall through to
-        the button.
+        fall through to the button.
+
+        Right-click opens a SessionDetailPopup with the rich metadata
+        (id / cwd / created / per-model tokens / last prompt). Left
+        click activates the WT tab as before.
         """
         btn = QPushButton()
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -931,40 +1166,47 @@ class ExpandedWindow(QWidget):
         name_label.setObjectName("name_label")
         name_label.setStyleSheet(_STYLE_NAME)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        # Elide long project names from the right so the age stays visible.
         name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout.addWidget(name_label, 1)
 
-        age_label = QLabel()
-        age_label.setObjectName("age_label")
-        age_label.setStyleSheet(_STYLE_AGE)
-        age_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        age_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(age_label)
+        # Right-side meta slot. Used to be ``age_label`` (e.g. "19h");
+        # the user asked for cumulative session cost instead. Object
+        # name kept neutral (``meta_label``) so the slot is reusable
+        # if we ever want to put something else there.
+        meta_label = QLabel()
+        meta_label.setObjectName("meta_label")
+        meta_label.setStyleSheet(_STYLE_AGE)
+        meta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        meta_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(meta_label)
 
         self._update_row(btn, session)
         btn.clicked.connect(lambda: self._on_row_clicked(
             btn.property("_session"),
             btn.property("_siblings") or [],
         ))
+        # Right-click → detail popup at cursor. CustomContextMenu lets
+        # us bypass Qt's default text-context-menu and route the event
+        # to our handler, which opens the rich SessionDetailPopup.
+        btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        btn.customContextMenuRequested.connect(
+            lambda local_pos: self._show_detail_popup(btn, local_pos)
+        )
         return btn
 
     def _update_row(self, btn: QPushButton, session: Session) -> None:
-        """Refresh dot color, name, age, and hover tooltip on every
-        refresh tick so the traffic-light, "Xh", and tooltip details
-        all stay current without rebuilding the row."""
-        # Compose details up front: the title shown on the row prefers
-        # the human ``name`` from sessions/<pid>.json, then aiTitle,
-        # then the cwd basename. Same fallback chain inside the
-        # tooltip; keeping them in sync is what makes the row + hover
-        # read as one piece of info.
+        """Refresh dot color, name, and right-side cost on every
+        refresh tick. The cumulative session cost replaces the old
+        "Xh ago" so a glance at the row tells you who's spending
+        most. Activity recency stays encoded in the dot colour, just
+        no longer in the text."""
         details: SessionDetails | None = None
         if self._get_session_details is not None:
             try:
                 details = self._get_session_details(session)
             except Exception as exc:
-                # Tooltip is enrichment, not load-bearing — never let
-                # a composer hiccup take down the whole row update.
+                # Detail composition is enrichment, not load-bearing —
+                # never let a composer hiccup take down the row update.
                 import sys as _sys
                 print(f"[claude-island] session details failed: {exc}",
                       file=_sys.stderr)
@@ -974,7 +1216,10 @@ class ExpandedWindow(QWidget):
             or session.project_path.name
             or str(session.project_path)
         )
-        age = _fmt_ago(session.last_activity)
+        # "—" when details are unavailable rather than falling back to
+        # an age string — keeps the meta slot semantically consistent
+        # ("this column is always cost").
+        meta_text = _fmt_money(details.cost_usd) if details is not None else "—"
 
         dot = btn.findChild(QLabel, "activity_dot")
         if dot is not None:
@@ -984,12 +1229,14 @@ class ExpandedWindow(QWidget):
         if name_label is not None and name_label.text() != title:
             name_label.setText(title)
 
-        age_label = btn.findChild(QLabel, "age_label")
-        if age_label is not None and age_label.text() != age:
-            age_label.setText(age)
+        meta_label = btn.findChild(QLabel, "meta_label")
+        if meta_label is not None and meta_label.text() != meta_text:
+            meta_label.setText(meta_text)
 
-        # Hover tooltip: rich HTML with everything the row can't show.
-        btn.setToolTip(_build_session_tooltip(details, session))
+        # Right-click triggers the rich popup; tooltip would compete
+        # for the same surface, so it's gone. Explicit empty string
+        # in case Qt cached a value from an earlier build of the row.
+        btn.setToolTip("")
 
         btn.setProperty("_session", session)
 
@@ -1095,6 +1342,38 @@ class ExpandedWindow(QWidget):
         for pid in list(self._rows.keys()):
             if pid not in needed_pids:
                 self._rows.pop(pid).deleteLater()
+
+    def _show_detail_popup(self, btn: QPushButton, local_pos) -> None:
+        """Build a SessionDetailPopup with fresh data and pop it at the
+        cursor. Called from the row's customContextMenuRequested signal.
+
+        We compose details on demand (not from a cached value) so the
+        popup always reflects the latest cost / status. Failures in the
+        composer are logged and the popup still opens with whatever
+        partial data is available — falling back to None when the
+        composer is unwired or the lookup raises."""
+        session = btn.property("_session")
+        if session is None:
+            return
+        details: SessionDetails | None = None
+        if self._get_session_details is not None:
+            try:
+                details = self._get_session_details(session)
+            except Exception as exc:
+                import sys as _sys
+                print(f"[claude-island] detail popup composer failed: {exc}",
+                      file=_sys.stderr)
+        popup = SessionDetailPopup(details, session, parent=self)
+        # Map the row-local right-click position to global screen
+        # coordinates. ``btn.mapToGlobal`` does the right thing across
+        # multi-monitor / DPI setups.
+        popup.move(btn.mapToGlobal(local_pos))
+        popup.show()
+        # Hold a reference so Qt's GC doesn't tear the popup down
+        # before the user gets to interact with it. Replacing the slot
+        # on each open is fine — Qt's Popup flag closes the previous
+        # instance when the new one shows.
+        self._active_detail_popup = popup
 
     def _on_row_clicked(self, session: Session, siblings: list[Session]) -> None:
         # Activate first, then collapse — order matters: while our panel is

@@ -160,6 +160,15 @@ class SessionDetails:
     cost_usd: float               # cumulative cost across all turns of this session
     turn_count: int               # # assistant turns
     sidechain_count: int          # # subagent invocations
+    # Per-model breakdown for the detail popup's TOKENS section.
+    # Empty tuple when the composer / registry isn't wired yet — the
+    # popup degrades gracefully (renders just the cumulative cost row).
+    per_model: tuple[ModelTotals, ...] = ()
+    # The session_uuid actually used to look up records and metadata
+    # (composer resolves it from sessions/<pid>.json's ``sessionId``;
+    # ``Session.session_uuid`` is often "" coming out of ProcessScanner).
+    # The detail popup shows this in the ID row.
+    effective_uuid: str | None = None
 
 
 @dataclass(frozen=True)

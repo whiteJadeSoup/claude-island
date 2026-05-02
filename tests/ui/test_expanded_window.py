@@ -104,17 +104,20 @@ def test_added_pid_inserts_new_widget(panel):
     assert panel._rows[1] is btn1  # 1's widget preserved
 
 
-def test_existing_row_text_updates_in_place(panel):
+def test_existing_row_meta_updates_in_place(panel):
+    """The right-side meta slot used to show age; it now shows cost.
+    The label is still updated in-place across refreshes (no widget
+    rebuild)."""
     from PySide6.QtWidgets import QLabel
-    panel.refresh_sessions([_session(1, "/a", ago_minutes=0)])
+    panel.refresh_sessions([_session(1, "/a")])
     btn = panel._rows[1]
-    age_before = btn.findChild(QLabel, "age_label").text()
-
-    # Same pid, same cwd, but newer activity timestamp shifts the age label.
-    panel.refresh_sessions([_session(1, "/a", ago_minutes=5)])
-    assert panel._rows[1] is btn  # not recreated
-    age_after = btn.findChild(QLabel, "age_label").text()
-    assert age_after != age_before  # age label updated in place
+    label = btn.findChild(QLabel, "meta_label")
+    assert label is not None
+    # Without a get_session_details composer the meta reads "—".
+    assert label.text() == "—"
+    # The widget itself isn't recreated on the next refresh.
+    panel.refresh_sessions([_session(1, "/a")])
+    assert btn.findChild(QLabel, "meta_label") is label
 
 
 def test_empty_sessions_shows_placeholder(panel):
@@ -489,17 +492,14 @@ def test_session_card_stale_overrides_red(qtbot):
     assert "#ef4444" not in p._session_bar.styleSheet()
 
 
-def test_row_tooltip_renders_session_details(qtbot):
-    """When a get_session_details composer is wired, each row's
-    tooltip carries the rich HTML with name, branch, status, cost,
-    and a last-prompt preview. Title shown on the row itself prefers
-    the human ``name`` over the cwd basename."""
-    from claude_island.core.models import SessionDetails as _SD
-    from claude_island.ui.expanded_window import ExpandedWindow
-    from PySide6.QtWidgets import QLabel as _QL
-
-    s = _session(1, "/some/path/foo", window_handle=None)
-    details = _SD(
+def _make_full_details(s, **overrides):
+    """Helper: SessionDetails with sensible defaults; tests override
+    only what they care about."""
+    from claude_island.core.models import (
+        ModelTotals as _MT,
+        SessionDetails as _SD,
+    )
+    base = dict(
         session=s,
         name="cc-learning",
         ai_title="Refactor scanner to async iter",
@@ -511,7 +511,29 @@ def test_row_tooltip_renders_session_details(qtbot):
         cost_usd=2.67,
         turn_count=42,
         sidechain_count=3,
+        per_model=(
+            _MT(model="claude-sonnet-4-6", input_tokens=1000,
+                output_tokens=20000, cache_creation_tokens=300000,
+                cache_read_tokens=5000000, cost_usd=2.40),
+            _MT(model="claude-haiku-4-5", input_tokens=100,
+                output_tokens=200, cache_creation_tokens=1000,
+                cache_read_tokens=8000, cost_usd=0.27),
+        ),
+        effective_uuid="abc12345-6789-0000-0000-000000000000",
     )
+    base.update(overrides)
+    return _SD(**base)
+
+
+def test_row_meta_shows_cost_when_details_available(qtbot):
+    """The user wanted the right side of the row to show *cumulative
+    session cost* instead of an age string. Title should also pick up
+    the human ``name`` from the composer."""
+    from claude_island.ui.expanded_window import ExpandedWindow
+    from PySide6.QtWidgets import QLabel as _QL
+
+    s = _session(1, "/some/path/foo")
+    details = _make_full_details(s)
 
     capsule = QWidget()
     capsule.show()
@@ -526,30 +548,125 @@ def test_row_tooltip_renders_session_details(qtbot):
     panel.refresh_sessions([s])
 
     btn = panel._rows[1]
-    # Row title displays the human ``name``, not the cwd basename.
     assert btn.findChild(_QL, "name_label").text() == "cc-learning"
-
-    tt = btn.toolTip()
-    # All the high-value fields surface in the tooltip HTML.
-    assert "cc-learning" in tt
-    assert "feat-async" in tt
-    # Path normalisation differs by OS — just assert the basename.
-    assert "foo" in tt
-    assert "$2.67" in tt
-    assert "42 turns" in tt
-    assert "3 subagent" in tt
-    assert "please refactor this scanner" in tt
-    assert "2.1.123" in tt
-    assert "busy" in tt
+    assert btn.findChild(_QL, "meta_label").text() == "$2.67"
+    # The hover tooltip is now intentionally empty — replaced by
+    # right-click popup. Avoids two competing surfaces for the same info.
+    assert btn.toolTip() == ""
 
 
-def test_row_tooltip_falls_back_when_no_composer(qtbot):
-    """No composer wired → tooltip is just the cwd."""
-    panel_no_details = _panel_with_session(qtbot, lambda: None)
-    panel_no_details.refresh_sessions([_session(7, "/proj/foo")])
-    btn = panel_no_details._rows[7]
-    # Without details the tooltip should still be set, just minimal.
-    assert "/proj/foo" in btn.toolTip() or "proj" in btn.toolTip()
+def test_row_meta_renders_dash_when_no_details(qtbot):
+    """Composer unwired → meta shows ``—`` (not an age fallback)."""
+    from PySide6.QtWidgets import QLabel as _QL
+    panel = _panel_with_session(qtbot, lambda: None)
+    panel.refresh_sessions([_session(7, "/proj/foo")])
+    btn = panel._rows[7]
+    assert btn.findChild(_QL, "meta_label").text() == "—"
+
+
+def test_row_has_custom_context_menu_policy(qtbot):
+    """Right-click is wired via Qt.CustomContextMenu so we own the
+    event. Without this, Qt would either show its built-in
+    text-context-menu or do nothing."""
+    panel = _panel_with_session(qtbot, lambda: None)
+    panel.refresh_sessions([_session(1, "/a")])
+    btn = panel._rows[1]
+    from PySide6.QtCore import Qt as _Qt
+    assert btn.contextMenuPolicy() == _Qt.ContextMenuPolicy.CustomContextMenu
+
+
+def test_detail_popup_renders_all_sections(qtbot):
+    """Build a popup directly with full details and verify every
+    section's text is present. Doesn't simulate the right-click event;
+    that path is exercised by _show_detail_popup which we test
+    separately."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    s = _session(1, "/some/path/foo")
+    details = _make_full_details(s)
+
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+
+    # Walk all child labels and concatenate their text — easiest way
+    # to assert "this string appears somewhere in the popup".
+    from PySide6.QtWidgets import QLabel as _QL
+    text = " | ".join(
+        lbl.text() for lbl in popup.findChildren(_QL) if lbl.text()
+    )
+    # Header card
+    assert "cc-learning" in text
+    assert "Refactor scanner to async iter" in text
+    assert "busy" in text
+    # Meta card
+    assert "abc12345" in text                    # short uuid
+    assert "feat-async" in text
+    assert "2.1.123" in text                     # cc version
+    assert "foo" in text                         # cwd basename
+    # Tokens card
+    assert "TOKENS" in text
+    assert "Sonnet" in text and "Haiku" in text
+    assert "$2.40" in text                       # per-model cost
+    assert "42 turns" in text
+    assert "3 subagent" in text
+    # Prompt card
+    assert "LAST PROMPT" in text
+    assert "please refactor this scanner" in text
+
+
+def test_detail_popup_skips_prompt_card_when_empty(qtbot):
+    """No last_prompt → don't render an empty 'LAST PROMPT' card."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    s = _session(1, "/a")
+    details = _make_full_details(s, last_prompt=None)
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    from PySide6.QtWidgets import QLabel as _QL
+    text = " | ".join(l.text() for l in popup.findChildren(_QL) if l.text())
+    assert "LAST PROMPT" not in text
+
+
+def test_detail_popup_uses_main_panel_style_tokens(qtbot):
+    """Visual-consistency safety net. The popup should reuse the same
+    background colour tokens as the main panel and group cards — no
+    rogue '#' values that would make it look like a different app."""
+    from claude_island.ui.expanded_window import SessionDetailPopup, _BG_SINGLE
+    s = _session(1, "/a")
+    popup = SessionDetailPopup(_make_full_details(s), s)
+    qtbot.addWidget(popup)
+    # Each inner sub-card uses _BG_SINGLE; spot-check by walking the
+    # popup's child QFrames and confirming at least one carries it.
+    from PySide6.QtWidgets import QFrame as _QF
+    frames = popup.findChildren(_QF)
+    assert any(_BG_SINGLE in (f.styleSheet() or "") for f in frames)
+
+
+def test_show_detail_popup_constructs_and_holds_reference(qtbot):
+    """End-to-end-ish: ExpandedWindow._show_detail_popup constructs a
+    popup from the composer's details and keeps a reference so Qt
+    doesn't immediately GC it."""
+    from claude_island.ui.expanded_window import (
+        ExpandedWindow, SessionDetailPopup,
+    )
+    s = _session(1, "/a")
+    details = _make_full_details(s)
+
+    capsule = QWidget()
+    capsule.show()
+    panel = ExpandedWindow(
+        capsule=capsule, controller=IslandController(),
+        get_usage_totals=lambda p: UsageTotals(period=p),
+        get_session_details=lambda _s: details,
+    )
+    qtbot.addWidget(panel)
+    qtbot.addWidget(capsule)
+    panel.refresh_sessions([s])
+
+    btn = panel._rows[1]
+    # Drive the slot directly (bypassing Qt's mouse-event plumbing).
+    from PySide6.QtCore import QPoint
+    panel._show_detail_popup(btn, QPoint(5, 5))
+
+    assert isinstance(panel._active_detail_popup, SessionDetailPopup)
 
 
 def test_session_card_model_breakdown_shows_top_models(qtbot):

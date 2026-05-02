@@ -284,6 +284,19 @@ class UsageRegistry:
                     turns += 1
         return cost, turns, sides
 
+    def get_session_per_model(self, session_uuid: str) -> tuple[ModelTotals, ...]:
+        """Per-model aggregation for a single transcript file.
+
+        Same shape as :meth:`get_totals_by_model` but filtered by
+        ``session_uuid`` instead of a rolling time period. Used by the
+        right-click detail popup's TOKENS section to show one row per
+        model with its own cost + token breakdown. Empty tuple when no
+        records exist for that uuid.
+        """
+        with self._lock:
+            rs = [r for r in self._records if r.session_uuid == session_uuid]
+        return _aggregate_by_model(rs)
+
     def get_session_window(
         self,
         *,
