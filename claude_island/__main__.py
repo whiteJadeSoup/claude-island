@@ -45,7 +45,20 @@ jsonl_parser = JsonlParser(
 # ---------------------------------------------------------------------------
 from claude_island.platform_.file_watcher import FileWatcher
 from claude_island.platform_.process_scanner import ProcessScanner
-from claude_island.platform_.quota_provider import QuotaProvider
+from claude_island.platform_.providers import (
+    ProviderEngine,
+    ensure_provider_config,
+    get_selected_provider,
+    set_selected_provider,
+)
+
+# First-time-user friendly: drop a self-documented providers.json at
+# ~/.claude-island/providers.json so users discover where + how to
+# configure additional providers without trawling the README. No-op
+# if the file already exists.
+ensure_provider_config()
+from claude_island.platform_.providers.anthropic import AnthropicProvider
+from claude_island.platform_.providers.minimax import MiniMaxProvider
 from claude_island.platform_.session_discovery import SessionDiscovery
 from claude_island.platform_ import session_state as session_state_reader
 from claude_island.platform_.window_activator import WindowActivator
@@ -57,13 +70,11 @@ session_discovery = SessionDiscovery(
     scanner=process_scanner,
     registry=session_registry,
 )
-# QuotaProvider hits Anthropic's private /api/oauth/usage with the OAuth
-# token Claude Code already maintains. Cache lives next to our usage DB
-# so all per-user state stays in one platformdirs-resolved location.
-quota_provider = QuotaProvider(
-    credentials_path=Path.home() / ".claude" / ".credentials.json",
-    cache_path=Path(user_data_dir(_APP_NAME, appauthor=False)) / "usage-cache.json",
-    enabled=True,
+# ProviderEngine auto-detects the active provider (Anthropic / MiniMax)
+# and dispatches to the right quota API. Each provider manages its own
+# cache; the engine just calls get() and force_refresh().
+quota_engine = ProviderEngine(
+    cache_dir=Path(user_data_dir(_APP_NAME, appauthor=False)),
 )
 
 # ---------------------------------------------------------------------------
@@ -74,34 +85,67 @@ from PySide6.QtCore import QTimer
 app = QApplication(sys.argv)
 app.setQuitOnLastWindowClosed(False)
 
-from dataclasses import replace
-from datetime import timedelta
-
 from claude_island.ui.capsule_window import CapsuleWindow
 from claude_island.ui.controller import IslandController
 from claude_island.ui.expanded_window import ExpandedWindow
 from claude_island.ui.qt_bridge import QtBridge
 
 
-def _build_session_usage():
-    """Combine the local 5h block with the (optional) remote quota
-    snapshot. Lives here because it's cross-layer wiring: core gives
-    the local block, platform gives the remote quota, UI consumes
-    the combined record. Neither layer should know about the other.
+def _get_quota_snapshot():
+    """Fetch the currently-selected provider's quota snapshot.
 
-    When a quota snapshot is available, we anchor the session window
-    to Anthropic's authoritative reset time: window = [resets_at - 5h,
-    resets_at]. Without it, the registry uses its local approximation
-    (earliest record in the last 5h, plus 5h).
+    Reads the panel's selection at call time (closure pattern) so a
+    tab click immediately re-fetches the right provider. Returns None
+    when no quota is available (provider unconfigured, network error,
+    etc.) — the QUOTA card hides its bars.
     """
-    snap = quota_provider.get()
-    if snap is not None:
-        end_time = snap.five_hour_resets_at
-        since = end_time - timedelta(hours=5)
-        base = usage_registry.get_session_window(since=since, end_time=end_time)
-    else:
-        base = usage_registry.get_session_window()
-    return replace(base, quota=snap)
+    selected = expanded.selected_provider_name() if "expanded" in globals() else None
+    return quota_engine.get(provider_name=selected)
+
+
+def _resolve_available_providers() -> list[str]:
+    """Build the tab list shown in the 5h-session card.
+
+    Anthropic is always present (every Claude Code user has the OAuth
+    credential). MiniMax shows up only when the user has *signalled*
+    they want it — either by setting ``ANTHROPIC_BASE_URL`` to a
+    MiniMax host OR by writing a token into ``providers.json``. If
+    only Anthropic qualifies, ExpandedWindow renders no tabs (single-
+    provider users see the pre-feature look).
+    """
+    available = ["anthropic"]
+    if MiniMaxProvider().detect():
+        available.append("minimax")
+    return available
+
+
+def _on_provider_tab_clicked(name: str) -> None:
+    """User clicked a provider tab. Persist the choice — the next
+    refresh tick will pick up the new selection.
+
+    No force_refresh here: that would block the UI thread on a 3 s
+    HTTP timeout per click. The provider's disk cache (5 min TTL) and
+    the engine's in-memory cache (90 s TTL) make tab switches
+    essentially instant from the user's perspective. The manual ↻
+    button still exists for cases where the user wants to force a
+    network fetch."""
+    set_selected_provider(name)
+
+
+_available_providers = _resolve_available_providers()
+# Honour the user's stored choice, but fall back to the first available
+# provider if the stored name is no longer valid (e.g. user removed the
+# MiniMax token but providers.json still says "selected": "minimax").
+_selected_provider = get_selected_provider()
+if _selected_provider not in _available_providers:
+    _selected_provider = _available_providers[0]
+
+
+def _force_refresh_selected() -> None:
+    """Manual-refresh button hook. Re-fetches whichever provider the
+    user is currently looking at, not the auto-detected default."""
+    selected = expanded.selected_provider_name() if "expanded" in globals() else _selected_provider
+    quota_engine.force_refresh(provider_name=selected)
 
 
 def _build_session_details(session):
@@ -127,13 +171,18 @@ def _build_session_details(session):
     meta = jsonl_parser.get_session_metadata(sess_uuid) or {}
     cost, turns, sides = usage_registry.get_session_summary(sess_uuid)
     per_model = usage_registry.get_session_per_model(sess_uuid)
+    started_at = session_state_reader.parse_started_at(state.get("startedAt"))
+    # Fallback to the earliest JSONL timestamp when sessions JSON is absent
+    # (MiniMax sessions don't write ~/.claude/sessions/<pid>.json).
+    if started_at is None:
+        started_at = meta.get("started_at")
     return SessionDetails(
         session=session,
         name=state.get("name") if isinstance(state.get("name"), str) else None,
         ai_title=meta.get("ai_title"),
         git_branch=meta.get("git_branch"),
         last_prompt=meta.get("last_prompt"),
-        started_at=session_state_reader.parse_started_at(state.get("startedAt")),
+        started_at=started_at,
         status=state.get("status") if isinstance(state.get("status"), str) else None,
         cc_version=state.get("version") or meta.get("version"),
         cost_usd=cost,
@@ -150,9 +199,13 @@ expanded = ExpandedWindow(
     capsule=capsule,
     controller=controller,
     get_usage_totals=usage_registry.get_totals,
-    get_session_usage=_build_session_usage,
-    on_refresh_clicked=quota_provider.force_refresh,
+    get_totals_by_model=usage_registry.get_totals_by_model,
+    get_quota_snapshot=_get_quota_snapshot,
+    on_refresh_clicked=_force_refresh_selected,
     get_session_details=_build_session_details,
+    available_providers=_available_providers,
+    selected_provider=_selected_provider,
+    on_provider_selected=_on_provider_tab_clicked,
 )
 
 # ---------------------------------------------------------------------------
