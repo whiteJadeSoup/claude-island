@@ -151,6 +151,19 @@ _BAR_YELLOW = "#facc15"  # matches _DOT_YELLOW
 _BAR_RED    = "#ef4444"  # Tailwind red-500
 _BAR_STALE  = "#6b7280"
 
+_STYLE_REFRESH_BTN = """
+    QPushButton {
+        color: #888;
+        background: transparent;
+        border: 1px solid #333;
+        border-radius: 10px;
+        font-size: 12px;
+        padding: 0;
+    }
+    QPushButton:hover   { color: #ddd; border-color: #555; }
+    QPushButton:pressed { color: white; background: #2a2a2a; }
+"""
+
 _PROGRESS_BAR_TPL = """
     QProgressBar {{
         border: none;
@@ -376,6 +389,7 @@ class ExpandedWindow(QWidget):
         controller: IslandController,
         get_usage_totals: Callable[[str], UsageTotals],
         get_session_usage: Callable[[], SessionUsage] | None = None,
+        on_refresh_clicked: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self._capsule = capsule
@@ -386,6 +400,12 @@ class ExpandedWindow(QWidget):
         # (e.g. legacy callers, tests), the session card renders an
         # empty placeholder so existing tests aren't broken.
         self._get_session_usage = get_session_usage
+        # Optional manual-refresh hook. Wired in __main__ to bypass the
+        # QuotaProvider's TTL and force an immediate fetch — gives the
+        # user an out when the auto-refresh hasn't caught the latest
+        # state yet (cache TTL is 5 min, heartbeat is 60 s, so worst
+        # case the displayed % can lag 5 min behind reality).
+        self._on_refresh_clicked = on_refresh_clicked
         self._period = "today"
         # Diff-based row update: keep widget references keyed by pid so that
         # session ticks (every ~10s) don't tear down rows the user might be
@@ -449,10 +469,21 @@ class ExpandedWindow(QWidget):
         sep.setStyleSheet(_STYLE_SEP)
         root.addWidget(sep)
 
-        # Usage title
+        # Usage title row: "USAGE" + manual refresh button on the right.
+        usage_header = QHBoxLayout()
+        usage_header.setSpacing(6)
         usage_title = QLabel("USAGE")
         usage_title.setStyleSheet(_STYLE_TITLE)
-        root.addWidget(usage_title)
+        usage_header.addWidget(usage_title)
+        usage_header.addStretch()
+        self._refresh_btn = QPushButton("↻")
+        self._refresh_btn.setStyleSheet(_STYLE_REFRESH_BTN)
+        self._refresh_btn.setFixedSize(20, 20)
+        self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_btn.setToolTip("Refresh quota now")
+        self._refresh_btn.clicked.connect(self._on_manual_refresh)
+        usage_header.addWidget(self._refresh_btn)
+        root.addLayout(usage_header)
 
         # ── 5h session card (top, highlighted) ────────────────────────
         self._session_card = self._build_session_card()
@@ -541,6 +572,25 @@ class ExpandedWindow(QWidget):
         continues to fire this on every DB change."""
         self._refresh_session_card()
         self._refresh_period_card()
+
+    def _on_manual_refresh(self) -> None:
+        """User clicked the ↻ button. Force a quota fetch (bypassing
+        the QuotaProvider's TTL) and immediately redraw the cards.
+
+        The fetch is synchronous on the Qt main thread — we live with
+        the ~3s worst-case HTTP timeout (matches the rest of the
+        provider) because the user is staring at the UI waiting for it
+        to update; an async dance with a spinner is overkill here."""
+        if self._on_refresh_clicked is not None:
+            try:
+                self._on_refresh_clicked()
+            except Exception as exc:
+                # Manual refresh must never crash the UI; the worst
+                # case is "you press it and nothing changes".
+                import sys as _sys
+                print(f"[claude-island] manual refresh failed: {exc}",
+                      file=_sys.stderr)
+        self.refresh_usage_bar()
 
     # ------------------------------------------------------------------
     # USAGE: session card (top, 5h Anthropic block)

@@ -26,6 +26,12 @@ from claude_island.core.models import QuotaSnapshot
 from claude_island.platform_ import quota_provider as qp_mod
 from claude_island.platform_.quota_provider import QuotaProvider, _CACHE_VERSION
 
+# Reset timestamps used by every fixture must stay in the future, otherwise
+# QuotaProvider treats the cache as window-expired and returns None. Compute
+# at import time so the values don't drift between assertions inside one test.
+_FUTURE_FIVE = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+_FUTURE_SEVEN = (datetime.now(timezone.utc) + timedelta(days=4)).isoformat()
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -42,11 +48,11 @@ def _good_response(five_pct: float = 53.0, seven_pct: float = 17.0) -> dict:
     return {
         "five_hour": {
             "utilization": five_pct,
-            "resets_at": "2026-05-01T20:00:00+00:00",
+            "resets_at": _FUTURE_FIVE,
         },
         "seven_day": {
             "utilization": seven_pct,
-            "resets_at": "2026-05-08T16:00:00+00:00",
+            "resets_at": _FUTURE_SEVEN,
         },
     }
 
@@ -162,8 +168,8 @@ def test_expired_cache_served_stale_when_refresh_fails(paths):
     paths["cache"].write_text(json.dumps({
         "version": _CACHE_VERSION,
         "fetched_at": old.isoformat(),
-        "five_hour": {"utilization": 88.0, "resets_at": "2026-05-01T20:00:00+00:00"},
-        "seven_day": {"utilization": 22.0, "resets_at": "2026-05-08T16:00:00+00:00"},
+        "five_hour": {"utilization": 88.0, "resets_at": _FUTURE_FIVE},
+        "seven_day": {"utilization": 22.0, "resets_at": _FUTURE_SEVEN},
     }), encoding="utf-8")
 
     p = QuotaProvider(credentials_path=paths["creds"], cache_path=paths["cache"])
@@ -189,8 +195,8 @@ def test_very_old_cache_marked_is_stale(paths):
     paths["cache"].write_text(json.dumps({
         "version": _CACHE_VERSION,
         "fetched_at": very_old.isoformat(),
-        "five_hour": {"utilization": 11.0, "resets_at": "2026-05-01T20:00:00+00:00"},
-        "seven_day": {"utilization": 3.0,  "resets_at": "2026-05-08T16:00:00+00:00"},
+        "five_hour": {"utilization": 11.0, "resets_at": _FUTURE_FIVE},
+        "seven_day": {"utilization": 3.0,  "resets_at": _FUTURE_SEVEN},
     }), encoding="utf-8")
 
     p = QuotaProvider(credentials_path=paths["creds"], cache_path=paths["cache"])
@@ -279,6 +285,78 @@ def test_concurrent_calls_serialise_through_lock(paths):
 # Bonus: malformed responses are rejected (don't poison the cache)
 # ---------------------------------------------------------------------------
 
+def test_window_expired_cache_returns_none_and_triggers_refresh(paths):
+    """When the cached snapshot's resets_at is in the past, get() must
+    treat the cache as invalid (regardless of fetched_at age) and try
+    a fresh fetch. If the fetch fails too, we surface None — never a
+    misleading 'still 75% used' for a window that's already ended."""
+    _good_creds(paths["creds"])
+    # Cache fetched 1 min ago (well within TTL) but with resets_at
+    # already 1 min in the past — window expired.
+    fresh = datetime.now(timezone.utc) - timedelta(minutes=1)
+    past_resets = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    paths["cache"].write_text(json.dumps({
+        "version": _CACHE_VERSION,
+        "fetched_at": fresh.isoformat(),
+        "five_hour": {"utilization": 75.0, "resets_at": past_resets},
+        "seven_day": {"utilization": 5.0,  "resets_at": _FUTURE_SEVEN},
+    }), encoding="utf-8")
+
+    p = QuotaProvider(credentials_path=paths["creds"], cache_path=paths["cache"])
+
+    # Refresh fails → expect None (never serve the expired cache).
+    with patch.object(qp_mod.urllib.request, "urlopen",
+                      _mock_urlopen(exc=URLError("offline"))):
+        snap = p.get()
+    assert snap is None
+
+
+def test_force_refresh_bypasses_ttl(paths):
+    """force_refresh() must hit the network even if the cache is fresh
+    by age — that's its whole point. Used by the manual ↻ button."""
+    _good_creds(paths["creds"])
+    # Plant a brand-new cache. Normal get() would return it without an
+    # HTTP call.
+    fresh = datetime.now(timezone.utc)
+    paths["cache"].write_text(json.dumps({
+        "version": _CACHE_VERSION,
+        "fetched_at": fresh.isoformat(),
+        "five_hour": {"utilization": 10.0, "resets_at": _FUTURE_FIVE},
+        "seven_day": {"utilization": 5.0,  "resets_at": _FUTURE_SEVEN},
+    }), encoding="utf-8")
+
+    p = QuotaProvider(credentials_path=paths["creds"], cache_path=paths["cache"])
+
+    fake = _mock_urlopen(_good_response(five_pct=99.0))
+    with patch.object(qp_mod.urllib.request, "urlopen", fake):
+        snap = p.force_refresh()
+
+    # The HTTP call DID fire; the new value (99) replaces the cached 10.
+    assert fake.call_count == 1
+    assert snap is not None
+    assert snap.five_hour_pct == 99.0
+
+
+def test_force_refresh_failure_returns_none_does_not_fall_back_to_cache(paths):
+    """When the user explicitly asks for fresh and we can't deliver,
+    we return None rather than lie with a cached value. The next regular
+    get() is free to fall back to cache; force_refresh() is the loud one."""
+    _good_creds(paths["creds"])
+    fresh = datetime.now(timezone.utc)
+    paths["cache"].write_text(json.dumps({
+        "version": _CACHE_VERSION,
+        "fetched_at": fresh.isoformat(),
+        "five_hour": {"utilization": 10.0, "resets_at": _FUTURE_FIVE},
+        "seven_day": {"utilization": 5.0,  "resets_at": _FUTURE_SEVEN},
+    }), encoding="utf-8")
+    p = QuotaProvider(credentials_path=paths["creds"], cache_path=paths["cache"])
+
+    with patch.object(qp_mod.urllib.request, "urlopen",
+                      _mock_urlopen(exc=URLError("offline"))):
+        snap = p.force_refresh()
+    assert snap is None
+
+
 def test_malformed_response_does_not_overwrite_good_cache(paths):
     """Plant a good cache, then have the endpoint return junk on refresh
     after TTL — we should keep the good cache, not poison it."""
@@ -287,8 +365,8 @@ def test_malformed_response_does_not_overwrite_good_cache(paths):
     paths["cache"].write_text(json.dumps({
         "version": _CACHE_VERSION,
         "fetched_at": fresh.isoformat(),
-        "five_hour": {"utilization": 77.0, "resets_at": "2026-05-01T20:00:00+00:00"},
-        "seven_day": {"utilization": 5.0, "resets_at": "2026-05-08T16:00:00+00:00"},
+        "five_hour": {"utilization": 77.0, "resets_at": _FUTURE_FIVE},
+        "seven_day": {"utilization": 5.0, "resets_at": _FUTURE_SEVEN},
     }), encoding="utf-8")
 
     p = QuotaProvider(credentials_path=paths["creds"], cache_path=paths["cache"])

@@ -57,9 +57,26 @@ _PERIOD_DELTA: dict[str, timedelta] = {
 
 
 def _today_cutoff() -> datetime:
-    """Midnight UTC of the current calendar day."""
-    now = datetime.now(timezone.utc)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    """Midnight in the user's *local* timezone, returned as a UTC
+    timestamp so it can compare with the records' UTC ``timestamp``.
+
+    Why local instead of UTC: a user in UTC+8 sees "today" as the
+    period since their 00:00 — which is UTC-8 of the previous calendar
+    day. Filtering by UTC midnight would silently exclude everything
+    they did before their local 08:00 (= UTC 00:00) and report
+    "Today $0" until they crossed that line. Using their local
+    midnight matches what they expect "today" to mean.
+    """
+    # ``datetime.now()`` is naive; .astimezone() attaches the system
+    # local timezone; .replace() snaps to that day's local 00:00; a
+    # second .astimezone(UTC) converts the result back to UTC for the
+    # ``timestamp >= cutoff`` comparison against UTC-stamped records.
+    local_midnight = (
+        datetime.now()
+        .astimezone()
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+    return local_midnight.astimezone(timezone.utc)
 
 
 def _period_cutoff(period: str) -> datetime:

@@ -67,15 +67,15 @@ class QuotaProvider:
 
     def get(self) -> QuotaSnapshot | None:
         """Return the freshest QuotaSnapshot we know, or ``None`` when
-        disabled / no credentials / no cache yet and refresh failed.
+        disabled / no credentials / no fresh data and no usable cache.
 
         Decision tree:
-        - enabled=False                 → None
-        - cache age ≤ TTL               → return cached (fresh)
-        - cache age > TTL or no cache   → try refresh
-            ↳ success                   → write cache, return fresh
-            ↳ failure but cache exists  → return cached, is_stale=True
-            ↳ failure and no cache      → None
+        - enabled=False                              → None
+        - cache fresh by age AND window not expired  → return cached
+        - cache stale OR window expired OR missing   → try refresh
+            ↳ success                                → write cache, return fresh
+            ↳ failure but cache has unexpired window → cached (is_stale=True)
+            ↳ failure and no usable cache            → None
         """
         if not self._enabled:
             return None
@@ -84,8 +84,16 @@ class QuotaProvider:
             cached = self._read_cache()
             now = datetime.now(timezone.utc)
 
+            # Fast path: cache is fresh by age AND describes a window
+            # that hasn't ended yet. _snapshot_from_cache returns None
+            # when the cached resets_at is in the past, in which case
+            # we fall through to the refresh path even if cache age
+            # is < TTL — Anthropic has already moved to a new block
+            # and our cached % is no longer meaningful.
             if cached is not None and not _is_expired(cached, now, POLL_TTL_SECONDS):
-                return _snapshot_from_cache(cached, now)
+                snap = _snapshot_from_cache(cached, now)
+                if snap is not None:
+                    return snap
 
             token = self._read_token()
             fresh = None
@@ -97,10 +105,35 @@ class QuotaProvider:
                 self._write_cache(payload)
                 return _snapshot_from_cache(payload, now)
 
-            # Refresh failed — serve last-good if we have one.
+            # Refresh failed — serve last-good if window is still valid.
+            # _snapshot_from_cache returns None for expired windows so
+            # we never lie about a block that already ended.
             if cached is not None:
                 return _snapshot_from_cache(cached, now)
             return None
+
+    def force_refresh(self) -> QuotaSnapshot | None:
+        """Bypass the TTL and issue a fresh fetch immediately.
+
+        Used by the manual-refresh button. Returns the new snapshot on
+        success, or None on any failure (no fallback to cache — when
+        the user explicitly asks for fresh, returning a stale value
+        would be misleading; let the next regular ``get()`` rebuild
+        from cache if the user prefers stale-over-nothing).
+        """
+        if not self._enabled:
+            return None
+        with self._lock:
+            token = self._read_token()
+            if token is None:
+                return None
+            fresh = self._fetch(token)
+            if fresh is None:
+                return None
+            now = datetime.now(timezone.utc)
+            payload = _normalise_payload(fresh, fetched_at=now)
+            self._write_cache(payload)
+            return _snapshot_from_cache(payload, now)
 
     # ------------------------------------------------------------------
     # Internal: cache I/O
@@ -246,8 +279,14 @@ def _parse_iso(s: object) -> datetime | None:
 def _snapshot_from_cache(cached: dict, now: datetime) -> QuotaSnapshot | None:
     """Materialise a QuotaSnapshot from the on-disk cache dict.
 
-    Returns None if the cache is unreadable enough that we can't fill
-    the dataclass — caller treats that as "no quota available".
+    Returns None when:
+    - the cache shape is malformed enough that we can't fill the
+      dataclass (caller treats this as "no quota available"), or
+    - the 5-hour window described by the cache has already ended
+      (``resets_at <= now``) — that snapshot describes a past block
+      and Anthropic is already counting against a new one, so the
+      utilization % would be misleading. Returning None forces the
+      caller to either get a fresh fetch or hide the progress bar.
     """
     fetched_at = _parse_iso(cached.get("fetched_at"))
     five_hour = cached.get("five_hour")
@@ -258,6 +297,9 @@ def _snapshot_from_cache(cached: dict, now: datetime) -> QuotaSnapshot | None:
     five_resets = _parse_iso(five_hour.get("resets_at"))
     seven_resets = _parse_iso(seven_day.get("resets_at"))
     if five_resets is None or seven_resets is None:
+        return None
+    # Window-expired: don't serve a snapshot describing a past block.
+    if five_resets <= now:
         return None
     age_seconds = (now - fetched_at).total_seconds()
     return QuotaSnapshot(

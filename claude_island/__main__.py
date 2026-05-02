@@ -110,6 +110,7 @@ expanded = ExpandedWindow(
     controller=controller,
     get_usage_totals=usage_registry.get_totals,
     get_session_usage=_build_session_usage,
+    on_refresh_clicked=quota_provider.force_refresh,
 )
 
 # ---------------------------------------------------------------------------
