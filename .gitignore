@@ -41,3 +41,7 @@ poetry.lock
 # Scratch files (commit message buffers, repro scripts)
 _*.txt
 _*.py
+# ...but never ignore Python's package marker, even though it starts
+# with an underscore. Without this exception, every new sub-package's
+# __init__.py needs `git add -f` to stage.
+!__init__.py
