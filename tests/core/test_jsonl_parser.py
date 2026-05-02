@@ -384,3 +384,25 @@ def test_naive_timestamp_row_is_included_in_daily_totals(env):
     assert totals.input_tokens == 42, (
         "naive-timestamp row dropped from daily totals due to lex-order bug"
     )
+
+
+def test_earliest_timestamp_becomes_started_at(env):
+    """get_session_metadata returns the earliest timestamp as 'started_at',
+    enabling the detail popup to show 'Created' even when
+    ~/.claude/sessions/<pid>.json is absent (MiniMax sessions)."""
+    reg, parser, jsonl = env
+
+    ts_old = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    ts_mid = datetime(2026, 1, 1, 14, 0, 0, tzinfo=timezone.utc)
+    ts_new = datetime(2026, 1, 1, 16, 0, 0, tzinfo=timezone.utc)
+    jsonl.write_bytes(
+        _line_with_ts(ts_old.isoformat(), input_tokens=10) + b"\n"
+        + _line_with_ts(ts_mid.isoformat(), input_tokens=20) + b"\n"
+        + _line_with_ts(ts_new.isoformat(), input_tokens=30) + b"\n"
+    )
+
+    parser.parse_file(jsonl)
+
+    meta = parser.get_session_metadata(jsonl.stem)
+    assert meta.get("started_at") is not None
+    assert meta["started_at"] == ts_old  # earliest, not latest

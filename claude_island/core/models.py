@@ -62,27 +62,73 @@ class UsageRecord:
 
 @dataclass(frozen=True)
 class PricingTable:
-    """Per-model pricing in USD per million tokens."""
+    """Per-model pricing in USD per million tokens.
+
+    ``cache_write_per_mtok`` / ``cache_read_per_mtok`` are optional.
+    When None they fall back to Anthropic's standard ratios
+    (write = 1.25 × input, read = 0.1 × input) — that ratio holds for
+    every Anthropic model and also for MiniMax cache writes, so most
+    entries can leave them unset. Override them when a provider
+    publishes a different cache rate (e.g. MiniMax-M2.7's cache_read
+    is $0.06/Mtok = 0.2 × input, not 0.1 ×).
+    """
     input_per_mtok: float
     output_per_mtok: float
+    cache_write_per_mtok: float | None = None
+    cache_read_per_mtok: float | None = None
+
+    def cw_rate(self) -> float:
+        """Effective cache-write $/Mtok: explicit value or 1.25 × input."""
+        if self.cache_write_per_mtok is not None:
+            return self.cache_write_per_mtok
+        return self.input_per_mtok * 1.25
+
+    def cr_rate(self) -> float:
+        """Effective cache-read $/Mtok: explicit value or 0.1 × input."""
+        if self.cache_read_per_mtok is not None:
+            return self.cache_read_per_mtok
+        return self.input_per_mtok * 0.1
 
 
-# Per-Mtok input/output rates from Anthropic's official API pricing
-# table (https://platform.claude.com/docs/en/about-claude/pricing,
-# fetched 2026-05-01). Cache write is ×1.25 input (5-min ephemeral —
-# the SDK default), cache read is ×0.1 input.
+# Per-Mtok input/output rates compiled from each provider's official
+# pricing page. Lookup is length-descending substring match (see
+# usage_registry._resolve_pricing): a model id like
+# "MiniMax-M2.7-highspeed" matches the longest applicable key first,
+# falling back to the family token (e.g. "sonnet") for unknown
+# version suffixes.
 #
-# Heads-up: Opus dropped from $15/$75 (3.x and 4.0/4.1) to $5/$25
-# starting with 4.5 and held through 4.6 and 4.7 — if a user is on
-# legacy 4.0/4.1 the rate substring match still routes to "opus" but
-# the cost is silently 3× under-reported for them. Acceptable trade-off:
-# Anthropic's recent versions converge on the new rate, and the substring
-# match keeps working as new opus-N versions ship. Revisit if Anthropic
-# fragments the 4.x family.
+# Anthropic — https://platform.claude.com/docs/en/about-claude/pricing
+#   Heads-up: Opus dropped from $15/$75 (3.x, 4.0, 4.1) to $5/$25
+#   starting with 4.5 and held through 4.6/4.7 — legacy 4.0/4.1 are
+#   silently 3× under-reported. Acceptable trade-off: recent versions
+#   converge on the new rate.
+#
+# MiniMax — https://platform.minimax.io/docs/guides/pricing-paygo
+#   M2 / M2.1 / M2.5 / M2.7 share input ($0.30) and output ($1.20)
+#   rates; only cache_read varies (M2.7 = $0.06, others = $0.03).
+#   "-highspeed" variants are 2× input/output, identical cache rates.
+#   The MiniMax Coding-Plan API returns "MiniMax-M*" as a wildcard
+#   model name; we treat it as M2.7 (the current flagship that
+#   MiniMax's own setup docs name). Cache write is $0.375/Mtok
+#   (= 1.25 × input, matching Anthropic's ratio) so it falls through
+#   to the default.
 PRICING: dict[str, PricingTable] = {
+    # Anthropic — substring tokens
     "haiku":  PricingTable(input_per_mtok=1.0, output_per_mtok=5.0),
     "sonnet": PricingTable(input_per_mtok=3.0, output_per_mtok=15.0),
     "opus":   PricingTable(input_per_mtok=5.0, output_per_mtok=25.0),
+    # MiniMax — exact + variant suffix matches. Length-descending
+    # iteration in _resolve_pricing means "MiniMax-M2.7-highspeed"
+    # picks its specific entry before the shorter "MiniMax-M2.7" /
+    # "MiniMax-M*" entries.
+    "MiniMax-M2.7-highspeed": PricingTable(0.60, 2.40, cache_read_per_mtok=0.06),
+    "MiniMax-M2.5-highspeed": PricingTable(0.60, 2.40, cache_read_per_mtok=0.03),
+    "MiniMax-M2.1-highspeed": PricingTable(0.60, 2.40, cache_read_per_mtok=0.03),
+    "MiniMax-M2.7":           PricingTable(0.30, 1.20, cache_read_per_mtok=0.06),
+    "MiniMax-M2.5":           PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
+    "MiniMax-M2.1":           PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
+    "MiniMax-M*":             PricingTable(0.30, 1.20, cache_read_per_mtok=0.06),
+    "MiniMax-M2":             PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
 }
 DEFAULT_PRICING = PricingTable(input_per_mtok=3.0, output_per_mtok=15.0)
 
@@ -122,14 +168,13 @@ class ModelTotals:
 
 @dataclass(frozen=True)
 class QuotaSnapshot:
-    """One snapshot of Anthropic's private /api/oauth/usage endpoint.
+    """One snapshot of a provider's quota API (Anthropic or MiniMax).
 
     Mirrors what Claude Code's /status command shows: the user's
-    consumer-plan 5-hour-session and 7-day usage percentages plus when
-    each window resets. Reverse-engineered — Anthropic does not
-    advertise this as a public API and the call may break or be
-    blocked at any time, hence the ``is_stale`` flag for callers that
-    want to display a degraded indicator instead of going dark.
+    5-hour-session and 7-day usage percentages plus when each window
+    resets. Reverse-engineered — these are private APIs and may break
+    or be blocked at any time, hence the ``is_stale`` flag for callers
+    that want to display a degraded indicator instead of going dark.
     """
     five_hour_pct: float            # 0..100
     five_hour_resets_at: datetime
@@ -137,6 +182,7 @@ class QuotaSnapshot:
     seven_day_resets_at: datetime
     fetched_at: datetime
     is_stale: bool                  # True when fetched_at is older than 3*TTL
+    provider: str = "anthropic"    # "anthropic" | "minimax"
 
 
 @dataclass(frozen=True)

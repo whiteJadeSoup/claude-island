@@ -159,6 +159,10 @@ class JsonlParser:
         batch: list[UsageRecord] = []
         last_activity: datetime | None = None
         meta = self._session_meta.setdefault(session_uuid, {})
+        # Track the earliest timestamp so the detail popup can show the
+        # session start time even when ~/.claude/sessions/<pid>.json is
+        # absent (MiniMax sessions don't write that file).
+        earliest_ts: datetime | None = None
 
         for raw_line in complete_lines:
             raw_line = raw_line.strip()
@@ -198,6 +202,12 @@ class JsonlParser:
             ts = _parse_ts(entry)
             usage, model = _extract_usage(entry)
 
+            # Track the earliest timestamp across all entries in this file.
+            # The first entry of a transcript is always a "type": "user" row
+            # with the session start time, so min(timestamps) ≈ session start.
+            if ts is not None and (earliest_ts is None or ts < earliest_ts):
+                earliest_ts = ts
+
             if usage and ts:
                 # Pull the API ``message.id`` for dedup. Claude Code
                 # writes the same response usage across N JSONL rows
@@ -220,6 +230,15 @@ class JsonlParser:
                 ))
                 if last_activity is None or ts > last_activity:
                     last_activity = ts
+
+        # Persist the earliest timestamp so the detail popup can show
+        # "Created" even when ~/.claude/sessions/<pid>.json is absent
+        # (MiniMax sessions don't write that file). latest-wins for other
+        # fields; earliest-wins for started_at.
+        if earliest_ts is not None:
+            existing = meta.get("started_at")
+            if existing is None or earliest_ts < existing:
+                meta["started_at"] = earliest_ts
 
         # Advance offset and emit records. Order is important: advance
         # offset BEFORE the registry call so a watchdog event firing

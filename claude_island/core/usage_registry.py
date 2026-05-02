@@ -49,7 +49,16 @@ _SESSION_WINDOW_HOURS = 5
 # Rolling windows, not calendar periods — "monthly" is the trailing
 # 30 days, not the current calendar month. Avoids month-boundary edge
 # cases at the cost of a small UI-label ambiguity.
+#
+# "5h" is a rolling spend window (last 5 hours), distinct from the
+# provider-specific quota window. The two often overlap but conceptually
+# differ: spend = "what did I run in the last 5 hours" (cross-provider,
+# JSONL-derived); quota = "how much of THIS provider's 5h bucket is
+# used" (provider-specific, anchored to that provider's reset clock).
+# Putting both in the period selector lets the user compare 5h spend
+# alongside daily/weekly/monthly without conflating with quota.
 _PERIOD_DELTA: dict[str, timedelta] = {
+    "5h":      timedelta(hours=5),
     "daily":   timedelta(days=1),
     "weekly":  timedelta(weeks=1),
     "monthly": timedelta(days=30),
@@ -88,18 +97,27 @@ def _period_cutoff(period: str) -> datetime:
 
 
 def _resolve_pricing(model: str) -> PricingTable:
-    """Map an API model id to its pricing entry. Substring match so we
-    survive Anthropic's version-suffixing (``claude-3-5-sonnet-20241022``
-    → "sonnet"). Iteration order is the dict's insertion order
-    (haiku, sonnet, opus); the family tokens don't appear in each
-    other's names so the order is safe. Unknown / empty model falls
-    back to DEFAULT_PRICING (Sonnet rates) — preferable to crashing,
-    means an unknown future family gets priced as Sonnet until the
-    table is updated.
+    """Map an API model id to its pricing entry.
+
+    Length-descending substring match so the most-specific key wins:
+    "MiniMax-M2.7-highspeed" matches its own entry before the shorter
+    "MiniMax-M2.7", which matches before the family token "sonnet" /
+    "opus" / "haiku" (which appear in dirty Anthropic ids like
+    ``claude-3-5-sonnet-20241022``).
+
+    Comparison is case-insensitive on both sides so the table can keep
+    readable mixed-case keys ("MiniMax-M2.7") while still matching
+    lowercased model ids.
+
+    Unknown / empty model → DEFAULT_PRICING (Sonnet rates). Preferable
+    to crashing — an unknown future family gets priced as Sonnet until
+    the table is updated. The cost will be visibly off for non-Sonnet
+    families (MiniMax under-priced ~10×, etc), so add new entries
+    promptly when a new family appears.
     """
     lower = model.lower()
-    for key, pricing in PRICING.items():
-        if key in lower:
+    for key, pricing in sorted(PRICING.items(), key=lambda kv: -len(kv[0])):
+        if key.lower() in lower:
             return pricing
     return DEFAULT_PRICING
 
@@ -130,8 +148,8 @@ def _aggregate_by_model(
         cost = (
             agg["input"] / 1_000_000 * p.input_per_mtok
             + agg["output"] / 1_000_000 * p.output_per_mtok
-            + agg["cw"] / 1_000_000 * p.input_per_mtok * 1.25
-            + agg["cr"] / 1_000_000 * p.input_per_mtok * 0.1
+            + agg["cw"] / 1_000_000 * p.cw_rate()
+            + agg["cr"] / 1_000_000 * p.cr_rate()
         )
         out.append(ModelTotals(
             model=model,
@@ -240,8 +258,8 @@ class UsageRegistry:
             p = _resolve_pricing(m.model)
             totals.input_cost          += m.input_tokens / 1_000_000 * p.input_per_mtok
             totals.output_cost         += m.output_tokens / 1_000_000 * p.output_per_mtok
-            totals.cache_creation_cost += m.cache_creation_tokens / 1_000_000 * p.input_per_mtok * 1.25
-            totals.cache_read_cost     += m.cache_read_tokens / 1_000_000 * p.input_per_mtok * 0.1
+            totals.cache_creation_cost += m.cache_creation_tokens / 1_000_000 * p.cw_rate()
+            totals.cache_read_cost     += m.cache_read_tokens / 1_000_000 * p.cr_rate()
         return totals
 
     def get_totals_by_model(self, period: str) -> tuple[ModelTotals, ...]:
@@ -275,8 +293,8 @@ class UsageRegistry:
                 cost += (
                     r.input_tokens / 1_000_000 * p.input_per_mtok
                     + r.output_tokens / 1_000_000 * p.output_per_mtok
-                    + r.cache_creation_tokens / 1_000_000 * p.input_per_mtok * 1.25
-                    + r.cache_read_tokens / 1_000_000 * p.input_per_mtok * 0.1
+                    + r.cache_creation_tokens / 1_000_000 * p.cw_rate()
+                    + r.cache_read_tokens / 1_000_000 * p.cr_rate()
                 )
                 if r.is_sidechain:
                     sides += 1

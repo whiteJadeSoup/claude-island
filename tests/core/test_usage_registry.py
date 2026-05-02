@@ -162,6 +162,20 @@ def test_get_totals_excludes_records_outside_period(registry):
     assert t.input_tokens == 1
 
 
+def test_get_totals_5h_window_excludes_older_records(registry):
+    """The "5h" period is a rolling 5-hour window for cross-provider
+    spend — distinct from the per-provider quota window. A record from
+    6 hours ago must not appear; one from 4 hours ago must."""
+    six_h_ago = datetime.now(timezone.utc) - timedelta(hours=6)
+    four_h_ago = datetime.now(timezone.utc) - timedelta(hours=4)
+    registry.record_many([
+        _record(when=six_h_ago, input_tokens=999),   # too old
+        _record(when=four_h_ago, input_tokens=42),   # in-window
+    ])
+    t = registry.get_totals("5h")
+    assert t.input_tokens == 42
+
+
 # --------------------------------------------------------------------------
 # M1-M2: per-model breakdown
 # --------------------------------------------------------------------------
@@ -284,6 +298,104 @@ def test_opus_pricing_matches_anthropic_5_25_per_mtok(registry):
     assert len(rows) == 1
     # Tolerate tiny floating-point drift; the third-party showed $11.0258
     assert abs(rows[0].cost_usd - 11.0259) < 0.01
+
+
+# --------------------------------------------------------------------------
+# MiniMax pricing: regression for the "MiniMax-M2.7 priced as Sonnet"
+# bug. Before the multi-provider PRICING table, _resolve_pricing fell
+# through to DEFAULT (Sonnet $3/$15) for any non-Anthropic model id,
+# inflating MiniMax cost ~10×. These tests pin the new behaviour.
+# --------------------------------------------------------------------------
+
+def test_minimax_m2_7_priced_at_paygo_rates(registry):
+    """1M input + 1M output of MiniMax-M2.7 must price at $0.30 + $1.20
+    = $1.50, not Sonnet's $3 + $15 = $18 (10× over). Cache_read is
+    M2.7's documented $0.06/Mtok, distinct from the M2.5 $0.03 rate."""
+    registry.record_many([_record(
+        model="MiniMax-M2.7",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        cache_read_tokens=1_000_000,
+    )])
+    rows = registry.get_totals_by_model("today")
+    assert len(rows) == 1
+    # 0.30 + 1.20 + 0.06 (M2.7 cache_read) = 1.56
+    assert abs(rows[0].cost_usd - 1.56) < 0.0001
+
+
+def test_minimax_m2_5_uses_distinct_cache_read_rate(registry):
+    """M2.5 cache_read is $0.03 (= 0.1 × input), M2.7 is $0.06. Make
+    sure the right entry is picked even though input/output match."""
+    registry.record_many([_record(
+        model="MiniMax-M2.5",
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=1_000_000,
+    )])
+    rows = registry.get_totals_by_model("today")
+    assert abs(rows[0].cost_usd - 0.03) < 0.0001
+
+
+def test_minimax_highspeed_variant_doubles_io_keeps_cache(registry):
+    """-highspeed SKUs are 2× input/output, identical cache rates.
+    Length-descending lookup must pick the longer "-highspeed" key
+    before the shorter "MiniMax-M2.7" parent entry."""
+    registry.record_many([_record(
+        model="MiniMax-M2.7-highspeed",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+    )])
+    rows = registry.get_totals_by_model("today")
+    # 0.60 + 2.40 = 3.00
+    assert abs(rows[0].cost_usd - 3.00) < 0.0001
+
+
+def test_minimax_m_wildcard_falls_back_to_m2_7_rates(registry):
+    """The MiniMax Coding-Plan API returns ``model_name: "MiniMax-M*"``
+    as a literal wildcard. We treat it as M2.7 (the current flagship,
+    only model named in MiniMax's own Claude Code setup docs)."""
+    registry.record_many([_record(
+        model="MiniMax-M*",
+        input_tokens=1_000_000,
+        cache_read_tokens=1_000_000,
+    )])
+    rows = registry.get_totals_by_model("today")
+    # 0.30 (input) + 0.06 (M2.7 cache_read) = 0.36
+    assert abs(rows[0].cost_usd - 0.36) < 0.0001
+
+
+def test_resolve_pricing_length_descending_priority():
+    """Direct test of _resolve_pricing: the most-specific key wins.
+    Without length-descending iteration, "MiniMax-M2" would match
+    "MiniMax-M2.7-highspeed" first (insertion order) and price the
+    -highspeed SKU at parent-family rates."""
+    from claude_island.core.usage_registry import _resolve_pricing
+    p = _resolve_pricing("MiniMax-M2.7-highspeed")
+    assert p.input_per_mtok == 0.60
+    assert p.output_per_mtok == 2.40
+
+    p = _resolve_pricing("MiniMax-M2.7")
+    assert p.input_per_mtok == 0.30
+    assert p.cache_read_per_mtok == 0.06
+
+    # Anthropic dirty id still routes to the family token
+    p = _resolve_pricing("claude-3-5-sonnet-20241022")
+    assert p.input_per_mtok == 3.0
+
+
+def test_pricing_table_cache_rate_fallbacks():
+    """When cache_read/write are None, fall back to Anthropic's
+    standard ratios (1.25× / 0.1× input). When set, the explicit
+    value wins. Both branches matter — Anthropic uses None (ratio),
+    MiniMax-M2.7 uses explicit ($0.06)."""
+    from claude_island.core.models import PricingTable
+    p_anth = PricingTable(input_per_mtok=3.0, output_per_mtok=15.0)
+    assert p_anth.cw_rate() == pytest.approx(3.75)   # 3.0 × 1.25
+    assert p_anth.cr_rate() == pytest.approx(0.30)   # 3.0 × 0.1
+
+    p_mm = PricingTable(0.30, 1.20, cache_read_per_mtok=0.06)
+    assert p_mm.cr_rate() == pytest.approx(0.06)     # explicit wins
+    assert p_mm.cw_rate() == pytest.approx(0.375)    # falls back to 0.30 × 1.25
 
 
 # --------------------------------------------------------------------------
