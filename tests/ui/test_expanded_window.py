@@ -350,6 +350,30 @@ def _make_session_usage(
     )
 
 
+def _panel_with_quota(qtbot, *, quota=None, totals=None, by_model=None):
+    """Build a panel wired with the new SPEND + QUOTA APIs.
+
+    ``quota``    — drives the QUOTA card (bars / pct / reset).
+    ``totals``   — drives the SPEND card amount + I/O lines.
+    ``by_model`` — drives the SPEND card per-model breakdown.
+
+    Use this helper instead of ``_panel_with_session`` for any test
+    that exercises the post-A2 layout. The legacy helper passes
+    ``get_session_usage`` which the new cards no longer read."""
+    capsule = QWidget()
+    capsule.show()
+    p = ExpandedWindow(
+        capsule=capsule,
+        controller=IslandController(),
+        get_usage_totals=lambda period: (totals or UsageTotals(period=period)),
+        get_totals_by_model=(lambda _period: by_model) if by_model is not None else None,
+        get_quota_snapshot=(lambda: quota) if quota is not None else None,
+    )
+    qtbot.addWidget(p)
+    qtbot.addWidget(capsule)
+    return p
+
+
 def _make_quota(*, five_pct: float = 53.0, is_stale: bool = False):
     now = datetime.now(timezone.utc)
     return _QuotaSnapshot(
@@ -362,72 +386,59 @@ def _make_quota(*, five_pct: float = 53.0, is_stale: bool = False):
     )
 
 
-def test_session_card_active_with_quota_shows_amount_bar_and_pct(qtbot):
-    """U1: active session + quota present → amount text rendered, progress
-    bar visible with the right value, % text shown."""
-    su = _make_session_usage(quota=_make_quota(five_pct=53.0))
-    p = _panel_with_session(qtbot, lambda: su)
+def test_quota_card_with_quota_shows_bar_and_pct(qtbot):
+    """U1: quota snapshot present → 5h bar visible, value matches pct,
+    % text rendered next to the bar."""
+    p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=53.0))
     p.refresh_usage_bar()
 
-    assert "$" in p._session_amount.text()
-    assert p._session_bar.isVisibleTo(p._session_card)
-    assert p._session_bar.value() == 53
-    assert "53%" in p._session_pct.text()
+    assert p._quota_bar_5h.isVisibleTo(p._quota_card)
+    assert p._quota_bar_5h.value() == 53
+    assert "53%" in p._quota_pct_5h.text()
 
 
-def test_session_card_active_without_quota_hides_bar(qtbot):
-    """U2: active session but quota=None → main amount renders, but
-    progress bar and pct text are hidden/empty."""
-    su = _make_session_usage(quota=None, total_cost=1.50)
-    p = _panel_with_session(qtbot, lambda: su)
+def test_quota_card_without_quota_hides_bars(qtbot):
+    """U2: no quota snapshot → both bars hidden, pct empty."""
+    p = _panel_with_quota(qtbot, quota=None,
+                          totals=UsageTotals(period="today", input_tokens=10))
     p.refresh_usage_bar()
 
-    assert "$" in p._session_amount.text()
-    assert not p._session_bar.isVisibleTo(p._session_card)
-    assert p._session_pct.text() == ""
+    assert not p._quota_bar_5h.isVisibleTo(p._quota_card)
+    assert p._quota_pct_5h.text() == ""
+    assert not p._quota_bar_week.isVisibleTo(p._quota_card)
 
 
-def test_session_card_quota_stale_marks_warning(qtbot):
-    """U3: quota.is_stale=True → progress bar still shown but % text
-    carries the ⚠ marker so the user knows the value is old."""
-    su = _make_session_usage(quota=_make_quota(five_pct=20.0, is_stale=True))
-    p = _panel_with_session(qtbot, lambda: su)
+def test_quota_card_stale_marks_warning(qtbot):
+    """U3: quota.is_stale=True → bar still shown, ⚠ marker on pct text."""
+    p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=20.0, is_stale=True))
     p.refresh_usage_bar()
+    assert "⚠" in p._quota_pct_5h.text()
 
-    assert "⚠" in p._session_pct.text()
 
-
-def test_session_card_expired_session_dot_gray_reset_expired(qtbot):
-    """U4: end_time in the past → dot uses gray colour, reset text
-    reads 'expired' (when no quota overrides), amount still rendered."""
-    su = _make_session_usage(
-        start_offset_h=10.0,        # 10h ago
-        end_offset_h=-5.0,          # 5h ago — expired
-        quota=None,
-    )
-    p = _panel_with_session(qtbot, lambda: su)
+def test_quota_card_no_quota_dot_gray(qtbot):
+    """U4: no remote quota → live-dot greys out (no signal we can
+    derive freshness from). Replaces the old "expired session" test
+    that relied on SessionUsage.end_time."""
+    p = _panel_with_quota(qtbot, quota=None,
+                          totals=UsageTotals(period="today"))
     p.refresh_usage_bar()
-
-    # Dot stylesheet should reference the gray colour token
-    assert "#52525b" in p._session_dot.styleSheet()
-    assert "expired" in p._session_reset.text().lower()
+    assert "#52525b" in p._quota_dot.styleSheet()
 
 
-def test_session_card_empty_db_shows_no_active_session(qtbot):
-    """U5: SessionUsage with start_time=None → 'No active session' text,
-    no progress bar."""
-    su = _make_session_usage(start_offset_h=None, end_offset_h=None,
-                             quota=None, total_cost=0.0)
-    p = _panel_with_session(qtbot, lambda: su)
+def test_spend_card_empty_totals_shows_zero(qtbot):
+    """U5: empty totals → spend amount shows $0 (or fallback rendering),
+    bars stay hidden because quota is None."""
+    p = _panel_with_quota(qtbot, quota=None,
+                          totals=UsageTotals(period="today"))
     p.refresh_usage_bar()
+    # _fmt_money(0) returns "$0.001" or "$0.00" (sub-cent path); either way "$" is present
+    assert "$" in p._spend_amount.text()
+    assert not p._quota_bar_5h.isVisibleTo(p._quota_card)
 
-    assert "no active" in p._session_amount.text().lower()
-    assert not p._session_bar.isVisibleTo(p._session_card)
 
-
-def test_period_card_toggle_updates_total_and_token_rows(qtbot):
+def test_period_toggle_updates_spend_card(qtbot):
     """U6: switching period (Today → Weekly) calls get_usage_totals with
-    the new key and the period_total + token rows update."""
+    the new key and the spend amount updates."""
     capsule = QWidget()
     capsule.show()
 
@@ -435,11 +446,12 @@ def test_period_card_toggle_updates_total_and_token_rows(qtbot):
 
     def fake_totals(period):
         calls.append(period)
-        # Different totals per period so the assertion can prove an update
+        # Different cost per period so the amount label changes.
         return UsageTotals(
             period=period,
-            input_tokens=1000 if period == "today" else 9999,
+            input_tokens=1000 if period == "5h" else 9999,
             output_tokens=2000,
+            input_cost=1.0 if period == "5h" else 9.99,
         )
 
     p = ExpandedWindow(
@@ -451,13 +463,23 @@ def test_period_card_toggle_updates_total_and_token_rows(qtbot):
     qtbot.addWidget(capsule)
     p.refresh_usage_bar()
 
-    today_text = p._period_tokens_io.text()
+    # Default period is "5h" (most actionable window); first refresh
+    # populates that. Switching to weekly should re-fetch + re-render.
+    initial_amount = p._spend_amount.text()
     p._on_period("weekly")
-    weekly_text = p._period_tokens_io.text()
+    weekly_amount = p._spend_amount.text()
 
-    assert today_text != weekly_text
-    assert "today" in calls
+    assert initial_amount != weekly_amount
+    assert "5h" in calls
     assert "weekly" in calls
+
+
+def test_period_selector_includes_5h(qtbot):
+    """A2 regression: the unified SPEND selector exposes "5H" alongside
+    Today/Daily/Weekly/Monthly so 5h-spend isn't hidden in a separate
+    card. Apple HIG max of 5 segments — exactly what we have."""
+    p = _panel_with_quota(qtbot, totals=UsageTotals(period="today"))
+    assert set(p._period_btns.keys()) == {"5h", "today", "daily", "weekly", "monthly"}
 
 
 @pytest.mark.parametrize("pct,expected_color", [
@@ -471,25 +493,23 @@ def test_period_card_toggle_updates_total_and_token_rows(qtbot):
     (99.0,  "#ef4444"),
     (100.0, "#ef4444"),
 ])
-def test_session_card_progress_bar_color_thresholds(qtbot, pct, expected_color):
+def test_quota_bar_color_thresholds(qtbot, pct, expected_color):
     """U8: bar chunk colour escalates green → yellow → red at 60% / 85%.
     The pct text is coloured to match so the signal reads either way."""
-    su = _make_session_usage(quota=_make_quota(five_pct=pct))
-    p = _panel_with_session(qtbot, lambda: su)
+    p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=pct))
     p.refresh_usage_bar()
-    assert expected_color in p._session_bar.styleSheet()
-    assert expected_color in p._session_pct.styleSheet()
+    assert expected_color in p._quota_bar_5h.styleSheet()
+    assert expected_color in p._quota_pct_5h.styleSheet()
 
 
-def test_session_card_stale_overrides_red(qtbot):
+def test_quota_bar_stale_overrides_red(qtbot):
     """U9: stale data wins over the percent-based colour — we want
     "I don't trust this" to surface before "you're at the limit",
     so a stale 95% reads gray, not red."""
-    su = _make_session_usage(quota=_make_quota(five_pct=95.0, is_stale=True))
-    p = _panel_with_session(qtbot, lambda: su)
+    p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=95.0, is_stale=True))
     p.refresh_usage_bar()
-    assert "#6b7280" in p._session_bar.styleSheet()    # _BAR_STALE
-    assert "#ef4444" not in p._session_bar.styleSheet()
+    assert "#6b7280" in p._quota_bar_5h.styleSheet()    # _BAR_STALE
+    assert "#ef4444" not in p._quota_bar_5h.styleSheet()
 
 
 def _make_full_details(s, **overrides):
@@ -596,11 +616,12 @@ def test_detail_popup_renders_all_sections(qtbot):
     # Header card
     assert "cc-learning" in text
     assert "Refactor scanner to async iter" in text
-    assert "busy" in text
+    # Status pill removed by design — idle/waiting/busy carry low signal
+    # for popup users; no longer rendered.
     # Meta card
     assert "abc12345" in text                    # short uuid
     assert "feat-async" in text
-    assert "2.1.123" in text                     # cc version
+    assert "2.1.123" in text                     # cc version (header subtitle)
     assert "foo" in text                         # cwd basename
     # Tokens card
     assert "TOKENS" in text
@@ -608,9 +629,11 @@ def test_detail_popup_renders_all_sections(qtbot):
     assert "$2.40" in text                       # per-model cost
     assert "42 turns" in text
     assert "3 subagent" in text
-    # Prompt card
+    # Prompt card — collapsed view elides to popup-inner-width to
+    # keep popup at _PANEL_W (was: full string visible until elide
+    # was added in the dense-inspector pass).
     assert "LAST PROMPT" in text
-    assert "please refactor this scanner" in text
+    assert "please refactor" in text
 
 
 def test_detail_popup_skips_prompt_card_when_empty(qtbot):
@@ -626,18 +649,17 @@ def test_detail_popup_skips_prompt_card_when_empty(qtbot):
 
 
 def test_detail_popup_uses_main_panel_style_tokens(qtbot):
-    """Visual-consistency safety net. The popup should reuse the same
-    background colour tokens as the main panel and group cards — no
-    rogue '#' values that would make it look like a different app."""
-    from claude_island.ui.expanded_window import SessionDetailPopup, _BG_SINGLE
+    """Visual-consistency safety net. The dense-inspector design uses
+    flat sections separated by `_STYLE_SEP` dividers (no sub-cards),
+    so check that the standard separator colour is in use."""
+    from claude_island.ui.expanded_window import SessionDetailPopup, _STYLE_SEP
     s = _session(1, "/a")
     popup = SessionDetailPopup(_make_full_details(s), s)
     qtbot.addWidget(popup)
-    # Each inner sub-card uses _BG_SINGLE; spot-check by walking the
-    # popup's child QFrames and confirming at least one carries it.
     from PySide6.QtWidgets import QFrame as _QF
     frames = popup.findChildren(_QF)
-    assert any(_BG_SINGLE in (f.styleSheet() or "") for f in frames)
+    # At least one section divider should carry the shared sep style.
+    assert any(_STYLE_SEP in (f.styleSheet() or "") for f in frames)
 
 
 def test_show_detail_popup_constructs_and_holds_reference(qtbot):
@@ -669,20 +691,629 @@ def test_show_detail_popup_constructs_and_holds_reference(qtbot):
     assert isinstance(panel._active_detail_popup, SessionDetailPopup)
 
 
-def test_session_card_model_breakdown_shows_top_models(qtbot):
-    """U7: by_model populated → first 3 entries shown joined with ' · '
-    using friendly labels (Sonnet/Haiku/Opus); unknown ids truncated."""
+def test_detail_popup_uuid_short_display_full_copy(qtbot):
+    """ID row shows the first-8-char prefix for scanability; clicking it
+    copies the *full* 36-char UUID to the clipboard so ``claude --resume``
+    paste-flow still works. Click also shows 'Copied' feedback."""
+    from claude_island.ui.expanded_window import SessionDetailPopup, _CopyableIdLabel
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QLabel, QApplication
+    s = _session(1, "/a")
+    full_uuid = "abc12345-6789-0000-0000-000000000000"
+    details = _make_full_details(s, effective_uuid=full_uuid)
+
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    popup.show()   # required before event delivery
+
+    copyable = popup.findChild(_CopyableIdLabel)
+    assert copyable is not None, "ID row should contain a _CopyableIdLabel"
+    # The visible label is the 8-char prefix, NOT the full UUID.
+    uuid_label = copyable.findChild(QLabel)
+    assert uuid_label is not None
+    assert uuid_label.text() == "abc12345"
+    assert full_uuid not in uuid_label.text()
+
+    # Click → clipboard contains the FULL uuid, "Copied" feedback shows.
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import QPointF
+    copyable.mousePressEvent(QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        QPointF(), QPointF(), QPointF(),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    ))
+    qtbot.wait(50)
+    assert QApplication.clipboard().text() == full_uuid
+    copied_label = next(
+        (lbl for lbl in copyable.findChildren(QLabel) if lbl.text() == "Copied"), None
+    )
+    assert copied_label is not None
+    assert copied_label.isVisible()
+
+
+def test_spend_card_model_breakdown_shows_top_models(qtbot):
+    """U7: get_totals_by_model populated → proportional bar rows shown for top models."""
     by_model = (
         _ModelTotals(model="claude-sonnet-4-5", input_tokens=0, output_tokens=0,
                      cache_creation_tokens=0, cache_read_tokens=0, cost_usd=2.54),
         _ModelTotals(model="claude-haiku-4-5", input_tokens=0, output_tokens=0,
                      cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.13),
     )
-    su = _make_session_usage(by_model=by_model, total_cost=2.67, quota=None)
-    p = _panel_with_session(qtbot, lambda: su)
+    # Provide non-zero totals so the bar container is shown (cost_usd > 0 gate)
+    # cost_usd is derived from input_cost + output_cost + cache_creation_cost + cache_read_cost
+    totals = UsageTotals(
+        period="5h",
+        input_tokens=0, output_tokens=0,
+        cache_creation_tokens=0, cache_read_tokens=0,
+        input_cost=1.0, output_cost=1.0,
+        cache_creation_cost=0.4, cache_read_cost=0.27,
+    )
+    p = _panel_with_quota(qtbot, totals=totals, by_model=by_model)
     p.refresh_usage_bar()
 
-    text = p._session_models.text()
-    assert "Sonnet" in text
-    assert "Haiku" in text
-    assert "·" in text
+    # Spend bar container should be shown (cost > 0 and by_model wired).
+    # Use isHidden() not isVisible() — isVisible() returns False when the
+    # top-level window is hidden, but isHidden() correctly reflects whether
+    # show() was called on this widget regardless of parent visibility.
+    assert not p._spend_bar_container.isHidden()
+    # First row should show Sonnet with its cost
+    first_row = p._spend_bar_rows[0]
+    assert not first_row.isHidden()
+    assert first_row._spend_name.text() == "Sonnet"
+    assert "$" in first_row._spend_cost.text()
+
+
+# ============================================================================
+# Multi-provider tabs (5h card pill switcher)
+# ============================================================================
+
+def _build_panel_with_tabs(
+    qtbot,
+    *,
+    available,
+    selected="anthropic",
+    on_provider_selected=None,
+    get_session_usage=None,
+):
+    capsule = QWidget()
+    capsule.show()
+    controller = IslandController()
+    p = ExpandedWindow(
+        capsule=capsule,
+        controller=controller,
+        get_usage_totals=lambda period: UsageTotals(period=period),
+        get_session_usage=get_session_usage,
+        available_providers=available,
+        selected_provider=selected,
+        on_provider_selected=on_provider_selected,
+    )
+    qtbot.addWidget(p)
+    qtbot.addWidget(capsule)
+    return p
+
+
+def test_no_tabs_rendered_when_only_one_provider(qtbot):
+    """Single-provider users should see no tab pills — the 5h card
+    looks identical to the pre-feature version."""
+    p = _build_panel_with_tabs(qtbot, available=["anthropic"])
+    assert p._provider_btns == {}
+
+
+def test_no_tabs_rendered_when_zero_providers(qtbot):
+    """Empty list / None → no tabs (legacy callers, tests)."""
+    p = _build_panel_with_tabs(qtbot, available=[], selected=None)
+    assert p._provider_btns == {}
+
+
+def test_tabs_rendered_for_two_providers(qtbot):
+    p = _build_panel_with_tabs(qtbot, available=["anthropic", "minimax"])
+    assert set(p._provider_btns.keys()) == {"anthropic", "minimax"}
+    assert p._provider_btns["anthropic"].isChecked() is True
+    assert p._provider_btns["minimax"].isChecked() is False
+
+
+def test_clicking_tab_updates_state_and_notifies(qtbot):
+    """Click → selected_provider changes, callback fires once with the
+    new name, refresh_usage_bar runs, and only the clicked pill is
+    checked."""
+    fired: list[str] = []
+    p = _build_panel_with_tabs(
+        qtbot,
+        available=["anthropic", "minimax"],
+        on_provider_selected=fired.append,
+    )
+    p._provider_btns["minimax"].click()
+
+    assert fired == ["minimax"]
+    assert p.selected_provider_name() == "minimax"
+    assert p._provider_btns["anthropic"].isChecked() is False
+    assert p._provider_btns["minimax"].isChecked() is True
+
+
+def test_reclicking_active_tab_is_noop(qtbot):
+    fired: list[str] = []
+    p = _build_panel_with_tabs(
+        qtbot,
+        available=["anthropic", "minimax"],
+        selected="anthropic",
+        on_provider_selected=fired.append,
+    )
+    p._provider_btns["anthropic"].click()
+    assert fired == []
+    assert p.selected_provider_name() == "anthropic"
+
+
+def test_tab_callback_failure_does_not_crash_ui(qtbot):
+    """A persistence failure (disk full, permission error) must not
+    take down the UI thread."""
+    def boom(_: str) -> None:
+        raise OSError("disk full")
+
+    p = _build_panel_with_tabs(
+        qtbot,
+        available=["anthropic", "minimax"],
+        on_provider_selected=boom,
+    )
+    p._provider_btns["minimax"].click()  # must not raise
+    # Selection still flips in-process even though persistence failed.
+    assert p.selected_provider_name() == "minimax"
+
+
+# ============================================================================
+# Detail popup: REPAIR card (strip thinking blocks for cross-provider rescue)
+# ============================================================================
+
+def test_repair_icon_renders_when_session_has_uuid(qtbot):
+    """The repair ⟲ icon appears in the popup header whenever the
+    session has an effective uuid (i.e., a transcript on disk to
+    operate on). The tooltip carries the full explanation."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    s = _session(1, "/some/path/foo")
+    details = _make_full_details(s)
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+
+    assert popup._repair_icon is not None
+    # Now an icon, not a text-link button.
+    assert popup._repair_icon.text() == "⟲"
+    assert "thinking" in popup._repair_icon.toolTip().lower()
+    assert "backup" in popup._repair_icon.toolTip().lower()
+
+
+def test_repair_icon_hidden_when_no_uuid(qtbot):
+    """Synthetic / orphan sessions have no transcript file to repair —
+    don't render the ⚙ icon at all (it would be useless)."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    from PySide6.QtWidgets import QLabel as _QL
+    s = _session(1, "/p")
+    details = _make_full_details(s, effective_uuid="")
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+
+    # No repair icon when there's no UUID
+    assert popup._repair_icon is None
+    # Status label is hidden (created but kept for layout consistency)
+    assert not popup._repair_status.isVisible()
+
+
+def test_repair_button_strips_thinking_and_disables_self(qtbot, tmp_path):
+    """Click → strip_thinking_blocks runs → status reads "Removed N
+    blocks", button becomes disabled with text "Done"."""
+    import json
+    from unittest.mock import patch
+    from claude_island.ui.expanded_window import SessionDetailPopup
+
+    # Use a short project_path (NOT pytest's nested tmp_path) so the
+    # final slug stays well under Windows' 260-char MAX_PATH limit —
+    # the .bak.<unix-ts> suffix adds another 14 chars.
+    s = _session(1, "C:/X")
+    full_uuid = "abc12345-6789-0000-0000-000000000000"
+    details = _make_full_details(s, effective_uuid=full_uuid)
+
+    # Build a transcript on disk that the popup will try to repair.
+    # Path follows Claude Code's convention: ~/.claude/projects/<slug>/<uuid>.jsonl
+    # — we patch _claude_projects_root() to redirect at that root.
+    from claude_island.core.models import project_hash
+    fake_home = tmp_path / "fake_home"
+    proj_dir = fake_home / ".claude" / "projects" / project_hash(s.project_path)
+    proj_dir.mkdir(parents=True)
+    jsonl_path = proj_dir / f"{full_uuid}.jsonl"
+    jsonl_path.write_text(
+        json.dumps({"message": {"content": [
+            {"type": "thinking", "thinking": "x", "signature": "abc"},
+            {"type": "text", "text": "hello"},
+        ]}}) + "\n",
+        encoding="utf-8",
+    )
+
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+
+    with patch(
+        "claude_island.ui.expanded_window._claude_projects_root",
+        return_value=fake_home / ".claude" / "projects",
+    ):
+        popup._on_strip_thinking()
+
+    # File should no longer contain the thinking block, and a backup
+    # should have been written alongside.
+    cleaned = json.loads(jsonl_path.read_text(encoding="utf-8").strip())
+    types = [c.get("type") for c in cleaned["message"]["content"]]
+    assert types == ["text"]
+    backups = list(proj_dir.glob(f"{full_uuid}.jsonl.bak.*"))
+    assert len(backups) == 1
+    # Status reflects the result; icon becomes disabled and shows "Done".
+    assert "Removed 1 thinking block" in popup._repair_status.text()
+    assert popup._repair_icon.isEnabled() is False
+    assert popup._repair_icon.text() == "Done"
+
+
+def test_repair_button_handles_missing_transcript(qtbot, tmp_path):
+    """If the JSONL doesn't exist (session moved / wrong cwd), surface
+    a clear error in the status line — never crash the popup."""
+    from unittest.mock import patch
+    from claude_island.ui.expanded_window import SessionDetailPopup
+
+    s = _session(1, str(tmp_path))
+    details = _make_full_details(s, effective_uuid="abc12345-6789-0000-0000-000000000000")
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+
+    fake_home = tmp_path / "empty_home"   # nothing under here
+    fake_home.mkdir()
+    with patch(
+        "claude_island.ui.expanded_window._claude_projects_root",
+        return_value=fake_home / ".claude" / "projects",
+    ):
+        popup._on_strip_thinking()  # must not raise
+
+    assert "Transcript not found" in popup._repair_status.text()
+    # Icon still active so the user can retry after fixing the path.
+    assert popup._repair_icon.isEnabled() is True
+
+
+def test_repair_button_zero_blocks_message(qtbot, tmp_path):
+    """A clean transcript should report 'No thinking blocks found' and
+    still leave a backup (for symmetry / forensic clarity)."""
+    import json
+    from unittest.mock import patch
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    from claude_island.core.models import project_hash
+
+    s = _session(1, "C:/Y")  # short path → short slug → fits MAX_PATH
+    full_uuid = "abc12345-6789-0000-0000-000000000000"
+    details = _make_full_details(s, effective_uuid=full_uuid)
+
+    fake_home = tmp_path / "fake_home"
+    proj_dir = fake_home / ".claude" / "projects" / project_hash(s.project_path)
+    proj_dir.mkdir(parents=True)
+    jsonl_path = proj_dir / f"{full_uuid}.jsonl"
+    jsonl_path.write_text(
+        json.dumps({"message": {"content": [{"type": "text", "text": "ok"}]}}) + "\n",
+        encoding="utf-8",
+    )
+
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    with patch(
+        "claude_island.ui.expanded_window._claude_projects_root",
+        return_value=fake_home / ".claude" / "projects",
+    ):
+        popup._on_strip_thinking()
+
+    assert "No thinking blocks found" in popup._repair_status.text()
+    assert len(list(proj_dir.glob(f"{full_uuid}.jsonl.bak.*"))) == 1
+
+
+# ============================================================================
+# Detail popup: Dense Inspector redesign — aggregation, hiding rules, footer
+# ============================================================================
+
+def test_aggregate_per_model_dedupes_by_display_label():
+    """Two raw model ids that share a display label (both 'Opus') get
+    merged into one row with summed cost/tokens, sorted by cost desc."""
+    from claude_island.ui.expanded_window import _aggregate_per_model_for_display
+    from claude_island.core.models import ModelTotals as _MT
+    rows = _aggregate_per_model_for_display((
+        _MT(model="claude-opus-4-5", input_tokens=100, output_tokens=200,
+            cache_creation_tokens=10, cache_read_tokens=20, cost_usd=10.0),
+        _MT(model="claude-opus-4-6", input_tokens=200, output_tokens=300,
+            cache_creation_tokens=30, cache_read_tokens=40, cost_usd=15.0),
+        _MT(model="claude-sonnet-4-6", input_tokens=50, output_tokens=60,
+            cache_creation_tokens=5, cache_read_tokens=6, cost_usd=2.0),
+    ))
+    # Two Opus + one Sonnet input → one Opus + one Sonnet output.
+    labels = [r.label for r in rows]
+    assert labels == ["Opus", "Sonnet"]   # sorted by cost desc
+    opus = rows[0]
+    assert opus.cost_usd == 25.0
+    assert opus.input_tokens == 300
+    assert opus.output_tokens == 500
+    assert opus.cache_creation_tokens == 40
+    assert opus.cache_read_tokens == 60
+
+
+def test_aggregate_per_model_drops_zero_cost_zero_token_rows():
+    """``<synthetic>`` and similar all-zero placeholders disappear
+    entirely — they're noise, not data."""
+    from claude_island.ui.expanded_window import _aggregate_per_model_for_display
+    from claude_island.core.models import ModelTotals as _MT
+    rows = _aggregate_per_model_for_display((
+        _MT(model="<synthetic>", input_tokens=0, output_tokens=0,
+            cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.0),
+        _MT(model="claude-haiku-4-5", input_tokens=10, output_tokens=20,
+            cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.5),
+    ))
+    labels = [r.label for r in rows]
+    assert "<synthetic>" not in labels
+    assert labels == ["Haiku"]
+
+
+def test_detail_popup_dedupes_models_in_render(qtbot):
+    """End-to-end check: feeding two Opus rows produces ONE 'Opus'
+    label in the rendered popup (visual de-dup, not just data-level)."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    from claude_island.core.models import ModelTotals as _MT
+    from PySide6.QtWidgets import QLabel as _QL
+    s = _session(1, "/x")
+    details = _make_full_details(s, per_model=(
+        _MT(model="claude-opus-4-5", input_tokens=100, output_tokens=200,
+            cache_creation_tokens=10, cache_read_tokens=20, cost_usd=65.0),
+        _MT(model="claude-opus-4-6", input_tokens=200, output_tokens=300,
+            cache_creation_tokens=30, cache_read_tokens=40, cost_usd=64.0),
+    ))
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    # Count "Opus" labels — must be exactly 1 (the merged row).
+    opus_labels = [
+        l for l in popup.findChildren(_QL) if l.text() == "Opus"
+    ]
+    assert len(opus_labels) == 1
+
+
+def test_detail_popup_hides_synthetic_zero_cost_row(qtbot):
+    """``<synthetic>`` placeholder gets dropped from the rendered popup
+    so the user doesn't see meaningless ``<synthetic>  $0.000`` noise."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    from claude_island.core.models import ModelTotals as _MT
+    from PySide6.QtWidgets import QLabel as _QL
+    s = _session(1, "/x")
+    details = _make_full_details(s, per_model=(
+        _MT(model="<synthetic>", input_tokens=0, output_tokens=0,
+            cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.0),
+        _MT(model="claude-sonnet-4-6", input_tokens=100, output_tokens=200,
+            cache_creation_tokens=0, cache_read_tokens=0, cost_usd=1.0),
+    ))
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    text = " | ".join(l.text() for l in popup.findChildren(_QL) if l.text())
+    assert "<synthetic>" not in text
+    assert "Sonnet" in text  # the real row still rendered
+
+
+def test_detail_popup_hides_branch_when_head(qtbot):
+    """``HEAD`` is git's detached-state placeholder, not a useful
+    branch name — suppress the row to avoid visual noise."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    from PySide6.QtWidgets import QLabel as _QL
+    s = _session(1, "/x")
+    details = _make_full_details(s, git_branch="HEAD")
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    keys = [l.text() for l in popup.findChildren(_QL) if l.text() == "Branch"]
+    assert keys == []
+
+
+def test_detail_popup_prompt_collapsed_by_default(qtbot):
+    """A long multi-line prompt renders as a single truncated preview
+    by default; the toggle expands it to the full body."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    s = _session(1, "/x")
+    long_prompt = "first line of prompt\n" + ("x" * 200)
+    details = _make_full_details(s, last_prompt=long_prompt)
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+
+    # Default: collapsed → first line + "…" so the user knows more
+    # content exists beneath.
+    assert popup._prompt_expanded is False
+    assert popup._prompt_body is not None
+    assert popup._prompt_body.text() == "first line of prompt…"
+    assert popup._prompt_toggle is not None
+    assert popup._prompt_toggle.text() == "[展开]"
+
+    # Toggle → expanded: collapsed QLabel hides, expanded QTextEdit
+    # appears with the full body. Toggle text flips to "[收起]".
+    popup._on_toggle_prompt()
+    assert popup._prompt_expanded is True
+    assert popup._prompt_full_view is not None
+    assert popup._prompt_body.isHidden()
+    assert not popup._prompt_full_view.isHidden()
+    full_text = popup._prompt_full_view.toPlainText()
+    assert "first line of prompt" in full_text
+    assert "x" * 100 in full_text  # original tail present
+    assert popup._prompt_toggle.text() == "[收起]"
+
+    # Toggle back → collapsed: full view hidden, label visible again.
+    popup._on_toggle_prompt()
+    assert popup._prompt_expanded is False
+    assert popup._prompt_full_view.isHidden()
+    assert not popup._prompt_body.isHidden()
+    assert popup._prompt_toggle.text() == "[展开]"
+
+
+def test_detail_popup_short_prompt_no_toggle(qtbot):
+    """Short single-line prompts that fit fully render without the
+    expand toggle — collapsing them would be confusing.
+
+    Toggle is always *created* (hidden by default) and shown only after
+    the post-show font-metrics check confirms elision actually happens.
+    For "quick question" no elision → toggle stays hidden."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    s = _session(1, "/x")
+    details = _make_full_details(s, last_prompt="quick question")
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    popup.show()
+    assert popup._prompt_toggle is not None
+    assert not popup._prompt_toggle.isVisible()
+    assert popup._prompt_body.text() == "quick question"
+
+
+def test_detail_popup_cjk_long_prompt_shows_toggle(qtbot):
+    """CJK glyphs render at ~14px each in 12px-stylesheet labels —
+    30+ chars exceed the 288px collapsed budget. Earlier `len > 80`
+    heuristic missed this; the post-show metrics check catches it."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    s = _session(1, "/x")
+    # User's real prompt from screenshot — 53 chars but ~439px wide.
+    long_cjk = "我已经merge了 checkout到master pull最新代码，然后把改动同步到~/.claude下"
+    details = _make_full_details(s, last_prompt=long_cjk)
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    popup.show()
+    assert popup._prompt_toggle is not None
+    assert popup._prompt_toggle.isVisible(), (
+        "toggle should be visible because the CJK prompt is wider "
+        "than the popup-inner-width and was elided"
+    )
+    # The displayed text should include the elide marker.
+    assert "…" in popup._prompt_body.text()
+
+
+def test_detail_popup_header_action_icons(qtbot):
+    """Header right side carries three icon buttons:
+        ⧉ Copy ID  ↗ Open folder  ⟲ Reset thinking blocks
+    The destructive reset uses a separate style (amber hover) but
+    sits next to the safe actions for visual consistency."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    s = _session(1, "/x")
+    details = _make_full_details(s)
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    assert popup._copy_id_btn is not None
+    assert popup._copy_id_btn.text() == "⧉"
+    assert "Copy" in popup._copy_id_btn.toolTip()
+    assert popup._open_folder_btn is not None
+    assert popup._open_folder_btn.text() == "↗"
+    assert "Open" in popup._open_folder_btn.toolTip()
+    assert popup._repair_btn is not None
+    assert popup._repair_btn.text() == "⟲"
+    assert "thinking" in popup._repair_btn.toolTip().lower()
+
+
+def test_detail_popup_no_actions_when_no_uuid(qtbot):
+    """No uuid → no transcript to repair AND no id to copy. Copy ID
+    and Reset hide; Open folder (works without uuid) stays."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    s = _session(1, "/x")
+    details = _make_full_details(s, effective_uuid="")
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    assert popup._copy_id_btn is None
+    assert popup._repair_btn is None
+    assert popup._open_folder_btn is not None  # always present
+
+
+def test_detail_popup_status_pill_never_renders(qtbot):
+    """Status pill (idle / waiting / busy) was removed by design — the
+    information is low-value for popup users (who came here to inspect,
+    not monitor) and the chip created visual noise next to the action
+    icons. None of the three states should render a pill."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    from PySide6.QtWidgets import QLabel as _QL
+    s = _session(1, "/x")
+    for state in ("idle", "waiting", "busy"):
+        details = _make_full_details(s, status=state)
+        popup = SessionDetailPopup(details, s)
+        qtbot.addWidget(popup)
+        text = " | ".join(l.text() for l in popup.findChildren(_QL) if l.text())
+        assert state not in text, f"status '{state}' should not render"
+
+
+def test_detail_popup_copy_id_action_writes_clipboard(qtbot):
+    """Clicking the footer 'Copy ID' button puts the full UUID on the
+    clipboard and surfaces a confirmation in the status line."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    from PySide6.QtWidgets import QApplication
+    s = _session(1, "/x")
+    full_uuid = "deadbeef-0000-0000-0000-000000000000"
+    details = _make_full_details(s, effective_uuid=full_uuid)
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    popup._on_copy_id()
+    assert QApplication.clipboard().text() == full_uuid
+    assert "deadbeef" in popup._repair_status.text()
+
+
+def test_detail_popup_path_click_copies_to_clipboard(qtbot):
+    """Path value is itself click-to-copy (matches ID's affordance).
+    Click writes the full path to the clipboard and flashes 'Copied'."""
+    from PySide6.QtCore import Qt, QPointF
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+    from claude_island.ui.expanded_window import (
+        SessionDetailPopup, _ClickToCopyLabel,
+    )
+    s = _session(1, "/some/proj/path")
+    details = _make_full_details(s)
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    popup.show()
+
+    path_label = popup.findChild(_ClickToCopyLabel)
+    assert path_label is not None
+    expected = str(s.project_path)
+    assert path_label.text() == expected
+
+    QApplication.clipboard().clear()
+    path_label.mousePressEvent(QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        QPointF(), QPointF(), QPointF(),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    ))
+    assert QApplication.clipboard().text() == expected
+    assert path_label.text() == "Copied"
+
+
+def test_detail_popup_header_layout_stable_when_prompt_toggles(qtbot):
+    """Regression: when prompt is expanded, header section's geometry
+    must NOT change. Earlier bugs let layout surplus stretch the
+    header, leaving a visible gap between subtitle and ID row."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    long_prompt = "first line\n" + ("x" * 500)
+    s = _session(1, "/x")
+    details = _make_full_details(s, last_prompt=long_prompt)
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+    popup.show()
+
+    root = popup.layout()
+    geom_before = root.itemAt(0).widget().geometry()
+    popup._on_toggle_prompt()
+    geom_after = root.itemAt(0).widget().geometry()
+    # Allow 2px tolerance for font-baseline rounding; the original bug
+    # stretched header by 30+ px so this still catches it definitively.
+    height_diff = abs(geom_after.height() - geom_before.height())
+    assert height_diff <= 2, (
+        f"header section height changed by {height_diff}px on prompt "
+        f"expand (was {geom_before.height()}, now {geom_after.height()})"
+    )
+    assert geom_before.topLeft() == geom_after.topLeft()
+
+
+def test_detail_popup_open_folder_calls_helper(qtbot, monkeypatch):
+    """Clicking 'Open folder' invokes _open_in_explorer with the
+    project_path. Helper is patched so the test doesn't actually shell
+    out."""
+    from claude_island.ui import expanded_window as ew
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    s = _session(1, "/test/proj")
+    details = _make_full_details(s)
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+
+    called: list[Path] = []
+    monkeypatch.setattr(ew, "_open_in_explorer", lambda p: called.append(p))
+    popup._on_open_folder()
+    assert called == [s.project_path]
