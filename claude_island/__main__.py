@@ -47,6 +47,7 @@ from claude_island.platform_.file_watcher import FileWatcher
 from claude_island.platform_.process_scanner import ProcessScanner
 from claude_island.platform_.providers import (
     ProviderEngine,
+    all_providers,
     ensure_provider_config,
     get_selected_provider,
     set_selected_provider,
@@ -57,8 +58,11 @@ from claude_island.platform_.providers import (
 # configure additional providers without trawling the README. No-op
 # if the file already exists.
 ensure_provider_config()
-from claude_island.platform_.providers.anthropic import AnthropicProvider
-from claude_island.platform_.providers.minimax import MiniMaxProvider
+# No per-provider class imports here — providers self-register via the
+# @provider("name") decorator when the providers package is imported.
+# Adding a new provider is pure extension: drop a file under providers/
+# and append it to the package's bottom-of-module import list. NO change
+# to __main__.py is needed.
 from claude_island.platform_.session_discovery import SessionDiscovery
 from claude_island.platform_ import session_state as session_state_reader
 from claude_island.platform_.window_activator import WindowActivator
@@ -104,19 +108,20 @@ def _get_quota_snapshot():
 
 
 def _resolve_available_providers() -> list[str]:
-    """Build the tab list shown in the 5h-session card.
+    """Build the tab list shown in the 5h-session card by asking each
+    registered provider whether it has been *signalled* for use.
 
-    Anthropic is always present (every Claude Code user has the OAuth
-    credential). MiniMax shows up only when the user has *signalled*
-    they want it — either by setting ``ANTHROPIC_BASE_URL`` to a
-    MiniMax host OR by writing a token into ``providers.json``. If
-    only Anthropic qualifies, ExpandedWindow renders no tabs (single-
-    provider users see the pre-feature look).
-    """
-    available = ["anthropic"]
-    if MiniMaxProvider().detect():
-        available.append("minimax")
-    return available
+    Declarative: iterates ``all_providers()`` (auto-populated by the
+    ``@provider`` decorator at import time) and keeps the ones whose
+    ``detect()`` returns truthy. Adding a 4th / 5th provider needs no
+    change here — just drop a file under ``providers/`` and add it to
+    the bottom-of-module import list in ``providers/__init__.py``.
+
+    Anthropic always detects (every Claude Code user has the OAuth
+    credential), so when no other provider is configured the tab strip
+    contains just Anthropic, and ExpandedWindow renders no tabs at all
+    (single-provider users see the pre-feature look)."""
+    return [name for name, cls in all_providers().items() if cls().detect()]
 
 
 def _on_provider_tab_clicked(name: str) -> None:
@@ -133,12 +138,25 @@ def _on_provider_tab_clicked(name: str) -> None:
 
 
 _available_providers = _resolve_available_providers()
-# Honour the user's stored choice, but fall back to the first available
-# provider if the stored name is no longer valid (e.g. user removed the
-# MiniMax token but providers.json still says "selected": "minimax").
+# Honour the user's stored choice, but fall back to a sensible default
+# if the stored name is no longer valid (e.g. user removed the MiniMax
+# token but providers.json still says "selected": "minimax").
+#
+# Explicit prefer-Anthropic fallback (NOT _available_providers[0]).
+# The positional approach worked only because the import order at
+# providers/__init__.py:448 happens to put anthropic first; one
+# careless re-ordering of that line would silently swap the default.
+# Naming "anthropic" explicitly makes "the default tab is Anthropic"
+# a contract, not an accident — pairs with the ``"selected":
+# "anthropic"`` literal in providers/__init__.py::_build_default_config.
+_DEFAULT_FALLBACK_PROVIDER = "anthropic"
 _selected_provider = get_selected_provider()
 if _selected_provider not in _available_providers:
-    _selected_provider = _available_providers[0]
+    _selected_provider = (
+        _DEFAULT_FALLBACK_PROVIDER
+        if _DEFAULT_FALLBACK_PROVIDER in _available_providers
+        else _available_providers[0]
+    )
 
 
 def _force_refresh_selected() -> None:

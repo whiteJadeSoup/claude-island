@@ -127,6 +127,28 @@ def _find_coding_model(models: list) -> dict | None:
 class MiniMaxProvider:
     name = "minimax"
 
+    @classmethod
+    def default_config(cls) -> dict:
+        """Seed block for ``providers.json`` → ``providers.minimax``.
+
+        Empty ``auth_token`` so the tab does NOT appear until the user
+        pastes a key in. ``base_url`` defaults to the CN host because
+        the Coding Plan is sold predominantly in CN; international users
+        flip it to ``api.minimax.io``. Auto-included by the package's
+        ``_build_default_config()`` — no manual wiring."""
+        return {
+            "_help": (
+                "Paste your MiniMax sk-cp-... Coding-Plan key into "
+                "auth_token below. Get one at https://platform.minimaxi.com . "
+                "The MiniMax tab appears in the 5h card once auth_token is "
+                "non-empty. base_url is optional — leave the default "
+                "(api.minimaxi.com, CN) or set https://api.minimax.io for "
+                "international keys."
+            ),
+            "auth_token": "",
+            "base_url": "https://api.minimaxi.com",
+        }
+
     def detect(self) -> bool:
         """Returns True when the user has *signalled* they want to use
         MiniMax — either via ``ANTHROPIC_BASE_URL`` (Claude Code's

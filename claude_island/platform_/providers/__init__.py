@@ -159,6 +159,16 @@ class Provider(Protocol):
     ) -> QuotaSnapshot | None:
         """Return a QuotaSnapshot, using a local cache if available."""
 
+    # Optional. When implemented, returns the provider's seed entry for
+    # the auto-assembled providers.json (auth_token / base_url / _help).
+    # Return ``None`` if the provider needs no providers.json entry —
+    # e.g. AnthropicProvider reads OAuth from ~/.claude/.credentials.json
+    # so its block would just be noise.
+    @classmethod
+    def default_config(cls) -> dict | None:  # pragma: no cover - protocol stub
+        """Return this provider's default block in providers.json, or None."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Shared utilities (used by provider implementations)
@@ -205,36 +215,52 @@ def read_env_token() -> str | None:
 PROVIDER_CONFIG_PATH = Path.home() / ".claude-island" / "providers.json"
 
 
-# Default file written on first run. Self-documenting via "_"-prefixed
-# keys and embedded help strings — JSON has no real comment syntax,
-# but our reader ignores any key it doesn't explicitly look up, so
-# "_help" / "_comment" are safe to leave in the file forever. The
-# MiniMax block ships with an empty ``auth_token`` so the tab does
-# NOT appear until the user pastes a key in.
-_DEFAULT_PROVIDER_CONFIG: dict = {
-    "_comment": (
-        "claude-island provider config. Anthropic is always available "
-        "(reads OAuth token from ~/.claude/.credentials.json — no setup "
-        "needed). To enable additional providers, edit the relevant block "
-        "under 'providers' below. Schema: { selected: <provider name shown "
-        "in the 5h card>, providers: { <name>: { auth_token, base_url? } } }"
-    ),
-    "selected": "anthropic",
-    "providers": {
-        "minimax": {
-            "_help": (
-                "Paste your MiniMax sk-cp-... Coding-Plan key into "
-                "auth_token below. Get one at https://platform.minimaxi.com . "
-                "The MiniMax tab appears in the 5h card once auth_token is "
-                "non-empty. base_url is optional — leave the default "
-                "(api.minimaxi.com, CN) or set https://api.minimax.io for "
-                "international keys."
-            ),
-            "auth_token": "",
-            "base_url": "https://api.minimaxi.com",
-        },
-    },
-}
+# Self-documenting comment string that ships at the top of the seed
+# providers.json so users discover the schema without trawling the
+# README. JSON has no real comment syntax, but our reader ignores any
+# key it doesn't explicitly look up, so "_comment" / "_help" are safe
+# to leave in the file forever.
+_CONFIG_COMMENT = (
+    "claude-island provider config. Anthropic is always available "
+    "(reads OAuth token from ~/.claude/.credentials.json — no setup "
+    "needed). To enable additional providers, edit the relevant block "
+    "under 'providers' below. Schema: { selected: <provider name shown "
+    "in the 5h card>, providers: { <name>: { auth_token, base_url? } } }"
+)
+
+
+def _build_default_config() -> dict:
+    """Assemble the seed providers.json by collecting each provider's
+    own ``default_config()``. Provider order follows registration order
+    (anthropic, minimax, zhipu, ...). Providers that return None are
+    skipped — they don't need a config block (e.g. Anthropic reads
+    OAuth from ~/.claude/.credentials.json elsewhere).
+
+    Built fresh on every call so a newly-registered provider class
+    automatically contributes its block on first run, no ``__init__.py``
+    edit needed."""
+    blocks: dict[str, dict] = {}
+    for name, cls in _PROVIDERS.items():
+        cfg_fn = getattr(cls, "default_config", None)
+        if cfg_fn is None:
+            continue
+        try:
+            cfg = cfg_fn()
+        except Exception:
+            cfg = None
+        if isinstance(cfg, dict):
+            blocks[name] = cfg
+    return {
+        "_comment": _CONFIG_COMMENT,
+        # "anthropic" by design: the default-installed provider should
+        # match the most-common case. Even when other providers are
+        # registered first in import order, the seed file always names
+        # anthropic. This pairs with the explicit-fallback rule in
+        # __main__.py so the rule "default tab is Anthropic" is one
+        # coherent contract end-to-end.
+        "selected": "anthropic",
+        "providers": blocks,
+    }
 
 
 def ensure_provider_config(path: Path | None = None) -> None:
@@ -250,7 +276,7 @@ def ensure_provider_config(path: Path | None = None) -> None:
         path = PROVIDER_CONFIG_PATH
     if path.exists():
         return
-    write_provider_config(_DEFAULT_PROVIDER_CONFIG, path)
+    write_provider_config(_build_default_config(), path)
 
 
 def read_provider_config(path: Path | None = None) -> dict:
@@ -445,4 +471,4 @@ def snapshot_from_cache(
 # Placed at the bottom because the decorator's `provider` and the cache /
 # HTTP helpers must be defined before the sub-modules import them.
 # ---------------------------------------------------------------------------
-from . import anthropic, minimax  # noqa: F401, E402
+from . import anthropic, minimax, zhipu  # noqa: F401, E402

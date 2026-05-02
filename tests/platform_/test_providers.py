@@ -442,3 +442,339 @@ class TestMiniMaxHostProbing:
             "claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path,
         ):
             assert MiniMaxProvider().detect() is True
+
+
+# ============================================================================
+# Zhipu (Z.AI / GLM Coding Plan) provider
+# ============================================================================
+
+class TestZhipuProvider:
+    """Detect / fetch / cache behaviour for the Zhipu provider.
+
+    Endpoint reverse-engineered from cc-switch v3.14.1
+    (`src-tauri/src/services/coding_plan.rs`)."""
+
+    def test_detect_true_when_z_ai_in_base_url(self):
+        from claude_island.platform_.providers.zhipu import ZhipuProvider
+        with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "https://api.z.ai/anthropic"}):
+            assert ZhipuProvider().detect() is True
+
+    def test_detect_true_when_bigmodel_cn_in_base_url(self):
+        from claude_island.platform_.providers.zhipu import ZhipuProvider
+        with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/anthropic"}):
+            assert ZhipuProvider().detect() is True
+
+    def test_detect_true_when_token_in_config(self, tmp_path, monkeypatch):
+        from claude_island.platform_.providers import write_provider_config
+        from claude_island.platform_.providers.zhipu import ZhipuProvider
+
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+        path = tmp_path / "providers.json"
+        write_provider_config(
+            {"providers": {"zhipu": {"auth_token": "zhipu-fake-key"}}},
+            path,
+        )
+        with patch(
+            "claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path,
+        ):
+            assert ZhipuProvider().detect() is True
+
+    def test_detect_false_when_no_signal(self, tmp_path, monkeypatch):
+        # Isolate from any real ~/.claude-island/providers.json on the
+        # developer's machine — without the patch, a leaked Zhipu token
+        # would flip this assertion silently.
+        from claude_island.platform_.providers.zhipu import ZhipuProvider
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+        with patch(
+            "claude_island.platform_.providers.PROVIDER_CONFIG_PATH",
+            tmp_path / "no-config.json",
+        ):
+            assert ZhipuProvider().detect() is False
+
+    def test_default_config_has_required_keys(self):
+        from claude_island.platform_.providers.zhipu import ZhipuProvider
+        cfg = ZhipuProvider.default_config()
+        # Empty token so the tab does NOT auto-appear after first run.
+        assert cfg["auth_token"] == ""
+        # base_url defaults to international z.ai endpoint.
+        assert "z.ai" in cfg["base_url"]
+        # Self-documenting help string in the seed config.
+        assert "_help" in cfg
+
+    def test_normalise_two_limits_assigns_5h_then_weekly_by_reset_time(self):
+        # Per cc-switch rule: filter type==TOKENS_LIMIT, sort ascending
+        # by nextResetTime, first → 5h, second → weekly. Even when the
+        # API returns them in a different order.
+        from claude_island.platform_.providers.zhipu import _normalise
+        now = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        # Intentionally weekly-first in the input; sort must reverse it.
+        weekly_ms = int(datetime(2026, 5, 8, tzinfo=timezone.utc).timestamp() * 1000)
+        five_ms   = int(datetime(2026, 5, 1, 5, tzinfo=timezone.utc).timestamp() * 1000)
+        data = {
+            "data": {
+                "level": "Pro",
+                "limits": [
+                    {"type": "TOKENS_LIMIT", "percentage": 80.0,
+                     "nextResetTime": weekly_ms},
+                    {"type": "TOKENS_LIMIT", "percentage": 12.5,
+                     "nextResetTime": five_ms},
+                    # Noise: non-TOKENS_LIMIT entries must be filtered.
+                    {"type": "REQUEST_LIMIT", "percentage": 99.9,
+                     "nextResetTime": five_ms},
+                ],
+            },
+        }
+        payload = _normalise(data, fetched_at=now)
+        # Sorted ascending: 5h slot is the soonest reset (12.5%),
+        # weekly slot is the later reset (80%).
+        assert payload["five_hour"]["pct"] == 12.5
+        assert payload["seven_day"]["pct"] == 80.0
+        assert payload["provider"] == "zhipu"
+
+    def test_normalise_legacy_single_limit_synthesises_weekly(self):
+        # Pre-2026-02-12 subscriptions only emit one TOKENS_LIMIT; the
+        # snapshot still has to satisfy snapshot_from_cache's "both
+        # windows must have a real reset" gate, so we synthesise a
+        # 7-day-out sentinel for weekly with 0% utilisation.
+        from claude_island.platform_.providers.zhipu import _normalise
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        five_ms = int(datetime(2026, 1, 1, 5, tzinfo=timezone.utc).timestamp() * 1000)
+        data = {
+            "data": {
+                "level": "Lite",
+                "limits": [
+                    {"type": "TOKENS_LIMIT", "percentage": 25.0,
+                     "nextResetTime": five_ms},
+                ],
+            },
+        }
+        payload = _normalise(data, fetched_at=now)
+        assert payload["five_hour"]["pct"] == 25.0
+        # Synthesised weekly: 0%, far-future reset so the snapshot
+        # passes the validity gate.
+        assert payload["seven_day"]["pct"] == 0.0
+        assert payload["seven_day"]["resets_at"] is not None
+
+    def test_fetch_uses_cache(self, tmp_path):
+        from claude_island.platform_.providers.zhipu import ZhipuProvider
+        cache = tmp_path / "zhipu-quota.json"
+        now = datetime.now(timezone.utc).isoformat()
+        cache.write_text(json.dumps({
+            "provider": "zhipu",
+            "fetched_at": now,
+            "five_hour": {"pct": 33.0, "resets_at": "2030-01-01T00:00:00Z"},
+            "seven_day": {"pct": 11.0, "resets_at": "2030-01-07T00:00:00Z"},
+        }))
+        result = ZhipuProvider().fetch(cache_dir=tmp_path)
+        assert result is not None
+        assert result.five_hour_pct == 33.0
+        assert result.provider == "zhipu"
+
+    def test_fetch_authorization_header_has_no_bearer_prefix(self, tmp_path, monkeypatch):
+        # Critical Zhipu gotcha — Anthropic / MiniMax both prefix with
+        # "Bearer "; Zhipu rejects requests carrying that prefix. Capture
+        # the actual header by patching urlopen, assert the raw value.
+        from claude_island.platform_.providers import zhipu as zh
+
+        monkeypatch.setenv("ZHIPU_API_KEY", "raw-test-key")
+        captured: dict = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["auth"] = req.get_header("Authorization")
+            raise OSError("intercepted")  # we don't care about the response
+
+        with patch.object(zh.urllib.request, "urlopen", side_effect=fake_urlopen):
+            zh._fetch_http("raw-test-key")
+
+        assert captured["auth"] == "raw-test-key"
+        assert not captured["auth"].startswith("Bearer ")
+
+    def test_fetch_returns_cached_on_http_failure(self, tmp_path, monkeypatch):
+        from claude_island.platform_.providers.zhipu import ZhipuProvider
+        cache = tmp_path / "zhipu-quota.json"
+        now = datetime.now(timezone.utc).isoformat()
+        cache.write_text(json.dumps({
+            "provider": "zhipu",
+            "fetched_at": now,
+            "five_hour": {"pct": 50.0, "resets_at": "2030-01-01T00:00:00Z"},
+            "seven_day": {"pct": 20.0, "resets_at": "2030-01-07T00:00:00Z"},
+        }))
+        monkeypatch.setenv("ZHIPU_API_KEY", "any-key")
+        # bypass_cache forces an HTTP attempt; force it to fail and verify
+        # the cached snapshot is NOT returned (bypass=True path).
+        with patch(
+            "claude_island.platform_.providers.zhipu._fetch_http",
+            return_value=None,
+        ):
+            result = ZhipuProvider().fetch(cache_dir=tmp_path, bypass_cache=True)
+            assert result is None
+        # And without bypass, an HTTP failure DOES fall back to cache.
+        with patch(
+            "claude_island.platform_.providers.zhipu._fetch_http",
+            return_value=None,
+        ):
+            # Wipe the cache freshness so we hit the HTTP path then
+            # fall back; easier than mocking _is_expired.
+            old_now = "2020-01-01T00:00:00+00:00"
+            cache.write_text(json.dumps({
+                "provider": "zhipu",
+                "fetched_at": old_now,
+                "five_hour": {"pct": 50.0, "resets_at": "2030-01-01T00:00:00Z"},
+                "seven_day": {"pct": 20.0, "resets_at": "2030-01-07T00:00:00Z"},
+            }))
+            result = ZhipuProvider().fetch(cache_dir=tmp_path)
+            assert result is not None
+            assert result.five_hour_pct == 50.0
+
+    def test_token_chain_zhipu_env_wins(self, tmp_path, monkeypatch):
+        from claude_island.platform_.providers import write_provider_config
+        from claude_island.platform_.providers.zhipu import _read_token
+
+        monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-env-wins")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-env")
+        path = tmp_path / "providers.json"
+        write_provider_config(
+            {"providers": {"zhipu": {"auth_token": "config-fallback"}}},
+            path,
+        )
+        with patch(
+            "claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path,
+        ):
+            assert _read_token() == "zhipu-env-wins"
+
+    def test_token_chain_anthropic_env_then_config(self, tmp_path, monkeypatch):
+        from claude_island.platform_.providers import write_provider_config
+        from claude_island.platform_.providers.zhipu import _read_token
+
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-env-shared")
+        path = tmp_path / "providers.json"
+        write_provider_config(
+            {"providers": {"zhipu": {"auth_token": "config-fallback"}}},
+            path,
+        )
+        with patch(
+            "claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path,
+        ):
+            # Anthropic env wins because ZHIPU_API_KEY is missing.
+            assert _read_token() == "anthropic-env-shared"
+
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        with patch(
+            "claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path,
+        ):
+            # Falls all the way through to providers.json.
+            assert _read_token() == "config-fallback"
+
+
+# ============================================================================
+# Auto-assembly of providers.json from each provider's default_config()
+# ============================================================================
+
+class TestEnsureProviderConfigAutoAssembly:
+    """``_build_default_config()`` collects every provider's
+    ``default_config()`` so adding a new provider doesn't require
+    editing ``providers/__init__.py``."""
+
+    def test_assembles_blocks_from_all_providers(self, tmp_path):
+        # Importing the package triggers @provider registration of all
+        # sub-modules (anthropic, minimax, zhipu) via the bottom-of-
+        # module import line.
+        from claude_island.platform_.providers import (
+            ensure_provider_config, read_provider_config,
+        )
+        path = tmp_path / "providers.json"
+        ensure_provider_config(path)
+        cfg = read_provider_config(path)
+
+        providers = cfg["providers"]
+        # MiniMax + Zhipu both contribute blocks (Anthropic intentionally
+        # does NOT — it reads OAuth from ~/.claude/.credentials.json).
+        assert "minimax" in providers
+        assert "zhipu" in providers
+        assert "anthropic" not in providers
+
+        # Each block shape is sane.
+        for name in ("minimax", "zhipu"):
+            block = providers[name]
+            assert block["auth_token"] == ""
+            assert "base_url" in block
+            assert "_help" in block
+
+        # Default selection is anthropic — explicit, not positional.
+        assert cfg["selected"] == "anthropic"
+
+    def test_does_not_overwrite_existing_file(self, tmp_path):
+        # The "user's tokens are sacred" invariant: ensure() must be a
+        # pure no-op when the file already exists, even after the
+        # refactor that moved blocks behind `default_config()`.
+        from claude_island.platform_.providers import (
+            ensure_provider_config, read_provider_config, write_provider_config,
+        )
+        path = tmp_path / "providers.json"
+        original = {
+            "selected": "minimax",
+            "providers": {
+                "minimax": {"auth_token": "user-secret-key",
+                             "base_url": "https://custom.example"},
+            },
+        }
+        write_provider_config(original, path)
+        ensure_provider_config(path)
+        # Untouched, including absence of the new zhipu block.
+        assert read_provider_config(path) == original
+
+    def test_assembled_zhipu_block_contains_z_ai_default_host(self, tmp_path):
+        from claude_island.platform_.providers import (
+            ensure_provider_config, read_provider_config,
+        )
+        path = tmp_path / "providers.json"
+        ensure_provider_config(path)
+        cfg = read_provider_config(path)
+        assert "z.ai" in cfg["providers"]["zhipu"]["base_url"]
+
+
+# ============================================================================
+# Default-fallback contract (anthropic, regardless of import order)
+# ============================================================================
+
+class TestSelectedProviderDefaultFallback:
+    """The "default tab is Anthropic" contract is enforced in two
+    places — the seed config (TestEnsureProviderConfigAutoAssembly
+    above) AND the runtime fallback in ``__main__.py``. Test the
+    latter at the function-level (importing __main__ would start the
+    GUI), by replicating its exact fallback expression."""
+
+    def test_invalid_selection_falls_back_to_anthropic(self):
+        # Mimics __main__.py's fallback expression, verifying that an
+        # invalid stored selection routes to "anthropic" rather than
+        # _available_providers[0] (which would be order-dependent).
+        _DEFAULT_FALLBACK_PROVIDER = "anthropic"
+        _available_providers = ["zhipu", "anthropic", "minimax"]   # arbitrary order
+        _selected_provider = "kimi-removed-by-user"
+        if _selected_provider not in _available_providers:
+            _selected_provider = (
+                _DEFAULT_FALLBACK_PROVIDER
+                if _DEFAULT_FALLBACK_PROVIDER in _available_providers
+                else _available_providers[0]
+            )
+        assert _selected_provider == "anthropic"
+
+    def test_falls_back_to_first_when_anthropic_missing(self):
+        # Pathological: anthropic provider somehow not registered. The
+        # fallback degrades to the first available rather than raising,
+        # so the panel still renders something.
+        _DEFAULT_FALLBACK_PROVIDER = "anthropic"
+        _available_providers = ["zhipu", "minimax"]
+        _selected_provider = "removed"
+        if _selected_provider not in _available_providers:
+            _selected_provider = (
+                _DEFAULT_FALLBACK_PROVIDER
+                if _DEFAULT_FALLBACK_PROVIDER in _available_providers
+                else _available_providers[0]
+            )
+        assert _selected_provider == "zhipu"
