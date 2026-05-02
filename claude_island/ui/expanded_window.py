@@ -94,6 +94,7 @@ class _CopyableIdLabel(QFrame):
         layout.addWidget(self._copied_label)
 
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Click to copy session ID")
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         QApplication.clipboard().setText(self._uuid)
@@ -1268,6 +1269,7 @@ class SessionDetailPopup(QFrame):
         k.setStyleSheet("color: #6b7280; font-size: 11px;")
         k.setFixedWidth(54)
         k.setAlignment(Qt.AlignmentFlag.AlignTop)
+        k.setToolTip("Click to copy session ID")
         id_h.addWidget(k)
         if sess_uuid:
             copyable = _CopyableIdLabel(sess_uuid, display_text=_short_uuid(sess_uuid))
@@ -1290,15 +1292,17 @@ class SessionDetailPopup(QFrame):
         pk.setStyleSheet("color: #6b7280; font-size: 11px;")
         pk.setFixedWidth(54)
         pk.setAlignment(Qt.AlignmentFlag.AlignTop)
+        pk.setToolTip("Project path")
         path_h.addWidget(pk)
-        # Path value is click-to-copy (matches ID's affordance — both
-        # rows are "click value to copy", the inline ↗ icon is just
-        # an extra "open folder" action revealed on hover).
-        pv = _ClickToCopyLabel(str(self._fallback.project_path))
+        # Path value is clickable to open folder (same as the ↗ button
+        # revealed on hover — clicking the text should open, not copy).
+        pv = QLabel(str(self._fallback.project_path))
         pv.setStyleSheet("color: #e8e8e8; font-size: 12px;")
         pv.setWordWrap(True)
         pv.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        pv.setToolTip("Click to copy path")
+        pv.setCursor(Qt.CursorShape.PointingHandCursor)
+        pv.setToolTip("Open project folder in file explorer")
+        pv.mousePressEvent = lambda _: self._on_open_folder()
         path_h.addWidget(pv, 1)
         open_link = QPushButton("↗")
         open_link.setStyleSheet(_STYLE_TEXT_LINK)

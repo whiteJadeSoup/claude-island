@@ -1251,34 +1251,37 @@ def test_detail_popup_copy_id_action_writes_clipboard(qtbot):
     assert "deadbeef" in popup._repair_status.text()
 
 
-def test_detail_popup_path_click_copies_to_clipboard(qtbot):
-    """Path value is itself click-to-copy (matches ID's affordance).
-    Click writes the full path to the clipboard and flashes 'Copied'."""
+def test_detail_popup_path_click_opens_folder(qtbot, monkeypatch):
+    """Path value is clickable and opens the folder in explorer (same as
+    the ↗ button). Clicking the path label invokes _open_in_explorer."""
     from PySide6.QtCore import Qt, QPointF
     from PySide6.QtGui import QMouseEvent
-    from PySide6.QtWidgets import QApplication
-    from claude_island.ui.expanded_window import (
-        SessionDetailPopup, _ClickToCopyLabel,
-    )
+    from claude_island.ui import expanded_window as ew
+    from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/some/proj/path")
     details = _make_full_details(s)
     popup = SessionDetailPopup(details, s)
     qtbot.addWidget(popup)
     popup.show()
 
-    path_label = popup.findChild(_ClickToCopyLabel)
+    # Path label is now a plain QLabel (not _ClickToCopyLabel)
+    from PySide6.QtWidgets import QLabel
+    path_label = None
+    for lbl in popup.findChildren(QLabel):
+        if lbl.text() == str(s.project_path):
+            path_label = lbl
+            break
     assert path_label is not None
-    expected = str(s.project_path)
-    assert path_label.text() == expected
+    assert path_label.toolTip() == "Open project folder in file explorer"
 
-    QApplication.clipboard().clear()
+    called: list[Path] = []
+    monkeypatch.setattr(ew, "_open_in_explorer", lambda p: called.append(p))
     path_label.mousePressEvent(QMouseEvent(
         QMouseEvent.Type.MouseButtonPress,
         QPointF(), QPointF(), QPointF(),
         Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
     ))
-    assert QApplication.clipboard().text() == expected
-    assert path_label.text() == "Copied"
+    assert called == [s.project_path]
 
 
 def test_detail_popup_header_layout_stable_when_prompt_toggles(qtbot):
