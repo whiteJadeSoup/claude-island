@@ -1317,3 +1317,253 @@ def test_detail_popup_open_folder_calls_helper(qtbot, monkeypatch):
     monkeypatch.setattr(ew, "_open_in_explorer", lambda p: called.append(p))
     popup._on_open_folder()
     assert called == [s.project_path]
+
+
+# ============================================================================
+# Add-provider dialog (in-app + button) — frameless popup that lets the
+# user paste credentials and have a new tab appear without restart.
+# ============================================================================
+
+class TestAddProviderDialog:
+    """Pure-UI tests: dialog renders fields from each provider's
+    default_config(), Save validates + invokes the callback. The
+    actual file write is tested separately at the platform layer."""
+
+    @staticmethod
+    def _zhipu_cfg():
+        return {
+            "_help": "Paste your Z.AI key here.",
+            "auth_token": "",
+            "base_url": "https://api.z.ai",
+        }
+
+    @staticmethod
+    def _minimax_cfg():
+        return {
+            "_help": "Paste your MiniMax key.",
+            "auth_token": "",
+            "base_url": "https://api.minimaxi.com",
+        }
+
+    def test_renders_radio_for_each_configurable(self, qtbot):
+        from claude_island.ui.expanded_window import _AddProviderDialog
+        dlg = _AddProviderDialog(
+            configurable=[("zhipu", self._zhipu_cfg()),
+                          ("minimax", self._minimax_cfg())],
+            on_save=lambda *a: None,
+        )
+        qtbot.addWidget(dlg)
+        # Radio strip has one button per configurable provider.
+        assert "zhipu" in dlg._radio_btns
+        assert "minimax" in dlg._radio_btns
+        assert len(dlg._radio_btns) == 2
+
+    def test_renders_form_fields_from_default_config(self, qtbot):
+        from claude_island.ui.expanded_window import _AddProviderDialog
+        from PySide6.QtWidgets import QLineEdit
+        dlg = _AddProviderDialog(
+            configurable=[("zhipu", self._zhipu_cfg())],
+            on_save=lambda *a: None,
+        )
+        qtbot.addWidget(dlg)
+        # auth_token + base_url QLineEdits both registered for the active form.
+        keys = [k for k, _ in dlg._inputs["zhipu"]]
+        assert keys == ["auth_token", "base_url"]
+        # auth_token is password-mode (echo hides input).
+        token_edit = dict(dlg._inputs["zhipu"])["auth_token"]
+        assert token_edit.echoMode() == QLineEdit.EchoMode.Password
+        assert token_edit.text() == ""  # always empty initial regardless of seed
+        # base_url pre-filled from default_config.
+        url_edit = dict(dlg._inputs["zhipu"])["base_url"]
+        assert url_edit.text() == "https://api.z.ai"
+
+    def test_save_with_empty_token_shows_error_no_callback(self, qtbot):
+        from claude_island.ui.expanded_window import _AddProviderDialog
+        called: list = []
+        dlg = _AddProviderDialog(
+            configurable=[("zhipu", self._zhipu_cfg())],
+            on_save=lambda *a: called.append(a),
+        )
+        qtbot.addWidget(dlg)
+        # auth_token starts empty; click Save without typing.
+        dlg._on_save_clicked()
+        assert called == []                  # callback NOT invoked
+        # isVisible() returns False when the widget isn't realised
+        # (qtbot.addWidget doesn't show the parent). isHidden() reflects
+        # only the explicit hide()/show() state regardless of ancestry.
+        assert not dlg._status.isHidden()
+        assert "auth_token" in dlg._status.text()
+
+    def test_save_invokes_callback_with_field_values(self, qtbot):
+        from claude_island.ui.expanded_window import _AddProviderDialog
+        captured: list[tuple[str, dict]] = []
+        dlg = _AddProviderDialog(
+            configurable=[("zhipu", self._zhipu_cfg())],
+            on_save=lambda n, f: captured.append((n, f)),
+        )
+        qtbot.addWidget(dlg)
+        # Fill the form: paste a token, change base_url.
+        inputs = dict(dlg._inputs["zhipu"])
+        inputs["auth_token"].setText("z-test-key")
+        inputs["base_url"].setText("https://api.z.ai")
+        dlg._on_save_clicked()
+        assert captured == [("zhipu", {"auth_token": "z-test-key",
+                                       "base_url": "https://api.z.ai"})]
+
+    def test_radio_switch_changes_active_form(self, qtbot):
+        from claude_island.ui.expanded_window import _AddProviderDialog
+        dlg = _AddProviderDialog(
+            configurable=[("zhipu", self._zhipu_cfg()),
+                          ("minimax", self._minimax_cfg())],
+            on_save=lambda *a: None,
+        )
+        qtbot.addWidget(dlg)
+        # Default-selected is the first provider in the list.
+        assert dlg._active == "zhipu"
+        assert not dlg._form_widgets["zhipu"].isHidden()
+        assert dlg._form_widgets["minimax"].isHidden()
+        # Click the minimax radio.
+        dlg._select_provider("minimax")
+        assert dlg._active == "minimax"
+        assert dlg._form_widgets["zhipu"].isHidden()
+        assert not dlg._form_widgets["minimax"].isHidden()
+
+    def test_empty_state_when_nothing_configurable(self, qtbot):
+        from claude_island.ui.expanded_window import _AddProviderDialog
+        from PySide6.QtWidgets import QLabel
+        dlg = _AddProviderDialog(
+            configurable=[],
+            on_save=lambda *a: None,
+        )
+        qtbot.addWidget(dlg)
+        # No radio buttons, no inputs, no save button.
+        assert not hasattr(dlg, "_radio_btns") or not dlg._radio_btns
+        assert dlg._inputs == {}
+        # Empty-state message is rendered as a QLabel containing the
+        # word "configured" — check by text.
+        labels = [l.text() for l in dlg.findChildren(QLabel)]
+        assert any("configured" in t for t in labels)
+
+    def test_callback_exception_surfaces_in_status(self, qtbot):
+        # The dialog should not crash when on_save raises; instead it
+        # shows the error in the status slot so the user can retry.
+        from claude_island.ui.expanded_window import _AddProviderDialog
+
+        def boom(_n, _f):
+            raise RuntimeError("simulated write failure")
+
+        dlg = _AddProviderDialog(
+            configurable=[("zhipu", self._zhipu_cfg())],
+            on_save=boom,
+        )
+        qtbot.addWidget(dlg)
+        dict(dlg._inputs["zhipu"])["auth_token"].setText("k")
+        dlg._on_save_clicked()
+        assert not dlg._status.isHidden()
+        assert "simulated write failure" in dlg._status.text()
+
+
+# ============================================================================
+# ExpandedWindow.set_available_providers — runtime tab strip rebuild
+# ============================================================================
+
+def _panel_with_providers(qtbot, available: list[str], selected: str | None = None,
+                          on_provider_config_changed=None):
+    capsule = QWidget()
+    capsule.show()
+    panel = ExpandedWindow(
+        capsule=capsule,
+        controller=IslandController(),
+        get_usage_totals=lambda period: UsageTotals(period=period),
+        available_providers=available,
+        selected_provider=selected or (available[0] if available else None),
+        on_provider_config_changed=on_provider_config_changed,
+    )
+    qtbot.addWidget(panel)
+    qtbot.addWidget(capsule)
+    return panel
+
+
+class TestSetAvailableProviders:
+    def test_adds_new_tab(self, qtbot):
+        # Start with anthropic only (single-provider, static QUOTA label).
+        panel = _panel_with_providers(qtbot, ["anthropic"])
+        assert panel._provider_btns == {}
+        # User adds zhipu via the + dialog → wiring layer pushes the
+        # updated list back; tab strip rebuilds.
+        panel.set_available_providers(["anthropic", "zhipu"], selected="anthropic")
+        assert set(panel._provider_btns.keys()) == {"anthropic", "zhipu"}
+        # Selected pill is checked.
+        assert panel._provider_btns["anthropic"].isChecked()
+        assert not panel._provider_btns["zhipu"].isChecked()
+
+    def test_removes_obsolete_tab(self, qtbot):
+        panel = _panel_with_providers(qtbot, ["anthropic", "zhipu"], "zhipu")
+        assert set(panel._provider_btns.keys()) == {"anthropic", "zhipu"}
+        # Token removed → wiring pushes a smaller list.
+        panel.set_available_providers(["anthropic"])
+        assert "zhipu" not in panel._provider_btns
+
+    def test_falls_back_when_selected_removed(self, qtbot):
+        # Selected provider is dropped; selection must reset to the
+        # first remaining (since no explicit override is passed).
+        panel = _panel_with_providers(qtbot, ["anthropic", "zhipu"], "zhipu")
+        panel.set_available_providers(["anthropic"])
+        assert panel._selected_provider == "anthropic"
+
+    def test_explicit_selected_arg_wins(self, qtbot):
+        panel = _panel_with_providers(qtbot, ["anthropic"])
+        panel.set_available_providers(["anthropic", "zhipu", "minimax"], selected="minimax")
+        assert panel._selected_provider == "minimax"
+
+
+class TestPlusButtonVisibility:
+    def test_plus_visible_when_provider_addable(self, qtbot):
+        # anthropic is registered, others (minimax, zhipu) have
+        # default_config() and are NOT in available → + should appear.
+        called: list = []
+        panel = _panel_with_providers(
+            qtbot, ["anthropic"],
+            on_provider_config_changed=lambda: called.append(1),
+        )
+        # The + button is held on the panel as _add_provider_btn.
+        assert panel._add_provider_btn is not None
+        assert panel._add_provider_btn.text() == "+"
+
+    def test_plus_hidden_when_callback_not_wired(self, qtbot):
+        # Without on_provider_config_changed (e.g. tests that don't
+        # care about the dialog), the + button stays out of the strip.
+        panel = _panel_with_providers(qtbot, ["anthropic"])
+        assert getattr(panel, "_add_provider_btn", None) is None
+
+    def test_plus_hidden_when_all_configured(self, qtbot):
+        # All three providers in available → nothing left to add → no +.
+        panel = _panel_with_providers(
+            qtbot, ["anthropic", "minimax", "zhipu"], "anthropic",
+            on_provider_config_changed=lambda: None,
+        )
+        assert getattr(panel, "_add_provider_btn", None) is None
+
+    def test_dialog_save_persists_then_triggers_callback(self, qtbot, monkeypatch):
+        # End-to-end through the panel: filling the form and clicking
+        # Save calls set_provider_settings AND invokes the
+        # on_provider_config_changed callback exactly once.
+        #
+        # Patch the SOURCE symbol (claude_island.platform_.providers
+        # .set_provider_settings) rather than expanded_window's namespace
+        # because _on_dialog_save uses a function-local lazy import.
+        writes: list[tuple[str, dict]] = []
+        refreshes: list = []
+        monkeypatch.setattr(
+            "claude_island.platform_.providers.set_provider_settings",
+            lambda name, fields: writes.append((name, fields)),
+        )
+
+        panel = _panel_with_providers(
+            qtbot, ["anthropic"],
+            on_provider_config_changed=lambda: refreshes.append(1),
+        )
+        # Drive the save handler directly with realistic args.
+        panel._on_dialog_save("zhipu", {"auth_token": "k", "base_url": "https://api.z.ai"})
+        assert writes == [("zhipu", {"auth_token": "k", "base_url": "https://api.z.ai"})]
+        assert refreshes == [1]

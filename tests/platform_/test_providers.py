@@ -778,3 +778,83 @@ class TestSelectedProviderDefaultFallback:
                 else _available_providers[0]
             )
         assert _selected_provider == "zhipu"
+
+
+# ============================================================================
+# set_provider_settings — used by the in-app + dialog to persist a
+# freshly added provider's credentials without touching the rest of the
+# config.
+# ============================================================================
+
+class TestSetProviderSettings:
+    def test_merges_into_existing_config(self, tmp_path):
+        from claude_island.platform_.providers import (
+            read_provider_config, write_provider_config, set_provider_settings,
+        )
+        path = tmp_path / "providers.json"
+        original = {
+            "selected": "anthropic",
+            "providers": {
+                "minimax": {"auth_token": "minimax-key", "base_url": "https://api.minimaxi.com"},
+            },
+        }
+        write_provider_config(original, path)
+        with patch(
+            "claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path,
+        ):
+            set_provider_settings("zhipu", {"auth_token": "z-key", "base_url": "https://api.z.ai"})
+        cfg = read_provider_config(path)
+        # New zhipu block written.
+        assert cfg["providers"]["zhipu"]["auth_token"] == "z-key"
+        assert cfg["providers"]["zhipu"]["base_url"] == "https://api.z.ai"
+        # Existing minimax block + selected pointer untouched.
+        assert cfg["providers"]["minimax"]["auth_token"] == "minimax-key"
+        assert cfg["selected"] == "anthropic"
+
+    def test_empty_fields_is_noop(self, tmp_path):
+        from claude_island.platform_.providers import (
+            read_provider_config, write_provider_config, set_provider_settings,
+        )
+        path = tmp_path / "providers.json"
+        original = {"selected": "anthropic", "providers": {}}
+        write_provider_config(original, path)
+        with patch(
+            "claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path,
+        ):
+            set_provider_settings("zhipu", {})
+        # File untouched — no zhipu block, no extra entries.
+        assert read_provider_config(path) == original
+
+    def test_creates_providers_object_when_missing(self, tmp_path):
+        from claude_island.platform_.providers import (
+            read_provider_config, write_provider_config, set_provider_settings,
+        )
+        path = tmp_path / "providers.json"
+        # Config without a "providers" object at all (e.g. user wiped it).
+        write_provider_config({"selected": "anthropic"}, path)
+        with patch(
+            "claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path,
+        ):
+            set_provider_settings("zhipu", {"auth_token": "k"})
+        cfg = read_provider_config(path)
+        assert cfg["providers"]["zhipu"]["auth_token"] == "k"
+
+    def test_updates_existing_block_in_place(self, tmp_path):
+        # Same provider, second call → fields merge (e.g. user pastes a
+        # new token without re-typing the base_url they edited earlier).
+        from claude_island.platform_.providers import (
+            read_provider_config, write_provider_config, set_provider_settings,
+        )
+        path = tmp_path / "providers.json"
+        write_provider_config(
+            {"providers": {"zhipu": {"auth_token": "old", "base_url": "https://custom"}}},
+            path,
+        )
+        with patch(
+            "claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path,
+        ):
+            set_provider_settings("zhipu", {"auth_token": "new"})
+        block = read_provider_config(path)["providers"]["zhipu"]
+        assert block["auth_token"] == "new"
+        # base_url survives — only the touched key was replaced.
+        assert block["base_url"] == "https://custom"

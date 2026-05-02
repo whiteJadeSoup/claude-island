@@ -166,6 +166,32 @@ def _force_refresh_selected() -> None:
     quota_engine.force_refresh(provider_name=selected)
 
 
+def _on_provider_config_changed() -> None:
+    """In-app + dialog persisted a new provider's credentials. Re-run
+    detection (the new providers.json entry is on disk now, the next
+    detect() call will see it), push the updated list to the panel so
+    its tab strip rebuilds, and force a quota refresh so the user sees
+    real numbers in the new tab within ~1 second instead of waiting
+    for the next heartbeat tick."""
+    if "expanded" not in globals():
+        return
+    new_available = _resolve_available_providers()
+    # Honour the user's stored selection if still valid; otherwise
+    # default to the explicit anthropic fallback (matches startup logic).
+    stored = get_selected_provider()
+    if stored in new_available:
+        selected = stored
+    elif _DEFAULT_FALLBACK_PROVIDER in new_available:
+        selected = _DEFAULT_FALLBACK_PROVIDER
+    elif new_available:
+        selected = new_available[0]
+    else:
+        selected = None
+    expanded.set_available_providers(new_available, selected=selected)
+    if selected:
+        quota_engine.force_refresh(provider_name=selected)
+
+
 def _build_session_details(session):
     """Compose the per-row hover-tooltip details from three sources:
     the JSONL parser's session metadata cache, ``~/.claude/sessions/
@@ -224,6 +250,7 @@ expanded = ExpandedWindow(
     available_providers=_available_providers,
     selected_provider=_selected_provider,
     on_provider_selected=_on_provider_tab_clicked,
+    on_provider_config_changed=_on_provider_config_changed,
 )
 
 # ---------------------------------------------------------------------------

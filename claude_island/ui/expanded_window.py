@@ -447,6 +447,66 @@ _STYLE_PERIOD_BTN = """
     QPushButton:checked { color: white; border-color: #888; background: #2a2a2a; }
 """
 
+# Variant of the pill style for the trailing "+" button that opens the
+# add-provider dialog. Same shape so it reads as part of the tab strip,
+# but a touch dimmer at rest and a touch brighter on hover so the affordance
+# stays discoverable without competing with the actual tabs.
+_STYLE_ADD_TAB_BTN = """
+    QPushButton {
+        color: #888;
+        background: transparent;
+        border: 1px dashed #444;
+        border-radius: 8px;
+        padding: 2px 8px;
+        font-size: 12px;
+        font-weight: bold;
+    }
+    QPushButton:hover { color: #e8e8e8; border-color: #888; border-style: solid; }
+    QPushButton:pressed { background: #2a2a2a; }
+"""
+
+# Inputs in the add-provider dialog. Dark background, subtle border,
+# accent on focus so the user knows which field is active.
+_STYLE_DIALOG_INPUT = """
+    QLineEdit {
+        color: #e8e8e8;
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        padding: 6px 8px;
+        font-size: 12px;
+    }
+    QLineEdit:focus { border-color: #4a4a4a; }
+"""
+
+# Primary / secondary buttons in the add-provider dialog footer.
+_STYLE_DIALOG_PRIMARY_BTN = """
+    QPushButton {
+        color: #e8e8e8;
+        background: #2a3f5a;
+        border: 1px solid #3a557a;
+        border-radius: 6px;
+        padding: 6px 14px;
+        font-size: 12px;
+    }
+    QPushButton:hover { background: #335073; border-color: #4a6890; }
+    QPushButton:pressed { background: #1f3046; }
+    QPushButton:disabled { color: #666; background: #1f1f1f; border-color: #2a2a2a; }
+"""
+
+_STYLE_DIALOG_SECONDARY_BTN = """
+    QPushButton {
+        color: #c9c9c9;
+        background: transparent;
+        border: 1px solid #3a3a3a;
+        border-radius: 6px;
+        padding: 6px 14px;
+        font-size: 12px;
+    }
+    QPushButton:hover { color: #e8e8e8; border-color: #4a4a4a; background: #2a2a2a; }
+    QPushButton:pressed { background: #1f1f1f; }
+"""
+
 # --------------------------------------------------------------------------
 # USAGE region typography + cards
 # --------------------------------------------------------------------------
@@ -1724,6 +1784,262 @@ class SessionDetailPopup(QFrame):
         return self._fallback.session_uuid or ""
 
 
+class _AddProviderDialog(QFrame):
+    """Frameless rounded popup for adding a new quota provider in-app.
+
+    Renders a radio strip of every provider that exposes a
+    ``default_config()`` AND isn't already configured, plus a form
+    auto-generated from the chosen provider's default block. On Save
+    it invokes a caller-supplied ``on_save(name, fields)`` callback —
+    the dialog itself does no I/O, so it stays pure-UI and tests can
+    drive it without a filesystem.
+
+    The dialog is fully declarative: it has zero hard-coded provider
+    names. Adding a 5th provider in the future surfaces here automatically
+    as long as the provider class has a ``default_config()`` classmethod.
+
+    Usage::
+
+        dlg = _AddProviderDialog(
+            configurable=[("zhipu", ZhipuProvider.default_config())],
+            on_save=lambda name, fields: ...,
+            parent=self,
+        )
+        dlg.move(button.mapToGlobal(QPoint(0, button.height())))
+        dlg.show()
+    """
+
+    _DIALOG_W = 360
+
+    def __init__(
+        self,
+        configurable: list[tuple[str, dict]],
+        on_save: Callable[[str, dict], None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.Popup
+            | Qt.WindowType.FramelessWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedWidth(self._DIALOG_W)
+
+        self._configurable = configurable
+        self._on_save = on_save
+        # Map provider name → list[(key_name, QLineEdit)] for read-back
+        # at save time. Populated by _build_form_for().
+        self._inputs: dict[str, list[tuple[str, "QLineEdit"]]] = {}
+        # Map provider name → form QWidget so we can show/hide the
+        # right one as the user picks a different radio.
+        self._form_widgets: dict[str, QWidget] = {}
+        # Currently visible provider's name; None when no providers
+        # are configurable (empty state).
+        self._active: str | None = None
+
+        # Stylesheet matches SessionDetailPopup so the two floating
+        # surfaces read as the same component family. Includes the
+        # explicit QToolTip block for parity with the popup's fix
+        # for white-on-white tooltip rendering on Windows.
+        self.setStyleSheet(
+            "_AddProviderDialog {"
+            "    color: white;"
+            "    font-family: 'Segoe UI', sans-serif;"
+            "}"
+            "QLabel { color: #e8e8e8; }"
+            "QToolTip {"
+            "    color: #e8e8e8;"
+            "    background-color: #1e1e1e;"
+            "    border: 1px solid #3a3a3a;"
+            "    padding: 6px 8px;"
+            "    border-radius: 4px;"
+            "    font-size: 12px;"
+            "}"
+        )
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 14)
+        root.setSpacing(10)
+        self._build_body(root)
+        self.adjustSize()
+
+    def paintEvent(self, event: object) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, self.width(), self.height(), 12, 12)
+        painter.fillPath(path, QColor(18, 18, 18, 245))
+
+    # ------------------------------------------------------------------
+    # Body
+    # ------------------------------------------------------------------
+
+    def _build_body(self, root: QVBoxLayout) -> None:
+        title = QLabel("Add provider")
+        title.setStyleSheet("color: #e8e8e8; font-size: 13px; font-weight: 500;")
+        root.addWidget(title)
+
+        # Empty state: nothing left to add. Skip the radio + form
+        # entirely and offer a single Close button.
+        if not self._configurable:
+            msg = QLabel(
+                "All available providers are already configured.\n\n"
+                "Edit ~/.claude-island/providers.json directly to update "
+                "tokens or add a custom provider."
+            )
+            msg.setStyleSheet("color: #c9c9c9; font-size: 12px;")
+            msg.setWordWrap(True)
+            root.addWidget(msg)
+
+            close_row = QHBoxLayout()
+            close_row.addStretch()
+            close_btn = QPushButton("Close")
+            close_btn.setStyleSheet(_STYLE_DIALOG_SECONDARY_BTN)
+            close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            close_btn.clicked.connect(self.close)
+            close_row.addWidget(close_btn)
+            root.addLayout(close_row)
+            return
+
+        # Radio strip: one pill per configurable provider.
+        radio_row = QHBoxLayout()
+        radio_row.setSpacing(6)
+        self._radio_btns: dict[str, QPushButton] = {}
+        for name, _cfg in self._configurable:
+            btn = QPushButton(name.capitalize())
+            btn.setCheckable(True)
+            btn.setStyleSheet(_STYLE_PERIOD_BTN)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _checked, n=name: self._select_provider(n))
+            self._radio_btns[name] = btn
+            radio_row.addWidget(btn)
+        radio_row.addStretch()
+        root.addLayout(radio_row)
+
+        # Forms — one per provider, only the active one visible.
+        for name, cfg in self._configurable:
+            form = self._build_form_for(name, cfg)
+            form.hide()
+            self._form_widgets[name] = form
+            root.addWidget(form)
+
+        # Status slot for save-time error messages.
+        self._status = QLabel("")
+        self._status.setStyleSheet("color: #ef4444; font-size: 11px;")
+        self._status.setWordWrap(True)
+        self._status.hide()
+        root.addWidget(self._status)
+
+        # Footer: Cancel / Save.
+        footer = QHBoxLayout()
+        footer.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(_STYLE_DIALOG_SECONDARY_BTN)
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.close)
+        footer.addWidget(cancel_btn)
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet(_STYLE_DIALOG_PRIMARY_BTN)
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.clicked.connect(self._on_save_clicked)
+        footer.addWidget(save_btn)
+        self._save_btn = save_btn
+        root.addLayout(footer)
+
+        # Default-select the first provider so the dialog opens with
+        # a usable form rather than blank.
+        self._select_provider(self._configurable[0][0])
+
+    def _build_form_for(self, name: str, cfg: dict) -> QWidget:
+        """Generate a form from the provider's ``default_config()`` dict.
+
+        Iteration order:
+          1. ``_help`` (and other ``_``-prefixed keys) → dim wrap-text
+             label above the inputs.
+          2. ``auth_token`` → password QLineEdit, empty initial value
+             (the seed config ships ``""``).
+          3. Any other string key (e.g. ``base_url``) → text QLineEdit
+             pre-filled with the seed value.
+        """
+        from PySide6.QtWidgets import QLineEdit
+
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        inputs: list[tuple[str, "QLineEdit"]] = []
+        # Help text first.
+        for key, val in cfg.items():
+            if key.startswith("_") and isinstance(val, str):
+                help_lbl = QLabel(val)
+                help_lbl.setStyleSheet("color: #9ca3af; font-size: 11px;")
+                help_lbl.setWordWrap(True)
+                layout.addWidget(help_lbl)
+
+        # Inputs: auth_token first (password), then any other string keys.
+        for key in ("auth_token", *(k for k in cfg.keys() if k != "auth_token" and not k.startswith("_"))):
+            if key not in cfg:
+                continue
+            val = cfg[key]
+            if not isinstance(val, str):
+                continue
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            label = QLabel(key)
+            label.setStyleSheet("color: #6b7280; font-size: 11px;")
+            label.setFixedWidth(80)
+            row.addWidget(label)
+            edit = QLineEdit()
+            edit.setStyleSheet(_STYLE_DIALOG_INPUT)
+            if key == "auth_token":
+                edit.setEchoMode(QLineEdit.EchoMode.Password)
+                edit.setPlaceholderText("paste API key here")
+                # auth_token always starts empty regardless of seed.
+            else:
+                edit.setText(val)
+            row.addWidget(edit, 1)
+            layout.addLayout(row)
+            inputs.append((key, edit))
+
+        self._inputs[name] = inputs
+        return wrap
+
+    def _select_provider(self, name: str) -> None:
+        """Switch the visible form + the checked radio to ``name``."""
+        for k, btn in self._radio_btns.items():
+            btn.setChecked(k == name)
+        for k, form in self._form_widgets.items():
+            form.setVisible(k == name)
+        self._active = name
+        # Hide any stale error from the previous provider.
+        if hasattr(self, "_status"):
+            self._status.hide()
+        self.adjustSize()
+
+    def _on_save_clicked(self) -> None:
+        if self._active is None:
+            return
+        fields: dict[str, str] = {}
+        for key, edit in self._inputs.get(self._active, []):
+            fields[key] = edit.text().strip()
+        # Hard validation: auth_token is the one universally required field.
+        # Any provider without it can't authenticate, so the tab is useless.
+        if not fields.get("auth_token"):
+            self._status.setText("auth_token is required.")
+            self._status.show()
+            self.adjustSize()
+            return
+        try:
+            self._on_save(self._active, fields)
+        except Exception as exc:
+            self._status.setText(f"Save failed: {exc}")
+            self._status.show()
+            self.adjustSize()
+            return
+        self.close()
+
+
 class ExpandedWindow(QWidget):
     """Floating panel that appears below the capsule when expanded.
 
@@ -1752,6 +2068,7 @@ class ExpandedWindow(QWidget):
         on_provider_selected: Callable[[str], None] | None = None,
         get_totals_by_model: Callable[[str], "tuple[ModelTotals, ...]"] | None = None,
         get_quota_snapshot: Callable[[], "QuotaSnapshot | None"] | None = None,
+        on_provider_config_changed: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self._capsule = capsule
@@ -1802,7 +2119,15 @@ class ExpandedWindow(QWidget):
         self._available_providers = list(available_providers or [])
         self._selected_provider = selected_provider
         self._on_provider_selected = on_provider_selected
+        # Fired when the in-app + dialog persists a new provider's
+        # credentials. The wiring layer re-runs detect() and pushes the
+        # updated provider list back via :meth:`set_available_providers`.
+        # None → the + button is hidden (no-restart add isn't wired).
+        self._on_provider_config_changed = on_provider_config_changed
         self._provider_btns: dict[str, QPushButton] = {}
+        # Hold a reference to the active add-provider dialog so Qt's
+        # GC doesn't tear it down before the user can interact with it.
+        self._add_provider_dialog: "_AddProviderDialog | None" = None
         # Diff-based row update: keep widget references keyed by pid so that
         # session ticks (every ~10s) don't tear down rows the user might be
         # hovering. The placeholder widget (no sessions) is tracked separately
@@ -2345,24 +2670,14 @@ class ExpandedWindow(QWidget):
         self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
         quota_hdr.addWidget(self._quota_dot)
 
-        if len(self._available_providers) >= 2:
-            for name in self._available_providers:
-                btn = QPushButton(name.capitalize())
-                btn.setCheckable(True)
-                btn.setStyleSheet(_STYLE_PERIOD_BTN)
-                btn.setChecked(name == self._selected_provider)
-                btn.clicked.connect(lambda _, n=name: self._on_provider_clicked(n))
-                quota_hdr.addWidget(btn)
-                self._provider_btns[name] = btn
-            quota_hdr.addStretch()
-            # Hidden label kept for tests that read text — never shown.
-            self._quota_hdr = QLabel("QUOTA")
-            self._quota_hdr.hide()
-        else:
-            self._quota_hdr = QLabel("QUOTA")
-            self._quota_hdr.setStyleSheet(_STYLE_TITLE)
-            quota_hdr.addWidget(self._quota_hdr)
-            quota_hdr.addStretch()
+        # Cache the layout so set_available_providers() can rebuild the
+        # tab strip in place without rebuilding the whole quota card.
+        self._quota_hdr_layout = quota_hdr
+        # Always-present hidden label so tests that grep for "QUOTA"
+        # text keep working regardless of single- vs multi-provider
+        # state. Shown only in the no-tabs branch below.
+        self._quota_hdr = QLabel("QUOTA")
+        self._build_provider_tab_strip()
 
         # Manual-refresh button on the right of the QUOTA header. Sits
         # in the region it actually affects (per Apple HIG) — when it
@@ -2563,6 +2878,151 @@ class ExpandedWindow(QWidget):
                 import sys as _sys
                 print(f"[claude-island] provider-select callback failed: {exc}",
                       file=_sys.stderr)
+        self.refresh_usage_bar()
+
+    # ------------------------------------------------------------------
+    # Provider tab strip — construction, in-place rebuild, and the
+    # in-app + button that opens the add-provider dialog.
+    # ------------------------------------------------------------------
+
+    def _build_provider_tab_strip(self) -> None:
+        """Populate ``self._quota_hdr_layout`` with one pill per active
+        provider plus a trailing ``+`` pill (when at least one
+        configurable provider is still un-added).
+
+        Called once at construction and again from
+        :meth:`_rebuild_provider_tab_strip` after a runtime add.
+        Always-rendered hidden ``QUOTA`` label keeps grep-text tests
+        happy regardless of single-provider state."""
+        layout = self._quota_hdr_layout
+        if len(self._available_providers) >= 2:
+            # Multi-provider state: one pill per provider, hide the
+            # static QUOTA label entirely.
+            for name in self._available_providers:
+                btn = QPushButton(name.capitalize())
+                btn.setCheckable(True)
+                btn.setStyleSheet(_STYLE_PERIOD_BTN)
+                btn.setChecked(name == self._selected_provider)
+                btn.clicked.connect(lambda _, n=name: self._on_provider_clicked(n))
+                layout.addWidget(btn)
+                self._provider_btns[name] = btn
+            self._quota_hdr.setText("QUOTA")
+            self._quota_hdr.hide()
+        else:
+            # Single (or zero) provider: static QUOTA label, no pills.
+            self._quota_hdr.setText("QUOTA")
+            self._quota_hdr.setStyleSheet(_STYLE_TITLE)
+            layout.addWidget(self._quota_hdr)
+
+        # + button. Append before the stretch so it sits at the right
+        # end of the pill row. Skip when no callback is wired (tests /
+        # detached use), or when there's nothing left to add.
+        self._add_provider_btn: QPushButton | None = None
+        if self._on_provider_config_changed is not None and self._configurable_providers():
+            self._add_provider_btn = QPushButton("+")
+            self._add_provider_btn.setStyleSheet(_STYLE_ADD_TAB_BTN)
+            self._add_provider_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._add_provider_btn.setToolTip("Add a quota provider")
+            self._add_provider_btn.setFixedHeight(20)
+            self._add_provider_btn.clicked.connect(self._on_add_provider_clicked)
+            layout.addWidget(self._add_provider_btn)
+
+        layout.addStretch()
+
+    def _rebuild_provider_tab_strip(self) -> None:
+        """Tear down the existing pills + ``+`` + stretch and rebuild
+        from the updated ``self._available_providers``. Used after the
+        in-app add dialog persists a new provider so the tab appears
+        without an app restart."""
+        layout = self._quota_hdr_layout
+        # Walk backward so removeItem indices stay valid. Stop at the
+        # ``●`` dot at index 0 — that's the only non-tab widget the
+        # construction always inserts before the strip.
+        while layout.count() > 1:
+            item = layout.takeAt(layout.count() - 1)
+            if item is None:
+                break
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+            # Spacer items don't have a widget — takeAt() removes them too.
+        self._provider_btns.clear()
+        self._add_provider_btn = None
+        self._build_provider_tab_strip()
+
+    def _configurable_providers(self) -> list[tuple[str, dict]]:
+        """List of (name, default_config_dict) for providers that
+        expose ``default_config()`` and aren't already in
+        ``_available_providers``. Drives both the + button visibility
+        and the dialog's choice list."""
+        from claude_island.platform_.providers import all_providers
+        out: list[tuple[str, dict]] = []
+        for name, cls in all_providers().items():
+            if name in self._available_providers:
+                continue
+            cfg_fn = getattr(cls, "default_config", None)
+            if cfg_fn is None:
+                continue
+            try:
+                cfg = cfg_fn()
+            except Exception:
+                cfg = None
+            if isinstance(cfg, dict):
+                out.append((name, cfg))
+        return out
+
+    def _on_add_provider_clicked(self) -> None:
+        """Open the add-provider dialog adjacent to the + button."""
+        configurable = self._configurable_providers()
+        dlg = _AddProviderDialog(
+            configurable=configurable,
+            on_save=self._on_dialog_save,
+            parent=self,
+        )
+        # Position immediately below the + button. mapToGlobal handles
+        # multi-monitor / DPI correctly.
+        if self._add_provider_btn is not None:
+            origin = self._add_provider_btn.mapToGlobal(
+                self._add_provider_btn.rect().bottomLeft()
+            )
+            dlg.move(origin)
+        dlg.show()
+        # Hold a reference so Qt's GC doesn't tear it down.
+        self._add_provider_dialog = dlg
+
+    def _on_dialog_save(self, name: str, fields: dict) -> None:
+        """Dialog Save callback — persist credentials, then ask the
+        wiring layer to re-detect providers and push the new list back
+        via :meth:`set_available_providers`."""
+        from claude_island.platform_.providers import set_provider_settings
+        set_provider_settings(name, fields)
+        if self._on_provider_config_changed is not None:
+            try:
+                self._on_provider_config_changed()
+            except Exception as exc:
+                import sys as _sys
+                print(f"[claude-island] provider-config-changed callback failed: {exc}",
+                      file=_sys.stderr)
+
+    def set_available_providers(
+        self, providers: list[str], selected: str | None = None
+    ) -> None:
+        """Update the panel's available-provider list and rebuild the
+        QUOTA card's tab strip in place. Called by the wiring layer
+        after the in-app add-provider dialog writes new credentials —
+        gives users a no-restart path from "I just pasted a key" to
+        "the new tab is live".
+
+        ``selected`` overrides the current selection; when None and
+        the existing selection is no longer valid, falls back to the
+        first available."""
+        self._available_providers = list(providers)
+        if selected is not None:
+            self._selected_provider = selected
+        elif self._selected_provider not in providers and providers:
+            self._selected_provider = providers[0]
+        self._rebuild_provider_tab_strip()
         self.refresh_usage_bar()
 
     # ------------------------------------------------------------------

@@ -351,6 +351,34 @@ def set_selected_provider(name: str) -> None:
     write_provider_config(cfg)
 
 
+def set_provider_settings(name: str, fields: dict) -> None:
+    """Merge ``fields`` into ``providers.json`` under ``providers[name]``.
+
+    Round-trips the existing config so other providers' tokens, the
+    ``selected`` pointer, and any user-added keys are preserved. Atomic
+    write via :func:`write_provider_config`. No-op when ``fields`` is
+    empty so the in-app + dialog can call it unconditionally without
+    rewriting the file when the user clicks Save with no changes.
+
+    Used by the in-app provider-add dialog so a freshly configured
+    provider's auth token gets persisted without overwriting unrelated
+    state (the broader "user's tokens are sacred" invariant).
+    """
+    if not fields:
+        return
+    cfg = read_provider_config()
+    providers = cfg.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+        cfg["providers"] = providers
+    block = providers.get(name)
+    if not isinstance(block, dict):
+        block = {}
+        providers[name] = block
+    block.update(fields)
+    write_provider_config(cfg)
+
+
 def read_oauth_token(credentials_path: Path) -> str | None:
     """Read ``claudeAiOauth.accessToken`` from Claude Code's credentials.
 
