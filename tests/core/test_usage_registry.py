@@ -130,6 +130,33 @@ def test_totals_by_model_empty_returns_empty_tuple(registry):
     assert registry.get_totals_by_model("today") == ()
 
 
+def test_opus_pricing_matches_anthropic_5_25_per_mtok(registry):
+    """Regression for the bug a third-party tracker exposed: we had
+    Opus at $15/$75 (legacy 3.x / 4.0/4.1 rates) but Anthropic dropped
+    it to $5/$25 starting with Opus 4.5 (still current at 4.7). The
+    real-data sample below was reverse-engineered from the third-party
+    UI and matches Anthropic's official pricing page exactly.
+
+    1 turn of Opus 4.7 with:
+      input  21
+      output 26,223
+      cw     746,695   (×1.25 input rate)
+      cr     11,406,712 (×0.10 input rate)
+    Should price at $11.0259 (was $33.08 with the legacy rate).
+    """
+    registry.record_many([_record(
+        model="claude-opus-4-7",
+        input_tokens=21,
+        output_tokens=26_223,
+        cache_creation_tokens=746_695,
+        cache_read_tokens=11_406_712,
+    )])
+    rows = registry.get_totals_by_model("today")
+    assert len(rows) == 1
+    # Tolerate tiny floating-point drift; the third-party showed $11.0258
+    assert abs(rows[0].cost_usd - 11.0259) < 0.01
+
+
 # --------------------------------------------------------------------------
 # W1-W5: 5h session window
 # --------------------------------------------------------------------------

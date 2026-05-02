@@ -55,11 +55,22 @@ class PricingTable:
     output_per_mtok: float
 
 
-# Prices as of mid-2025; cache write is ×1.25 input, cache read is ×0.1 input.
+# Per-Mtok input/output rates from Anthropic's official API pricing
+# table (https://platform.claude.com/docs/en/about-claude/pricing,
+# fetched 2026-05-01). Cache write is ×1.25 input (5-min ephemeral —
+# the SDK default), cache read is ×0.1 input.
+#
+# Heads-up: Opus dropped from $15/$75 (3.x and 4.0/4.1) to $5/$25
+# starting with 4.5 and held through 4.6 and 4.7 — if a user is on
+# legacy 4.0/4.1 the rate substring match still routes to "opus" but
+# the cost is silently 3× under-reported for them. Acceptable trade-off:
+# Anthropic's recent versions converge on the new rate, and the substring
+# match keeps working as new opus-N versions ship. Revisit if Anthropic
+# fragments the 4.x family.
 PRICING: dict[str, PricingTable] = {
-    "haiku":  PricingTable(input_per_mtok=1.0,  output_per_mtok=5.0),
-    "sonnet": PricingTable(input_per_mtok=3.0,  output_per_mtok=15.0),
-    "opus":   PricingTable(input_per_mtok=15.0, output_per_mtok=75.0),
+    "haiku":  PricingTable(input_per_mtok=1.0, output_per_mtok=5.0),
+    "sonnet": PricingTable(input_per_mtok=3.0, output_per_mtok=15.0),
+    "opus":   PricingTable(input_per_mtok=5.0, output_per_mtok=25.0),
 }
 DEFAULT_PRICING = PricingTable(input_per_mtok=3.0, output_per_mtok=15.0)
 
