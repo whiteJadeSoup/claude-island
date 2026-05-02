@@ -56,10 +56,32 @@ class JsonlParser:
         # every transcript from the beginning — JSONL is the source of
         # truth, the registry is rebuilt from scratch.
         self._offsets: dict[str, int] = {}
+        # Per-session metadata extracted from the JSONL — surfaced in
+        # the UI's hover tooltip. Keyed by ``session_uuid`` (transcript
+        # filename stem). Each value is a dict with optional keys:
+        #   ``ai_title`` (str)    — from a ``type=ai-title`` row
+        #   ``last_prompt`` (str) — from a ``type=last-prompt`` row
+        #   ``git_branch`` (str)  — from any row's ``gitBranch`` field
+        #   ``version`` (str)     — from any row's ``version`` field
+        #   ``turn_count`` (int)  — running count of ``type=assistant`` rows
+        #   ``sidechain_count`` (int) — count of rows with ``isSidechain=True``
+        # In-memory only (matches the rest of post-DB-removal design).
+        self._session_meta: dict[str, dict] = {}
         # Cooperative cancellation for backfill_all. Set by request_stop()
         # at app shutdown so the daemon thread bails out at the next file
         # boundary instead of doing redundant work after the UI has gone.
         self._stop_event = threading.Event()
+
+    def get_session_metadata(self, session_uuid: str) -> dict:
+        """Snapshot of per-session metadata extracted from the JSONL.
+
+        Returns a dict with optional keys ``ai_title`` / ``last_prompt`` /
+        ``git_branch`` / ``version``. Empty dict when the session UUID
+        is unknown (transcript not yet parsed). Returned dict is a
+        shallow copy so callers can read freely without locking.
+        """
+        with self._lock:
+            return dict(self._session_meta.get(session_uuid, {}))
 
     def request_stop(self) -> None:
         """Signal backfill_all to abort at the next file boundary.
@@ -136,6 +158,7 @@ class JsonlParser:
 
         batch: list[UsageRecord] = []
         last_activity: datetime | None = None
+        meta = self._session_meta.setdefault(session_uuid, {})
 
         for raw_line in complete_lines:
             raw_line = raw_line.strip()
@@ -145,6 +168,32 @@ class JsonlParser:
                 entry: dict = json.loads(raw_line.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
+
+            # Capture per-session metadata before we filter by usage —
+            # ai-title / last-prompt / permission-mode rows have no
+            # usage but carry the session info we want for the tooltip.
+            row_type = entry.get("type")
+            if row_type == "ai-title":
+                t = entry.get("aiTitle")
+                if isinstance(t, str) and t.strip():
+                    meta["ai_title"] = t.strip()
+            elif row_type == "last-prompt":
+                p = entry.get("lastPrompt")
+                if isinstance(p, str) and p.strip():
+                    meta["last_prompt"] = p.strip()
+            # Branch + version live on most rows; latest-wins is fine
+            # since they don't change within one session except for
+            # the rare git-checkout-mid-session case (then the latest
+            # write reflects the user's current branch).
+            br = entry.get("gitBranch")
+            if isinstance(br, str) and br:
+                meta["git_branch"] = br
+            ver = entry.get("version")
+            if isinstance(ver, str) and ver:
+                meta["version"] = ver
+            # turn / sidechain counts live in UsageRegistry — there
+            # they're computed from unique message.id, dedupping the
+            # N-rows-per-response duplication we already handle there.
 
             ts = _parse_ts(entry)
             usage, model = _extract_usage(entry)
@@ -167,6 +216,7 @@ class JsonlParser:
                     cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
                     cache_read_tokens=usage.get("cache_read_input_tokens", 0),
                     message_id=message_id if isinstance(message_id, str) else None,
+                    is_sidechain=bool(entry.get("isSidechain")),
                 ))
                 if last_activity is None or ts > last_activity:
                     last_activity = ts

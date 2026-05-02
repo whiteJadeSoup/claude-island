@@ -133,6 +133,40 @@ def test_partial_line_offset_rewinds_to_last_complete_boundary(env):
     assert _input_tokens_total(reg) == 60
 
 
+def test_session_metadata_extracted_from_special_rows(env):
+    """JsonlParser tracks per-session metadata from rows that don't
+    carry usage themselves: ``ai-title`` / ``last-prompt`` / any row
+    with gitBranch + version. Used by the hover tooltip."""
+    reg, parser, jsonl = env
+    rows = [
+        # An assistant turn with usage — also carries gitBranch + version.
+        b'{"type":"assistant","timestamp":"2025-01-01T00:00:00Z",'
+        b'"gitBranch":"feat-x","version":"2.1.123",'
+        b'"message":{"model":"claude-sonnet-4-5",'
+        b'"id":"msg_001",'
+        b'"usage":{"input_tokens":1,"output_tokens":1,'
+        b'"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n',
+        # Special rows without usage but with metadata.
+        b'{"type":"ai-title","aiTitle":"Refactor scanner to async iter",'
+        b'"sessionId":"session-uuid"}\n',
+        b'{"type":"last-prompt","lastPrompt":"please refactor this",'
+        b'"sessionId":"session-uuid"}\n',
+    ]
+    jsonl.write_bytes(b"".join(rows))
+    parser.parse_file(jsonl)
+
+    meta = parser.get_session_metadata("session-uuid")
+    assert meta["ai_title"] == "Refactor scanner to async iter"
+    assert meta["last_prompt"] == "please refactor this"
+    assert meta["git_branch"] == "feat-x"
+    assert meta["version"] == "2.1.123"
+
+
+def test_session_metadata_unknown_session_returns_empty(env):
+    reg, parser, _ = env
+    assert parser.get_session_metadata("nope") == {}
+
+
 def test_chunk_ending_exactly_on_newline_advances_to_eof(env):
     """Sanity: if the chunk ends on \\n, offset advances normally."""
     reg, parser, jsonl = env

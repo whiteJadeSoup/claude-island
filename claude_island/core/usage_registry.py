@@ -252,6 +252,38 @@ class UsageRegistry:
         since = _period_cutoff(period)
         return _aggregate_by_model(self._records_since(since))
 
+    def get_session_summary(self, session_uuid: str) -> tuple[float, int, int]:
+        """Aggregate over a single Claude Code session (transcript file).
+
+        Returns ``(total_cost_usd, turn_count, sidechain_count)`` —
+        used by the hover tooltip to show how much this specific
+        session has consumed across its lifetime. Iterates the
+        in-memory record list once; cheap at the user's scale.
+
+        ``turn_count`` counts records that are NOT subagent (i.e. the
+        main session's assistant turns). ``sidechain_count`` is the
+        number of subagent invocations.
+        """
+        cost = 0.0
+        turns = 0
+        sides = 0
+        with self._lock:
+            for r in self._records:
+                if r.session_uuid != session_uuid:
+                    continue
+                p = _resolve_pricing(r.model)
+                cost += (
+                    r.input_tokens / 1_000_000 * p.input_per_mtok
+                    + r.output_tokens / 1_000_000 * p.output_per_mtok
+                    + r.cache_creation_tokens / 1_000_000 * p.input_per_mtok * 1.25
+                    + r.cache_read_tokens / 1_000_000 * p.input_per_mtok * 0.1
+                )
+                if r.is_sidechain:
+                    sides += 1
+                else:
+                    turns += 1
+        return cost, turns, sides
+
     def get_session_window(
         self,
         *,

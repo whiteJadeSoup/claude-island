@@ -489,6 +489,69 @@ def test_session_card_stale_overrides_red(qtbot):
     assert "#ef4444" not in p._session_bar.styleSheet()
 
 
+def test_row_tooltip_renders_session_details(qtbot):
+    """When a get_session_details composer is wired, each row's
+    tooltip carries the rich HTML with name, branch, status, cost,
+    and a last-prompt preview. Title shown on the row itself prefers
+    the human ``name`` over the cwd basename."""
+    from claude_island.core.models import SessionDetails as _SD
+    from claude_island.ui.expanded_window import ExpandedWindow
+    from PySide6.QtWidgets import QLabel as _QL
+
+    s = _session(1, "/some/path/foo", window_handle=None)
+    details = _SD(
+        session=s,
+        name="cc-learning",
+        ai_title="Refactor scanner to async iter",
+        git_branch="feat-async",
+        last_prompt="please refactor this scanner",
+        started_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        status="busy",
+        cc_version="2.1.123",
+        cost_usd=2.67,
+        turn_count=42,
+        sidechain_count=3,
+    )
+
+    capsule = QWidget()
+    capsule.show()
+    panel = ExpandedWindow(
+        capsule=capsule,
+        controller=IslandController(),
+        get_usage_totals=lambda p: UsageTotals(period=p),
+        get_session_details=lambda _s: details,
+    )
+    qtbot.addWidget(panel)
+    qtbot.addWidget(capsule)
+    panel.refresh_sessions([s])
+
+    btn = panel._rows[1]
+    # Row title displays the human ``name``, not the cwd basename.
+    assert btn.findChild(_QL, "name_label").text() == "cc-learning"
+
+    tt = btn.toolTip()
+    # All the high-value fields surface in the tooltip HTML.
+    assert "cc-learning" in tt
+    assert "feat-async" in tt
+    # Path normalisation differs by OS — just assert the basename.
+    assert "foo" in tt
+    assert "$2.67" in tt
+    assert "42 turns" in tt
+    assert "3 subagent" in tt
+    assert "please refactor this scanner" in tt
+    assert "2.1.123" in tt
+    assert "busy" in tt
+
+
+def test_row_tooltip_falls_back_when_no_composer(qtbot):
+    """No composer wired → tooltip is just the cwd."""
+    panel_no_details = _panel_with_session(qtbot, lambda: None)
+    panel_no_details.refresh_sessions([_session(7, "/proj/foo")])
+    btn = panel_no_details._rows[7]
+    # Without details the tooltip should still be set, just minimal.
+    assert "/proj/foo" in btn.toolTip() or "proj" in btn.toolTip()
+
+
 def test_session_card_model_breakdown_shows_top_models(qtbot):
     """U7: by_model populated → first 3 entries shown joined with ' · '
     using friendly labels (Sonnet/Haiku/Opus); unknown ids truncated."""

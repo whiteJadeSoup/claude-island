@@ -187,6 +187,36 @@ def test_totals_by_model_empty_returns_empty_tuple(registry):
     assert registry.get_totals_by_model("today") == ()
 
 
+def test_session_summary_aggregates_one_sessions_records(registry):
+    """get_session_summary returns (cost, turns, sidechain) for one
+    transcript file. Records from other sessions are ignored."""
+    registry.record_many([
+        UsageRecord(**{**_record(model="claude-opus-4-7",
+                                  input_tokens=1, output_tokens=1000).__dict__,
+                       "session_uuid": "sess-a",
+                       "message_id": "m1", "is_sidechain": False}),
+        UsageRecord(**{**_record(model="claude-opus-4-7",
+                                  input_tokens=2, output_tokens=2000).__dict__,
+                       "session_uuid": "sess-a",
+                       "message_id": "m2", "is_sidechain": True}),
+        UsageRecord(**{**_record(model="claude-opus-4-7",
+                                  input_tokens=99, output_tokens=99).__dict__,
+                       "session_uuid": "sess-b",   # belongs to another session
+                       "message_id": "m3"}),
+    ])
+    cost, turns, sides = registry.get_session_summary("sess-a")
+    # 2 records for sess-a: 1 turn + 1 sidechain. cost is opus-priced.
+    expected = (1/1e6*5 + 1000/1e6*25) + (2/1e6*5 + 2000/1e6*25)
+    assert abs(cost - expected) < 1e-6
+    assert turns == 1
+    assert sides == 1
+
+
+def test_session_summary_unknown_session_returns_zero(registry):
+    cost, turns, sides = registry.get_session_summary("nope")
+    assert (cost, turns, sides) == (0.0, 0, 0)
+
+
 def test_opus_pricing_matches_anthropic_5_25_per_mtok(registry):
     """Regression for the bug a third-party tracker exposed: we had
     Opus at $15/$75 (legacy 3.x / 4.0/4.1 rates) but Anthropic dropped

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from claude_island.core.models import Session, SessionUsage, UsageTotals
+from claude_island.core.models import Session, SessionDetails, SessionUsage, UsageTotals
 from .controller import IslandController
 
 _PANEL_W = 320
@@ -255,6 +255,84 @@ def _fmt_model_label(model: str) -> str:
     return model[:12] + ("…" if len(model) > 12 else "")
 
 
+def _fmt_started(dt: datetime | None) -> str:
+    """Wall-clock duration string for the tooltip header."""
+    if dt is None:
+        return "—"
+    delta = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
+    s = int(delta.total_seconds())
+    if s < 60:
+        return f"started {s}s ago"
+    if s < 3600:
+        return f"started {s // 60}m ago"
+    if s < 86400:
+        return f"started {s // 3600}h {(s % 3600) // 60}m ago"
+    return f"started {s // 86400}d ago"
+
+
+def _escape_html(text: str) -> str:
+    """Minimal HTML escape for tooltip-safe rendering of user content."""
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+
+def _build_session_tooltip(d: SessionDetails | None, fallback: Session) -> str:
+    """Render a SessionDetails as the row's hover tooltip.
+
+    Designed for Qt's auto-tooltip (QWidget.setToolTip) which renders
+    a bounded subset of HTML. We use only <b> / <br> / <i> /
+    <span style='color:…'> — anything fancier won't survive Qt's
+    text engine. Returned string is safe to pass directly to setToolTip.
+
+    Falls back to a one-line cwd display when ``d`` is None (no
+    composer wired, or the session hasn't been parsed yet).
+    """
+    if d is None:
+        return _escape_html(str(fallback.project_path))
+
+    # Title block — name from sessions/<pid>.json wins, then aiTitle,
+    # then cwd basename. The "outside" row shows just the title; the
+    # tooltip is allowed to repeat it for context.
+    title = (d.name or d.ai_title
+             or fallback.project_path.name
+             or str(fallback.project_path))
+    branch = f"  ·  <span style='color:#9ca3af'>{_escape_html(d.git_branch)}</span>" if d.git_branch else ""
+
+    parts: list[str] = []
+    parts.append(f"<b>{_escape_html(title)}</b>{branch}")
+    parts.append(f"<span style='color:#9ca3af'>{_escape_html(str(fallback.project_path))}</span>")
+
+    meta_line: list[str] = []
+    if d.started_at is not None:
+        meta_line.append(_fmt_started(d.started_at))
+    if d.status:
+        meta_line.append(f"status: <b>{_escape_html(d.status)}</b>")
+    if meta_line:
+        parts.append(" · ".join(meta_line))
+
+    parts.append("<br>")
+    cost_line = f"This session: <b>{_fmt_money(d.cost_usd)}</b>"
+    if d.turn_count:
+        cost_line += f" · {d.turn_count} turn{'s' if d.turn_count != 1 else ''}"
+    if d.sidechain_count:
+        cost_line += f" · {d.sidechain_count} subagent call{'s' if d.sidechain_count != 1 else ''}"
+    parts.append(cost_line)
+
+    if d.last_prompt:
+        # Truncate long prompts so the tooltip stays a reasonable size.
+        snippet = d.last_prompt
+        if len(snippet) > 220:
+            snippet = snippet[:217] + "…"
+        parts.append("<br><i>Last prompt:</i>")
+        parts.append(f"<span style='color:#c9c9c9'>{_escape_html(snippet)}</span>")
+
+    if d.cc_version:
+        parts.append(f"<br><span style='color:#6b7280'>Claude Code {_escape_html(d.cc_version)}</span>")
+
+    return "<br>".join(parts)
+
+
 def _quota_color(pct: float, stale: bool) -> str:
     """Pick the progress-bar / pct-text colour for a 5h quota reading.
 
@@ -390,6 +468,7 @@ class ExpandedWindow(QWidget):
         get_usage_totals: Callable[[str], UsageTotals],
         get_session_usage: Callable[[], SessionUsage] | None = None,
         on_refresh_clicked: Callable[[], None] | None = None,
+        get_session_details: Callable[[Session], SessionDetails] | None = None,
     ) -> None:
         super().__init__()
         self._capsule = capsule
@@ -406,6 +485,14 @@ class ExpandedWindow(QWidget):
         # state yet (cache TTL is 5 min, heartbeat is 60 s, so worst
         # case the displayed % can lag 5 min behind reality).
         self._on_refresh_clicked = on_refresh_clicked
+        # Per-session detail composer. Wired in __main__ to combine
+        # JSONL metadata (aiTitle / gitBranch / lastPrompt / version),
+        # process state (status / name / startedAt from
+        # ~/.claude/sessions/<pid>.json), and aggregate usage (cost /
+        # turn count / sidechain count) into one SessionDetails record
+        # for the row's hover tooltip. None → tooltip falls back to a
+        # minimal "<cwd>" string.
+        self._get_session_details = get_session_details
         self._period = "today"
         # Diff-based row update: keep widget references keyed by pid so that
         # session ticks (every ~10s) don't tear down rows the user might be
@@ -863,9 +950,30 @@ class ExpandedWindow(QWidget):
         return btn
 
     def _update_row(self, btn: QPushButton, session: Session) -> None:
-        """Refresh dot color, name, and age on every refresh tick so the
-        traffic-light and "Xh" stay current without rebuilding the row."""
-        name = session.project_path.name or str(session.project_path)
+        """Refresh dot color, name, age, and hover tooltip on every
+        refresh tick so the traffic-light, "Xh", and tooltip details
+        all stay current without rebuilding the row."""
+        # Compose details up front: the title shown on the row prefers
+        # the human ``name`` from sessions/<pid>.json, then aiTitle,
+        # then the cwd basename. Same fallback chain inside the
+        # tooltip; keeping them in sync is what makes the row + hover
+        # read as one piece of info.
+        details: SessionDetails | None = None
+        if self._get_session_details is not None:
+            try:
+                details = self._get_session_details(session)
+            except Exception as exc:
+                # Tooltip is enrichment, not load-bearing — never let
+                # a composer hiccup take down the whole row update.
+                import sys as _sys
+                print(f"[claude-island] session details failed: {exc}",
+                      file=_sys.stderr)
+        title = (
+            (details.name if details and details.name else None)
+            or (details.ai_title if details and details.ai_title else None)
+            or session.project_path.name
+            or str(session.project_path)
+        )
         age = _fmt_ago(session.last_activity)
 
         dot = btn.findChild(QLabel, "activity_dot")
@@ -873,12 +981,15 @@ class ExpandedWindow(QWidget):
             dot.setStyleSheet(_STYLE_DOT.format(color=_activity_color(session.last_activity)))
 
         name_label = btn.findChild(QLabel, "name_label")
-        if name_label is not None and name_label.text() != name:
-            name_label.setText(name)
+        if name_label is not None and name_label.text() != title:
+            name_label.setText(title)
 
         age_label = btn.findChild(QLabel, "age_label")
         if age_label is not None and age_label.text() != age:
             age_label.setText(age)
+
+        # Hover tooltip: rich HTML with everything the row can't show.
+        btn.setToolTip(_build_session_tooltip(details, session))
 
         btn.setProperty("_session", session)
 

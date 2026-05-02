@@ -47,6 +47,7 @@ from claude_island.platform_.file_watcher import FileWatcher
 from claude_island.platform_.process_scanner import ProcessScanner
 from claude_island.platform_.quota_provider import QuotaProvider
 from claude_island.platform_.session_discovery import SessionDiscovery
+from claude_island.platform_ import session_state as session_state_reader
 from claude_island.platform_.window_activator import WindowActivator
 
 process_scanner = ProcessScanner()
@@ -103,6 +104,43 @@ def _build_session_usage():
     return replace(base, quota=snap)
 
 
+def _build_session_details(session):
+    """Compose the per-row hover-tooltip details from three sources:
+    the JSONL parser's session metadata cache, ``~/.claude/sessions/
+    <pid>.json``, and the UsageRegistry's per-session aggregate.
+
+    The ProcessScanner can't easily fill in ``session.session_uuid``
+    (it'd need to read the transcript, which isn't its job), so we
+    look up the real uuid here from sessions/<pid>.json's ``sessionId``
+    field. Without this, the per-session $ aggregate was always $0
+    because the empty uuid never matched any UsageRecord.
+
+    Each source is read independently and treated as best-effort; a
+    miss in one leaves that field None and the tooltip degrades.
+    """
+    from claude_island.core.models import SessionDetails
+    state = session_state_reader.read_session_state(session.pid) or {}
+    # Prefer sessionId from the per-pid state file (always present for
+    # a live Claude Code process) over Session.session_uuid (which
+    # ProcessScanner leaves empty).
+    sess_uuid = state.get("sessionId") if isinstance(state.get("sessionId"), str) else session.session_uuid
+    meta = jsonl_parser.get_session_metadata(sess_uuid) or {}
+    cost, turns, sides = usage_registry.get_session_summary(sess_uuid)
+    return SessionDetails(
+        session=session,
+        name=state.get("name") if isinstance(state.get("name"), str) else None,
+        ai_title=meta.get("ai_title"),
+        git_branch=meta.get("git_branch"),
+        last_prompt=meta.get("last_prompt"),
+        started_at=session_state_reader.parse_started_at(state.get("startedAt")),
+        status=state.get("status") if isinstance(state.get("status"), str) else None,
+        cc_version=state.get("version") or meta.get("version"),
+        cost_usd=cost,
+        turn_count=turns,
+        sidechain_count=sides,
+    )
+
+
 controller = IslandController()
 capsule = CapsuleWindow(controller)
 expanded = ExpandedWindow(
@@ -111,6 +149,7 @@ expanded = ExpandedWindow(
     get_usage_totals=usage_registry.get_totals,
     get_session_usage=_build_session_usage,
     on_refresh_clicked=quota_provider.force_refresh,
+    get_session_details=_build_session_details,
 )
 
 # ---------------------------------------------------------------------------

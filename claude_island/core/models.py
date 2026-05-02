@@ -57,6 +57,7 @@ class UsageRecord:
     cache_creation_tokens: int
     cache_read_tokens: int
     message_id: str | None = None
+    is_sidechain: bool = False   # True when the JSONL row was a subagent invocation
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,29 @@ class QuotaSnapshot:
     seven_day_resets_at: datetime
     fetched_at: datetime
     is_stale: bool                  # True when fetched_at is older than 3*TTL
+
+
+@dataclass(frozen=True)
+class SessionDetails:
+    """Rich per-session metadata used to render the hover tooltip.
+
+    All fields are optional ``None`` so the UI can render a partial
+    tooltip when one source (e.g. the JSONL hasn't been fully parsed
+    yet, or ~/.claude/sessions/<pid>.json is missing) hasn't yielded
+    anything. Composed by the wiring layer (__main__.py) — core has
+    no business reading platform-specific files.
+    """
+    session: Session
+    name: str | None              # human slug from sessions/<pid>.json (e.g. "cc-learning")
+    ai_title: str | None          # Claude-generated session title from JSONL ai-title row
+    git_branch: str | None        # gitBranch field; same on every JSONL row of a session
+    last_prompt: str | None       # text of the latest user message (for preview)
+    started_at: datetime | None   # session start (from sessions/<pid>.json startedAt)
+    status: str | None            # "idle"/"busy"/"waiting" — Claude Code's own state
+    cc_version: str | None        # Claude Code version (e.g. "2.1.123")
+    cost_usd: float               # cumulative cost across all turns of this session
+    turn_count: int               # # assistant turns
+    sidechain_count: int          # # subagent invocations
 
 
 @dataclass(frozen=True)
