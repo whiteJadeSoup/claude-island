@@ -150,6 +150,13 @@ class JsonlParser:
             usage, model = _extract_usage(entry)
 
             if usage and ts:
+                # Pull the API ``message.id`` for dedup. Claude Code
+                # writes the same response usage across N JSONL rows
+                # (one per content block); UsageRegistry uses this id
+                # to count the response exactly once. None is OK —
+                # legacy rows without an id bypass dedup.
+                msg_block = entry.get("message") or {}
+                message_id = msg_block.get("id") if isinstance(msg_block, dict) else None
                 batch.append(UsageRecord(
                     timestamp=ts,
                     project_path=project_path,
@@ -159,6 +166,7 @@ class JsonlParser:
                     output_tokens=usage.get("output_tokens", 0),
                     cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
                     cache_read_tokens=usage.get("cache_read_input_tokens", 0),
+                    message_id=message_id if isinstance(message_id, str) else None,
                 ))
                 if last_activity is None or ts > last_activity:
                     last_activity = ts

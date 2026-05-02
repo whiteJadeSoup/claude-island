@@ -156,6 +156,12 @@ class UsageRegistry:
     def __init__(self) -> None:
         self.totals_changed: Event[None] = Event()
         self._records: list[UsageRecord] = []
+        # Dedup keyed by Anthropic ``message.id``. One API response is
+        # spread across N JSONL lines (one per content block: text +
+        # each tool_use), and every one of those lines repeats the same
+        # ``usage`` payload. Without this set, a response with 5 blocks
+        # is counted 5×. Records whose message_id is None bypass dedup.
+        self._seen_message_ids: set[str] = set()
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -163,14 +169,33 @@ class UsageRegistry:
     # ------------------------------------------------------------------
 
     def record_many(self, records: Iterable[UsageRecord]) -> None:
-        """Append a batch of UsageRecords. Emits ``totals_changed`` once
-        at the end so the UI redraws once per batch, not once per row.
-        Empty input is a no-op (no emit, no work)."""
-        batch = list(records)
-        if not batch:
+        """Append a batch of UsageRecords, dropping duplicates of any
+        ``message.id`` we have already accepted. Emits
+        ``totals_changed`` once at the end (and only if at least one
+        record actually made it past dedup, so a batch that's 100 %
+        duplicates is a no-op for the UI).
+
+        Records with message_id=None bypass dedup — these come from
+        legacy transcript rows that don't expose the API id; better to
+        risk a rare over-count than drop them.
+        """
+        batch_in = list(records)
+        if not batch_in:
             return
         with self._lock:
-            self._records.extend(batch)
+            kept: list[UsageRecord] = []
+            for r in batch_in:
+                mid = r.message_id
+                if mid is None:
+                    kept.append(r)
+                    continue
+                if mid in self._seen_message_ids:
+                    continue
+                self._seen_message_ids.add(mid)
+                kept.append(r)
+            if not kept:
+                return
+            self._records.extend(kept)
         self.totals_changed.emit(None)
 
     def record(self, record: UsageRecord) -> None:

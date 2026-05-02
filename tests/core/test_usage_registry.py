@@ -71,6 +71,63 @@ def test_record_many_with_empty_batch_is_noop(registry):
     assert registry._records == []
 
 
+def test_dedup_drops_repeated_message_ids(registry):
+    """One Anthropic API response is spread across N JSONL lines (one
+    per content block: text + each tool_use), and every line repeats
+    the same ``usage`` payload. The registry must keep only the first
+    record per ``message.id``; otherwise an N-block response is billed
+    N×. This was a real ~5× over-count on the test machine."""
+    seen: list[None] = []
+    registry.totals_changed.subscribe(lambda _: seen.append(None))
+
+    # 5 records sharing one msg id (simulating a 5-block response)
+    # plus 1 with a different msg id (a separate response).
+    repeated = [
+        _record(model="claude-opus-4-7", input_tokens=1, output_tokens=1000)
+            for _ in range(5)
+    ]
+    repeated = [
+        UsageRecord(**{**r.__dict__, "message_id": "msg_aaa"})
+        for r in repeated
+    ]
+    other = UsageRecord(
+        **{**_record(model="claude-opus-4-7", input_tokens=1,
+                     output_tokens=2000).__dict__,
+           "message_id": "msg_bbb"}
+    )
+    registry.record_many(repeated + [other])
+
+    # Only 2 records survive: the first msg_aaa + the msg_bbb.
+    assert len(registry._records) == 2
+    assert registry._records[0].message_id == "msg_aaa"
+    assert registry._records[1].message_id == "msg_bbb"
+    # And totals_changed fired exactly once for the surviving batch.
+    assert len(seen) == 1
+
+
+def test_dedup_allows_records_without_message_id(registry):
+    """Records with message_id=None bypass dedup — legacy transcript
+    rows that don't expose the API id still count, even if duplicates
+    happen to slip in."""
+    legacy = [
+        _record(model="claude-sonnet-4-5", input_tokens=10, output_tokens=20)
+        for _ in range(3)
+    ]  # all message_id=None by default
+    registry.record_many(legacy)
+    assert len(registry._records) == 3
+
+
+def test_dedup_persists_across_batches(registry):
+    """A duplicate message_id arriving in a later batch is also dropped —
+    matters when JsonlParser flushes one batch per file and the same
+    msg id appears in a sibling subagent transcript."""
+    base = _record(model="claude-opus-4-7", input_tokens=1, output_tokens=1000)
+    rec = UsageRecord(**{**base.__dict__, "message_id": "msg_xxx"})
+    registry.record_many([rec])
+    registry.record_many([rec])  # second batch: same msg id
+    assert len(registry._records) == 1
+
+
 def test_record_single_wraps_record_many(registry):
     """``record(rec)`` is a one-call helper."""
     seen: list[None] = []

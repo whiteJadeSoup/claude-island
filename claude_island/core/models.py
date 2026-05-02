@@ -37,6 +37,16 @@ class UsageRecord:
     the single source of truth — there is no on-disk derived store; the
     UsageRegistry holds these in memory for the life of the process and
     rebuilds from JSONL on every start.
+
+    ``message_id`` is the Anthropic API ``message.id`` (e.g. ``msg_014…``).
+    Claude Code splits one API response across multiple JSONL lines (one
+    per content block: text + each tool_use), and **every one of those
+    lines repeats the same response's usage block**. Without dedup we
+    multiply-count: a 5-block response is billed 5×. The registry
+    discards records whose message_id it has already seen so the API
+    cost ends up exactly equal to ``unique_responses × per_response_cost``.
+    A None ``message_id`` (older transcript schemas without it) bypasses
+    the dedup — better to risk the rare double-count than drop a real row.
     """
     timestamp: datetime
     project_path: str   # Claude Code's hashed project id (parent dir name)
@@ -46,6 +56,7 @@ class UsageRecord:
     output_tokens: int
     cache_creation_tokens: int
     cache_read_tokens: int
+    message_id: str | None = None
 
 
 @dataclass(frozen=True)
