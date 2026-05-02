@@ -381,6 +381,16 @@ class TestMiniMaxHostProbing:
 
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
         mm._HOST_CACHE = None  # reset module cache for clean state
+        # Isolate from the dev's real ~/.claude-island/providers.json.
+        # If it has minimax.base_url set, _candidate_hosts() returns
+        # just that one URL and the test loses its ability to fall
+        # through to the second host. (Bit me: dev's real config grew
+        # a base_url mid-session and this test started failing for
+        # "no good reason".)
+        monkeypatch.setattr(
+            "claude_island.platform_.providers.PROVIDER_CONFIG_PATH",
+            tmp_path / "no-config.json",
+        )
 
         calls: list[str] = []
 

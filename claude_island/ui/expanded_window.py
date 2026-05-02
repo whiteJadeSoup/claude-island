@@ -245,9 +245,10 @@ class _SmoothWheelScroller(QObject):
         return super().eventFilter(obj, event)
 
 _STYLE_PANEL = """
-    color: white;
-    font-family: 'Segoe UI', sans-serif;
-
+    ExpandedWindow {
+        color: white;
+        font-family: 'Segoe UI', sans-serif;
+    }
     QToolTip {
         color: #e8e8e8;
         background-color: #1e1e1e;
@@ -257,6 +258,12 @@ _STYLE_PANEL = """
         font-size: 12px;
     }
 """
+# Bare top-level properties + selector blocks in one stylesheet make
+# Qt fail to parse the entire sheet (silent "Could not parse" warning,
+# and the QToolTip block goes ignored — system default white tooltip
+# would render the "Add a quota provider" hint as white-on-white).
+# Wrapping the bare props under the ExpandedWindow selector forces a
+# strict parse so the QToolTip override actually applies.
 _STYLE_TITLE = "color: #888; font-size: 10px; letter-spacing: 1px;"
 _STYLE_SEP = "background: #2a2a2a;"
 
@@ -1969,11 +1976,18 @@ class _AddProviderDialog(QFrame):
         layout.setSpacing(8)
 
         inputs: list[tuple[str, "QLineEdit"]] = []
-        # Help text first.
+        # Help text first. Bumped from 11px/#9ca3af to 12px/#c9c9c9 so
+        # the multi-sentence guidance is comfortably readable on the
+        # dark bg — earlier sizing made it feel like fine print rather
+        # than the primary onboarding text it actually is. Top padding
+        # gives it breathing room against the radio row above.
         for key, val in cfg.items():
             if key.startswith("_") and isinstance(val, str):
                 help_lbl = QLabel(val)
-                help_lbl.setStyleSheet("color: #9ca3af; font-size: 11px;")
+                help_lbl.setStyleSheet(
+                    "color: #c9c9c9; font-size: 12px; "
+                    "padding: 4px 0 2px 0;"
+                )
                 help_lbl.setWordWrap(True)
                 layout.addWidget(help_lbl)
 
@@ -2663,26 +2677,37 @@ class ExpandedWindow(QWidget):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(4)
 
-        # Header: dot + (tabs | static label)
+        # Section title — mirrors the SPEND header so the two halves
+        # of the USAGE card share the same visual language. Earlier
+        # the QUOTA region had no title; the dot+pills row alone read
+        # as floating UI rather than a labelled section.
+        section_title = QLabel("QUOTA")
+        section_title.setStyleSheet(_STYLE_TITLE)
+        layout.addWidget(section_title)
+
+        # Header: dot + tab strip + refresh button
         quota_hdr = QHBoxLayout()
         quota_hdr.setSpacing(8)
         self._quota_dot = QLabel("●")
         self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
         quota_hdr.addWidget(self._quota_dot)
 
-        # Cache the layout so set_available_providers() can rebuild the
-        # tab strip in place without rebuilding the whole quota card.
-        self._quota_hdr_layout = quota_hdr
-        # Always-present hidden label so tests that grep for "QUOTA"
-        # text keep working regardless of single- vs multi-provider
-        # state. Shown only in the no-tabs branch below.
+        # Tab strip lives in its own sub-layout so set_available_providers()
+        # can wipe + rebuild it without disturbing the dot or the refresh
+        # button on either side. Earlier the rebuild walked quota_hdr
+        # directly and ate the refresh button as collateral damage.
+        self._tab_strip_layout = QHBoxLayout()
+        self._tab_strip_layout.setSpacing(8)
+        self._tab_strip_layout.setContentsMargins(0, 0, 0, 0)
+        # Always-present hidden label so legacy tests that grep for
+        # "QUOTA" text in the widget tree keep passing. Shown only in
+        # the no-providers fallback branch.
         self._quota_hdr = QLabel("QUOTA")
         self._build_provider_tab_strip()
+        quota_hdr.addLayout(self._tab_strip_layout, 1)
 
-        # Manual-refresh button on the right of the QUOTA header. Sits
-        # in the region it actually affects (per Apple HIG) — when it
-        # was floating in the global USAGE header users couldn't tell
-        # what it controlled.
+        # Manual-refresh button — lives in quota_hdr (NOT the tab
+        # strip sub-layout) so a tab-strip rebuild leaves it intact.
         self._refresh_btn = QPushButton("↻")
         self._refresh_btn.setStyleSheet(_STYLE_REFRESH_BTN)
         self._refresh_btn.setFixedSize(20, 20)
@@ -2719,14 +2744,14 @@ class ExpandedWindow(QWidget):
             self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
             self._hide_quota_row(self._quota_bar_5h, self._quota_pct_5h, self._quota_reset_5h)
             self._hide_quota_row(self._quota_bar_week, self._quota_pct_week, self._quota_reset_week)
-            # Update single-provider label if we're in static mode
-            if not self._provider_btns and self._selected_provider:
-                self._quota_hdr.setText(f"{self._selected_provider.upper()} QUOTA")
             return
 
-        # Update single-provider label
-        if not self._provider_btns:
-            self._quota_hdr.setText(f"{snap.provider.upper()} QUOTA")
+        # Provider name no longer prepended to the section title — the
+        # section header is just "QUOTA" and the active pill in the
+        # tab strip indicates which provider is selected. The old
+        # ``ANTHROPIC QUOTA`` / ``MINIMAX QUOTA`` text fought with the
+        # pill for the same role and confused users into thinking it
+        # was a different region.
 
         # Live dot: green when 5h window is still open
         active = snap.five_hour_resets_at > datetime.now(timezone.utc)
@@ -2886,18 +2911,27 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _build_provider_tab_strip(self) -> None:
-        """Populate ``self._quota_hdr_layout`` with one pill per active
-        provider plus a trailing ``+`` pill (when at least one
-        configurable provider is still un-added).
+        """Populate ``self._tab_strip_layout`` with one pill per
+        active provider plus a trailing ``+`` pill when at least one
+        configurable provider is still un-added.
 
-        Called once at construction and again from
-        :meth:`_rebuild_provider_tab_strip` after a runtime add.
-        Always-rendered hidden ``QUOTA`` label keeps grep-text tests
-        happy regardless of single-provider state."""
-        layout = self._quota_hdr_layout
-        if len(self._available_providers) >= 2:
-            # Multi-provider state: one pill per provider, hide the
-            # static QUOTA label entirely.
+        Even single-provider state renders as a pill (e.g. just
+        ``[Anthropic] [+]``) so the user always sees which provider
+        the bars belong to AND the "selected" affordance. Earlier
+        single-provider branch dropped to a static ``ANTHROPIC QUOTA``
+        text label, which read as a section header rather than a
+        current-selection indicator and confused users.
+
+        Lives in its own sub-layout (separate from the refresh button
+        in the parent ``quota_hdr``) so :meth:`_rebuild_provider_tab_strip`
+        can wipe + rebuild without taking out the refresh button.
+
+        The hidden ``QUOTA`` label is kept around as a no-op widget so
+        existing tests that grep for the string keep passing."""
+        layout = self._tab_strip_layout
+        if self._available_providers:
+            # Always pill-render — even single-provider state shows
+            # one selected pill rather than degrading to a static label.
             for name in self._available_providers:
                 btn = QPushButton(name.capitalize())
                 btn.setCheckable(True)
@@ -2909,9 +2943,11 @@ class ExpandedWindow(QWidget):
             self._quota_hdr.setText("QUOTA")
             self._quota_hdr.hide()
         else:
-            # Single (or zero) provider: static QUOTA label, no pills.
+            # Pathological zero-provider state — fall back to the static
+            # label so the card still has a visible header in this row.
             self._quota_hdr.setText("QUOTA")
             self._quota_hdr.setStyleSheet(_STYLE_TITLE)
+            self._quota_hdr.show()
             layout.addWidget(self._quota_hdr)
 
         # + button. Append before the stretch so it sits at the right
@@ -2933,20 +2969,30 @@ class ExpandedWindow(QWidget):
         """Tear down the existing pills + ``+`` + stretch and rebuild
         from the updated ``self._available_providers``. Used after the
         in-app add dialog persists a new provider so the tab appears
-        without an app restart."""
-        layout = self._quota_hdr_layout
-        # Walk backward so removeItem indices stay valid. Stop at the
-        # ``●`` dot at index 0 — that's the only non-tab widget the
-        # construction always inserts before the strip.
-        while layout.count() > 1:
-            item = layout.takeAt(layout.count() - 1)
+        without an app restart.
+
+        Operates only on ``self._tab_strip_layout`` so the dot and
+        refresh button (siblings in the parent quota_hdr) survive
+        the rebuild — earlier the rebuild walked the parent layout
+        and ate the refresh button as collateral damage."""
+        layout = self._tab_strip_layout
+        # Wipe everything in the sub-layout. self._quota_hdr is the
+        # only widget we want to keep around (cached on self,
+        # potentially re-added in the empty-providers branch); detach
+        # without deleteLater so the next _build_provider_tab_strip
+        # can re-show it if needed.
+        while layout.count() > 0:
+            item = layout.takeAt(0)
             if item is None:
                 break
             w = item.widget()
-            if w is not None:
-                w.setParent(None)
-                w.deleteLater()
-            # Spacer items don't have a widget — takeAt() removes them too.
+            if w is None:
+                continue  # spacer — already removed by takeAt
+            if w is self._quota_hdr:
+                w.setParent(None)  # keep alive for re-use
+                continue
+            w.setParent(None)
+            w.deleteLater()
         self._provider_btns.clear()
         self._add_provider_btn = None
         self._build_provider_tab_strip()

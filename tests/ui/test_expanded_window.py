@@ -792,11 +792,16 @@ def _build_panel_with_tabs(
     return p
 
 
-def test_no_tabs_rendered_when_only_one_provider(qtbot):
-    """Single-provider users should see no tab pills — the 5h card
-    looks identical to the pre-feature version."""
+def test_single_provider_renders_one_pill(qtbot):
+    """Single-provider state still renders the one pill (e.g. just
+    [Anthropic]) — earlier the single-provider branch dropped to a
+    static "ANTHROPIC QUOTA" text label, which read as a section
+    header rather than a current-selection indicator and confused
+    users. With the always-pill design the user sees a uniform
+    selected-tab affordance regardless of provider count."""
     p = _build_panel_with_tabs(qtbot, available=["anthropic"])
-    assert p._provider_btns == {}
+    assert set(p._provider_btns.keys()) == {"anthropic"}
+    assert p._provider_btns["anthropic"].isChecked() is True
 
 
 def test_no_tabs_rendered_when_zero_providers(qtbot):
@@ -1486,9 +1491,11 @@ def _panel_with_providers(qtbot, available: list[str], selected: str | None = No
 
 class TestSetAvailableProviders:
     def test_adds_new_tab(self, qtbot):
-        # Start with anthropic only (single-provider, static QUOTA label).
+        # Start with anthropic only — single-provider state still
+        # renders one pill (always-pill design, see
+        # test_single_provider_renders_one_pill).
         panel = _panel_with_providers(qtbot, ["anthropic"])
-        assert panel._provider_btns == {}
+        assert set(panel._provider_btns.keys()) == {"anthropic"}
         # User adds zhipu via the + dialog → wiring layer pushes the
         # updated list back; tab strip rebuilds.
         panel.set_available_providers(["anthropic", "zhipu"], selected="anthropic")
