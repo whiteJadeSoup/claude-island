@@ -388,32 +388,40 @@ def _make_quota(*, five_pct: float = 53.0, is_stale: bool = False):
 
 
 def test_quota_card_with_quota_shows_bar_and_pct(qtbot):
-    """U1: quota snapshot present → 5h bar visible, value matches pct,
-    % text rendered next to the bar."""
+    """U1: quota snapshot present → Weekly bar visible, value matches
+    seven_day_pct, % text rendered next to the bar.
+
+    The 5h bar moved to the top summary in P1.1 — the QUOTA card now
+    only carries the Weekly bar (5h was redundant once the summary
+    surfaced it). Test asserts the Weekly path is intact."""
     p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=53.0))
     p.refresh_usage_bar()
 
-    assert p._quota_bar_5h.isVisibleTo(p._quota_card)
-    assert p._quota_bar_5h.value() == 53
-    assert "53%" in p._quota_pct_5h.text()
+    # _make_quota fixes seven_day_pct = 17.0
+    assert p._quota_bar_week.isVisibleTo(p._quota_card)
+    assert p._quota_bar_week.value() == 17
+    assert "17%" in p._quota_pct_week.text()
 
 
 def test_quota_card_without_quota_hides_bars(qtbot):
-    """U2: no quota snapshot → both bars hidden, pct empty."""
+    """U2: no quota snapshot → Weekly bar hidden, pct empty.
+    The 5h row is hidden unconditionally (lives in summary now), so
+    its visibility is not asserted here."""
     p = _panel_with_quota(qtbot, quota=None,
                           totals=UsageTotals(period="today", input_tokens=10))
     p.refresh_usage_bar()
 
-    assert not p._quota_bar_5h.isVisibleTo(p._quota_card)
-    assert p._quota_pct_5h.text() == ""
     assert not p._quota_bar_week.isVisibleTo(p._quota_card)
+    assert p._quota_pct_week.text() == ""
 
 
 def test_quota_card_stale_marks_warning(qtbot):
-    """U3: quota.is_stale=True → bar still shown, ⚠ marker on pct text."""
+    """U3: quota.is_stale=True → Weekly bar still shown, ⚠ marker on
+    pct text. (5h moved to summary card, which carries its own
+    threshold colour story without the ⚠ marker today.)"""
     p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=20.0, is_stale=True))
     p.refresh_usage_bar()
-    assert "⚠" in p._quota_pct_5h.text()
+    assert "⚠" in p._quota_pct_week.text()
 
 
 def test_quota_card_no_quota_dot_gray(qtbot):
@@ -428,13 +436,13 @@ def test_quota_card_no_quota_dot_gray(qtbot):
 
 def test_spend_card_empty_totals_shows_zero(qtbot):
     """U5: empty totals → spend amount shows $0 (or fallback rendering),
-    bars stay hidden because quota is None."""
+    Weekly quota bar stays hidden because quota is None."""
     p = _panel_with_quota(qtbot, quota=None,
                           totals=UsageTotals(period="today"))
     p.refresh_usage_bar()
     # _fmt_money(0) returns "$0.001" or "$0.00" (sub-cent path); either way "$" is present
     assert "$" in p._spend_amount.text()
-    assert not p._quota_bar_5h.isVisibleTo(p._quota_card)
+    assert not p._quota_bar_week.isVisibleTo(p._quota_card)
 
 
 def test_period_toggle_updates_spend_card(qtbot):
@@ -499,21 +507,34 @@ def test_period_selector_includes_5h(qtbot):
 ])
 def test_quota_bar_color_thresholds(qtbot, pct, expected_color):
     """U8: bar chunk colour escalates green → yellow → red at 60% / 85%.
-    The pct text is coloured to match so the signal reads either way."""
-    p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=pct))
+    Verified on the Weekly bar — the 5h bar moved to the summary
+    card in P1.1 but the threshold logic itself is the same code path
+    (both rows feed through _render_quota_row → _quota_color).
+
+    Driven via seven_day_pct so the bar that's still rendered in the
+    QUOTA card picks up the test value."""
+    p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=10.0))
+    # Override the seven_day_pct on the snapshot we just created.
+    snap = p._get_quota_snapshot()
+    from dataclasses import replace
+    p._get_quota_snapshot = lambda: replace(snap, seven_day_pct=pct)
     p.refresh_usage_bar()
-    assert expected_color in p._quota_bar_5h.styleSheet()
-    assert expected_color in p._quota_pct_5h.styleSheet()
+    assert expected_color in p._quota_bar_week.styleSheet()
+    assert expected_color in p._quota_pct_week.styleSheet()
 
 
 def test_quota_bar_stale_overrides_red(qtbot):
     """U9: stale data wins over the percent-based colour — we want
     "I don't trust this" to surface before "you're at the limit",
-    so a stale 95% reads gray, not red."""
-    p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=95.0, is_stale=True))
+    so a stale 95% reads gray, not red. Verified on the Weekly bar
+    (5h is in the summary card; same render code path)."""
+    snap = _make_quota(five_pct=10.0, is_stale=True)
+    from dataclasses import replace
+    snap = replace(snap, seven_day_pct=95.0)
+    p = _panel_with_quota(qtbot, quota=snap)
     p.refresh_usage_bar()
-    assert "#6b7280" in p._quota_bar_5h.styleSheet()    # _BAR_STALE
-    assert "#ef4444" not in p._quota_bar_5h.styleSheet()
+    assert "#6b7280" in p._quota_bar_week.styleSheet()    # _BAR_STALE
+    assert "#ef4444" not in p._quota_bar_week.styleSheet()
 
 
 def _make_full_details(s, **overrides):
@@ -2295,7 +2316,10 @@ class TestHighCostRowAlert:
             get_session_details=details,
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
-        p.refresh_sessions([_session(1, "/a")])
+        # ago_minutes=10 keeps the session out of the "currently
+        # running" window so the running-tooltip path doesn't fire —
+        # the test isolates the low-cost vs high-cost alert behaviour.
+        p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
         dot = p._rows[1].findChild(QLabel, "dot_label")
         assert dot is not None
         assert dot.text() == "●"

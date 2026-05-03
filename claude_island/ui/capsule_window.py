@@ -59,19 +59,25 @@ _QUOTA_CRITICAL_THRESHOLD = 90
 # the breathing animation off mid-burst.
 _ACTIVE_THRESHOLD_SECONDS = 30
 
-# Breathing animation parameters. 2.0 s round-trip (1.0 s in, 1.0 s out)
-# matches Apple's slow-pulse cadence — perceptible but not distracting.
-# Floor 0.55 keeps the dot legible at the dimmest point so it never
-# disappears entirely (which would read as "no session" not "live").
-_BREATH_PERIOD_MS = 2000
-_BREATH_OPACITY_FLOOR = 0.55
+# Breathing animation parameters. Tuned more aggressively after user
+# feedback that the original 2.0 s / 0.55 floor cycle was too easy
+# to miss in peripheral vision. 1.2 s round-trip (0.6 in, 0.6 out)
+# + 0.2 floor make the pulse genuinely "alive" without crossing into
+# distracting strobe territory. 0.2 (not 0) keeps the dot just barely
+# visible at the dimmest point — going to 0 reads as "the dot
+# disappeared" which is wrong (the session is still there).
+_BREATH_PERIOD_MS = 1200
+_BREATH_OPACITY_FLOOR = 0.20
 _BREATH_OPACITY_PEAK = 1.0
 
 _STYLE_LABEL = "color: white; font-size: 12px; font-family: 'Segoe UI', sans-serif;"
 # Dot colours: green when at least one session is active, neutral grey
 # when all idle. Matches the in-card status-dot semantics so the user
 # learns one mapping ("green = something is happening") globally.
-_STYLE_DOT_ACTIVE = "color: #4ade80; font-size: 14px;"
+# Active dot uses a brighter, more saturated green + bumped font size
+# (16 vs 14) so the pulsing animation reads as a meaningful signal in
+# peripheral vision rather than as ambient noise.
+_STYLE_DOT_ACTIVE = "color: #22c55e; font-size: 16px; font-weight: bold;"
 _STYLE_DOT_IDLE = "color: #6b7280; font-size: 14px;"
 _BG_COLOR = QColor(18, 18, 18, 230)
 # Capsule background swap when quota crosses the critical threshold —

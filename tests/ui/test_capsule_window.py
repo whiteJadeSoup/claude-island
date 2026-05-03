@@ -286,7 +286,7 @@ def test_breathing_starts_when_any_session_active(qtbot):
     # Stylesheet flipped to green — substring check rather than exact
     # equality so future colour tweaks don't break the test for the
     # wrong reason.
-    assert "4ade80" in capsule._dot_label.styleSheet()
+    assert "22c55e" in capsule._dot_label.styleSheet()
 
 
 def test_breathing_stops_when_no_session_active(qtbot):

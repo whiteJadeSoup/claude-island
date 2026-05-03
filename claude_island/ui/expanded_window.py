@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -415,9 +416,13 @@ def _lighten_bg(hex_color: str, shift: int = 18) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-_DOT_GREEN = "#4ade80"   # < 1h since last activity
-_DOT_YELLOW = "#facc15"  # < 24h
-_DOT_GRAY = "#52525b"    # ≥ 24h
+_DOT_GREEN = "#4ade80"    # < 1h since last activity
+_DOT_YELLOW = "#facc15"   # < 24h
+_DOT_GRAY = "#52525b"     # ≥ 24h
+# Brighter, more saturated green for the running state — distinct from
+# _DOT_GREEN (freshness) so the pulsing animation reads as "live now"
+# rather than "recent". Tested at 12 px and 14 px font sizes.
+_DOT_RUNNING = "#22c55e"
 
 # Two-line row: top = dot + name + cost, bottom = model chip + status.
 # 52 px holds the 13 px name plus the 11 px status row with breathing
@@ -1661,10 +1666,12 @@ class SessionDetailPopup(QFrame):
         top.addWidget(cost)
         v.addLayout(top)
 
-        # Sub-line: dim token breakdown on a single row. Terms are
-        # spelled out (P3 — replaced legacy "cw"/"cr" abbreviations
-        # which only made sense to people who already knew what they
-        # meant; new users were silently lost).
+        # Sub-line: dim token breakdown. Terms are spelled out (P3 —
+        # replaced legacy "cw"/"cr" abbreviations which only made
+        # sense to people who already knew what they meant). Word-wrap
+        # on so the four full-name parts ("cache write …", "cache
+        # read …") flow to a second line when the popup is at its
+        # default width rather than truncating the tail.
         parts = [
             f"input {_fmt_tokens(r.input_tokens)}",
             f"output {_fmt_tokens(r.output_tokens)}",
@@ -1674,6 +1681,10 @@ class SessionDetailPopup(QFrame):
             parts.append(f"cache read {_fmt_tokens(r.cache_read_tokens)}")
         tokens = QLabel("  " + " · ".join(parts))
         tokens.setStyleSheet(_STYLE_AGE)
+        tokens.setWordWrap(True)
+        tokens.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
+        )
         v.addWidget(tokens)
         return row
 
@@ -3101,7 +3112,15 @@ class ExpandedWindow(QWidget):
     def _toggle_spend_details(self) -> None:
         """Show / hide the per-model token sub-lines. The bar rows
         themselves stay visible regardless — only the cache/in/out
-        detail line on each row toggles."""
+        detail line on each row toggles.
+
+        No ``adjustSize`` / ``_position`` here on purpose: those calls
+        recompute the panel geometry and re-anchor to the capsule,
+        which made the whole panel (and any subsequent content below)
+        appear to "jump" on every toggle. Qt's layout system already
+        handles vertical reflow when child widgets toggle visibility —
+        the panel grows downward without disturbing its top-left
+        anchor, which is the visual we want."""
         self._spend_details_open = not self._spend_details_open
         self._spend_details_btn.setText(
             "▾ details" if self._spend_details_open else "▸ details"
@@ -3116,9 +3135,6 @@ class ExpandedWindow(QWidget):
                 sub.hide()
                 continue
             sub.setVisible(self._spend_details_open)
-        # Panel may grow / shrink — re-anchor.
-        self.adjustSize()
-        self._position()
 
     def _build_spend_model_row(self) -> QWidget:
         """One model row: name · bar · cost · aggregate-tokens, plus a
@@ -3176,10 +3192,15 @@ class ExpandedWindow(QWidget):
         # Aggregate token count to the right of cost. Dimmer than cost
         # so the dollar number remains the dominant value on the row;
         # tokens are the "scale context" answer ("how big was the
-        # workload that produced this $?").
+        # workload that produced this $?"). Drop the literal word
+        # "tokens" — at 320 px panel width the suffix pushed values
+        # like "100.7M tokens" past the column boundary and clipped
+        # the trailing "ns". The unit column is unambiguous at the
+        # row level (it's always tokens), and the headline above
+        # ("$86 · 1.2M tokens") names the unit once for the whole card.
         agg_lbl = QLabel("")
         agg_lbl.setStyleSheet("color: #9ca3af; font-size: 11px;")
-        agg_lbl.setFixedWidth(78)
+        agg_lbl.setFixedWidth(56)
         agg_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         top.addWidget(agg_lbl)
 
@@ -3190,8 +3211,16 @@ class ExpandedWindow(QWidget):
         # is omitted when both cw/cr are 0. Hidden by default —
         # toggled by the SPEND card's "▸ details" disclosure so the
         # default density stays scannable.
+        # Word-wrap on so the full-term spelling ("cache write" / "cache
+        # read") doesn't get clipped at narrow panel widths — the line
+        # naturally flows to a second row when needed instead of losing
+        # the tail of "cache read N" off the right edge.
         token_lbl = QLabel("")
         token_lbl.setStyleSheet("color: rgba(156,163,175, 0.6); font-size: 11px;")
+        token_lbl.setWordWrap(True)
+        token_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
+        )
         token_lbl.hide()
         v.addWidget(token_lbl)
 
@@ -3345,11 +3374,13 @@ class ExpandedWindow(QWidget):
         name_lbl.setToolTip(full_name if full_name else label)
         cost_lbl.setText(_fmt_money(cost))
 
-        # Aggregate token count on the top line.
+        # Aggregate token count on the top line. No "tokens" suffix
+        # (see _build_spend_model_row): the column is always tokens
+        # and the headline above the rows already names the unit.
         agg_lbl: QLabel | None = getattr(row, "_spend_aggregate", None)
         total_tokens = tokens_in + tokens_out + cache_w + cache_r
         if agg_lbl is not None:
-            agg_lbl.setText(f"{_fmt_tokens(total_tokens)} tokens")
+            agg_lbl.setText(_fmt_tokens(total_tokens))
 
         # Detail sub-line — full breakdown with un-abbreviated terms
         # (P3 polish: replaced "cw"/"cr" with "cache write"/"cache read"
@@ -3450,12 +3481,19 @@ class ExpandedWindow(QWidget):
 
         layout.addLayout(quota_hdr)
 
-        # 5h + Weekly stacked bars
+        # The 5h bar moved to the top focus summary in P1.1 — keeping
+        # it here too was visually redundant ("the same number twice
+        # on one screen, why?"). Build the widget but hide it; the
+        # references are kept so refresh_quota_card / tests can still
+        # touch the same fields without conditional plumbing.
         row5, self._quota_bar_5h, self._quota_pct_5h, self._quota_reset_5h = (
             self._build_quota_row("5h")
         )
+        row5.hide()
+        self._quota_row_5h = row5  # so tests / future code can re-show
         layout.addWidget(row5)
-        layout.addSpacing(2)
+        # Weekly bar stays — the summary's progress bar only covers the
+        # 5h window, so weekly utilisation has no other home in the panel.
         row_week, self._quota_bar_week, self._quota_pct_week, self._quota_reset_week = (
             self._build_quota_row("Weekly")
         )
@@ -3488,7 +3526,8 @@ class ExpandedWindow(QWidget):
 
         if snap is None:
             self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
-            self._hide_quota_row(self._quota_bar_5h, self._quota_pct_5h, self._quota_reset_5h)
+            # Skip updating the 5h row widgets — that row is hidden
+            # under the new summary-card design (5h lives there now).
             self._hide_quota_row(self._quota_bar_week, self._quota_pct_week, self._quota_reset_week)
             self._show_quota_unavailable_hint()
             return
@@ -3498,25 +3537,15 @@ class ExpandedWindow(QWidget):
         # transition and visually compete with the now-real bars).
         self._quota_unavailable.hide()
 
-        # Provider name no longer prepended to the section title — the
-        # section header is just "QUOTA" and the active pill in the
-        # tab strip indicates which provider is selected. The old
-        # ``ANTHROPIC QUOTA`` / ``MINIMAX QUOTA`` text fought with the
-        # pill for the same role and confused users into thinking it
-        # was a different region.
-
         # Live dot: green when 5h window is still open
         active = snap.five_hour_resets_at > datetime.now(timezone.utc)
         self._quota_dot.setStyleSheet(
             _STYLE_DOT.format(color=_DOT_GREEN if active else _DOT_GRAY)
         )
 
-        self._render_quota_row(
-            self._quota_bar_5h, self._quota_pct_5h, self._quota_reset_5h,
-            pct=snap.five_hour_pct,
-            resets_at=snap.five_hour_resets_at,
-            stale=snap.is_stale,
-        )
+        # 5h row is hidden in the QUOTA card — the summary card up top
+        # carries the 5h progress now. Only the Weekly bar gets its
+        # values refreshed here.
         self._render_quota_row(
             self._quota_bar_week, self._quota_pct_week, self._quota_reset_week,
             pct=snap.seven_day_pct,
@@ -3998,6 +4027,27 @@ class ExpandedWindow(QWidget):
         dot_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         dot_label.setFixedWidth(12)
         dot_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        # Per-row pulse animation. Active when the session is currently
+        # running (last_activity within the active threshold). The
+        # opacity range here is wider than the capsule's (0.25→1.0 vs
+        # 0.55→1.0) and the period faster (1.1 s vs 2 s) so the
+        # in-card indicator reads as "actually doing something" rather
+        # than the more passive ambient glow on the pill. Opacity
+        # effect lives on the dot only — the row's hover accent and
+        # text are unaffected.
+        dot_opacity = QGraphicsOpacityEffect(dot_label)
+        dot_opacity.setOpacity(1.0)
+        dot_label.setGraphicsEffect(dot_opacity)
+        dot_animation = QPropertyAnimation(dot_opacity, b"opacity", btn)
+        dot_animation.setDuration(1100)
+        dot_animation.setStartValue(1.0)
+        dot_animation.setKeyValueAt(0.5, 0.25)
+        dot_animation.setEndValue(1.0)
+        dot_animation.setEasingCurve(QEasingCurve.Type.InOutSine)
+        dot_animation.setLoopCount(-1)
+        btn._dot_opacity = dot_opacity
+        btn._dot_animation = dot_animation
+        btn._dot_animating = False
         top.addWidget(dot_label)
 
         name_label = QLabel()
@@ -4090,7 +4140,29 @@ class ExpandedWindow(QWidget):
         high_cost = (
             details is not None and details.cost_usd >= _HIGH_COST_USD_THRESHOLD
         )
-        dot_color = _DOT_YELLOW if high_cost else _activity_color(session.last_activity)
+        # "Currently running" detection — same threshold as the capsule
+        # so both surfaces light up together. Used to drive the row
+        # dot's pulse animation (bright dot + opacity dance is the
+        # most-obvious "this one is moving" cue without changing the
+        # row layout).
+        try:
+            seconds_since = (
+                datetime.now(timezone.utc)
+                - session.last_activity.astimezone(timezone.utc)
+            ).total_seconds()
+        except (TypeError, ValueError):
+            seconds_since = 1e9
+        running = seconds_since < _ROW_ACTIVE_THRESHOLD_SECONDS
+
+        if high_cost:
+            dot_color = _DOT_YELLOW
+        elif running:
+            # Brighter green for the running state so the pulsing dot
+            # reads as "live" — distinct from the freshness palette
+            # used for static activity age.
+            dot_color = _DOT_RUNNING
+        else:
+            dot_color = _activity_color(session.last_activity)
         dot_glyph = "⚡" if high_cost else "●"
         dot_label = btn.findChild(QLabel, "dot_label")
         if dot_label is not None:
@@ -4106,8 +4178,28 @@ class ExpandedWindow(QWidget):
                     f"High cumulative spend (${details.cost_usd:.0f}) — "
                     "consider checking this session"
                 )
+            elif running:
+                dot_label.setToolTip("Currently running — JSONL recently updated")
             else:
                 dot_label.setToolTip("")
+
+        # Drive the per-row pulse animation. Running ⇒ start (idempotent);
+        # idle ⇒ stop and snap opacity back to 1.0 so the dot doesn't
+        # get stranded mid-cycle. High-cost sessions don't animate —
+        # the ⚡ glyph + yellow colour already screams loudly enough,
+        # and stacking a pulse on top would make the row jittery.
+        anim = getattr(btn, "_dot_animation", None)
+        opacity_effect = getattr(btn, "_dot_opacity", None)
+        if anim is not None and opacity_effect is not None:
+            should_pulse = running and not high_cost
+            currently = getattr(btn, "_dot_animating", False)
+            if should_pulse and not currently:
+                anim.start()
+                btn._dot_animating = True
+            elif not should_pulse and currently:
+                anim.stop()
+                opacity_effect.setOpacity(1.0)
+                btn._dot_animating = False
 
         name_label = btn.findChild(QLabel, "name_label")
         if name_label is not None and name_label.text() != title:
