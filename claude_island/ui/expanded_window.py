@@ -737,8 +737,9 @@ _STYLE_GROUP_CARD = f"""
 """
 _STYLE_GROUP_ROW = f"""
     QPushButton {{
-        background: transparent;
+        background: {_BG_SINGLE};
         border: none;
+        border-radius: 8px;
         text-align: left;
     }}
     QPushButton:pressed {{ background: {_BG_PRESSED}; }}
