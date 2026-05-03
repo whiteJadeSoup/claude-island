@@ -1666,25 +1666,25 @@ class SessionDetailPopup(QFrame):
         top.addWidget(cost)
         v.addLayout(top)
 
-        # Sub-line: dim token breakdown. Terms are spelled out (P3 —
-        # replaced legacy "cw"/"cr" abbreviations which only made
-        # sense to people who already knew what they meant). Word-wrap
-        # on so the four full-name parts ("cache write …", "cache
-        # read …") flow to a second line when the popup is at its
-        # default width rather than truncating the tail.
+        # Sub-line: dim token breakdown. "cache w / cache r" instead
+        # of "cache write / cache read" — the longer form pushed the
+        # line past the popup's fixed width and got truncated on the
+        # right edge. The short form keeps "cache" so the meaning is
+        # still obvious without a glossary.
         parts = [
             f"input {_fmt_tokens(r.input_tokens)}",
             f"output {_fmt_tokens(r.output_tokens)}",
         ]
         if r.cache_creation_tokens or r.cache_read_tokens:
-            parts.append(f"cache write {_fmt_tokens(r.cache_creation_tokens)}")
-            parts.append(f"cache read {_fmt_tokens(r.cache_read_tokens)}")
+            parts.append(f"cache w {_fmt_tokens(r.cache_creation_tokens)}")
+            parts.append(f"cache r {_fmt_tokens(r.cache_read_tokens)}")
         tokens = QLabel("  " + " · ".join(parts))
         tokens.setStyleSheet(_STYLE_AGE)
         tokens.setWordWrap(True)
-        tokens.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
-        )
+        # NO setSizePolicy(Expanding, …) — see _build_spend_model_row's
+        # token_lbl for the same defensive note. wordWrap + Expanding
+        # made Qt demand a 480 px minimum width and froze the layout
+        # against the popup's fixed width.
         v.addWidget(tokens)
         return row
 
@@ -3215,12 +3215,16 @@ class ExpandedWindow(QWidget):
         # read") doesn't get clipped at narrow panel widths — the line
         # naturally flows to a second row when needed instead of losing
         # the tail of "cache read N" off the right edge.
+        # NO setSizePolicy(Expanding, …) here: that combination with
+        # wordWrap=True makes Qt compute a minimumSizeHint of the
+        # full unwrapped string width, which the panel layout then
+        # propagates upward as a 480 px minimum and conflicts with
+        # the panel's setFixedWidth(_PANEL_W=320). Default policy
+        # (Preferred horizontal) lets the label honour the parent's
+        # width and wrap accordingly.
         token_lbl = QLabel("")
         token_lbl.setStyleSheet("color: rgba(156,163,175, 0.6); font-size: 11px;")
         token_lbl.setWordWrap(True)
-        token_lbl.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
-        )
         token_lbl.hide()
         v.addWidget(token_lbl)
 
@@ -3382,16 +3386,19 @@ class ExpandedWindow(QWidget):
         if agg_lbl is not None:
             agg_lbl.setText(_fmt_tokens(total_tokens))
 
-        # Detail sub-line — full breakdown with un-abbreviated terms
-        # (P3 polish: replaced "cw"/"cr" with "cache write"/"cache read"
-        # so the meaning is obvious without an external glossary).
+        # Detail sub-line — compact "cache w/r" form per user feedback:
+        # "cache write"/"cache read" was readable but pushed the line
+        # past the 320 px panel width and triggered word-wrap +
+        # layout-conflict warnings. "cache w"/"cache r" keeps the
+        # word "cache" so the meaning is still obvious (much better
+        # than the legacy bare "cw"/"cr") while fitting on one line.
         parts = [
             f"input {_fmt_tokens(tokens_in)}",
             f"output {_fmt_tokens(tokens_out)}",
         ]
         if cache_w or cache_r:
-            parts.append(f"cache write {_fmt_tokens(cache_w)}")
-            parts.append(f"cache read {_fmt_tokens(cache_r)}")
+            parts.append(f"cache w {_fmt_tokens(cache_w)}")
+            parts.append(f"cache r {_fmt_tokens(cache_r)}")
         token_lbl.setText("  " + " · ".join(parts))
         # Visibility tracks the SPEND card's disclosure toggle, NOT the
         # row's own visibility — _show_spend_row is called for each
@@ -3492,12 +3499,27 @@ class ExpandedWindow(QWidget):
         row5.hide()
         self._quota_row_5h = row5  # so tests / future code can re-show
         layout.addWidget(row5)
-        # Weekly bar stays — the summary's progress bar only covers the
-        # 5h window, so weekly utilisation has no other home in the panel.
+        # Weekly bar likewise hidden — replaced by the compact inline
+        # text below ("Weekly 57% used · resets 1h 11m") per user
+        # feedback that a full progress bar was overkill for one
+        # value already shown in the summary card's neighbourhood.
+        # Widget refs preserved so legacy tests keep finding them.
         row_week, self._quota_bar_week, self._quota_pct_week, self._quota_reset_week = (
             self._build_quota_row("Weekly")
         )
+        row_week.hide()
+        self._quota_row_week = row_week
         layout.addWidget(row_week)
+
+        # Compact Weekly status — single line, no bar. Format:
+        # "Weekly 57% used · resets 1h 11m". Filled by
+        # _refresh_quota_card; hidden when no quota snapshot.
+        self._quota_weekly_inline = QLabel("")
+        self._quota_weekly_inline.setStyleSheet(
+            "color: #c9c9c9; font-size: 11px;"
+        )
+        self._quota_weekly_inline.hide()
+        layout.addWidget(self._quota_weekly_inline)
 
         # "Unavailable" hint, hidden at rest. Shown by _refresh_quota_card
         # when the provider's fetch returns None — replaces the silent
@@ -3529,6 +3551,7 @@ class ExpandedWindow(QWidget):
             # Skip updating the 5h row widgets — that row is hidden
             # under the new summary-card design (5h lives there now).
             self._hide_quota_row(self._quota_bar_week, self._quota_pct_week, self._quota_reset_week)
+            self._quota_weekly_inline.hide()
             self._show_quota_unavailable_hint()
             return
 
@@ -3543,15 +3566,31 @@ class ExpandedWindow(QWidget):
             _STYLE_DOT.format(color=_DOT_GREEN if active else _DOT_GRAY)
         )
 
-        # 5h row is hidden in the QUOTA card — the summary card up top
-        # carries the 5h progress now. Only the Weekly bar gets its
-        # values refreshed here.
+        # 5h + Weekly bars are both hidden — the summary card carries
+        # 5h, and the Weekly bar was overkill for one number. Push
+        # values into the legacy bar widgets anyway (cheap, lets
+        # tests / future "show bars" toggle keep working) but render
+        # the user-visible Weekly status as a compact inline line.
         self._render_quota_row(
             self._quota_bar_week, self._quota_pct_week, self._quota_reset_week,
             pct=snap.seven_day_pct,
             resets_at=snap.seven_day_resets_at,
             stale=snap.is_stale,
         )
+        weekly_pct = max(0, min(100, int(round(snap.seven_day_pct))))
+        stale_marker = " ⚠" if snap.is_stale else ""
+        weekly_color = _quota_color(weekly_pct, stale=snap.is_stale)
+        reset_text = _fmt_reset(snap.seven_day_resets_at)
+        # Stylesheet is rebuilt per refresh so the colour tracks the
+        # threshold (green/amber/red/grey-stale) without an extra
+        # state machine.
+        self._quota_weekly_inline.setStyleSheet(
+            f"color: {weekly_color}; font-size: 11px;"
+        )
+        self._quota_weekly_inline.setText(
+            f"Weekly {weekly_pct}% used{stale_marker} · resets {reset_text}"
+        )
+        self._quota_weekly_inline.show()
 
     def _show_quota_unavailable_hint(self) -> None:
         """Surface a provider-specific tip explaining why the bars are

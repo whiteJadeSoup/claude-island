@@ -331,10 +331,20 @@ class CapsuleWindow(QWidget):
         return basename or None
 
     def _active_sessions(self) -> list[Session]:
-        """Sessions whose JSONL has been written within the active
-        threshold. ``last_activity`` is updated by the JSONL parser
-        through SessionRegistry.update_activity, so this read is
-        Eventually-Consistent with the live transcript."""
+        """Sessions that are currently doing something. Two signals:
+
+        1. JSONL written within the active threshold — the fast,
+           reliable signal for "model is streaming / tool loop is
+           iterating", since each turn writes a new transcript line.
+        2. ``SessionDetails.status`` is ``busy`` or ``waiting`` —
+           catches the "model is mid-thought" case where the JSONL
+           hasn't ticked in >30 s yet (e.g. a long Opus response).
+           Without this fallback the capsule's name display went silent
+           on the very sessions the user most wants to see.
+
+        Either signal is enough to count a session as active. Status
+        is only consulted when the heuristic missed, so the fast
+        path stays fast for the common case (no active session at all)."""
         now = datetime.now(timezone.utc)
         result: list[Session] = []
         for s in self._controller.sessions:
@@ -344,6 +354,19 @@ class CapsuleWindow(QWidget):
                 continue
             if age < _ACTIVE_THRESHOLD_SECONDS:
                 result.append(s)
+                continue
+            # Slower second pass — only consult details when activity
+            # heuristic missed. Composer is best-effort; a failing call
+            # leaves the session out (worst case: name doesn't show).
+            if self._get_session_details is not None:
+                try:
+                    d = self._get_session_details(s)
+                except Exception:
+                    continue
+                if d is None:
+                    continue
+                if isinstance(d.status, str) and d.status.lower() in ("busy", "waiting"):
+                    result.append(s)
         return result
 
     def _refresh_active_state(self) -> None:
