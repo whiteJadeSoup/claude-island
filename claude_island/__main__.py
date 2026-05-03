@@ -330,6 +330,13 @@ _wiring = [
     (session_registry.sessions_changed, capsule.refresh_sessions),
     (session_registry.sessions_changed, expanded.refresh_sessions),
     (usage_registry.totals_changed,     expanded.refresh_usage_bar),
+    # JSONL writes also need to bump the per-row state (running glyph,
+    # cost colour, model chip) — without this the row indicator only
+    # re-evaluated on the 10-s process scan tick and lagged the capsule
+    # (which already listens to totals_changed) by up to that interval,
+    # producing the visible "capsule says island-dev running, row says
+    # idle" mismatch from image #133.
+    (usage_registry.totals_changed,     expanded.refresh_row_states),
     # Capsule shows today's $ alongside session count — mirror the
     # expanded panel's wiring so backfill / live JSONL writes both
     # propagate to the pill within one Qt event loop tick.

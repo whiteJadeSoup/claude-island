@@ -2512,3 +2512,108 @@ class TestRowStatusGlyph:
         assert glyph._idle_visible is False
 
 
+class TestRefreshRowStates:
+    """``refresh_row_states()`` is the JSONL-write hook that keeps the
+    expanded panel rows in lockstep with the capsule.
+
+    Without this hook, rows would only re-evaluate their
+    running-glyph / cost-colour / model-chip state on the 10 s
+    process-scan tick (``sessions_changed``). The capsule already
+    re-evaluates on every JSONL write (``totals_changed`` →
+    ``capsule.refresh_cost`` → ``_refresh_active_state``). The hook
+    closes that gap: the row's ``_update_row`` runs on the same
+    ``totals_changed`` event the capsule listens to, so they read
+    ``SessionDetails.status`` at (effectively) the same instant and
+    can't disagree.
+    """
+
+    def test_running_glyph_flips_when_status_changes_without_full_rebuild(
+        self, qtbot,
+    ):
+        """The user-visible bug from image #133: capsule shows
+        ``island-dev`` running, but the row's running indicator is
+        absent. Reproduces the bug by letting the row render with
+        ``status=idle`` first (no indicator), then flipping the
+        composer to return ``status=busy`` and calling only
+        ``refresh_row_states()`` — the row must pick up the new
+        running state without a full ``refresh_sessions`` rebuild
+        (which is what would happen on the next 10 s scan tick)."""
+        from claude_island.core.models import SessionDetails
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+
+        # Mutable holder so the closure can flip what details() returns
+        # between calls — same shape as a status-file edit between two
+        # JSONL-write events.
+        current_status = ["idle"]
+
+        def details(session):
+            return SessionDetails(
+                session=session, name="x", ai_title=None, git_branch=None,
+                last_prompt=None, started_at=None,
+                status=current_status[0],
+                cc_version=None, cost_usd=4.0,
+                turn_count=1, sidechain_count=0,
+            )
+
+        capsule = QWidget(); capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule, controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+            get_session_details=details,
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+
+        # Initial render: status=idle ⇒ row's glyph stays IDLE even
+        # though last_activity is recent. This is the priority-chain
+        # contract _update_row implements.
+        p.refresh_sessions([_session(1, "/a", ago_minutes=0)])
+        btn = p._rows[1]
+        assert btn._status_glyph.state() == _RowStatusGlyph.STATE_IDLE
+        assert btn._running is False
+
+        # Now flip the underlying status — same as a JSONL write
+        # arriving while the user is reading the panel. The row should
+        # update on totals_changed, not wait 10 s for the next process
+        # scan.
+        current_status[0] = "busy"
+        p.refresh_row_states()
+        assert btn._status_glyph.state() == _RowStatusGlyph.STATE_RUNNING
+        assert btn._running is True
+
+    def test_no_layout_rebuild_preserves_row_identity(self, qtbot):
+        """``refresh_row_states`` must reuse the existing HoverRow
+        widgets — re-creating them would reset hover state, animation
+        phase, and (under load) cause visible flicker. The same widget
+        instance must survive the call."""
+        from claude_island.core.models import SessionDetails
+
+        def details(session):
+            return SessionDetails(
+                session=session, name="x", ai_title=None, git_branch=None,
+                last_prompt=None, started_at=None, status="idle",
+                cc_version=None, cost_usd=1.0,
+                turn_count=1, sidechain_count=0,
+            )
+
+        capsule = QWidget(); capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule, controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+            get_session_details=details,
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p.refresh_sessions([_session(1, "/a", ago_minutes=0)])
+        before = p._rows[1]
+        p.refresh_row_states()
+        assert p._rows[1] is before  # same widget instance
+
+    def test_safe_when_no_rows(self, qtbot, panel):
+        """Empty rows dict must not raise — totals_changed can fire
+        before the first refresh_sessions populates rows."""
+        assert panel._rows == {}
+        # Must not raise.
+        panel.refresh_row_states()
+
+

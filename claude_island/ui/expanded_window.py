@@ -3088,6 +3088,29 @@ class ExpandedWindow(QWidget):
         self.adjustSize()
         self._position()
 
+    def refresh_row_states(self, _: object = None) -> None:
+        """Re-evaluate per-row state (running glyph, cost colour, model
+        chip) without rebuilding the layout.
+
+        Wired to ``usage_registry.totals_changed`` in __main__.py so a
+        JSONL write — the most reliable "this session is producing
+        turns" signal — propagates to every row's running indicator
+        within one Qt event-loop tick. Without this hook, rows would
+        only re-evaluate on the 10-s process-scan tick and so could lag
+        the capsule (which already listens to totals_changed via
+        refresh_cost → _refresh_active_state) by up to 10 s, producing
+        the visible "capsule says island-dev running, row says idle"
+        bug from image #133.
+
+        Cheap: no layout rebuild, just setText / setStyleSheet /
+        set_state on existing children — same surface area as a hover
+        repaint. Iterates the cached rows dict so it's O(visible rows),
+        not O(all sessions ever)."""
+        for btn in self._rows.values():
+            session = btn.property("_session")
+            if session is not None:
+                self._update_row(btn, session)
+
     def _on_manual_refresh(self) -> None:
         """User clicked the ↻ button. Force a quota fetch (bypassing
         the QuotaProvider's TTL) and immediately redraw the cards.
