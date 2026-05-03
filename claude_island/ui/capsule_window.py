@@ -138,19 +138,20 @@ class CapsuleWindow(QWidget):
         # stays gone until the next process restart — there is no tray icon
         # to bring it back, so all auto-show paths must respect this flag.
         self._hidden_by_user = False
-        # Pull today's spend on demand (closure → main wires it to
-        # usage_registry.get_totals('today').cost_usd). None means the
-        # capsule omits the $ field — keeps the constructor optional so
-        # existing tests instantiating CapsuleWindow(controller) still work.
+        # Constructor params kept for backwards compat with the wiring
+        # layer's call signature; no longer read internally — the
+        # capsule's data path is render(snap) only after Phase G2.2.
+        # Will be removed once the wiring layer drops them too.
         self._get_today_cost = get_today_cost
+        self._get_session_details = get_session_details
+        self._get_quota_snapshot = get_quota_snapshot
+        # Cost from the latest snapshot's today_cost_usd. Drives the
+        # pill text suffix and the quota-bar paint path.
         self._cost_cache: float = 0.0
         # Snapshot-driven session list. Populated by render(snap) and
-        # consumed by _compose_label_text_from_snap /
-        # _refresh_active_state_from_snap. Initialised empty so any
-        # snap-path method called before the first render() doesn't
-        # AttributeError. Legacy refresh_xxx still uses
-        # controller.sessions, so this is parallel state during the
-        # migration.
+        # consumed by _compose_label_text + _refresh_active_state.
+        # Initialised empty so any path called before the first
+        # render() doesn't AttributeError.
         self._snap_sessions: tuple[SessionView, ...] = ()
         # Multi-running carousel: when ≥2 sessions are running, cycle
         # the pill text through their names every _ROTATE_INTERVAL_MS
@@ -164,16 +165,6 @@ class CapsuleWindow(QWidget):
         self._rotation_timer = QTimer(self)
         self._rotation_timer.setInterval(_ROTATE_INTERVAL_MS)
         self._rotation_timer.timeout.connect(self._on_rotate_tick)
-        # Used to render the running-session's name (custom rename ↦
-        # ai_title ↦ project basename) in place of "N sessions" when
-        # exactly one session is active. None ⇒ capsule falls back to
-        # the count-only label.
-        self._get_session_details = get_session_details
-        # Quota snapshot getter for the mini quota bar. Same pattern
-        # as get_today_cost — closure-injected by main so the panel's
-        # provider-tab state is honoured. None ⇒ capsule never shows
-        # the quota bar (multi-provider was never wired).
-        self._get_quota_snapshot = get_quota_snapshot
         # Latest 5h % cached so paintEvent can render the bar without
         # re-fetching. None ⇒ no snapshot yet (or below threshold);
         # paint code skips the bar entirely.
@@ -241,22 +232,74 @@ class CapsuleWindow(QWidget):
         self._center_top(_DOT_W, _DOT_H)
         self._label.hide()
         self._dot_label.hide()
-        self._stop_breathing()
+        # Glyph state goes IDLE while in dot mode — equalizer animation
+        # would be wasted CPU on an invisible widget.
+        self._dot_label.set_state(
+            _RowStatusGlyph.STATE_IDLE, dot_color=_DOT_IDLE_COLOR,
+        )
+        self._is_breathing = False
         self.update()
         self.show()
 
+    def _should_show_quota_bar(self) -> bool:
+        """True when the cached 5h % crossed the warning threshold.
+        Below the threshold the indicator is hidden — a green-only
+        "you're at 12 %" reading would be noise."""
+        if self._quota_pct_cache is None:
+            return False
+        return self._quota_pct_cache >= _QUOTA_WARN_THRESHOLD
+
+    # ------------------------------------------------------------------
+    # Sole entry point — render(snap)
+    # ------------------------------------------------------------------
+
+    def render(self, snap: WorldSnapshot) -> None:
+        """Render the capsule from a single ``WorldSnapshot``.
+
+        Pure "draw what's in the snap" — every policy decision
+        (running detection, cost colouring, name resolution) was
+        already made by the Snapshotter when it composed the
+        SessionViews. This method only does widget mutation.
+        """
+        if self._hidden_by_user:
+            return
+
+        # Update the caches the paint logic reads from.
+        # _paint_quota_bar reads _quota_pct_cache; _compose_label_text
+        # reads _cost_cache.
+        self._cost_cache = float(snap.today_cost_usd)
+        self._quota_pct_cache = (
+            float(snap.quota.five_hour_pct) if snap.quota is not None else None
+        )
+
+        # Cache the snapshot's session views so the pill text + active
+        # state derive from snap-resolved is_running / name fields.
+        self._snap_sessions: tuple[SessionView, ...] = snap.sessions
+
+        # Sync the multi-running carousel with the new running set.
+        # Must happen before _apply_capsule so the label text and
+        # timer state reflect the same snapshot.
+        self._update_rotation_state()
+
+        if self._is_dot:
+            return
+
+        # Capsule mode: re-apply (label + width + active state).
+        self._apply_capsule()
+
     def _apply_capsule(self) -> None:
+        """Lay out + show the capsule pill for the current snapshot.
+
+        Three jobs:
+          - set the label text via _compose_label_text
+          - resize the pill (wider when the quota mini-bar is shown)
+          - sync the equalizer-glyph running state
+        """
         self._is_dot = False
         self._label.setText(self._compose_label_text())
-        # Width grows when a quota mini-bar should be rendered (cache
-        # populated AND ≥ warn threshold). Variable width keeps the
-        # pill compact when there's nothing to flag.
         showing_quota = self._should_show_quota_bar()
         target_w = _CAPSULE_W_WITH_QUOTA if showing_quota else _CAPSULE_W
         self._center_top(target_w, _CAPSULE_H)
-        # Dot sits in a fixed slot on the left; text label takes the
-        # rest of the width minus the right pad (which holds the mini
-        # quota bar when shown, or just empty space when not).
         self._dot_label.setGeometry(_DOT_LEFT_PAD, 0, _DOT_LABEL_W, _CAPSULE_H)
         right_pad = (
             (_QUOTA_RIGHT_PAD + _QUOTA_BAR_W + 36)  # 36 px for "78%"
@@ -272,220 +315,7 @@ class CapsuleWindow(QWidget):
         self.update()
         self.show()
 
-    def _should_show_quota_bar(self) -> bool:
-        """True when the cached 5h % crossed the warning threshold and
-        we have a getter wired. Below the threshold the indicator is
-        hidden — a green-only "you're at 12 %" reading would be noise."""
-        if self._get_quota_snapshot is None:
-            return False
-        if self._quota_pct_cache is None:
-            return False
-        return self._quota_pct_cache >= _QUOTA_WARN_THRESHOLD
-
     def _compose_label_text(self) -> str:
-        """Render the pill text — combines session count or running
-        session name with today's cumulative spend.
-
-        Text logic:
-          - Exactly one *active* session AND we can resolve its name
-            ⇒ show that name (so the user can tell which session is
-            burning their $ at a glance).
-          - All other cases (zero / multiple active, or name unknown)
-            ⇒ show "N sessions" so the digit is at least informative.
-
-        Cost suffix is appended when the getter is wired and the
-        cumulative is > 0. ``$0`` is suppressed (no records yet) so a
-        fresh first launch reads cleanly as "1 session" instead of
-        "1 session  $0".
-        """
-        cost_suffix = ""
-        if self._get_today_cost is not None and self._cost_cache > 0:
-            cost_suffix = f"  {_fmt_money(self._cost_cache)}"
-
-        active = self._active_sessions()
-        if len(active) == 1 and self._get_session_details is not None:
-            name = self._resolve_session_name(active[0])
-            if name:
-                return f"{name}{cost_suffix}"
-
-        count = len(self._controller.sessions)
-        noun = "session" if count == 1 else "sessions"
-        return f"{count} {noun}{cost_suffix}"
-
-    def _resolve_session_name(self, session: Session) -> str | None:
-        """Return the best human label for ``session``.
-
-        Falls through user-rename → AI title → project directory name.
-        Mirrors the resolution order used in ExpandedWindow's row
-        rendering so "what the panel calls this session" matches "what
-        the pill calls it" for the running-session case."""
-        try:
-            details = self._get_session_details(session)  # type: ignore[misc]
-        except Exception:
-            return None
-        if details is not None:
-            if details.name:
-                return details.name
-            if details.ai_title:
-                return details.ai_title
-        basename = session.project_path.name
-        return basename or None
-
-    def _active_sessions(self) -> list[Session]:
-        """Sessions that are currently doing something.
-
-        Status takes precedence over the activity heuristic:
-          * ``status == "busy" / "waiting"`` → running (authoritative,
-            comes from Claude Code's own state file).
-          * ``status == "idle"`` → NOT running, even if last_activity is
-            recent. This filters out cases like a "<synthetic>" session
-            that just got a /compact summary written to its JSONL —
-            Claude Code marks it idle, but the JSONL bump made the old
-            heuristic count it as active and that masked the *real*
-            running session in the count check below.
-          * ``status`` unknown (no state file, e.g. non-Anthropic
-            provider) → fall back to the activity heuristic so we
-            still surface obviously-busy sessions.
-
-        Fast path: when the details composer is unwired, just use the
-        heuristic — keeps tests + minimal setups working as before."""
-        now = datetime.now(timezone.utc)
-        result: list[Session] = []
-        for s in self._controller.sessions:
-            status_word: str | None = None
-            if self._get_session_details is not None:
-                try:
-                    d = self._get_session_details(s)
-                    if d is not None and isinstance(d.status, str):
-                        status_word = d.status.lower()
-                except Exception:
-                    pass
-
-            if status_word == "idle":
-                # Authoritative "not running" — skip even if JSONL
-                # was just written (synthetic / compaction churn).
-                continue
-            if status_word in ("busy", "waiting"):
-                result.append(s)
-                continue
-
-            # status_word is None (unknown) — fall back to the activity
-            # heuristic so the pill still works for providers that
-            # don't write a sessions/<pid>.json state file.
-            try:
-                age = (now - s.last_activity).total_seconds()
-            except (TypeError, ValueError):
-                continue
-            if age < _ACTIVE_THRESHOLD_SECONDS:
-                result.append(s)
-        return result
-
-    def _refresh_active_state(self) -> None:
-        """Synchronise the equalizer glyph with whether any session is
-        currently active. Idempotent — set_state is a no-op when the
-        target state matches the current one, so safe to call every
-        refresh tick."""
-        active = bool(self._active_sessions())
-        if active:
-            self._dot_label.set_state(
-                _RowStatusGlyph.STATE_RUNNING,
-                bar_color=_DOT_RUNNING_COLOR,
-            )
-            self._is_breathing = True
-        else:
-            self._dot_label.set_state(
-                _RowStatusGlyph.STATE_IDLE,
-                dot_color=_DOT_IDLE_COLOR,
-            )
-            self._is_breathing = False
-
-    def _start_breathing(self) -> None:
-        """Legacy alias kept for tests / external callers — drives
-        through the new glyph state machine."""
-        self._dot_label.set_state(
-            _RowStatusGlyph.STATE_RUNNING,
-            bar_color=_DOT_RUNNING_COLOR,
-        )
-        self._is_breathing = True
-
-    def _stop_breathing(self) -> None:
-        """Legacy alias kept for tests / external callers."""
-        self._dot_label.set_state(
-            _RowStatusGlyph.STATE_IDLE,
-            dot_color=_DOT_IDLE_COLOR,
-        )
-        self._is_breathing = False
-
-    # ------------------------------------------------------------------
-    # New unified entry point — render(snap)
-    # ------------------------------------------------------------------
-
-    def render(self, snap: WorldSnapshot) -> None:
-        """Render the capsule from a single ``WorldSnapshot``.
-
-        This is the new entry point introduced by the state-broadcast
-        refactor. It supersedes the three legacy ``refresh_xxx``
-        methods (refresh_sessions, refresh_cost, refresh_quota), which
-        remain wired in parallel during the migration so behaviour can
-        be visually compared. Phase G will delete the legacy methods.
-
-        All policy logic (running detection, cost colouring, name
-        resolution) is pre-resolved on the snapshot's SessionView, so
-        this method is pure "draw what's in the snap" — no calls back
-        out to controllers, getters, or detail composers."""
-        if self._hidden_by_user:
-            return
-
-        # Update the caches the existing paint logic reads from.
-        # _paint_quota_bar reads _quota_pct_cache; _compose_label_text_*
-        # reads _cost_cache.
-        self._cost_cache = float(snap.today_cost_usd)
-        self._quota_pct_cache = (
-            float(snap.quota.five_hour_pct) if snap.quota is not None else None
-        )
-
-        # Cache the snapshot's session views so the pill text + active
-        # state derive from snap-resolved is_running / name fields,
-        # not from the legacy controller.sessions + per-session
-        # composer path.
-        self._snap_sessions: tuple[SessionView, ...] = snap.sessions
-
-        # Sync the multi-running carousel with the new running set.
-        # Must happen before _apply_capsule_from_snap so the label
-        # text and timer state reflect the same snapshot.
-        self._update_rotation_state()
-
-        if self._is_dot:
-            return
-
-        # Capsule mode: re-apply (label + width + active state).
-        self._apply_capsule_from_snap()
-
-    def _apply_capsule_from_snap(self) -> None:
-        """Snap-driven analogue of ``_apply_capsule``. Reads label text
-        and running state from ``self._snap_sessions`` instead of from
-        controllers + composers."""
-        self._is_dot = False
-        self._label.setText(self._compose_label_text_from_snap())
-        showing_quota = self._should_show_quota_bar()
-        target_w = _CAPSULE_W_WITH_QUOTA if showing_quota else _CAPSULE_W
-        self._center_top(target_w, _CAPSULE_H)
-        self._dot_label.setGeometry(_DOT_LEFT_PAD, 0, _DOT_LABEL_W, _CAPSULE_H)
-        right_pad = (
-            (_QUOTA_RIGHT_PAD + _QUOTA_BAR_W + 36)
-            if showing_quota
-            else _DOT_LEFT_PAD + _DOT_LABEL_W
-        )
-        self._label.setGeometry(
-            _TEXT_LEFT, 0, target_w - _TEXT_LEFT - right_pad, _CAPSULE_H,
-        )
-        self._dot_label.show()
-        self._label.show()
-        self._refresh_active_state_from_snap()
-        self.update()
-        self.show()
-
-    def _compose_label_text_from_snap(self) -> str:
         """Compose pill text from the current snap + carousel state.
 
         Three modes:
@@ -523,7 +353,7 @@ class CapsuleWindow(QWidget):
             return
         self._rotation_index = (self._rotation_index + 1) % len(self._rotation_names)
         if not self._is_dot:
-            self._label.setText(self._compose_label_text_from_snap())
+            self._label.setText(self._compose_label_text())
 
     def _update_rotation_state(self) -> None:
         """Sync ``_rotation_names`` with the current running sessions
@@ -548,8 +378,10 @@ class CapsuleWindow(QWidget):
             if self._rotation_timer.isActive():
                 self._rotation_timer.stop()
 
-    def _refresh_active_state_from_snap(self) -> None:
-        """Snap-driven analogue of ``_refresh_active_state``."""
+    def _refresh_active_state(self) -> None:
+        """Sync the equalizer-glyph state with whether any snapshotted
+        session is running. Idempotent — set_state is a no-op when
+        the target state matches."""
         has_active = any(v.is_running for v in self._snap_sessions)
         if has_active:
             self._dot_label.set_state(
@@ -563,73 +395,6 @@ class CapsuleWindow(QWidget):
                 dot_color=_DOT_IDLE_COLOR,
             )
             self._is_breathing = False
-
-    # ------------------------------------------------------------------
-    # Legacy refresh entry points (Phase G will delete these)
-    # ------------------------------------------------------------------
-
-    def refresh_sessions(self, sessions: object) -> None:
-        """Called by bridge when sessions list changes (updates count label)."""
-        if self._hidden_by_user:
-            return
-        if not self._is_dot:
-            self._apply_capsule()
-
-    def refresh_quota(self, _: object = None) -> None:
-        """Pull the latest quota snapshot and re-render the pill if the
-        warn-threshold crossing changed visibility.
-
-        Wired into the same heartbeat that drives ``refresh_usage_bar``
-        in __main__ so the pill picks up quota changes without needing
-        its own timer. No-op when the getter is unwired (the pill
-        simply never shows the quota bar)."""
-        if self._hidden_by_user or self._get_quota_snapshot is None:
-            return
-        previous_visible = self._should_show_quota_bar()
-        snap: QuotaSnapshot | None = None
-        try:
-            snap = self._get_quota_snapshot()
-        except Exception as exc:
-            import sys as _sys
-            print(f"[claude-island] capsule quota fetch failed: {exc}",
-                  file=_sys.stderr)
-            return
-        self._quota_pct_cache = (
-            float(snap.five_hour_pct) if snap is not None else None
-        )
-        # Visibility may have flipped — re-applying the capsule will
-        # resize and reposition. If the visible state is unchanged,
-        # just trigger a repaint so the bar % updates in place.
-        now_visible = self._should_show_quota_bar()
-        if not self._is_dot and previous_visible != now_visible:
-            self._apply_capsule()
-        else:
-            self.update()
-
-    def refresh_cost(self, _: object = None) -> None:
-        """Called by bridge when usage totals change. Pulls today's
-        cost via the injected getter and refreshes the pill text + the
-        breathing-dot state.
-
-        Why refresh active state here too: ``totals_changed`` fires on
-        every JSONL write, which is the most reliable signal that "a
-        session is currently producing turns" — much more responsive
-        than waiting for the 10-s process scan cycle to re-run
-        ``refresh_sessions``. Without this hook, the breathing dot
-        would lag activity by up to 10 s.
-        """
-        if self._hidden_by_user or self._get_today_cost is None:
-            return
-        try:
-            self._cost_cache = float(self._get_today_cost())
-        except Exception:
-            # Cost is presentational — never let a registry hiccup crash
-            # the UI. Keep the previous cached value rather than zeroing
-            # (which would briefly flash "$0" between refreshes).
-            return
-        if not self._is_dot:
-            self._label.setText(self._compose_label_text())
-            self._refresh_active_state()
 
     # ------------------------------------------------------------------
     # Paint + events
