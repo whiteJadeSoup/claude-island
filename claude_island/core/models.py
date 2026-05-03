@@ -196,6 +196,12 @@ class SessionDetails:
     # ``Session.session_uuid`` is often "" coming out of ProcessScanner).
     # The detail popup shows this in the ID row.
     effective_uuid: str | None = None
+    # The Claude-Code-assigned session name, BEFORE any user override.
+    # The detail popup compares this against ``name`` to detect a
+    # rename, and surfaces this as the subtitle when the user renamed
+    # but no AI-generated title exists. None when sessions/<pid>.json
+    # had no name field (e.g. MiniMax sessions).
+    original_name: str | None = None
 
 
 @dataclass(frozen=True)

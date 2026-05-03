@@ -1443,6 +1443,142 @@ class TestDetailPopupRename:
         assert "Rename failed" in popup._repair_status.text()
 
 
+class TestDetailPopupSubtitle:
+    """Italic subtitle in the detail popup header. Two-tier resolution:
+    prefer ai_title (AI-generated, descriptive), fall back to
+    original_name (Claude Code's auto name) only when the user
+    renamed but the AI never assigned a title."""
+
+    @staticmethod
+    def _label_with_text(popup, text: str):
+        from PySide6.QtWidgets import QLabel
+        for lbl in popup.findChildren(QLabel):
+            if lbl.text() == text:
+                return lbl
+        return None
+
+    @staticmethod
+    def _count_labels(popup, text: str) -> int:
+        from PySide6.QtWidgets import QLabel
+        return sum(
+            1 for lbl in popup.findChildren(QLabel) if lbl.text() == text
+        )
+
+    def test_ai_title_shown_when_renamed_and_differs(self, qtbot):
+        # Classic case: AI generated a title, user renamed → italic
+        # surfaces the AI title underneath.
+        from claude_island.ui.expanded_window import SessionDetailPopup
+        s = _session(1, "/proj")
+        details = _make_full_details(
+            s, name="learning python",
+            ai_title="Learn Python and TypeScript basics",
+            original_name="cc-learning",
+        )
+        popup = SessionDetailPopup(details, s)
+        qtbot.addWidget(popup)
+        assert self._label_with_text(
+            popup, "Learn Python and TypeScript basics",
+        ) is not None
+
+    def test_original_name_shown_when_renamed_and_no_ai_title(self, qtbot):
+        # Session has no ai_title (Claude Code never set one) but DOES
+        # have a state.name that the user renamed away from. Italic
+        # falls back to the state.name so the user can still see what
+        # the session used to be called.
+        from claude_island.ui.expanded_window import SessionDetailPopup
+        s = _session(1, "/proj")
+        details = _make_full_details(
+            s, name="claude md prompt coding",
+            ai_title=None,
+            original_name="claude md prompt",
+        )
+        popup = SessionDetailPopup(details, s)
+        qtbot.addWidget(popup)
+        assert self._label_with_text(popup, "claude md prompt") is not None
+
+    def test_original_name_NOT_shown_when_no_rename(self, qtbot):
+        # Without a rename, original_name == name == title. Surfacing
+        # original_name as subtitle would just echo the title — noise.
+        # Verify by counting: only one label with that text (the
+        # title), not two (title + would-be-subtitle).
+        from claude_island.ui.expanded_window import SessionDetailPopup
+        s = _session(1, "/proj")
+        details = _make_full_details(
+            s, name="cc-learning",
+            ai_title=None,
+            original_name="cc-learning",
+        )
+        popup = SessionDetailPopup(details, s)
+        qtbot.addWidget(popup)
+        assert self._count_labels(popup, "cc-learning") == 1
+
+    def test_no_subtitle_when_no_ai_title_and_no_rename(self, qtbot):
+        # Same as above but with original_name=None too — guards the
+        # "MiniMax-style session with neither ai_title nor state.name"
+        # path. Title degrades to project basename; no subtitle.
+        from claude_island.ui.expanded_window import SessionDetailPopup
+        s = _session(1, "/proj-name")
+        details = _make_full_details(
+            s, name=None,
+            ai_title=None,
+            original_name=None,
+        )
+        popup = SessionDetailPopup(details, s)
+        qtbot.addWidget(popup)
+        # No phantom italic line of any kind.
+        assert self._count_labels(popup, "proj-name") == 1
+
+    def test_ai_title_preferred_over_original_when_both_present(self, qtbot):
+        # When both candidates differ from the renamed title, ai_title
+        # wins — it's typically more descriptive than the auto name.
+        from claude_island.ui.expanded_window import SessionDetailPopup
+        s = _session(1, "/proj")
+        details = _make_full_details(
+            s, name="custom",
+            ai_title="The AI Generated Title",
+            original_name="The Original Name",
+        )
+        popup = SessionDetailPopup(details, s)
+        qtbot.addWidget(popup)
+        assert self._label_with_text(
+            popup, "The AI Generated Title",
+        ) is not None
+        assert self._label_with_text(popup, "The Original Name") is None
+
+    def test_falls_through_to_original_when_rename_matches_ai_title(self, qtbot):
+        # User renamed to the same string ai_title would have produced
+        # → ai_title would echo the title. Fall through to
+        # original_name (which still differs) so the user can see what
+        # the auto-detected name was.
+        from claude_island.ui.expanded_window import SessionDetailPopup
+        s = _session(1, "/proj")
+        details = _make_full_details(
+            s, name="Refactor",
+            ai_title="Refactor",
+            original_name="cc-learning",
+        )
+        popup = SessionDetailPopup(details, s)
+        qtbot.addWidget(popup)
+        # Title appears once; "cc-learning" appears as the italic
+        # subtitle (fall-through after ai_title echoed).
+        assert self._count_labels(popup, "Refactor") == 1
+        assert self._label_with_text(popup, "cc-learning") is not None
+
+    def test_no_subtitle_when_all_candidates_echo_title(self, qtbot):
+        # Both ai_title and original_name match the rename → nothing
+        # to add. Subtitle suppressed, only the title shown.
+        from claude_island.ui.expanded_window import SessionDetailPopup
+        s = _session(1, "/proj")
+        details = _make_full_details(
+            s, name="Same",
+            ai_title="Same",
+            original_name="Same",
+        )
+        popup = SessionDetailPopup(details, s)
+        qtbot.addWidget(popup)
+        assert self._count_labels(popup, "Same") == 1
+
+
 # ============================================================================
 # Add-provider dialog (in-app + button) — frameless popup that lets the
 # user paste credentials and have a new tab appear without restart.
