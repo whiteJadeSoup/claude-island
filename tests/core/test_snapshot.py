@@ -34,6 +34,12 @@ def _view(
     so each test only specifies the fields it cares about."""
     if is_high_cost is None:
         is_high_cost = cost_usd >= HIGH_COST_USD_THRESHOLD
+    from claude_island.core.models import Session
+    sess = Session(
+        pid=1234, project_path=Path("/tmp/test"),
+        session_uuid="", window_handle=None,
+        last_activity=datetime.now(timezone.utc),
+    )
     return SessionView(
         pid=1234,
         name="test",
@@ -46,6 +52,7 @@ def _view(
         latest_model="claude-opus-4-7",
         status_word="idle",
         window_handle=None,
+        session=sess,
     )
 
 
@@ -170,13 +177,20 @@ class TestWorldSnapshot:
         """sessions tuples are order-sensitive — Snapshotter sorts
         deterministically before constructing the snapshot, so the UI
         can rely on the same order across renders."""
+        from claude_island.core.models import Session
         a = _view(cost_usd=1.0)
+        b_sess = Session(
+            pid=99, project_path=Path("/b"),
+            session_uuid="", window_handle=None,
+            last_activity=datetime.now(timezone.utc),
+        )
         b = SessionView(
             pid=99, name="b", project_path=Path("/b"),
             project_basename="b",
             last_activity=datetime.now(timezone.utc),
             is_running=False, cost_usd=1.0, is_high_cost=False,
             latest_model=None, status_word=None, window_handle=None,
+            session=b_sess,
         )
         s1 = WorldSnapshot.empty()
         s_ab = WorldSnapshot(

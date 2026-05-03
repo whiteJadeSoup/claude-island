@@ -42,6 +42,7 @@ from claude_island.core.models import (
     resolve_model_color,
     resolve_model_short_name,
 )
+from claude_island.core.snapshot import SessionView, WorldSnapshot
 from .controller import IslandController
 
 
@@ -2959,7 +2960,47 @@ class ExpandedWindow(QWidget):
         self.setStyleSheet(_STYLE_PANEL)
 
     # ------------------------------------------------------------------
-    # Slots (called by QtBridge / signals)
+    # New unified entry point — render(snap)
+    # ------------------------------------------------------------------
+
+    def render(self, snap: WorldSnapshot) -> None:
+        """Render the panel from a single ``WorldSnapshot``.
+
+        This is the new entry point introduced by the state-broadcast
+        refactor. It supersedes the three legacy ``refresh_xxx``
+        methods (refresh_sessions, refresh_usage_bar, refresh_row_states)
+        which remain wired in parallel during the migration so the two
+        paths can be visually compared. Phase G will delete the legacy
+        methods and have ``_update_row`` consume ``SessionView`` directly
+        instead of round-tripping through the composer.
+
+        Phase D scope (this commit): converts ``snap.sessions`` back to
+        ``list[Session]`` and delegates to the existing rebuild
+        machinery. The cards (summary / SPEND / QUOTA) keep reading
+        from registries because they're not the consistency-bug source
+        — the row indicators were, and those go through the snap
+        sessions list.
+        """
+        # Cache the snapshot so a (Phase G) refactor can have
+        # _update_row read pre-resolved fields off the SessionView
+        # directly instead of re-running the composer.
+        self._latest_snap = snap
+
+        # Build the legacy session-list shape from snap.sessions and
+        # delegate. refresh_sessions calls _update_row per row, which
+        # in turn (today) calls the composer for the SessionDetails
+        # the row needs. Phase G replaces that round-trip with a
+        # direct SessionView read.
+        sessions = [v.session for v in snap.sessions]
+        self.refresh_sessions(sessions)
+
+        # Cards refresh from registries on the same tick — keeps
+        # summary $, SPEND breakdown and QUOTA bars synchronized with
+        # the row state we just rebuilt.
+        self.refresh_usage_bar()
+
+    # ------------------------------------------------------------------
+    # Legacy slots (Phase G will delete these once render is the only path)
     # ------------------------------------------------------------------
 
     def refresh_sessions(self, sessions: list[Session]) -> None:

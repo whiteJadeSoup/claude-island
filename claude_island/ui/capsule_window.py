@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from claude_island.core.models import QuotaSnapshot, Session, SessionDetails
+from claude_island.core.snapshot import SessionView, WorldSnapshot
 from .controller import IslandController
 from .expanded_window import _RowStatusGlyph
 
@@ -135,6 +136,14 @@ class CapsuleWindow(QWidget):
         # existing tests instantiating CapsuleWindow(controller) still work.
         self._get_today_cost = get_today_cost
         self._cost_cache: float = 0.0
+        # Snapshot-driven session list. Populated by render(snap) and
+        # consumed by _compose_label_text_from_snap /
+        # _refresh_active_state_from_snap. Initialised empty so any
+        # snap-path method called before the first render() doesn't
+        # AttributeError. Legacy refresh_xxx still uses
+        # controller.sessions, so this is parallel state during the
+        # migration.
+        self._snap_sessions: tuple[SessionView, ...] = ()
         # Used to render the running-session's name (custom rename ↦
         # ai_title ↦ project basename) in place of "N sessions" when
         # exactly one session is active. None ⇒ capsule falls back to
@@ -386,6 +395,110 @@ class CapsuleWindow(QWidget):
             dot_color=_DOT_IDLE_COLOR,
         )
         self._is_breathing = False
+
+    # ------------------------------------------------------------------
+    # New unified entry point — render(snap)
+    # ------------------------------------------------------------------
+
+    def render(self, snap: WorldSnapshot) -> None:
+        """Render the capsule from a single ``WorldSnapshot``.
+
+        This is the new entry point introduced by the state-broadcast
+        refactor. It supersedes the three legacy ``refresh_xxx``
+        methods (refresh_sessions, refresh_cost, refresh_quota), which
+        remain wired in parallel during the migration so behaviour can
+        be visually compared. Phase G will delete the legacy methods.
+
+        All policy logic (running detection, cost colouring, name
+        resolution) is pre-resolved on the snapshot's SessionView, so
+        this method is pure "draw what's in the snap" — no calls back
+        out to controllers, getters, or detail composers."""
+        if self._hidden_by_user:
+            return
+
+        # Update the caches the existing paint logic reads from.
+        # _paint_quota_bar reads _quota_pct_cache; _compose_label_text_*
+        # reads _cost_cache.
+        self._cost_cache = float(snap.today_cost_usd)
+        self._quota_pct_cache = (
+            float(snap.quota.five_hour_pct) if snap.quota is not None else None
+        )
+
+        # Cache the snapshot's session views so the pill text + active
+        # state derive from snap-resolved is_running / name fields,
+        # not from the legacy controller.sessions + per-session
+        # composer path.
+        self._snap_sessions: tuple[SessionView, ...] = snap.sessions
+
+        if self._is_dot:
+            return
+
+        # Capsule mode: re-apply (label + width + active state).
+        self._apply_capsule_from_snap()
+
+    def _apply_capsule_from_snap(self) -> None:
+        """Snap-driven analogue of ``_apply_capsule``. Reads label text
+        and running state from ``self._snap_sessions`` instead of from
+        controllers + composers."""
+        self._is_dot = False
+        self._label.setText(self._compose_label_text_from_snap())
+        showing_quota = self._should_show_quota_bar()
+        target_w = _CAPSULE_W_WITH_QUOTA if showing_quota else _CAPSULE_W
+        self._center_top(target_w, _CAPSULE_H)
+        self._dot_label.setGeometry(_DOT_LEFT_PAD, 0, _DOT_LABEL_W, _CAPSULE_H)
+        right_pad = (
+            (_QUOTA_RIGHT_PAD + _QUOTA_BAR_W + 36)
+            if showing_quota
+            else _DOT_LEFT_PAD + _DOT_LABEL_W
+        )
+        self._label.setGeometry(
+            _TEXT_LEFT, 0, target_w - _TEXT_LEFT - right_pad, _CAPSULE_H,
+        )
+        self._dot_label.show()
+        self._label.show()
+        self._refresh_active_state_from_snap()
+        self.update()
+        self.show()
+
+    def _compose_label_text_from_snap(self) -> str:
+        """Same logic as ``_compose_label_text`` but reads from snap.
+
+        - Exactly one running session ⇒ show its name (already resolved
+          on the SessionView).
+        - All other cases ⇒ show "N sessions".
+        Cost suffix appended when > 0 (so a fresh first launch reads
+        cleanly without a trailing ``$0``)."""
+        cost_suffix = ""
+        if self._cost_cache > 0:
+            cost_suffix = f"  {_fmt_money(self._cost_cache)}"
+
+        active = [v for v in self._snap_sessions if v.is_running]
+        if len(active) == 1:
+            return f"{active[0].name}{cost_suffix}"
+
+        count = len(self._snap_sessions)
+        noun = "session" if count == 1 else "sessions"
+        return f"{count} {noun}{cost_suffix}"
+
+    def _refresh_active_state_from_snap(self) -> None:
+        """Snap-driven analogue of ``_refresh_active_state``."""
+        has_active = any(v.is_running for v in self._snap_sessions)
+        if has_active:
+            self._dot_label.set_state(
+                _RowStatusGlyph.STATE_RUNNING,
+                bar_color=_DOT_RUNNING_COLOR,
+            )
+            self._is_breathing = True
+        else:
+            self._dot_label.set_state(
+                _RowStatusGlyph.STATE_IDLE,
+                dot_color=_DOT_IDLE_COLOR,
+            )
+            self._is_breathing = False
+
+    # ------------------------------------------------------------------
+    # Legacy refresh entry points (Phase G will delete these)
+    # ------------------------------------------------------------------
 
     def refresh_sessions(self, sessions: object) -> None:
         """Called by bridge when sessions list changes (updates count label)."""

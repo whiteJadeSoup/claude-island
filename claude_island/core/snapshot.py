@@ -90,6 +90,12 @@ class SessionView:
     latest_model: str | None        # None when no records yet
     status_word: str | None         # raw "busy" / "idle" / "waiting" / None
     window_handle: int | None       # passthrough from Session
+    # The original Session object the view was composed from. Carried
+    # along so UI callbacks that accept a Session (e.g. WindowActivator,
+    # the row's _siblings list) don't need to reconstruct one. Frozen
+    # like everything else here — once the snapshot is built, the
+    # ``session`` reference is stable for the lifetime of the snapshot.
+    session: Session
 
     def __post_init__(self) -> None:
         # Self-consistency invariant — guards against the UI and the
@@ -338,6 +344,7 @@ def compose_session_view(
         latest_model=latest_model,
         status_word=status_word.lower() if status_word else None,
         window_handle=session.window_handle,
+        session=session,
     )
 
 
@@ -417,6 +424,7 @@ def _degraded_view(session: Session) -> SessionView:
         latest_model=None,
         status_word=None,
         window_handle=session.window_handle,
+        session=session,
     )
 
 
