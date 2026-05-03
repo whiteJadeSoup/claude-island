@@ -1190,8 +1190,19 @@ class SessionDetailPopup(QFrame):
         still scanning the popup."""
         d = self._details
         title = self._title_text()
-        subtitle_ai = (
-            d.ai_title if d and d.ai_title and d.ai_title != title else None
+        # Italic subtitle = "what this session would have been called
+        # without the user's rename". Prefer the AI-generated title
+        # (it's the most descriptive); fall back to the auto-detected
+        # state.name so renamed sessions WITHOUT an ai_title still
+        # surface their original name. Suppressed when it'd just echo
+        # the title (no rename, or ai_title == name).
+        subtitle_candidates = [
+            d.ai_title if d else None,
+            d.original_name if d else None,
+        ]
+        subtitle_ai = next(
+            (c for c in subtitle_candidates if c and c != title),
+            None,
         )
 
         wrap = QWidget()
