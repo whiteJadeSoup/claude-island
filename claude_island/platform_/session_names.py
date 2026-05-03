@@ -1,23 +1,14 @@
 """Persistent custom session names.
 
 Users can rename a Claude Code session via the right-click detail
-popup; the override is stored here under TWO keys so the rename
-survives Claude Code's session rotation (``/clear``, ``/resume``,
-``/compact`` all mint a fresh sessionId for the same pid):
-
-  - ``<session_uuid>``  — the per-session key. Wins when the user
-    has renamed THIS specific session and the sessionId is still the
-    same as at rename time.
-  - ``:project:<project_path>`` — the per-project fallback. Picks up
-    when sessionId rotated and the per-session key no longer matches.
-    Acts as the "I named this project" carry-over so subsequent
-    sessions in the same dir inherit the rename.
+popup; the override is stored here keyed by the session's transcript
+UUID (the JSONL filename stem) — a strict per-session identifier so
+renaming one session never bleeds into others in the same project.
 
 Storage: ``~/.claude-island/session_names.json``::
 
     {
-      "1172b95b-4e6a-...": "frontend refactor",   # session-uuid key
-      ":project:/home/me/proj-a": "frontend",     # project key
+      "1172b95b-4e6a-...": "frontend refactor",
       ...
     }
 
@@ -26,6 +17,13 @@ underlying Windows Terminal tab title (that comes from Claude Code's
 conPTY writes and is not addressable from outside the process).
 Click-to-activate keeps working because the activator routes by pid +
 ``GetConsoleTitleW`` output, neither of which depends on this file.
+
+Trade-off note: an earlier design also wrote a per-project fallback
+key so the rename would survive Claude Code's ``/clear`` /
+``/resume`` minting a fresh sessionId for the same pid. That fallback
+was removed because it caused renames to bleed across sibling
+sessions sharing a project_path — a worse UX than occasionally
+"losing" a rename on session rotation.
 
 API mirrors ``platform_/providers/__init__.py`` (atomic write, lazy
 path resolution for tests, errors silenced as warnings) so it reads
@@ -42,20 +40,6 @@ from pathlib import Path
 # the module attribute. Same pattern as PROVIDER_CONFIG_PATH in
 # claude_island.platform_.providers.
 SESSION_NAMES_PATH = Path.home() / ".claude-island" / "session_names.json"
-
-# Prefix that distinguishes a project-path key from a session-uuid key.
-# Session UUIDs are alphanumeric+dash (no colon); paths can contain ":"
-# on Windows ("C:\..."), so the leading sentinel ":project:" must
-# itself contain a colon — relying on "no colons in uuids" alone would
-# false-positive on Windows drive letters.
-_PROJECT_KEY_PREFIX = ":project:"
-
-
-def _project_key(project_path: str) -> str:
-    """Build the storage key for a project-level rename. Normalises
-    nothing — callers are expected to feed ``str(session.project_path)``
-    consistently so the key matches across reads/writes."""
-    return f"{_PROJECT_KEY_PREFIX}{project_path}"
 
 
 def _read(path: Path | None = None) -> dict[str, str]:
@@ -97,97 +81,69 @@ def _write(names: dict[str, str], path: Path | None = None) -> None:
         print(f"[claude-island] session_names.json write failed: {e}", file=sys.stderr)
 
 
-def get_session_name(uuid: str, project_path: str | None = None) -> str | None:
-    """Return the user's custom name for this session, or ``None``.
+def get_session_name(uuid: str) -> str | None:
+    """Return the user's custom name for ``uuid``, or ``None`` if unset.
 
-    Tries the per-session key (``uuid``) first so an explicit per-
-    session rename always wins. Falls back to the per-project key
-    (``project_path``) when the session-key misses — that fallback is
-    what makes the rename survive Claude Code's ``/clear``-style
-    sessionId rotation. Empty values in the file are treated as
-    "unset" so the empty-as-delete sentinel doesn't leak through.
+    Per-session lookup only — there's no project-level fallback (an
+    earlier design caused renames to bleed across sibling sessions in
+    the same directory). Returned strings are guaranteed non-empty
+    (an empty value in the file is treated as "unset" so the
+    empty-as-delete sentinel doesn't leak through).
     """
-    names = _read()
-    if uuid:
-        name = names.get(uuid)
-        if name:
-            return name
-    if project_path:
-        name = names.get(_project_key(project_path))
-        if name:
-            return name
-    return None
+    if not uuid:
+        return None
+    name = _read().get(uuid)
+    return name if name else None
 
 
-def set_session_name(uuid: str, name: str, project_path: str | None = None) -> None:
-    """Persist ``name`` as the display override for this session.
+def set_session_name(uuid: str, name: str) -> None:
+    """Persist ``name`` as the display override for ``uuid``.
 
-    Writes BOTH the per-session key (``uuid``) and, when supplied, the
-    per-project key (``project_path``). The dual write is the whole
-    point of the design: the project key carries the rename across a
-    sessionId rotation that would otherwise orphan the per-session
-    entry. ``project_path`` is optional only because the platform
-    layer can be exercised without it; the UI always supplies it.
+    Empty / whitespace-only ``name`` deletes the entry — that's the
+    "go back to the auto-detected name" gesture, exposed in the UI as
+    saving a blank field. Saves are merge-style: other sessions'
+    overrides are preserved.
 
-    Empty / whitespace-only ``name`` deletes BOTH keys — the "restore
-    default" gesture exposed as saving a blank field. Saves are
-    merge-style: other sessions' overrides are preserved.
-
-    No-op when both keys are empty/missing (e.g. the detail popup
-    pre-uuid-resolution case).
+    No-op when ``uuid`` is empty (the detail popup may pass an empty
+    uuid for sessions whose transcript hasn't been resolved yet; we'd
+    rather quietly skip than corrupt the file with a "" key).
     """
-    cleaned = (name or "").strip()
-    keys: list[str] = []
-    if uuid:
-        keys.append(uuid)
-    if project_path:
-        keys.append(_project_key(project_path))
-    if not keys:
+    if not uuid:
         return
+    cleaned = (name or "").strip()
     names = _read()
-    changed = False
     if not cleaned:
-        for k in keys:
-            if k in names:
-                names.pop(k)
-                changed = True
-        if changed:
+        if uuid in names:
+            names.pop(uuid)
             _write(names)
         return
-    for k in keys:
-        if names.get(k) != cleaned:
-            names[k] = cleaned
-            changed = True
-    if changed:
-        _write(names)
+    if names.get(uuid) == cleaned:
+        return  # idempotent — skip the write if nothing changed
+    names[uuid] = cleaned
+    _write(names)
 
 
-def delete_session_name(uuid: str, project_path: str | None = None) -> None:
-    """Drop the override(s) for this session. Convenience wrapper
-    around :func:`set_session_name` with an empty value — clearer at
-    the call site than ``set_session_name(..., "")``."""
-    set_session_name(uuid, "", project_path=project_path)
+def delete_session_name(uuid: str) -> None:
+    """Drop ``uuid`` from the override map. Convenience wrapper around
+    :func:`set_session_name` with an empty value — clearer at the
+    call site than ``set_session_name(uuid, "")``."""
+    set_session_name(uuid, "")
 
 
 def gc_session_names(known_uuids: set[str]) -> None:
-    """Drop session-uuid entries whose transcript no longer exists on
-    disk. Project-key entries (``:project:<path>`` prefix) are always
-    kept — they're stable per directory and we don't track which dirs
-    are "still relevant".
+    """Drop entries whose session_uuid no longer corresponds to a known
+    transcript. Called periodically so renamed-then-closed sessions
+    don't accumulate forever in the override file.
 
     Pure data hygiene — never raises, no-op when the file is missing.
-    A ``known_uuids`` of ``set()`` would wipe ALL session-uuid entries
-    (since none would be "known"), so callers must populate it before
-    invoking — the obvious safety guard against running gc before the
-    JSONL parser has indexed anything.
+    A ``known_uuids`` of ``set()`` would wipe everything, so callers
+    must populate it before invoking — the obvious safety guard
+    against running gc before the JSONL parser has indexed anything.
     """
     if not known_uuids:
         return
     names = _read()
-    pruned = {
-        k: v for k, v in names.items()
-        if k.startswith(_PROJECT_KEY_PREFIX) or k in known_uuids
-    }
+    pruned = {uuid: n for uuid, n in names.items() if uuid in known_uuids}
     if pruned == names:
         return
     _write(pruned)

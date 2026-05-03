@@ -1086,12 +1086,10 @@ class SessionDetailPopup(QFrame):
 
         self._details = details
         self._fallback = fallback
-        # on_rename: caller-supplied (uuid, new_name, project_path) -> None
-        # invoked when the user commits a name change via the inline edit.
-        # None disables the edit affordance entirely. The popup itself has
-        # no platform dependency — it just hands the values back to the
-        # wiring layer. project_path is included as the per-project
-        # fallback key so renames survive Claude Code rotating sessionId.
+        # on_rename: caller-supplied (uuid, new_name) -> None invoked when
+        # the user commits a name change via the inline edit. None disables
+        # the edit affordance entirely. The popup itself has no platform
+        # dependency — it just hands the values back to the wiring layer.
         self._on_rename = on_rename
         # Inline rename state — only populated while the user is editing.
         self._name_label: QLabel | None = None
@@ -1721,7 +1719,7 @@ class SessionDetailPopup(QFrame):
             self._exit_rename_mode()
             return
         try:
-            self._on_rename(sess_uuid, new_name, str(self._fallback.project_path))
+            self._on_rename(sess_uuid, new_name)
         except Exception as exc:
             self._show_status(f"Rename failed: {exc}", color="#ef4444")
             self._exit_rename_mode()
@@ -3405,19 +3403,18 @@ class ExpandedWindow(QWidget):
                 print(f"[claude-island] provider-config-changed callback failed: {exc}",
                       file=_sys.stderr)
 
-    def _on_session_renamed(
-        self, sess_uuid: str, new_name: str, project_path: str
-    ) -> None:
+    def _on_session_renamed(self, sess_uuid: str, new_name: str) -> None:
         """Persist a custom session display name and re-render rows.
 
         Wired to ``SessionDetailPopup.on_rename``. Empty ``new_name``
         clears the override (restores the auto-detected name) — the
         platform helper handles the empty-as-delete sentinel.
 
-        Saves under both the per-session uuid and the per-project
-        path. The dual write means a follow-up Claude Code ``/clear``
-        (which mints a fresh sessionId for the same pid) doesn't
-        orphan the rename — the project key picks it up.
+        Strict per-session: the rename only affects THIS session. An
+        earlier dual-key design also wrote a per-project entry so the
+        rename would survive Claude Code's sessionId rotation, but
+        that caused renames to bleed across sibling sessions sharing
+        a project_path — worse than the rotation case.
 
         After persisting we re-call ``refresh_sessions`` with the
         cached snapshot so the row label reflects the new name without
@@ -3426,7 +3423,7 @@ class ExpandedWindow(QWidget):
         override on each call (which it does, via the wiring layer's
         ``_build_session_details``)."""
         from claude_island.platform_ import session_names as _names
-        _names.set_session_name(sess_uuid, new_name, project_path=project_path)
+        _names.set_session_name(sess_uuid, new_name)
         # Re-render with the cached snapshot so the new name appears
         # immediately. _latest_sessions stays empty until the first
         # refresh_sessions call, but rename can only happen via the

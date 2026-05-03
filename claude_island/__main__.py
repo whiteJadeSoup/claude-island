@@ -228,13 +228,9 @@ def _build_session_details(session):
     # User's custom name (set via the detail popup's edit affordance)
     # wins over Claude Code's auto-generated name. Falls through to the
     # state-file name when not overridden, then to ai_title / basename
-    # downstream in the UI. Pass project_path as the fallback key so
-    # the rename survives Claude Code rotating sessionId for the same
-    # pid (/clear, /resume, /compact all do this).
-    custom_name = session_names_store.get_session_name(
-        sess_uuid or "",
-        project_path=str(session.project_path),
-    )
+    # downstream in the UI. Strict per-session lookup — the per-project
+    # fallback was removed because it bled renames across siblings.
+    custom_name = session_names_store.get_session_name(sess_uuid or "")
     state_name = state.get("name") if isinstance(state.get("name"), str) else None
     return SessionDetails(
         session=session,
