@@ -3393,20 +3393,25 @@ class ExpandedWindow(QWidget):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(4)
 
-        # Section title — mirrors the SPEND header so the two halves
-        # of the USAGE card share the same visual language. Earlier
-        # the QUOTA region had no title; the dot+pills row alone read
-        # as floating UI rather than a labelled section.
+        # No QUOTA section title or status dot in the visible chrome —
+        # the provider tab strip below is enough context, and dropping
+        # both shaved ~30 px off the section's vertical footprint per
+        # user feedback that QUOTA had grown too heavy compared to
+        # SPEND. The widgets are still constructed (hidden) so legacy
+        # code paths and tests that find them by attribute keep working.
         section_title = QLabel("QUOTA")
         section_title.setStyleSheet(_STYLE_TITLE)
+        section_title.hide()
         layout.addWidget(section_title)
 
-        # Header: dot + tab strip + refresh button
+        # Header: tab strip + refresh button (no leading status dot).
+        # The dot was carrying "is the 5h window still open?" — same
+        # info now lives in the colour of the inline 5h line below.
         quota_hdr = QHBoxLayout()
         quota_hdr.setSpacing(8)
         self._quota_dot = QLabel("●")
         self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
-        quota_hdr.addWidget(self._quota_dot)
+        self._quota_dot.hide()
 
         # Tab strip lives in its own sub-layout so set_available_providers()
         # can wipe + rebuild it without disturbing the dot or the refresh
@@ -3457,24 +3462,24 @@ class ExpandedWindow(QWidget):
         self._quota_row_week = row_week
         layout.addWidget(row_week)
 
-        # Compact 5h + Weekly status lines. Same single-line format as
-        # the Weekly inline ("5h 49% used · resets 3h 12m"). 5h is
-        # also surfaced in the top summary card with a bigger bar; the
-        # inline copy here keeps the QUOTA section readable as a
-        # standalone "current rate-limit health" panel without making
-        # the user dart their eyes back up to the headline. Both hide
-        # when no quota snapshot.
+        # 5h + Weekly compressed onto a single rich-text line —
+        # ``5h 53% · 3h 5m  │  Weekly 57% · 55m``. Each half can take
+        # its own threshold colour because the label uses HTML in
+        # setText. Falls back to a single line of ~ 30 chars at 11 px
+        # font, which fits within the 320 px panel width with margin
+        # to spare. Hidden when no quota snapshot.
+        self._quota_inline = QLabel("")
+        self._quota_inline.setStyleSheet("font-size: 11px;")
+        self._quota_inline.setTextFormat(Qt.TextFormat.RichText)
+        self._quota_inline.hide()
+        layout.addWidget(self._quota_inline)
+        # Legacy attribute slots for tests that look these up by name.
+        # Both still constructed but hidden — the visible status now
+        # lives entirely on _quota_inline.
         self._quota_5h_inline = QLabel("")
-        self._quota_5h_inline.setStyleSheet(
-            "color: #c9c9c9; font-size: 11px;"
-        )
         self._quota_5h_inline.hide()
         layout.addWidget(self._quota_5h_inline)
-
         self._quota_weekly_inline = QLabel("")
-        self._quota_weekly_inline.setStyleSheet(
-            "color: #c9c9c9; font-size: 11px;"
-        )
         self._quota_weekly_inline.hide()
         layout.addWidget(self._quota_weekly_inline)
 
@@ -3508,6 +3513,7 @@ class ExpandedWindow(QWidget):
             # Skip updating the 5h row widgets — that row is hidden
             # under the new summary-card design (5h lives there now).
             self._hide_quota_row(self._quota_bar_week, self._quota_pct_week, self._quota_reset_week)
+            self._quota_inline.hide()
             self._quota_5h_inline.hide()
             self._quota_weekly_inline.hide()
             self._show_quota_unavailable_hint()
@@ -3535,30 +3541,30 @@ class ExpandedWindow(QWidget):
             resets_at=snap.seven_day_resets_at,
             stale=snap.is_stale,
         )
-        # 5h inline — same compact format the Weekly line uses.
-        # Threshold colour rebuilt per refresh so the line tracks state.
+        # 5h + Weekly compressed onto one rich-text line. Each half
+        # carries its own threshold colour (5h often warns first since
+        # that's the tighter window). Format: "5h 53% · 3h 5m │
+        # Weekly 57% · 55m" — abbreviations chosen to fit the 320 px
+        # panel: drop "used", drop "resets" (the time alone reads as
+        # "until reset" once the user knows the convention).
         five_pct = max(0, min(100, int(round(snap.five_hour_pct))))
+        weekly_pct = max(0, min(100, int(round(snap.seven_day_pct))))
         stale_marker = " ⚠" if snap.is_stale else ""
         five_color = _quota_color(five_pct, stale=snap.is_stale)
-        five_reset = _fmt_reset(snap.five_hour_resets_at)
-        self._quota_5h_inline.setStyleSheet(
-            f"color: {five_color}; font-size: 11px;"
-        )
-        self._quota_5h_inline.setText(
-            f"5h     {five_pct}% used{stale_marker} · resets {five_reset}"
-        )
-        self._quota_5h_inline.show()
-
-        weekly_pct = max(0, min(100, int(round(snap.seven_day_pct))))
         weekly_color = _quota_color(weekly_pct, stale=snap.is_stale)
+        five_reset = _fmt_reset(snap.five_hour_resets_at)
         weekly_reset = _fmt_reset(snap.seven_day_resets_at)
-        self._quota_weekly_inline.setStyleSheet(
-            f"color: {weekly_color}; font-size: 11px;"
+        # Strip leading "in " from the reset countdowns (the format
+        # helper sometimes emits "in 3h 5m" / "3h 5m" depending on
+        # window state) so the compact line stays uniform.
+        five_reset_short = five_reset.removeprefix("in ")
+        weekly_reset_short = weekly_reset.removeprefix("in ")
+        self._quota_inline.setText(
+            f"<span style='color:{five_color}'>5h {five_pct}%{stale_marker} · {five_reset_short}</span>"
+            f"<span style='color:#4b5563'>  │  </span>"
+            f"<span style='color:{weekly_color}'>Weekly {weekly_pct}%{stale_marker} · {weekly_reset_short}</span>"
         )
-        self._quota_weekly_inline.setText(
-            f"Weekly {weekly_pct}% used{stale_marker} · resets {weekly_reset}"
-        )
-        self._quota_weekly_inline.show()
+        self._quota_inline.show()
 
     def _show_quota_unavailable_hint(self) -> None:
         """Surface a provider-specific tip explaining why the bars are
