@@ -21,7 +21,15 @@ from pathlib import Path
 
 # Default location, overridable for tests.
 _DEFAULT_DIR = Path.home() / ".claude" / "sessions"
-_TTL_SECONDS = 5.0
+# Cache TTL for parsed state. Originally 5s — fine for tooltip-hover
+# rate-limiting but visibly stale for the row-state pipeline: when
+# Claude finishes a turn, the JSONL write wakes the snapshotter
+# immediately, but compose_session_view re-reads state from this
+# cache; if the cached "busy" was <5s old the row stayed "busy" for
+# up to 5s after the user-visible event. 1s is short enough that
+# busy↔idle flips appear within a tick, and ~20 sessions × ~10ms
+# per disk read once per second is still cheap (well under 1% CPU).
+_TTL_SECONDS = 1.0
 
 _cache: dict[int, tuple[float, dict | None]] = {}
 _cache_lock = threading.Lock()

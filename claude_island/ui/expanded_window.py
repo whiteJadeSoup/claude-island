@@ -818,16 +818,20 @@ _STYLE_STATUS = "color: #9ca3af; font-size: 10px;"
 def _row_status_text(
     view: "SessionView",
 ) -> str:
-    """Compose the bottom-line text for a row — just the relative
-    activity time ("5m ago"). The running state is conveyed by the
-    row's left-edge pulse animation + the dot's pulse, so the literal
-    word "running" / "idle" was redundant chrome and got dropped.
+    """Compose the bottom-line text for a row.
 
-    Returns "—" when view.last_activity isn't usable. Used to be a
-    2-arg helper that took SessionDetails to derive the status word;
-    the signature simplified once the word itself stopped being part
-    of the output."""
-    return _fmt_started(view.last_activity)
+    Renders the *last activity* time as ``"active <relative>"``. The
+    "active" prefix disambiguates this from the popup's "Created
+    <relative>" line — both used to format as plain ``"<N>m ago"``,
+    making it look (incorrectly) like the same field had two values
+    when the JSONL just got written ("now") on a session that started
+    46m ago. Now: list row reads "active now" / "active 5m ago"; popup
+    keeps "Created" + the absolute timestamp.
+
+    The running state itself is conveyed by the row's left-edge pulse
+    animation + the dot's pulse, so the literal word "running" / "idle"
+    was redundant and got dropped earlier."""
+    return f"active {_fmt_started(view.last_activity)}"
 _STYLE_PERIOD_BTN = """
     QPushButton {
         color: #666;

@@ -2005,23 +2005,26 @@ class TestRowStatusText:
     that signal now. Helper just returns the relative time of the
     most recent JSONL write (e.g. "5m ago")."""
 
-    def test_returns_relative_time(self):
+    def test_returns_relative_time_with_active_prefix(self):
+        """The "active" prefix disambiguates this from the popup's
+        "Created" line — both used to format as plain "<N>m ago"."""
         from claude_island.ui.expanded_window import _row_status_text
         from claude_island.core.snapshot import _degraded_view
         view = _degraded_view(_session(1, "/a", ago_minutes=5))
         text = _row_status_text(view)
+        assert text.startswith("active ")
         assert text.endswith("ago")
         assert "m" in text or "h" in text
 
-    def test_returns_now_for_fresh_activity(self):
-        """Activity within 5 seconds renders as "now" — the old
+    def test_returns_active_now_for_fresh_activity(self):
+        """Activity within 5 seconds renders as "active now" — the old
         "0s ago" / "3s ago" jittered chaotically for running sessions
         on every Snapshotter rebuild and read like a bug."""
         from claude_island.ui.expanded_window import _row_status_text
         from claude_island.core.snapshot import _degraded_view
         view = _degraded_view(_session(1, "/a", ago_minutes=0))
         text = _row_status_text(view)
-        assert text == "now"
+        assert text == "active now"
 
 
 # ============================================================================
