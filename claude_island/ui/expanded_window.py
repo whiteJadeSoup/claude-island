@@ -1657,11 +1657,17 @@ class SessionDetailPopup(QFrame):
             head.addWidget(self._repair_btn)
         layout.addLayout(head)
 
-        # Line 2: dim "<age> · v<version>" subtitle. Either part can be
+        # Line 2: dim "active <relative> · v<version>" subtitle.
+        # The "active" tag intentionally MATCHES the list-row time so
+        # the popup and the row carry the same number for the same
+        # field. The labelled "Created <abs> · <rel>" row in the meta
+        # section below is the canonical place for the creation time;
+        # the unlabelled top-of-popup time is now strictly the
+        # last-activity recency. Either part of the subtitle can be
         # missing — only show the dot separator when both sides exist.
         sub_parts: list[str] = []
-        if d and d.started_at is not None:
-            sub_parts.append(_fmt_started(d.started_at))
+        if self._fallback.last_activity is not None:
+            sub_parts.append(f"active {_fmt_started(self._fallback.last_activity)}")
         if d and d.cc_version:
             sub_parts.append(f"v{d.cc_version}")
         if sub_parts:
