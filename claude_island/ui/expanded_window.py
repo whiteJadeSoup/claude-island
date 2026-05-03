@@ -11,14 +11,14 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     Qt,
     QTimer,
+    QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFrame,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -503,19 +503,35 @@ class _RowStatusGlyph(QWidget):
     _BAR_W = 2          # px wide per equalizer bar
     _BAR_GAP = 2        # px between bars
     _BAR_COUNT = 3
-    _PERIOD_MS = 900    # full bounce cycle per bar
-    _MIN_PCT = 0.28     # bottom of the bounce (% of widget height)
+    # 900 ms per bounce cycle was tuned by feel: 600 ms reads as a
+    # frantic loading spinner, 1100 ms reads as a slow heartbeat.
+    # 900 ms hits the "live but calm" sweet spot Apple uses on the
+    # AirPods battery animation and Spotify's "Now Playing".
+    _PERIOD_MS = 900
+    # Min height fraction. 0.28 (not the docstring-friendly 0.30) is
+    # the value where the bar still reads as a distinct rectangle on
+    # 1× DPI without looking like a thin line.
+    _MIN_PCT = 0.28
     _MAX_PCT = 1.00
     _DEFAULT_W = _BAR_W * _BAR_COUNT + _BAR_GAP * (_BAR_COUNT - 1)  # 10 px
+    # Slot width floor matches the legacy dot_label.setFixedWidth(12)
+    # so swapping into the row layout doesn't shift other widgets.
+    _MIN_SLOT_W = 12
 
     STATE_IDLE = "idle"
     STATE_RUNNING = "running"
     STATE_HIGH_COST = "high_cost"
 
+    # Class-level font + colour for the HIGH_COST glyph — paintEvent
+    # would otherwise allocate fresh QFont / QColor objects every
+    # frame on every running row. These are immutable.
+    _HIGH_COST_FONT = QFont("Segoe UI Symbol", 11, QFont.Weight.Bold)
+    _HIGH_COST_PEN = QColor(_DOT_YELLOW)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setFixedWidth(max(self._DEFAULT_W, 12))
+        self.setFixedWidth(max(self._DEFAULT_W, self._MIN_SLOT_W))
         self._state = self.STATE_IDLE
         self._dot_color = _DOT_GRAY
         # Bar colour for the RUNNING state. Defaults to the standard
@@ -530,7 +546,6 @@ class _RowStatusGlyph(QWidget):
         # One QVariantAnimation per bar so each runs independently —
         # phase offset created by setting setCurrentTime() to a fraction
         # of the loop duration on construction.
-        from PySide6.QtCore import QVariantAnimation
         self._anims: list[QVariantAnimation] = []
         for i in range(self._BAR_COUNT):
             anim = QVariantAnimation(self)
@@ -579,9 +594,14 @@ class _RowStatusGlyph(QWidget):
         self._state = state
         if state == self.STATE_RUNNING and prev != self.STATE_RUNNING:
             # Stagger phases so the 3 bars are out-of-sync immediately.
+            # Seek first, THEN start — Qt docs allow either order, but
+            # PySide6's first internal tick after start() can overwrite
+            # a subsequent setCurrentTime, leaving all 3 bars synced
+            # at phase 0 (visual reads as a "loading spinner" not a
+            # "live equalizer"). Seek-then-start pins the offset.
             for i, anim in enumerate(self._anims):
-                anim.start()
                 anim.setCurrentTime((i * self._PERIOD_MS) // self._BAR_COUNT)
+                anim.start()
         elif prev == self.STATE_RUNNING and state != self.STATE_RUNNING:
             for anim in self._anims:
                 anim.stop()
@@ -592,7 +612,6 @@ class _RowStatusGlyph(QWidget):
         return self._state
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
-        from PySide6.QtGui import QPainter, QColor, QFont
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -624,11 +643,11 @@ class _RowStatusGlyph(QWidget):
                 )
         elif self._state == self.STATE_HIGH_COST:
             # ⚡ glyph — drawn via QPainter so we don't have to manage
-            # a separate QLabel for this branch. Slightly bigger font
-            # than the dot so the lightning bolt reads cleanly.
-            painter.setPen(QColor(_DOT_YELLOW))
-            font = QFont("Segoe UI Symbol", 11, QFont.Weight.Bold)
-            painter.setFont(font)
+            # a separate QLabel for this branch. Font + pen are
+            # class-level constants (B-007) so paintEvent doesn't
+            # allocate them every frame on every running row.
+            painter.setPen(self._HIGH_COST_PEN)
+            painter.setFont(self._HIGH_COST_FONT)
             painter.drawText(
                 self.rect(),
                 int(Qt.AlignmentFlag.AlignCenter),
@@ -3176,15 +3195,17 @@ class ExpandedWindow(QWidget):
         # Bar value — clamp to 0..100 just in case the provider returns
         # something odd (we've seen 100.5 when the API rounds).
         pct = max(0.0, min(100.0, float(snap.five_hour_pct)))
-        self._summary_quota_bar.setValue(int(pct))
+        # Round (NOT truncate) before bucketing — the QUOTA card uses
+        # int(round(...)) too, and a parallel int(...) here landed
+        # 84.6 in summary's "84 → yellow" bucket while QUOTA put it
+        # in "85 → red". The bucketing pct is also what feeds the
+        # progress bar so both numbers stay in lock-step.
+        bucket_pct = int(round(pct))
+        self._summary_quota_bar.setValue(bucket_pct)
         # Threshold colour — delegate to the same _quota_color helper
         # the QUOTA card uses, so the same percentage NEVER renders in
         # one colour up here and a different colour down there.
-        # Previously we had a parallel 70/90 threshold here that
-        # disagreed with _quota_color's 60/85; same value would land
-        # in different buckets depending on which surface you read it
-        # from. Single source of truth wins.
-        chunk_color = _quota_color(int(pct), stale=snap.is_stale)
+        chunk_color = _quota_color(bucket_pct, stale=snap.is_stale)
         self._summary_quota_bar.setStyleSheet(
             _STYLE_SUMMARY_PROGRESS.replace("__CHUNK__", chunk_color)
         )
@@ -3197,7 +3218,10 @@ class ExpandedWindow(QWidget):
             f"color: {chunk_color}; font-size: 11px;"
         )
         stale_marker = " ⚠" if snap.is_stale else ""
-        self._summary_caption.setText(f"{pct:.0f}% of 5h limit{stale_marker}")
+        # Show the same rounded bucket the colour was picked from so
+        # the user never sees "84 % → red" or "85 % → yellow" — bar
+        # value, caption, and chunk colour all read from bucket_pct.
+        self._summary_caption.setText(f"{bucket_pct}% of 5h limit{stale_marker}")
         self._summary_caption.show()
 
     def _build_spend_card(self) -> QFrame:
@@ -4579,9 +4603,25 @@ class ExpandedWindow(QWidget):
             self._placeholder = None
 
     def _gc_rows(self, needed_pids: set[int]) -> None:
+        """Drop rows whose pid is no longer present.
+
+        Animations are explicitly stopped before deleteLater() — without
+        this, a QVariantAnimation's valueChanged could in theory fire
+        once between the deleteLater event being posted and the actual
+        teardown, with the callback running on a half-destroyed widget.
+        Cheap defensive call; no observed crash but no reason to leave
+        the door cracked."""
         for pid in list(self._rows.keys()):
             if pid not in needed_pids:
-                self._rows.pop(pid).deleteLater()
+                btn = self._rows.pop(pid)
+                # Stop the row-level pulse + the glyph's per-bar anims
+                # before the widget enters the deferred-delete state.
+                if hasattr(btn, "set_running"):
+                    btn.set_running(False)
+                glyph = getattr(btn, "_status_glyph", None)
+                if glyph is not None:
+                    glyph.set_state(_RowStatusGlyph.STATE_IDLE)
+                btn.deleteLater()
 
     def _show_detail_popup(self, btn: QPushButton, local_pos) -> None:
         """Build a SessionDetailPopup with fresh data and pop it at the

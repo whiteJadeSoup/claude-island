@@ -523,6 +523,41 @@ def test_quota_bar_color_thresholds(qtbot, pct, expected_color):
     assert expected_color in p._quota_inline.text()
 
 
+@pytest.mark.parametrize("pct", [0.0, 59.0, 59.6, 60.0, 75.0, 84.0, 84.6, 85.0, 99.0, 100.0])
+def test_summary_and_quota_card_use_same_color_for_same_pct(qtbot, pct):
+    """Regression for the c685bb7 / A-001 bug: same five_hour_pct
+    must produce the same threshold colour everywhere it's rendered.
+
+    Pre-fix, summary used ``int(pct)`` while QUOTA used
+    ``int(round(pct))`` — at 84.6 the summary path bucketed to 84
+    (yellow) while QUOTA bucketed to 85 (red). User saw two
+    different colours for one snapshot.
+
+    Boundary values 59.6 / 84.6 are deliberately included — those
+    are the inputs that hit the truncate-vs-round disagreement."""
+    snap = _make_quota(five_pct=pct)
+    p = _panel_with_quota(qtbot, quota=snap)
+    p.refresh_usage_bar()
+    # The summary card stores the chunk colour in the bar's
+    # stylesheet AND in the caption label's stylesheet.
+    summary_bar_css = p._summary_quota_bar.styleSheet()
+    summary_caption_css = p._summary_caption.styleSheet()
+    # The QUOTA card surfaces it through the rich-text inline label.
+    quota_inline_text = p._quota_inline.text()
+    # All three must contain the same hex.
+    from claude_island.ui.expanded_window import _quota_color
+    expected = _quota_color(int(round(pct)), stale=False)
+    assert expected in summary_bar_css, (
+        f"summary bar at pct={pct} expected {expected}, got {summary_bar_css}"
+    )
+    assert expected in summary_caption_css, (
+        f"summary caption at pct={pct} expected {expected}, got {summary_caption_css}"
+    )
+    assert expected in quota_inline_text, (
+        f"quota inline at pct={pct} expected {expected}, got {quota_inline_text}"
+    )
+
+
 def test_quota_bar_stale_overrides_red(qtbot):
     """U9: stale data wins over the percent-based colour — we want
     "I don't trust this" to surface before "you're at the limit",
@@ -2385,19 +2420,23 @@ class TestRowStatusGlyph:
         """Calling set_state with the same state twice is a no-op for
         the animations — _update_row fires every refresh tick so we
         can't restart animations on every call (would visibly reset
-        the wave phase)."""
+        the wave phase).
+
+        Stronger assertion than ``>=`` — currentTime must have
+        advanced by more than the wait window, otherwise a buggy
+        restart-from-0 would slip through (currentTime() == 0 still
+        satisfies >= 0)."""
         from claude_island.ui.expanded_window import _RowStatusGlyph
         g = _RowStatusGlyph()
         qtbot.addWidget(g)
         g.set_state(_RowStatusGlyph.STATE_RUNNING)
         anim = g._anims[0]
         time_before = anim.currentTime()
-        # Wait a moment so currentTime would have advanced if restarted.
-        qtbot.wait(50)
+        # Wait long enough that a no-restart anim definitely advances
+        # past time_before + 20 ms but a restart-from-0 wouldn't.
+        qtbot.wait(80)
         g.set_state(_RowStatusGlyph.STATE_RUNNING)
-        # If set_state had restarted the animation, currentTime would
-        # be back near 0; instead it should still be advancing.
-        assert anim.currentTime() >= time_before
+        assert anim.currentTime() > time_before + 20
 
     def test_idle_dot_color_picked_by_caller(self, qtbot):
         """IDLE state respects the caller-supplied freshness colour —
