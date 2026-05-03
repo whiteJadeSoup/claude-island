@@ -1344,7 +1344,9 @@ class TestDetailPopupRename:
         renames: list = []
         popup = SessionDetailPopup(
             details, s,
-            on_rename=(lambda u, n: renames.append((u, n))) if with_rename else None,
+            on_rename=(
+                lambda u, n, p: renames.append((u, n, p))
+            ) if with_rename else None,
         )
         qtbot.addWidget(popup)
         return popup, renames
@@ -1386,7 +1388,12 @@ class TestDetailPopupRename:
         popup._enter_rename_mode()
         popup._name_edit.setText("frontend refactor")
         popup._commit_rename()
-        assert renames == [("uuid-1", "frontend refactor")]
+        # Callback receives (uuid, name, project_path) — the dual-key
+        # design needs project_path so renames survive sessionId rotation.
+        # Path string is platform-specific (\\ on Windows, / elsewhere)
+        # so derive it from the popup's own session rather than hard-coding.
+        expected_path = str(popup._fallback.project_path)
+        assert renames == [("uuid-1", "frontend refactor", expected_path)]
         # Edit mode torn down, label restored, edit button re-enabled.
         # Use isHidden() not isVisible() — the popup itself is never
         # shown in tests, so isVisible would always return False.
@@ -1404,7 +1411,8 @@ class TestDetailPopupRename:
         popup._enter_rename_mode()
         popup._name_edit.setText("   ")
         popup._commit_rename()
-        assert renames == [("uuid-1", "")]
+        expected_path = str(popup._fallback.project_path)
+        assert renames == [("uuid-1", "", expected_path)]
 
     def test_cancel_rename_does_not_invoke_callback(self, qtbot):
         popup, renames = self._popup(qtbot, with_rename=True)
@@ -1423,7 +1431,7 @@ class TestDetailPopupRename:
         from claude_island.ui.expanded_window import SessionDetailPopup
         s = _session(1, "/proj")
         details = _make_full_details(s, effective_uuid="uuid-1")
-        def boom(u, n):
+        def boom(u, n, p):
             raise RuntimeError("disk full")
         popup = SessionDetailPopup(details, s, on_rename=boom)
         qtbot.addWidget(popup)
