@@ -124,13 +124,81 @@ class TestCapsuleRender:
         # Single running session → name in pill text.
         assert "my-feature-branch" in capsule._label.text()
 
-    def test_render_two_running_falls_back_to_count(self, capsule):
-        v1 = _view(pid=1, name="a", cwd="/a", is_running=True)
-        v2 = _view(pid=2, name="b", cwd="/b", is_running=True)
+    def test_render_two_running_starts_carousel(self, capsule):
+        """≥2 running sessions: pill rotates through their names every
+        ``_ROTATE_INTERVAL_MS`` instead of degrading to the count form
+        (which loses information about WHICH sessions are live)."""
+        v1 = _view(pid=1, name="alpha", cwd="/a", is_running=True)
+        v2 = _view(pid=2, name="beta", cwd="/b", is_running=True)
         capsule.render(_snap(sessions=(v1, v2)))
-        # Two running ⇒ ambiguous which to name ⇒ "2 sessions".
-        assert "2 sessions" in capsule._label.text()
-        assert "a" not in capsule._label.text() or "b" not in capsule._label.text()
+
+        # Initial render shows the first rotation candidate.
+        text = capsule._label.text()
+        assert "alpha" in text
+        assert capsule._rotation_timer.isActive() is True
+
+    def test_carousel_advances_on_timer_tick(self, capsule, qtbot):
+        v1 = _view(pid=1, name="alpha", cwd="/a", is_running=True)
+        v2 = _view(pid=2, name="beta", cwd="/b", is_running=True)
+        capsule.render(_snap(sessions=(v1, v2)))
+        first = capsule._label.text()
+        # Manually tick the rotation handler — bypasses waiting for
+        # the 4 s timer to elapse (test would be slow + flaky).
+        capsule._on_rotate_tick()
+        second = capsule._label.text()
+        assert first != second
+        # Tick again — should wrap back to the first name.
+        capsule._on_rotate_tick()
+        assert capsule._label.text() == first
+
+    def test_carousel_index_resets_when_running_set_changes(self, capsule):
+        v1 = _view(pid=1, name="alpha", cwd="/a", is_running=True)
+        v2 = _view(pid=2, name="beta", cwd="/b", is_running=True)
+        capsule.render(_snap(sessions=(v1, v2)))
+        capsule._on_rotate_tick()  # advance to "beta"
+        assert capsule._rotation_index == 1
+
+        # New running set — index resets to 0.
+        v3 = _view(pid=3, name="gamma", cwd="/c", is_running=True)
+        capsule.render(_snap(sessions=(v1, v3)))
+        assert capsule._rotation_index == 0
+        assert "alpha" in capsule._label.text()
+
+    def test_carousel_index_does_not_reset_on_unrelated_snap_change(self, capsule):
+        """Cost ticking up shouldn't jerk the carousel back to position
+        0 — the carousel state is per running-name-set, not per snap."""
+        v1 = _view(pid=1, name="alpha", cwd="/a", is_running=True)
+        v2 = _view(pid=2, name="beta", cwd="/b", is_running=True)
+        capsule.render(_snap(sessions=(v1, v2), today_cost_usd=10.0))
+        capsule._on_rotate_tick()  # advance to index 1 ("beta")
+        assert capsule._rotation_index == 1
+
+        # Same running set, only cost changed → index preserved.
+        capsule.render(_snap(sessions=(v1, v2), today_cost_usd=11.0))
+        assert capsule._rotation_index == 1
+        assert "beta" in capsule._label.text()
+
+    def test_carousel_stops_when_running_drops_to_one(self, capsule):
+        v1 = _view(pid=1, name="alpha", cwd="/a", is_running=True)
+        v2 = _view(pid=2, name="beta", cwd="/b", is_running=True)
+        capsule.render(_snap(sessions=(v1, v2)))
+        assert capsule._rotation_timer.isActive() is True
+
+        # Drop to one running.
+        v2_idle = _view(pid=2, name="beta", cwd="/b", is_running=False)
+        capsule.render(_snap(sessions=(v1, v2_idle)))
+        # No rotation needed when only one is running — timer off, but
+        # the single-running branch still surfaces alpha as the name.
+        assert capsule._rotation_timer.isActive() is False
+        assert "alpha" in capsule._label.text()
+
+    def test_carousel_stops_when_no_running(self, capsule):
+        v1 = _view(pid=1, name="alpha", cwd="/a", is_running=True)
+        v2 = _view(pid=2, name="beta", cwd="/b", is_running=True)
+        capsule.render(_snap(sessions=(v1, v2)))
+        capsule.render(_snap(sessions=()))
+        assert capsule._rotation_timer.isActive() is False
+        assert "0 sessions" in capsule._label.text()
 
     def test_render_cost_suffix_appended_when_positive(self, capsule):
         v = _view(name="x", is_running=True)

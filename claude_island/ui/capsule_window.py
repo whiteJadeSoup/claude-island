@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QApplication,
@@ -46,6 +46,13 @@ _QUOTA_RIGHT_PAD = 12  # px from pill's right edge to bar's right edge
 # cliff the indicator becomes useful.
 _QUOTA_WARN_THRESHOLD = 70
 _QUOTA_CRITICAL_THRESHOLD = 90
+
+# Multi-running carousel cadence. 4 s is long enough to read a name
+# (one casual glance ≈ 0.5–1 s) without making the pill feel busy. A
+# faster rotation looks like the pill is glitching; slower (≥6 s)
+# makes the carousel feel pointless on busy machines where running
+# sessions come and go in the same window.
+_ROTATE_INTERVAL_MS = 4000
 
 # Heuristic for "this session is currently doing something". An active
 # Claude Code session writes a JSONL row at least every few seconds
@@ -144,6 +151,18 @@ class CapsuleWindow(QWidget):
         # controller.sessions, so this is parallel state during the
         # migration.
         self._snap_sessions: tuple[SessionView, ...] = ()
+        # Multi-running carousel: when ≥2 sessions are running, cycle
+        # the pill text through their names every _ROTATE_INTERVAL_MS
+        # so the user can see WHICH sessions are live (the count form
+        # "2 sessions" tells you how many but not which). Index resets
+        # every render(snap) when the running set changes; the timer
+        # itself starts on first render with ≥2 running and stops when
+        # the count drops back to ≤1.
+        self._rotation_names: list[str] = []
+        self._rotation_index: int = 0
+        self._rotation_timer = QTimer(self)
+        self._rotation_timer.setInterval(_ROTATE_INTERVAL_MS)
+        self._rotation_timer.timeout.connect(self._on_rotate_tick)
         # Used to render the running-session's name (custom rename ↦
         # ai_title ↦ project basename) in place of "N sessions" when
         # exactly one session is active. None ⇒ capsule falls back to
@@ -430,6 +449,11 @@ class CapsuleWindow(QWidget):
         # composer path.
         self._snap_sessions: tuple[SessionView, ...] = snap.sessions
 
+        # Sync the multi-running carousel with the new running set.
+        # Must happen before _apply_capsule_from_snap so the label
+        # text and timer state reflect the same snapshot.
+        self._update_rotation_state()
+
         if self._is_dot:
             return
 
@@ -461,24 +485,67 @@ class CapsuleWindow(QWidget):
         self.show()
 
     def _compose_label_text_from_snap(self) -> str:
-        """Same logic as ``_compose_label_text`` but reads from snap.
+        """Compose pill text from the current snap + carousel state.
 
-        - Exactly one running session ⇒ show its name (already resolved
-          on the SessionView).
-        - All other cases ⇒ show "N sessions".
+        Three modes:
+          * Exactly 1 running ⇒ show its name (no carousel; rotation
+            timer is stopped in render(snap)).
+          * ≥2 running ⇒ show the carousel-current name. The rotation
+            timer is running and ticks every ``_ROTATE_INTERVAL_MS``
+            so the user sees each running session in turn instead of
+            losing all names behind a "N sessions" count.
+          * 0 running ⇒ "N sessions" count form. Carousel inactive.
+
         Cost suffix appended when > 0 (so a fresh first launch reads
         cleanly without a trailing ``$0``)."""
         cost_suffix = ""
         if self._cost_cache > 0:
             cost_suffix = f"  {_fmt_money(self._cost_cache)}"
 
-        active = [v for v in self._snap_sessions if v.is_running]
-        if len(active) == 1:
-            return f"{active[0].name}{cost_suffix}"
+        if self._rotation_names:
+            # ≥1 running session — render the carousel-current name.
+            # Index is bounds-checked here in case render(snap) shrunk
+            # the list between two timer ticks.
+            idx = self._rotation_index % len(self._rotation_names)
+            return f"{self._rotation_names[idx]}{cost_suffix}"
 
+        # 0 running — count form. Use total session count, not running.
         count = len(self._snap_sessions)
         noun = "session" if count == 1 else "sessions"
         return f"{count} {noun}{cost_suffix}"
+
+    def _on_rotate_tick(self) -> None:
+        """Carousel timer hook: advance to the next running name and
+        repaint the label. No-op when the rotation list isn't worth
+        rotating (length ≤ 1)."""
+        if len(self._rotation_names) <= 1:
+            return
+        self._rotation_index = (self._rotation_index + 1) % len(self._rotation_names)
+        if not self._is_dot:
+            self._label.setText(self._compose_label_text_from_snap())
+
+    def _update_rotation_state(self) -> None:
+        """Sync ``_rotation_names`` with the current running sessions
+        and start / stop the timer accordingly. Called at the end of
+        every render(snap) tick.
+
+        Index reset rule: only reset to 0 when the *set* of running
+        names changes — not when the order changes (sort key is
+        stable across renders) and not when an unrelated snap field
+        flips. Without the reset rule, every snap tick (every JSONL
+        write, ~sub-second cadence under activity) would jerk the
+        carousel back to position 0 and make the pill text flash."""
+        new_names = [v.name for v in self._snap_sessions if v.is_running]
+        if new_names != self._rotation_names:
+            self._rotation_names = new_names
+            self._rotation_index = 0
+
+        if len(self._rotation_names) >= 2:
+            if not self._rotation_timer.isActive():
+                self._rotation_timer.start()
+        else:
+            if self._rotation_timer.isActive():
+                self._rotation_timer.stop()
 
     def _refresh_active_state_from_snap(self) -> None:
         """Snap-driven analogue of ``_refresh_active_state``."""
