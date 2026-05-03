@@ -114,6 +114,78 @@ def register_pricing(table: dict[str, PricingTable]) -> None:
     PRICING.update(table)
 
 
+# Per-model display registry. Same shape as PRICING — provider modules
+# self-register their entries via register_model_colors /
+# register_model_short_names at import time. Keeps the model display
+# table provider-owned: adding a new provider means adding one file
+# with its rates AND its colour/name tokens, with no edit needed in
+# core/ or ui/.
+#
+# Lookup uses length-descending substring match (see resolve_model_color
+# / resolve_model_short_name) so a model id like "MiniMax-M2.7-highspeed"
+# matches the longest applicable key first, falling back to family
+# tokens for unknown version suffixes.
+MODEL_COLORS: dict[str, str] = {}
+MODEL_SHORT_NAMES: dict[str, str] = {}
+
+# Neutral grey for any model not registered with a custom colour. Used
+# both for unknown providers and as a sentinel; explicitly NOT a hash
+# of the name so the same unknown model always renders identically
+# across runs (avoids "why did it change colour?" confusion).
+DEFAULT_MODEL_COLOR = "#6B7280"
+
+
+def register_model_colors(table: dict[str, str]) -> None:
+    """Merge per-model chip colours into the global registry.
+
+    Provider modules call this at import time to install their tier
+    palette. Idempotent — re-registering an existing key overwrites it.
+    Caller passes ``{model_substring: hex_color}`` pairs; lookup is
+    length-descending substring match (longest key wins)."""
+    MODEL_COLORS.update(table)
+
+
+def register_model_short_names(table: dict[str, str]) -> None:
+    """Merge per-model short display names into the global registry.
+
+    Used by the panel's row chip ("[Sonnet]") and the SPEND card's bar
+    label. Caller passes ``{model_substring: short_name}`` pairs; same
+    longest-substring-wins lookup as register_model_colors."""
+    MODEL_SHORT_NAMES.update(table)
+
+
+def resolve_model_color(model: str) -> str:
+    """Map an API model id to its registered chip colour.
+
+    Returns the longest matching key's value, or DEFAULT_MODEL_COLOR
+    for unknown models. Case-insensitive substring match — same logic
+    as usage_registry._resolve_pricing so behaviour stays consistent
+    across the colour and pricing tables."""
+    if not model:
+        return DEFAULT_MODEL_COLOR
+    lower = model.lower()
+    for key in sorted(MODEL_COLORS.keys(), key=len, reverse=True):
+        if key.lower() in lower:
+            return MODEL_COLORS[key]
+    return DEFAULT_MODEL_COLOR
+
+
+def resolve_model_short_name(model: str) -> str:
+    """Map an API model id to its registered short display name.
+
+    Falls back to the first 12 characters of the raw id when the model
+    has no registered short name — gives the user something recognisable
+    rather than a blank chip. Empty model id ⇒ empty string (defensive;
+    no model means no chip at all)."""
+    if not model:
+        return ""
+    lower = model.lower()
+    for key in sorted(MODEL_SHORT_NAMES.keys(), key=len, reverse=True):
+        if key.lower() in lower:
+            return MODEL_SHORT_NAMES[key]
+    return model[:12]
+
+
 @dataclass
 class UsageTotals:
     period: str  # "today" | "daily" | "weekly" | "monthly"

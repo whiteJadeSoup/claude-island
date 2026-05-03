@@ -329,6 +329,115 @@ def test_breathing_transitions_on_session_activity(qtbot):
     assert capsule._dot_opacity.opacity() == pytest.approx(1.0)
 
 
+def _quota_snap(pct: float) -> "QuotaSnapshot":
+    """Minimal QuotaSnapshot with just five_hour_pct populated to a
+    given value — the only field the capsule actually reads."""
+    from datetime import timedelta
+    from claude_island.core.models import QuotaSnapshot
+    now = datetime.now(timezone.utc)
+    return QuotaSnapshot(
+        five_hour_pct=pct,
+        five_hour_resets_at=now + timedelta(hours=4),
+        seven_day_pct=10.0,
+        seven_day_resets_at=now + timedelta(days=2),
+        fetched_at=now,
+        is_stale=False,
+    )
+
+
+# --------------------------------------------------------------------------
+# Mini quota bar (P2.2)
+# --------------------------------------------------------------------------
+
+
+class TestQuotaBar:
+    def test_no_getter_skips_bar(self, qtbot, controller_with_one_session):
+        """Capsule with no quota getter wired must never show the bar
+        regardless of any cached state — backwards-compat for tests
+        and any future no-quota deployments."""
+        capsule = CapsuleWindow(controller_with_one_session)
+        qtbot.addWidget(capsule)
+        capsule._apply_capsule()
+        assert capsule._should_show_quota_bar() is False
+        assert capsule.width() == 200  # _CAPSULE_W
+
+    def test_bar_hidden_below_threshold(self, qtbot, controller_with_one_session):
+        """5h % below 70 ⇒ bar stays hidden; pill keeps the narrow
+        layout. Suppresses the "everything's fine" indicator."""
+        capsule = CapsuleWindow(
+            controller_with_one_session,
+            get_quota_snapshot=lambda: _quota_snap(35.0),
+        )
+        qtbot.addWidget(capsule)
+        capsule._apply_capsule()
+        capsule.refresh_quota()
+        assert capsule._quota_pct_cache == 35.0
+        assert capsule._should_show_quota_bar() is False
+
+    def test_bar_appears_at_warn_threshold(self, qtbot, controller_with_one_session):
+        """Crossing 70% flips visibility; pill widens to make room."""
+        capsule = CapsuleWindow(
+            controller_with_one_session,
+            get_quota_snapshot=lambda: _quota_snap(78.0),
+        )
+        qtbot.addWidget(capsule)
+        capsule._apply_capsule()
+        capsule.refresh_quota()
+        assert capsule._should_show_quota_bar() is True
+        assert capsule.width() == 290  # _CAPSULE_W_WITH_QUOTA
+
+    def test_critical_threshold_swaps_bg_color(self, qtbot, controller_with_one_session):
+        """≥ 90 ⇒ critical colour decision lands in paintEvent. We can
+        verify the cache via the threshold comparison since paintEvent
+        itself is a Qt internal we don't easily intercept in tests."""
+        capsule = CapsuleWindow(
+            controller_with_one_session,
+            get_quota_snapshot=lambda: _quota_snap(95.0),
+        )
+        qtbot.addWidget(capsule)
+        capsule._apply_capsule()
+        capsule.refresh_quota()
+        assert capsule._quota_pct_cache == 95.0
+        # Sanity: bar still shows, since critical > warn.
+        assert capsule._should_show_quota_bar() is True
+
+    def test_refresh_quota_swallows_getter_exception(
+        self, qtbot, controller_with_one_session,
+    ):
+        """A throwing quota getter must not bring down the pill."""
+        def throwing():
+            raise RuntimeError("network dropped")
+        capsule = CapsuleWindow(
+            controller_with_one_session,
+            get_quota_snapshot=throwing,
+        )
+        qtbot.addWidget(capsule)
+        capsule._apply_capsule()
+        capsule.refresh_quota()  # must not raise
+        assert capsule._quota_pct_cache is None
+
+    def test_dropping_below_threshold_collapses_pill(
+        self, qtbot, controller_with_one_session,
+    ):
+        """Quota relaxes (e.g. 5 h reset) → bar disappears, pill
+        narrows again. The transition path matters as much as the
+        on-set: if we don't shrink back, the pill stays oversized
+        forever after one warning episode."""
+        pct_box = [85.0]
+        capsule = CapsuleWindow(
+            controller_with_one_session,
+            get_quota_snapshot=lambda: _quota_snap(pct_box[0]),
+        )
+        qtbot.addWidget(capsule)
+        capsule._apply_capsule()
+        capsule.refresh_quota()
+        assert capsule.width() == 290
+        # Reset window — pct drops below threshold.
+        pct_box[0] = 12.0
+        capsule.refresh_quota()
+        assert capsule.width() == 200
+
+
 def test_dot_label_hidden_in_dot_mode(qtbot, controller_with_one_session):
     """When the controller drops to the "no sessions" dot mode, the
     pill collapses to a 12 px round and BOTH labels must hide — leaving

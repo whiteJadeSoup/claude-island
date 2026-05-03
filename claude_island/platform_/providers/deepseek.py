@@ -19,7 +19,12 @@ the user actually pays today. Update when the promo ends.
 """
 from __future__ import annotations
 
-from claude_island.core.models import PricingTable, register_pricing
+from claude_island.core.models import (
+    PricingTable,
+    register_model_colors,
+    register_model_short_names,
+    register_pricing,
+)
 
 
 # Per-Mtok rates from https://platform.deepseek.com/api-docs/pricing
@@ -36,4 +41,23 @@ register_pricing({
         output_per_mtok=0.28,
         cache_read_per_mtok=0.0028,
     ),
+})
+
+# Display registry — orange/amber family for DeepSeek so it visually
+# stands apart from Anthropic's cool palette. Pro = deep orange (the
+# pricier, slower tier); Flash = light orange (the cheaper, faster
+# tier). Same intra-provider tier convention as Anthropic (deeper hue
+# = more capable / more expensive).
+register_model_colors({
+    "deepseek-v4-pro":   "#EA580C",  # deep orange
+    "deepseek-v4-flash": "#FB923C",  # light orange
+    # Catch-all for unrecognised DeepSeek model variants — share the
+    # Pro tone so DeepSeek family always reads orange, even if a new
+    # variant name is missing from the table for a release cycle.
+    "deepseek":          "#EA580C",
+})
+register_model_short_names({
+    "deepseek-v4-pro":   "V4 Pro",
+    "deepseek-v4-flash": "V4 Flash",
+    "deepseek":          "DeepSeek",
 })

@@ -18,10 +18,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from claude_island.core.models import Session, SessionDetails
+from claude_island.core.models import QuotaSnapshot, Session, SessionDetails
 from .controller import IslandController
 
+# Two widths: normal (no quota mini-bar) vs warning (quota mini-bar
+# appended on the right). Switching between them happens on every
+# refresh that crosses the warn threshold; the resize is unobtrusive
+# at this scale and re-centring keeps the pill anchored to the top.
 _CAPSULE_W = 200
+_CAPSULE_W_WITH_QUOTA = 290
 _CAPSULE_H = 36
 _DOT_W = 12
 _DOT_H = 12
@@ -30,6 +35,21 @@ _TOP_MARGIN = 8
 _DOT_LEFT_PAD = 12  # px from pill's left edge to dot's left edge
 _DOT_LABEL_W = 14   # px reserved for the "●" glyph
 _TEXT_LEFT = _DOT_LEFT_PAD + _DOT_LABEL_W + 4  # 4px gap between dot and text
+
+# Mini quota progress bar dimensions. 56 px is roughly the same density
+# as the iOS battery widget — recognisable as a progress indicator
+# without competing with the text for attention.
+_QUOTA_BAR_W = 56
+_QUOTA_BAR_H = 6
+_QUOTA_RIGHT_PAD = 12  # px from pill's right edge to bar's right edge
+
+# Threshold % at which the mini quota bar starts surfacing on the
+# capsule. Below the threshold the bar is hidden so the pill doesn't
+# carry a green-only "everything's fine" indicator that adds noise
+# without information. Once the user is approaching the rate-limit
+# cliff the indicator becomes useful.
+_QUOTA_WARN_THRESHOLD = 70
+_QUOTA_CRITICAL_THRESHOLD = 90
 
 # Heuristic for "this session is currently doing something". An active
 # Claude Code session writes a JSONL row at least every few seconds
@@ -54,7 +74,21 @@ _STYLE_LABEL = "color: white; font-size: 12px; font-family: 'Segoe UI', sans-ser
 _STYLE_DOT_ACTIVE = "color: #4ade80; font-size: 14px;"
 _STYLE_DOT_IDLE = "color: #6b7280; font-size: 14px;"
 _BG_COLOR = QColor(18, 18, 18, 230)
+# Capsule background swap when quota crosses the critical threshold —
+# amber that reads "warning, not failure" against the dark text. The
+# RGB matches the row chip's amber so the warning vocabulary stays
+# consistent across panel + pill.
+_BG_COLOR_WARN = QColor(120, 53, 15, 230)
+_BG_COLOR_CRITICAL = QColor(127, 29, 29, 230)
 _DOT_COLOR = QColor(80, 80, 80, 200)
+# Mini quota bar pen / brush colours. Threshold-driven, mirroring the
+# summary card's progress bar palette so the user sees the same colour
+# story in both places.
+_QUOTA_BAR_TRACK = QColor(255, 255, 255, 40)
+_QUOTA_BAR_FILL_WARN = QColor(250, 204, 21)     # amber
+_QUOTA_BAR_FILL_CRITICAL = QColor(248, 113, 113)  # bright red
+_STYLE_QUOTA_PCT = "color: #fde68a; font-size: 11px; font-weight: 600;"
+_STYLE_QUOTA_PCT_CRITICAL = "color: #fee2e2; font-size: 11px; font-weight: 600;"
 
 
 def _fmt_money(amount: float) -> str:
@@ -95,6 +129,7 @@ class CapsuleWindow(QWidget):
         *,
         get_today_cost: Callable[[], float] | None = None,
         get_session_details: Callable[[Session], SessionDetails | None] | None = None,
+        get_quota_snapshot: Callable[[], QuotaSnapshot | None] | None = None,
     ) -> None:
         super().__init__()
         self._controller = controller
@@ -114,6 +149,15 @@ class CapsuleWindow(QWidget):
         # exactly one session is active. None ⇒ capsule falls back to
         # the count-only label.
         self._get_session_details = get_session_details
+        # Quota snapshot getter for the mini quota bar. Same pattern
+        # as get_today_cost — closure-injected by main so the panel's
+        # provider-tab state is honoured. None ⇒ capsule never shows
+        # the quota bar (multi-provider was never wired).
+        self._get_quota_snapshot = get_quota_snapshot
+        # Latest 5h % cached so paintEvent can render the bar without
+        # re-fetching. None ⇒ no snapshot yet (or below threshold);
+        # paint code skips the bar entirely.
+        self._quota_pct_cache: float | None = None
 
         self._setup_window()
 
@@ -197,20 +241,39 @@ class CapsuleWindow(QWidget):
     def _apply_capsule(self) -> None:
         self._is_dot = False
         self._label.setText(self._compose_label_text())
-        self._center_top(_CAPSULE_W, _CAPSULE_H)
-        # Dot sits in a fixed slot on the left; text label takes the rest
-        # of the width minus a symmetric right margin so centering looks
-        # balanced even though the dot occupies space on one side only.
+        # Width grows when a quota mini-bar should be rendered (cache
+        # populated AND ≥ warn threshold). Variable width keeps the
+        # pill compact when there's nothing to flag.
+        showing_quota = self._should_show_quota_bar()
+        target_w = _CAPSULE_W_WITH_QUOTA if showing_quota else _CAPSULE_W
+        self._center_top(target_w, _CAPSULE_H)
+        # Dot sits in a fixed slot on the left; text label takes the
+        # rest of the width minus the right pad (which holds the mini
+        # quota bar when shown, or just empty space when not).
         self._dot_label.setGeometry(_DOT_LEFT_PAD, 0, _DOT_LABEL_W, _CAPSULE_H)
-        right_pad = _DOT_LEFT_PAD + _DOT_LABEL_W  # mirror left side
+        right_pad = (
+            (_QUOTA_RIGHT_PAD + _QUOTA_BAR_W + 36)  # 36 px for "78%"
+            if showing_quota
+            else _DOT_LEFT_PAD + _DOT_LABEL_W      # symmetric blank
+        )
         self._label.setGeometry(
-            _TEXT_LEFT, 0, _CAPSULE_W - _TEXT_LEFT - right_pad, _CAPSULE_H,
+            _TEXT_LEFT, 0, target_w - _TEXT_LEFT - right_pad, _CAPSULE_H,
         )
         self._dot_label.show()
         self._label.show()
         self._refresh_active_state()
         self.update()
         self.show()
+
+    def _should_show_quota_bar(self) -> bool:
+        """True when the cached 5h % crossed the warning threshold and
+        we have a getter wired. Below the threshold the indicator is
+        hidden — a green-only "you're at 12 %" reading would be noise."""
+        if self._get_quota_snapshot is None:
+            return False
+        if self._quota_pct_cache is None:
+            return False
+        return self._quota_pct_cache >= _QUOTA_WARN_THRESHOLD
 
     def _compose_label_text(self) -> str:
         """Render the pill text — combines session count or running
@@ -312,6 +375,37 @@ class CapsuleWindow(QWidget):
         if not self._is_dot:
             self._apply_capsule()
 
+    def refresh_quota(self, _: object = None) -> None:
+        """Pull the latest quota snapshot and re-render the pill if the
+        warn-threshold crossing changed visibility.
+
+        Wired into the same heartbeat that drives ``refresh_usage_bar``
+        in __main__ so the pill picks up quota changes without needing
+        its own timer. No-op when the getter is unwired (the pill
+        simply never shows the quota bar)."""
+        if self._hidden_by_user or self._get_quota_snapshot is None:
+            return
+        previous_visible = self._should_show_quota_bar()
+        snap: QuotaSnapshot | None = None
+        try:
+            snap = self._get_quota_snapshot()
+        except Exception as exc:
+            import sys as _sys
+            print(f"[claude-island] capsule quota fetch failed: {exc}",
+                  file=_sys.stderr)
+            return
+        self._quota_pct_cache = (
+            float(snap.five_hour_pct) if snap is not None else None
+        )
+        # Visibility may have flipped — re-applying the capsule will
+        # resize and reposition. If the visible state is unchanged,
+        # just trigger a repaint so the bar % updates in place.
+        now_visible = self._should_show_quota_bar()
+        if not self._is_dot and previous_visible != now_visible:
+            self._apply_capsule()
+        else:
+            self.update()
+
     def refresh_cost(self, _: object = None) -> None:
         """Called by bridge when usage totals change. Pulls today's
         cost via the injected getter and refreshes the pill text + the
@@ -346,9 +440,73 @@ class CapsuleWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         path = QPainterPath()
         r = self.height() / 2
-        color = _DOT_COLOR if self._is_dot else _BG_COLOR
+
+        # Background colour reflects quota severity. Critical (≥ 90 %)
+        # gets a deep red wash; warning (≥ 70 %) gets amber. Below the
+        # warn threshold (and in dot mode) we use the standard dark
+        # grey so normal operation looks unobtrusive.
+        if self._is_dot:
+            color = _DOT_COLOR
+        elif self._quota_pct_cache is not None and self._quota_pct_cache >= _QUOTA_CRITICAL_THRESHOLD:
+            color = _BG_COLOR_CRITICAL
+        elif self._quota_pct_cache is not None and self._quota_pct_cache >= _QUOTA_WARN_THRESHOLD:
+            color = _BG_COLOR_WARN
+        else:
+            color = _BG_COLOR
+
         path.addRoundedRect(0, 0, self.width(), self.height(), r, r)
         painter.fillPath(path, color)
+
+        # Mini quota bar — drawn directly on the pill (no QWidget
+        # overhead) for two reasons: it shares lifecycle with the pill
+        # background, and a child widget here would have to fight the
+        # frameless / translucent setup for layering. Skipped entirely
+        # when below threshold or the cache has never been populated.
+        if not self._is_dot and self._should_show_quota_bar():
+            self._paint_quota_bar(painter)
+
+    def _paint_quota_bar(self, painter: QPainter) -> None:
+        """Draw the right-side mini quota progress + "78%" caption."""
+        pct = max(0.0, min(100.0, float(self._quota_pct_cache or 0)))
+        critical = pct >= _QUOTA_CRITICAL_THRESHOLD
+
+        # Layout: [bar] gap [pct text]  flush right against _QUOTA_RIGHT_PAD.
+        bar_x = self.width() - _QUOTA_RIGHT_PAD - 36 - _QUOTA_BAR_W
+        bar_y = (self.height() - _QUOTA_BAR_H) // 2
+
+        # Track
+        track_path = QPainterPath()
+        track_path.addRoundedRect(
+            bar_x, bar_y, _QUOTA_BAR_W, _QUOTA_BAR_H,
+            _QUOTA_BAR_H / 2, _QUOTA_BAR_H / 2,
+        )
+        painter.fillPath(track_path, _QUOTA_BAR_TRACK)
+
+        # Fill — width = pct * bar_w / 100
+        fill_w = max(1, int(_QUOTA_BAR_W * pct / 100))
+        fill_path = QPainterPath()
+        fill_path.addRoundedRect(
+            bar_x, bar_y, fill_w, _QUOTA_BAR_H,
+            _QUOTA_BAR_H / 2, _QUOTA_BAR_H / 2,
+        )
+        painter.fillPath(
+            fill_path,
+            _QUOTA_BAR_FILL_CRITICAL if critical else _QUOTA_BAR_FILL_WARN,
+        )
+
+        # "78%" caption to the right of the bar. Native QPainter draw
+        # so we don't have to manage another QLabel + opacity effect.
+        from PySide6.QtGui import QFont
+        text = f"{int(pct)}%"
+        font = QFont("Segoe UI", 9, QFont.Weight.DemiBold)
+        painter.setFont(font)
+        text_color = (
+            QColor(254, 226, 226) if critical else QColor(253, 230, 138)
+        )
+        painter.setPen(text_color)
+        text_x = bar_x + _QUOTA_BAR_W + 4
+        text_y = self.height() // 2 + 4  # rough vertical centre for QFont
+        painter.drawText(text_x, text_y, text)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.RightButton:

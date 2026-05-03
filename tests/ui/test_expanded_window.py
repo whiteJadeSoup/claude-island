@@ -476,11 +476,14 @@ def test_period_toggle_updates_spend_card(qtbot):
 
 
 def test_period_selector_includes_5h(qtbot):
-    """A2 regression: the unified SPEND selector exposes "5H" alongside
-    Today/Daily/Weekly/Monthly so 5h-spend isn't hidden in a separate
-    card. Apple HIG max of 5 segments — exactly what we have."""
+    """The SPEND selector exposes 5h alongside Today/Last 7/Last 30 so
+    the most-actionable rate-limit window isn't hidden in a separate
+    card. ``daily`` was dropped in P1.2 (semantic overlap with
+    ``today``) and the strip became a single dropdown — keys live on
+    the combo's items rather than a button dict."""
     p = _panel_with_quota(qtbot, totals=UsageTotals(period="today"))
-    assert set(p._period_btns.keys()) == {"5h", "today", "daily", "weekly", "monthly"}
+    keys = {key for _label, key in p._period_combo_items}
+    assert keys == {"5h", "today", "weekly", "monthly"}
 
 
 @pytest.mark.parametrize("pct,expected_color", [
@@ -2068,7 +2071,10 @@ class TestModelHelpers:
         from claude_island.ui.expanded_window import _resolve_model_short_name
         # MiniMax-M2.7-highspeed: longest match is "minimax-m2.7" → "M2.7".
         assert _resolve_model_short_name("MiniMax-M2.7-highspeed") == "M2.7"
-        assert _resolve_model_short_name("MiniMax-M1") == "M1"
+        assert _resolve_model_short_name("MiniMax-M2.5") == "M2.5"
+        # Bare "MiniMax" with no version suffix — falls through to the
+        # family-only entry "MiniMax".
+        assert _resolve_model_short_name("MiniMax") == "MiniMax"
 
     def test_short_name_unknown_falls_back_to_prefix(self):
         from claude_island.ui.expanded_window import _resolve_model_short_name
@@ -2139,3 +2145,158 @@ class TestRowStatusText:
         sess = _session(1, "/a", ago_minutes=10)  # well past 30 s
         text = _row_status_text(None, sess)
         assert text.startswith("idle")
+
+
+# ============================================================================
+# Summary card (P1.1) — top focus area with today $ + 5h quota bar
+# ============================================================================
+
+
+def _quota_snap(pct: float):
+    """Minimal QuotaSnapshot — only five_hour_pct + reset matter for
+    summary card rendering."""
+    from datetime import datetime, timedelta, timezone
+    from claude_island.core.models import QuotaSnapshot
+    now = datetime.now(timezone.utc)
+    return QuotaSnapshot(
+        five_hour_pct=pct,
+        five_hour_resets_at=now + timedelta(hours=4, minutes=47),
+        seven_day_pct=10.0,
+        seven_day_resets_at=now + timedelta(days=2),
+        fetched_at=now,
+        is_stale=False,
+    )
+
+
+class TestSummaryCard:
+    """The new top focus card. Pins:
+       - Today's $ comes from get_usage_totals('today')
+       - Subtitle reads "<Provider> · resets in <countdown>"
+       - 5h bar hides when no snapshot is available"""
+
+    def test_summary_amount_from_today_total(self, qtbot):
+        from claude_island.core.models import UsageTotals
+        capsule = QWidget()
+        capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule,
+            controller=controller,
+            get_usage_totals=lambda period: UsageTotals(
+                period=period,
+                input_cost=80.0, output_cost=6.42,
+            ),
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        # _fmt_money rounds 86.42 → "$86" (≥10 cuts cents)
+        assert p._summary_amount.text() == "$86"
+
+    def test_summary_hides_quota_bar_when_no_snapshot(self, qtbot):
+        from claude_island.core.models import UsageTotals
+        capsule = QWidget()
+        capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule,
+            controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+            get_quota_snapshot=lambda: None,
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        assert p._summary_quota_bar.isHidden()
+        assert p._summary_caption.isHidden()
+        # Subtitle still names the provider so the user can tell which
+        # provider's quota we tried (and failed) to fetch.
+        assert "unavailable" in p._summary_subtitle.text().lower()
+
+    def test_summary_shows_quota_bar_when_snapshot_present(self, qtbot):
+        from claude_island.core.models import UsageTotals
+        capsule = QWidget()
+        capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule,
+            controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+            get_quota_snapshot=lambda: _quota_snap(78.0),
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        # ``isVisible`` requires the parent to be shown — use isHidden
+        # negation, which is the offscreen-test-safe equivalent.
+        assert not p._summary_quota_bar.isHidden()
+        assert p._summary_quota_bar.value() == 78
+        assert "78%" in p._summary_caption.text()
+        assert "5h limit" in p._summary_caption.text()
+        assert "resets in" in p._summary_subtitle.text()
+
+
+# ============================================================================
+# High-cost row alert (P2.3) — cumulative spend ≥ threshold flips dot
+# ============================================================================
+
+
+class TestHighCostRowAlert:
+    def test_high_cost_dot_swaps_to_lightning(self, qtbot):
+        """A session whose cumulative cost exceeds the alert threshold
+        should render the row dot as a yellow ⚡ glyph (rather than the
+        usual ●) so it stands out among well-behaved siblings."""
+        from PySide6.QtWidgets import QLabel
+        from claude_island.core.models import SessionDetails
+
+        def details(session):
+            return SessionDetails(
+                session=session, name="x", ai_title=None, git_branch=None,
+                last_prompt=None, started_at=None, status=None,
+                cc_version=None, cost_usd=132.0,  # well above $50
+                turn_count=10, sidechain_count=0,
+            )
+
+        capsule = QWidget(); capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule, controller=controller,
+            get_usage_totals=lambda period: __import__(
+                "claude_island.core.models", fromlist=["UsageTotals"]
+            ).UsageTotals(period=period),
+            get_session_details=details,
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p.refresh_sessions([_session(1, "/a")])
+        dot = p._rows[1].findChild(QLabel, "dot_label")
+        assert dot is not None
+        assert dot.text() == "⚡"
+        assert "facc15" in dot.styleSheet()  # yellow
+        assert "high cumulative spend" in dot.toolTip().lower()
+
+    def test_low_cost_dot_keeps_default_glyph(self, qtbot):
+        """Cost below threshold ⇒ dot stays as the regular ● glyph
+        with the freshness-derived colour. Tooltip cleared."""
+        from PySide6.QtWidgets import QLabel
+        from claude_island.core.models import SessionDetails
+
+        def details(session):
+            return SessionDetails(
+                session=session, name="x", ai_title=None, git_branch=None,
+                last_prompt=None, started_at=None, status=None,
+                cc_version=None, cost_usd=4.50,
+                turn_count=2, sidechain_count=0,
+            )
+
+        capsule = QWidget(); capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule, controller=controller,
+            get_usage_totals=lambda period: __import__(
+                "claude_island.core.models", fromlist=["UsageTotals"]
+            ).UsageTotals(period=period),
+            get_session_details=details,
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p.refresh_sessions([_session(1, "/a")])
+        dot = p._rows[1].findChild(QLabel, "dot_label")
+        assert dot is not None
+        assert dot.text() == "●"
+        assert dot.toolTip() == ""

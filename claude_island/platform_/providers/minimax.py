@@ -40,7 +40,12 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from claude_island.core.models import PricingTable, register_pricing
+from claude_island.core.models import (
+    PricingTable,
+    register_model_colors,
+    register_model_short_names,
+    register_pricing,
+)
 
 from . import (
     HTTP_TIMEOUT,
@@ -69,6 +74,28 @@ register_pricing({
     "MiniMax-M2.1":           PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
     "MiniMax-M*":             PricingTable(0.30, 1.20, cache_read_per_mtok=0.06),
     "MiniMax-M2":             PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
+})
+
+# Display registry — magenta family for MiniMax. The newer M2.7 line
+# gets the deeper hue (premium tier convention); the lighter rose
+# tone covers M2.x base models. "-highspeed" variants share the base
+# colour because they're the same model just provisioned faster —
+# colour is about model identity, not throughput tier.
+register_model_colors({
+    "MiniMax-M2.7": "#EC4899",  # magenta — newest line
+    "MiniMax-M2":   "#F472B6",  # lighter rose — base M2.x
+    # Fallback so anything starting with "MiniMax" reads as the family.
+    "MiniMax":      "#EC4899",
+})
+register_model_short_names({
+    # The name table mirrors the family-version split — the chip should
+    # convey "which M-version" without restating "MiniMax" each time.
+    "MiniMax-M2.7": "M2.7",
+    "MiniMax-M2.5": "M2.5",
+    "MiniMax-M2.1": "M2.1",
+    "MiniMax-M2":   "M2",
+    "MiniMax-M*":   "MiniMax",  # wildcard — show family name
+    "MiniMax":      "MiniMax",
 })
 
 

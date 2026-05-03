@@ -13,7 +13,12 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from claude_island.core.models import PricingTable, register_pricing
+from claude_island.core.models import (
+    PricingTable,
+    register_model_colors,
+    register_model_short_names,
+    register_pricing,
+)
 
 from . import (
     HTTP_TIMEOUT, POLL_TTL,
@@ -32,6 +37,21 @@ register_pricing({
     "haiku":  PricingTable(input_per_mtok=1.0, output_per_mtok=5.0),
     "sonnet": PricingTable(input_per_mtok=3.0, output_per_mtok=15.0),
     "opus":   PricingTable(input_per_mtok=5.0, output_per_mtok=25.0),
+})
+
+# Display registry — chip colour follows the cool-spectrum tier scheme:
+# the more powerful (and more expensive) the family, the deeper the
+# hue. Opus = purple, Sonnet = blue, Haiku = green. Matches the
+# Anthropic-house cool palette so the UI reads as on-brand.
+register_model_colors({
+    "opus":   "#8B5CF6",  # purple — premium tier
+    "sonnet": "#3B82F6",  # blue   — mid tier
+    "haiku":  "#10B981",  # green  — fast tier
+})
+register_model_short_names({
+    "opus":   "Opus",
+    "sonnet": "Sonnet",
+    "haiku":  "Haiku",
 })
 
 

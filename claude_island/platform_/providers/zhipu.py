@@ -49,6 +49,11 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from claude_island.core.models import (
+    register_model_colors,
+    register_model_short_names,
+)
+
 from . import (
     HTTP_TIMEOUT,
     provider,
@@ -61,6 +66,22 @@ from . import (
 
 _DEFAULT_HOST = "https://api.z.ai"
 _PATH = "/api/monitor/usage/quota/limit"
+
+# Display registry — cyan family for Zhipu / Z.AI. No pricing entries
+# (Zhipu doesn't surface a public per-Mtok rate the way Anthropic /
+# DeepSeek do — costs default to Sonnet rates via DEFAULT_PRICING),
+# but the chip still wants a recognisable colour so multi-provider
+# users can tell GLM rows apart from Anthropic rows in SPEND.
+register_model_colors({
+    "GLM-Pro": "#0891B2",  # cyan      — premium tier
+    "GLM-Air": "#22D3EE",  # bright cyan — fast tier
+    "GLM":     "#0891B2",  # family fallback
+})
+register_model_short_names({
+    "GLM-Pro": "GLM Pro",
+    "GLM-Air": "GLM Air",
+    "GLM":     "GLM",
+})
 
 
 def _read_token() -> str | None:

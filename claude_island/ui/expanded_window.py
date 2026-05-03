@@ -16,6 +16,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -30,12 +31,15 @@ from PySide6.QtWidgets import (
 )
 
 from claude_island.core.models import (
+    DEFAULT_MODEL_COLOR,
     ModelTotals,
     QuotaSnapshot,
     Session,
     SessionDetails,
     SessionUsage,
     UsageTotals,
+    resolve_model_color,
+    resolve_model_short_name,
 )
 from .controller import IslandController
 
@@ -426,75 +430,21 @@ _ROW_PAD_H = 12
 # between the pill and the panel rows.
 _ROW_ACTIVE_THRESHOLD_SECONDS = 30
 
-# Inline model → display-name map. Length-descending substring match
-# with the same logic as ``usage_registry._resolve_pricing`` so the
-# longest matching key wins (e.g. ``minimax-m2.7`` resolves to "M2.7"
-# before the family-only "MiniMax"). Will be replaced by a declarative
-# per-provider registry in P2; keeping it inline here per the staged
-# rollout in the design plan.
-_MODEL_SHORT_NAMES: dict[str, str] = {
-    "opus":           "Opus",
-    "sonnet":         "Sonnet",
-    "haiku":          "Haiku",
-    "deepseek-v4-pro":   "V4 Pro",
-    "deepseek-v4-flash": "V4 Flash",
-    "deepseek":       "DeepSeek",
-    "minimax-m2.7":   "M2.7",
-    "minimax-m2":     "M2",
-    "minimax-m1":     "M1",
-    "minimax":        "MiniMax",
-    "glm-pro":        "GLM Pro",
-    "glm-air":        "GLM Air",
-    "glm":            "GLM",
-}
+# Cumulative-spend threshold past which a session's row dot flips to
+# the high-cost ⚡ marker. The user explicitly chose to keep this
+# warning on the card only (NOT the capsule) so the pill stays calm
+# while individual rows still flag outliers. Number is intentionally
+# round-ish — fine-grained tuning via a settings panel can come later.
+_HIGH_COST_USD_THRESHOLD = 50.0
 
-# Inline model → chip colour. Same provider-tier scheme described in
-# the design plan: Anthropic cool family (purple/blue/green), DeepSeek
-# warm orange family, MiniMax magenta, Zhipu cyan. Unknown ⇒ neutral
-# grey so the chip remains readable rather than guessing.
-_MODEL_COLORS: dict[str, str] = {
-    "opus":              "#8B5CF6",  # purple
-    "sonnet":            "#3B82F6",  # blue
-    "haiku":             "#10B981",  # green
-    "deepseek-v4-pro":   "#EA580C",  # deep orange
-    "deepseek-v4-flash": "#FB923C",  # light orange
-    "deepseek":          "#EA580C",
-    "minimax":           "#EC4899",  # magenta
-    "glm-pro":           "#0891B2",  # cyan
-    "glm-air":           "#22D3EE",  # bright cyan
-    "glm":               "#0891B2",
-}
-_MODEL_COLOR_FALLBACK = "#6B7280"   # neutral grey for unknown families
-
-
-def _resolve_model_short_name(model: str) -> str:
-    """Map an API model id to a short display label.
-
-    Returns the longest matching ``_MODEL_SHORT_NAMES`` entry; falls
-    back to a 12-char prefix of the raw id so an unknown future
-    family at least shows something recognisable rather than nothing.
-    """
-    if not model:
-        return ""
-    lower = model.lower()
-    for key in sorted(_MODEL_SHORT_NAMES.keys(), key=len, reverse=True):
-        if key in lower:
-            return _MODEL_SHORT_NAMES[key]
-    return model[:12]
-
-
-def _resolve_model_color(model: str) -> str:
-    """Map an API model id to its chip colour.
-
-    Same length-descending lookup as ``_resolve_model_short_name``.
-    Returns ``_MODEL_COLOR_FALLBACK`` for unknown families."""
-    if not model:
-        return _MODEL_COLOR_FALLBACK
-    lower = model.lower()
-    for key in sorted(_MODEL_COLORS.keys(), key=len, reverse=True):
-        if key in lower:
-            return _MODEL_COLORS[key]
-    return _MODEL_COLOR_FALLBACK
+# Backwards-compat aliases for tests / call sites that referenced the
+# inline P0.3 helpers. The actual lookups now live in core.models, fed
+# by per-provider register_model_colors / register_model_short_names
+# calls at import time. Keep the names so external imports continue
+# to resolve; both delegate to the registry-aware core implementations.
+_MODEL_COLOR_FALLBACK = DEFAULT_MODEL_COLOR
+_resolve_model_short_name = resolve_model_short_name
+_resolve_model_color = resolve_model_color
 
 _STYLE_SINGLE_ROW = f"""
     QPushButton {{
@@ -605,6 +555,49 @@ _STYLE_PERIOD_BTN = """
     QPushButton:hover { color: #aaa; border-color: #555; }
     QPushButton:checked { color: white; border-color: #888; background: #2a2a2a; }
 """
+# Single dropdown selector — replaced the 5-tab pill strip in P1.2.
+# Compact (matches the old pill height); arrow indicator on the right
+# makes it scan as "selectable" without needing extra label.
+_STYLE_PERIOD_COMBO = """
+    QComboBox {
+        color: #c9c9c9;
+        background: transparent;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 2px 8px;
+        font-size: 10px;
+        min-width: 80px;
+    }
+    QComboBox:hover { color: #e8e8e8; border-color: #555; }
+    QComboBox::drop-down {
+        border: none;
+        width: 16px;
+    }
+    QComboBox::down-arrow {
+        image: none;
+    }
+    QComboBox QAbstractItemView {
+        background: #1e1e1e;
+        color: #e0e0e0;
+        border: 1px solid #333;
+        selection-background-color: #2e2e2e;
+        outline: none;
+    }
+"""
+# "▸ details" disclosure for the SPEND token breakdown.
+# Borderless link-styled button — reads as a hyperlink so the user
+# expects a click-to-expand interaction without any other affordance.
+_STYLE_DETAILS_DISCLOSURE = """
+    QPushButton {
+        color: #9ca3af;
+        background: transparent;
+        border: none;
+        font-size: 10px;
+        text-align: left;
+        padding: 2px 0;
+    }
+    QPushButton:hover { color: #e8e8e8; }
+"""
 
 # Variant of the pill style for the trailing "+" button that opens the
 # add-provider dialog. Same shape so it reads as part of the tab strip,
@@ -696,6 +689,23 @@ _STYLE_USAGE_PCT_STALE = "color: #facc15; font-size: 11px;"  # ⚠ tone
 # than "$22 (big) … 3% used (whisper)". Colour is set dynamically per
 # threshold (green / yellow / red / gray) — only the size is fixed here.
 _STYLE_USAGE_PCT_BIG = "font-size: 16px; font-weight: 500;"
+
+# Summary card's quota progress bar style. ``__CHUNK__`` is a marker
+# that ``_refresh_summary_card`` rewrites to the threshold colour
+# (green/amber/red) at refresh time — Qt stylesheets don't support
+# variable substitution out of the box, and the alternative (per-state
+# CSS classes) is more code for the same effect.
+_STYLE_SUMMARY_PROGRESS = (
+    "QProgressBar {"
+    " background: #2a2a2a;"
+    " border: none;"
+    " border-radius: 3px;"
+    "}"
+    "QProgressBar::chunk {"
+    " background: __CHUNK__;"
+    " border-radius: 3px;"
+    "}"
+)
 # Per-model breakdown: bumped from #6b7280 to #9ca3af (matches the
 # rest of the secondary text in the panel) so the "where did the $
 # go" line is actually scannable instead of a dim afterthought.
@@ -1605,8 +1615,10 @@ class SessionDetailPopup(QFrame):
         color: str,
     ) -> QWidget:
         """One model row: ``[name] [bar] [cost]`` then a dim sub-line
-        with in/out/cw/cr tokens. Mirrors the SPEND card layout so the
-        two surfaces share visual language."""
+        with the input / output / cache-write / cache-read token
+        breakdown. Mirrors the SPEND card layout so the two surfaces
+        share visual language. Terms are spelled out (no ``cw``/``cr``
+        abbreviations) so the user doesn't need a glossary."""
         row = QWidget()
         v = QVBoxLayout(row)
         v.setContentsMargins(0, 0, 0, 0)
@@ -1649,14 +1661,17 @@ class SessionDetailPopup(QFrame):
         top.addWidget(cost)
         v.addLayout(top)
 
-        # Sub-line: dim token breakdown on a single row.
+        # Sub-line: dim token breakdown on a single row. Terms are
+        # spelled out (P3 — replaced legacy "cw"/"cr" abbreviations
+        # which only made sense to people who already knew what they
+        # meant; new users were silently lost).
         parts = [
-            f"in {_fmt_tokens(r.input_tokens)}",
-            f"out {_fmt_tokens(r.output_tokens)}",
+            f"input {_fmt_tokens(r.input_tokens)}",
+            f"output {_fmt_tokens(r.output_tokens)}",
         ]
         if r.cache_creation_tokens or r.cache_read_tokens:
-            parts.append(f"cw {_fmt_tokens(r.cache_creation_tokens)}")
-            parts.append(f"cr {_fmt_tokens(r.cache_read_tokens)}")
+            parts.append(f"cache write {_fmt_tokens(r.cache_creation_tokens)}")
+            parts.append(f"cache read {_fmt_tokens(r.cache_read_tokens)}")
         tokens = QLabel("  " + " · ".join(parts))
         tokens.setStyleSheet(_STYLE_AGE)
         v.addWidget(tokens)
@@ -2578,18 +2593,27 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        """Three-zone vertical layout:
-            1. Bounded-scroll sessions list (max ~7 visible rows)
-            2. SPEND card (cross-provider, period-selectable)
-            3. QUOTA card (provider-specific, 5h + weekly bars)
-        Spend and quota are intentionally siblings — they're different
-        concepts (cumulative vs instantaneous) and grouping them in
-        adjacent cards lets the eye scan one then the other without
-        crossing through unrelated content.
+        """Four-zone vertical layout:
+            0. Focus summary card (today's $ + 5h quota bar) — Tier 1
+            1. Bounded-scroll sessions list (max ~5 visible rows) — Tier 2
+            2. SPEND card (cross-provider, period-selectable) — Tier 3
+            3. QUOTA card (provider-specific, 5h + weekly bars) — Tier 3
+        Summary at the top is the "glanceable" tier — big $ + a single
+        progress bar so the user gets the headline numbers without
+        reading anything below. SPEND + QUOTA stay as the detail tier
+        for power-user inspection.
         """
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(8)
+
+        # ── Focus summary (Tier 1: at-a-glance headline) ────────────
+        # Big "today" dollar value paired with a single 5h quota bar —
+        # the two numbers a user most often opens the panel to check.
+        # Placed above CLAUDE SESSIONS so a quick peek gets the answer
+        # without scanning the session list at all.
+        self._summary_card = self._build_summary_card()
+        root.addWidget(self._summary_card)
 
         # ── Sessions header (with count badge) ──────────────────────
         # Count badge makes overflow discoverable: when the list scrolls,
@@ -2786,9 +2810,9 @@ class ExpandedWindow(QWidget):
         )
 
     def refresh_usage_bar(self, _: object = None) -> None:
-        """Refresh both USAGE cards. Kept the legacy method name so the
-        existing ``totals_changed`` signal wire-up in __main__.py
-        continues to fire this on every DB change.
+        """Refresh summary + both USAGE cards. Kept the legacy method
+        name so the existing ``totals_changed`` signal wire-up in
+        __main__.py continues to fire this on every DB change.
 
         Calls ``adjustSize`` after the refresh so the panel grows /
         shrinks to match the new SPEND content (e.g. switching from
@@ -2797,6 +2821,7 @@ class ExpandedWindow(QWidget):
         and Qt squeezed the sessions scroll area to make room — the
         sessions section would visibly shrink when the user did
         nothing but switch a SPEND tab."""
+        self._refresh_summary_card()
         self._refresh_spend_card()
         self._refresh_quota_card()
         self.adjustSize()
@@ -2825,29 +2850,169 @@ class ExpandedWindow(QWidget):
     # USAGE: SPEND card (period-selectable, cross-provider)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Focus summary (Tier 1 headline)
+    # ------------------------------------------------------------------
+
+    def _build_summary_card(self) -> QFrame:
+        """Top focus summary — the panel's "what's the headline?" tier.
+
+        Layout::
+
+            ┌──────────────────────────────────────────┐
+            │ TODAY                          $86.42    │  big $
+            │ Anthropic · resets in 4h 47m             │  subtitle
+            │ ▓▓▓▓▓▓▓░░░░░░░░░░  78% of 5h limit       │  bar
+            └──────────────────────────────────────────┘
+
+        Today's $ is the most-asked question; the 5h bar warns when
+        the user is approaching the rate-limit cliff. Both numbers
+        already exist in the SPEND/QUOTA cards below, but those cards
+        are tier-3 detail; the summary lifts the headline up so the
+        eye lands on it first.
+        """
+        card = QFrame()
+        card.setObjectName("summary_card")
+        card.setStyleSheet(_STYLE_USAGE_SESSION_CARD.replace(
+            "usage_session_card", "summary_card"
+        ))
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+
+        # Top row: "TODAY" caption (left) + big $ amount (right).
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        today_label = QLabel("TODAY")
+        today_label.setStyleSheet(_STYLE_TITLE)
+        today_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        top.addWidget(today_label)
+        top.addStretch()
+
+        # Headline number — bumped 4 px over the SPEND card's amount so
+        # the visual hierarchy reads "summary > detail".
+        self._summary_amount = QLabel("—")
+        self._summary_amount.setStyleSheet(
+            "color: #f5f5f5; font-size: 24px; font-weight: 600;"
+        )
+        self._summary_amount.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        top.addWidget(self._summary_amount)
+        layout.addLayout(top)
+
+        # Subtitle — provider name + reset countdown. Hidden when no
+        # provider is configured (e.g. empty providers.json).
+        self._summary_subtitle = QLabel("")
+        self._summary_subtitle.setStyleSheet(_STYLE_USAGE_RESET)
+        layout.addWidget(self._summary_subtitle)
+
+        # 5h quota progress bar. Reused QProgressBar (consistent with
+        # the QUOTA card's bars) so styling stays in one place.
+        self._summary_quota_bar = QProgressBar()
+        self._summary_quota_bar.setRange(0, 100)
+        self._summary_quota_bar.setTextVisible(False)
+        self._summary_quota_bar.setFixedHeight(6)
+        # Default chunk colour at construction = neutral grey; the real
+        # threshold colour gets swapped in by _refresh_summary_card on
+        # the first refresh tick once a quota snapshot lands.
+        self._summary_quota_bar.setStyleSheet(
+            _STYLE_SUMMARY_PROGRESS.replace("__CHUNK__", "#4a4a4a")
+        )
+        layout.addWidget(self._summary_quota_bar)
+
+        # Bar caption ("78% of 5h limit"). Hidden when quota
+        # snapshot is unavailable (matches the bar's hide).
+        self._summary_caption = QLabel("")
+        self._summary_caption.setStyleSheet(_STYLE_USAGE_PCT)
+        layout.addWidget(self._summary_caption)
+
+        return card
+
+    def _refresh_summary_card(self) -> None:
+        """Repopulate the summary card from usage_registry + quota
+        snapshot. Same defensive pattern as the SPEND/QUOTA refreshers
+        — getter exceptions are logged and the card degrades to a "—"
+        amount or hides the bar rather than crashing the panel."""
+        # Today's spend
+        if self._get_usage_totals is not None:
+            try:
+                t = self._get_usage_totals("today")
+                self._summary_amount.setText(_fmt_money(t.cost_usd))
+            except Exception as exc:
+                import sys as _sys
+                print(f"[claude-island] summary today fetch failed: {exc}",
+                      file=_sys.stderr)
+                self._summary_amount.setText("—")
+        else:
+            self._summary_amount.setText("—")
+
+        # Quota snapshot for the 5h bar + reset countdown.
+        snap = None
+        if self._get_quota_snapshot is not None:
+            try:
+                snap = self._get_quota_snapshot()
+            except Exception as exc:
+                import sys as _sys
+                print(f"[claude-island] summary quota fetch failed: {exc}",
+                      file=_sys.stderr)
+
+        provider_label = (self.selected_provider_name() or "anthropic").title()
+        if snap is None:
+            # Subtitle still shows the provider name — gives the user
+            # something to read and signals "we know which provider
+            # we're trying to fetch" even when the fetch failed.
+            self._summary_subtitle.setText(f"{provider_label} · quota unavailable")
+            self._summary_quota_bar.hide()
+            self._summary_caption.hide()
+            return
+
+        reset = _fmt_reset(snap.five_hour_resets_at)
+        self._summary_subtitle.setText(f"{provider_label} · resets in {reset}")
+        # Bar value — clamp to 0..100 just in case the provider returns
+        # something odd (we've seen 100.5 when the API rounds).
+        pct = max(0.0, min(100.0, float(snap.five_hour_pct)))
+        self._summary_quota_bar.setValue(int(pct))
+        # Colour the chunk based on threshold — green/amber/red. Done
+        # here on the bar's stylesheet rather than via a stylesheet
+        # selector so we can react to the exact pct without juggling
+        # CSS classes.
+        chunk_color = (
+            "#ef4444" if pct >= 90
+            else "#facc15" if pct >= 70
+            else "#4ade80"
+        )
+        self._summary_quota_bar.setStyleSheet(
+            _STYLE_SUMMARY_PROGRESS.replace("__CHUNK__", chunk_color)
+        )
+        self._summary_quota_bar.show()
+        self._summary_caption.setText(f"{pct:.0f}% of 5h limit")
+        self._summary_caption.show()
+
     def _build_spend_card(self) -> QFrame:
-        """Single SPEND card driven by a 5-segment period selector
-        (5H / Today / Daily / Weekly / Monthly).
+        """Single SPEND card driven by a window dropdown (5h / Today /
+        Last 7 days / Last 30 days). Each row shows one model's bar
+        plus its aggregate token count; the per-model in/out/cache
+        breakdown is folded behind a "details" disclosure to keep the
+        default density readable.
 
-           ┌─────────────────────────────────────┐
-           │ SPEND                               │
-           │ [5H][Today][Daily][Weekly][Monthly] │
-           │ $27                                 │
-           │ Opus ████████████        $25.00    │
-           │   in 1.2M · out 48K                │
-           │ Sonnet ███░░░░░░░░░░░  $1.04      │
-           │   in 89K · out 12K                 │
-           │ ─────────────────────────────────── │
-           │ Input 18.7M · Output 684K           │
-           │ Cache W 4.7M · Cache R 236.9M       │
-           └─────────────────────────────────────┘
+           ┌──────────────────────────────────────────┐
+           │ SPEND                       ⌄ 5h         │
+           │ $86.42 · 1.2M tokens                     │
+           │ Opus  ████████  $85    1.2M tokens       │
+           │ Haiku ▓░░░░░░░  $0.77   19K tokens       │
+           │ ▸ details                                │
+           └──────────────────────────────────────────┘
 
-        Each model gets one proportional bar (width = share of total $).
-        Top-3 shown; rest collapsed to "others (N)". Token sub-lines
-        in 60%-opacity sit below each bar row. The proportional layout
-        (YNAB / iOS Battery / macOS Storage style) lets the user read
-        "where did the $ go" at a glance without parsing name+number
-        pairs — the bar does the cognitive work.
+        Period dropdown (instead of a tab strip) keeps the row above
+        the amount narrow and predictable — the previous 5-tab strip
+        was clipping the trailing "Monthly" tab on default panel
+        widths. "Daily" was dropped because it overlaps semantically
+        with "Today"; the remaining four windows cover all common
+        questions ("right now / today / week / month").
         """
         card = QFrame()
         card.setObjectName("usage_spend_card")
@@ -2857,41 +3022,47 @@ class ExpandedWindow(QWidget):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
 
+        # Header row: SPEND label (left) + period dropdown (right)
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
         spend_label = QLabel("SPEND")
         spend_label.setStyleSheet(_STYLE_TITLE)
-        layout.addWidget(spend_label)
+        hdr.addWidget(spend_label)
+        hdr.addStretch()
 
-        # Period selector: 5 segments — at the upper bound of what
-        # Apple HIG recommends for a segmented control (≤5).
-        period_row = QHBoxLayout()
-        period_row.setSpacing(6)
-        self._period_btns: dict[str, QPushButton] = {}
-        for label, key in [
-            ("5H",      "5h"),
-            ("Today",   "today"),
-            ("Daily",   "daily"),
-            ("Weekly",  "weekly"),
-            ("Monthly", "monthly"),
-        ]:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setStyleSheet(_STYLE_PERIOD_BTN)
-            btn.setChecked(key == self._period)
-            btn.clicked.connect(lambda _, k=key: self._on_period(k))
-            period_row.addWidget(btn)
-            self._period_btns[key] = btn
-        period_row.addStretch()
-        layout.addLayout(period_row)
+        self._period_combo = QComboBox()
+        self._period_combo.setStyleSheet(_STYLE_PERIOD_COMBO)
+        self._period_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        # (label, key) pairs. Order matters for the dropdown — most
+        # actionable window first ("right now") then expanding outward.
+        self._period_combo_items: list[tuple[str, str]] = [
+            ("5h window",   "5h"),
+            ("Today",       "today"),
+            ("Last 7 days", "weekly"),
+            ("Last 30 days", "monthly"),
+        ]
+        for label, key in self._period_combo_items:
+            self._period_combo.addItem(label, key)
+        # Pre-select the saved period
+        for idx, (_label, key) in enumerate(self._period_combo_items):
+            if key == self._period:
+                self._period_combo.setCurrentIndex(idx)
+                break
+        self._period_combo.currentIndexChanged.connect(self._on_period_combo_changed)
+        hdr.addWidget(self._period_combo)
+        layout.addLayout(hdr)
 
-        # Big $ anchor for the selected period
+        # Headline $ + total token count, on one row.
+        # ``$86.42 · 1.2M tokens`` — the dot separator visually couples
+        # them as "two facets of the same window" (cost vs scale).
         self._spend_amount = QLabel("—")
         self._spend_amount.setStyleSheet(_STYLE_USAGE_AMOUNT)
         layout.addWidget(self._spend_amount)
 
         # Per-model proportional bar container. Each row:
-        #   [short name] [======bar======] [$XX.XX]
-        #   [sub-token line in 60% opacity]
-        # Updated on every refresh; rows are created once here.
+        #   [short name] [======bar======] [$XX.XX] [tokens]
+        # Token detail sub-line is hidden by default; the disclosure
+        # below toggles all sub-lines together.
         self._spend_bar_container = QWidget()
         self._spend_bar_layout = QVBoxLayout(self._spend_bar_container)
         self._spend_bar_layout.setContentsMargins(0, 0, 0, 0)
@@ -2904,10 +3075,59 @@ class ExpandedWindow(QWidget):
         self._spend_bar_container.hide()
         layout.addWidget(self._spend_bar_container)
 
+        # Disclosure: ▸ details / ▾ details. Click toggles every row's
+        # token sub-line. Keeps the default view scannable while making
+        # the cache-write / cache-read story one click away.
+        self._spend_details_open = False
+        self._spend_details_btn = QPushButton("▸ details")
+        self._spend_details_btn.setStyleSheet(_STYLE_DETAILS_DISCLOSURE)
+        self._spend_details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._spend_details_btn.clicked.connect(self._toggle_spend_details)
+        # Hidden until at least one row has data — empty SPEND
+        # showing "▸ details" against nothing reads as an orphan link.
+        self._spend_details_btn.hide()
+        layout.addWidget(self._spend_details_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
         return card
 
+    def _on_period_combo_changed(self, index: int) -> None:
+        """QComboBox handler — extract the period key stored on the item
+        and route through the legacy period-change path so existing
+        tests / refresh logic keep working."""
+        if 0 <= index < len(self._period_combo_items):
+            _label, key = self._period_combo_items[index]
+            self._on_period(key)
+
+    def _toggle_spend_details(self) -> None:
+        """Show / hide the per-model token sub-lines. The bar rows
+        themselves stay visible regardless — only the cache/in/out
+        detail line on each row toggles."""
+        self._spend_details_open = not self._spend_details_open
+        self._spend_details_btn.setText(
+            "▾ details" if self._spend_details_open else "▸ details"
+        )
+        for row in self._spend_bar_rows:
+            sub = getattr(row, "_spend_tokens", None)
+            if sub is None:
+                continue
+            # Don't override the row's own visibility — only flip the
+            # sub-line when its parent row is shown.
+            if row.isHidden():
+                sub.hide()
+                continue
+            sub.setVisible(self._spend_details_open)
+        # Panel may grow / shrink — re-anchor.
+        self.adjustSize()
+        self._position()
+
     def _build_spend_model_row(self) -> QWidget:
-        """One model row: name · bar · cost, plus a token sub-line.
+        """One model row: name · bar · cost · aggregate-tokens, plus a
+        hidden token detail sub-line.
+
+        Aggregate token count sits on the top line so the user can
+        compare model scale at a glance. The detailed in/out/cw/cr
+        breakdown lives on a sub-line below, hidden by default and
+        collectively toggled by the SPEND card's "▸ details" button.
 
         Proportional bar is a QFrame with a fixed-height colored child
         whose width is set as a percentage of the container. Width is
@@ -2916,12 +3136,12 @@ class ExpandedWindow(QWidget):
         row = QWidget()
         row.setStyleSheet("background: transparent;")
 
-        # Two-line vertical: top = name+bar+cost, bottom = token sub-line
+        # Two-line vertical: top = name+bar+cost+tokens, bottom = detail line
         v = QVBoxLayout(row)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(1)
 
-        # Top line: [name] [bar-area] [cost]
+        # Top line: [name] [bar-area] [cost] [aggregate-tokens]
         top = QHBoxLayout()
         top.setSpacing(6)
 
@@ -2953,18 +3173,33 @@ class ExpandedWindow(QWidget):
         cost_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         top.addWidget(cost_lbl)
 
+        # Aggregate token count to the right of cost. Dimmer than cost
+        # so the dollar number remains the dominant value on the row;
+        # tokens are the "scale context" answer ("how big was the
+        # workload that produced this $?").
+        agg_lbl = QLabel("")
+        agg_lbl.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        agg_lbl.setFixedWidth(78)
+        agg_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(agg_lbl)
+
         v.addLayout(top)
 
-        # Token sub-line: "in X · out Y · cw A · cr B" all on one row
-        # in dimmed colour. Cache portion is omitted when both cw/cr are 0.
+        # Token detail sub-line: "input X · output Y · cache write A ·
+        # cache read B" all on one row in dimmed colour. Cache portion
+        # is omitted when both cw/cr are 0. Hidden by default —
+        # toggled by the SPEND card's "▸ details" disclosure so the
+        # default density stays scannable.
         token_lbl = QLabel("")
         token_lbl.setStyleSheet("color: rgba(156,163,175, 0.6); font-size: 11px;")
+        token_lbl.hide()
         v.addWidget(token_lbl)
 
         # Store on the row widget for later access by _show_spend_row
         row._spend_name = name_lbl
         row._spend_bar_fill = bar_fill
         row._spend_cost = cost_lbl
+        row._spend_aggregate = agg_lbl
         row._spend_tokens = token_lbl
         row._spend_bar_track = bar_track
 
@@ -2972,7 +3207,20 @@ class ExpandedWindow(QWidget):
 
     def _refresh_spend_card(self) -> None:
         t = self._get_usage_totals(self._period)
-        self._spend_amount.setText(_fmt_money(t.cost_usd))
+        # Headline now combines $ and total tokens — the "$86 · 1.2M
+        # tokens" pair lets the user feel the cost-per-token signal
+        # (Opus-heavy days vs Haiku-heavy days look obviously different).
+        # Tokens are suppressed when the period has no spend at all.
+        total_tokens = (
+            t.input_tokens + t.output_tokens
+            + t.cache_creation_tokens + t.cache_read_tokens
+        )
+        if t.cost_usd > 0 and total_tokens > 0:
+            self._spend_amount.setText(
+                f"{_fmt_money(t.cost_usd)} · {_fmt_tokens(total_tokens)} tokens"
+            )
+        else:
+            self._spend_amount.setText(_fmt_money(t.cost_usd))
 
         # Per-model proportional bars. Only rendered when the wiring layer
         # provides get_totals_by_model. Falls silent for legacy tests.
@@ -2989,6 +3237,7 @@ class ExpandedWindow(QWidget):
                 rows = ()
             self._populate_spend_bars(rows, t.cost_usd)
             self._spend_bar_container.show()
+            self._spend_details_btn.show()
             # _show_spend_row already stored _bar_pct on each row.
             # Call _update_spend_bar_widths to set fill widths before the
             # first paint — otherwise bars are invisible (fill has 0 width
@@ -2996,6 +3245,7 @@ class ExpandedWindow(QWidget):
             self._update_spend_bar_widths()
         else:
             self._spend_bar_container.hide()
+            self._spend_details_btn.hide()
 
     def _populate_spend_bars(
         self, model_rows: "tuple[ModelTotals, ...]", total_cost: float
@@ -3094,14 +3344,29 @@ class ExpandedWindow(QWidget):
         # (e.g. "deepseek-v4-pro" → "deepseek-v4-…").
         name_lbl.setToolTip(full_name if full_name else label)
         cost_lbl.setText(_fmt_money(cost))
+
+        # Aggregate token count on the top line.
+        agg_lbl: QLabel | None = getattr(row, "_spend_aggregate", None)
+        total_tokens = tokens_in + tokens_out + cache_w + cache_r
+        if agg_lbl is not None:
+            agg_lbl.setText(f"{_fmt_tokens(total_tokens)} tokens")
+
+        # Detail sub-line — full breakdown with un-abbreviated terms
+        # (P3 polish: replaced "cw"/"cr" with "cache write"/"cache read"
+        # so the meaning is obvious without an external glossary).
         parts = [
-            f"in {_fmt_tokens(tokens_in)}",
-            f"out {_fmt_tokens(tokens_out)}",
+            f"input {_fmt_tokens(tokens_in)}",
+            f"output {_fmt_tokens(tokens_out)}",
         ]
         if cache_w or cache_r:
-            parts.append(f"cw {_fmt_tokens(cache_w)}")
-            parts.append(f"cr {_fmt_tokens(cache_r)}")
+            parts.append(f"cache write {_fmt_tokens(cache_w)}")
+            parts.append(f"cache read {_fmt_tokens(cache_r)}")
         token_lbl.setText("  " + " · ".join(parts))
+        # Visibility tracks the SPEND card's disclosure toggle, NOT the
+        # row's own visibility — _show_spend_row is called for each
+        # active row, and we always want the sub-line to obey the
+        # global open/closed state.
+        token_lbl.setVisible(getattr(self, "_spend_details_open", False))
         bar_fill.setStyleSheet(f"background: {color}; border-radius: 4px;")
         # Store on the row for resizeEvent to compute widths after layout
         row._bar_pct = pct
@@ -3385,9 +3650,27 @@ class ExpandedWindow(QWidget):
             self.hide()
 
     def _on_period(self, period: str) -> None:
+        """Switch the SPEND time window. Kept the legacy entry point so
+        existing tests that drive period changes via ``_on_period``
+        continue to work; the dropdown handler routes through here.
+
+        Sync the dropdown's selection to ``period`` so programmatic
+        callers (tests, future hotkey bindings) and the user's clicks
+        leave the visible state consistent.
+        """
         self._period = period
-        for key, btn in self._period_btns.items():
-            btn.setChecked(key == period)
+        combo = getattr(self, "_period_combo", None)
+        if combo is not None:
+            for idx, (_label, key) in enumerate(self._period_combo_items):
+                if key == period:
+                    if combo.currentIndex() != idx:
+                        # blockSignals so syncing the index doesn't
+                        # re-trigger _on_period_combo_changed → infinite
+                        # recursion via _on_period.
+                        combo.blockSignals(True)
+                        combo.setCurrentIndex(idx)
+                        combo.blockSignals(False)
+                    break
         self.refresh_usage_bar()
 
     # ------------------------------------------------------------------
@@ -3800,12 +4083,31 @@ class ExpandedWindow(QWidget):
 
         # Activity dot — green/yellow/grey based on freshness. Same
         # palette as the capsule so the user learns one mapping globally.
-        dot_color = _activity_color(session.last_activity)
+        # High-cost sessions take precedence: cumulative spend over the
+        # alert threshold flips the dot to a yellow ⚡ glyph regardless
+        # of recency, so the user can spot expensive sessions even
+        # after they've gone idle.
+        high_cost = (
+            details is not None and details.cost_usd >= _HIGH_COST_USD_THRESHOLD
+        )
+        dot_color = _DOT_YELLOW if high_cost else _activity_color(session.last_activity)
+        dot_glyph = "⚡" if high_cost else "●"
         dot_label = btn.findChild(QLabel, "dot_label")
         if dot_label is not None:
             target_style = _STYLE_DOT.format(color=dot_color)
             if dot_label.styleSheet() != target_style:
                 dot_label.setStyleSheet(target_style)
+            if dot_label.text() != dot_glyph:
+                dot_label.setText(dot_glyph)
+            # Tooltip explains the warning so the user understands why
+            # this one row's dot is different from neighbours.
+            if high_cost:
+                dot_label.setToolTip(
+                    f"High cumulative spend (${details.cost_usd:.0f}) — "
+                    "consider checking this session"
+                )
+            else:
+                dot_label.setToolTip("")
 
         name_label = btn.findChild(QLabel, "name_label")
         if name_label is not None and name_label.text() != title:

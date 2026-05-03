@@ -261,6 +261,10 @@ capsule = CapsuleWindow(
     # active. Reuse the same composer the panel rows use so the pill
     # picks up custom renames + ai-titles consistently.
     get_session_details=_build_session_details,
+    # Quota snapshot for the mini progress bar. Same closure pattern
+    # as expanded.refresh_usage_bar — reads the panel's selected
+    # provider so a tab click in the panel propagates to the pill.
+    get_quota_snapshot=_get_quota_snapshot,
 )
 expanded = ExpandedWindow(
     capsule=capsule,
@@ -331,9 +335,11 @@ file_watcher.start()
 
 # 60s heartbeat: tick the 5h reset countdown and pull a fresh quota
 # snapshot. QuotaProvider gates HTTP internally on its 300s TTL, so this
-# only issues a network call every 5 min.
+# only issues a network call every 5 min. The pill's mini quota bar
+# rides the same heartbeat — same data, same cadence, no extra timer.
 _usage_heartbeat = QTimer()
 _usage_heartbeat.timeout.connect(expanded.refresh_usage_bar)
+_usage_heartbeat.timeout.connect(capsule.refresh_quota)
 _usage_heartbeat.start(60_000)
 
 # UI first — capsule shows immediately. All process scanning happens
