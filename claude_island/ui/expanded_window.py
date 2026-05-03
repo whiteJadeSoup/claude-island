@@ -2552,8 +2552,10 @@ class ExpandedWindow(QWidget):
         Rows beyond the top-3 are hidden.
         """
         PALETTE = _MODEL_BAR_PALETTE
-        top = list(model_rows[:3])
-        remainder = model_rows[3:]
+        # Filter out models with zero cost — they shouldn't appear in the bar chart
+        non_zero = [m for m in model_rows if m.cost_usd > 0]
+        top = list(non_zero[:3])
+        remainder = non_zero[3:]
         has_others = len(remainder) > 0
 
         # Pre-compute widths
