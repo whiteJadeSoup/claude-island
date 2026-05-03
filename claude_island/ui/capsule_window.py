@@ -3,16 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable
 
-from PySide6.QtCore import (
-    QEasingCurve,
-    QPoint,
-    QPropertyAnimation,
-    Qt,
-)
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QApplication,
-    QGraphicsOpacityEffect,
     QLabel,
     QMenu,
     QWidget,
@@ -20,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from claude_island.core.models import QuotaSnapshot, Session, SessionDetails
 from .controller import IslandController
+from .expanded_window import _RowStatusGlyph
 
 # Two widths: normal (no quota mini-bar) vs warning (quota mini-bar
 # appended on the right). Switching between them happens on every
@@ -59,26 +54,16 @@ _QUOTA_CRITICAL_THRESHOLD = 90
 # the breathing animation off mid-burst.
 _ACTIVE_THRESHOLD_SECONDS = 30
 
-# Breathing animation parameters. Tuned more aggressively after user
-# feedback that the original 2.0 s / 0.55 floor cycle was too easy
-# to miss in peripheral vision. 1.2 s round-trip (0.6 in, 0.6 out)
-# + 0.2 floor make the pulse genuinely "alive" without crossing into
-# distracting strobe territory. 0.2 (not 0) keeps the dot just barely
-# visible at the dimmest point — going to 0 reads as "the dot
-# disappeared" which is wrong (the session is still there).
-_BREATH_PERIOD_MS = 1200
-_BREATH_OPACITY_FLOOR = 0.20
-_BREATH_OPACITY_PEAK = 1.0
+# (Breathing constants removed — the dot's pulse animation moved
+# inside _RowStatusGlyph and runs as the equalizer-bar wave there.
+# Capsule no longer owns a QPropertyAnimation directly.)
 
 _STYLE_LABEL = "color: white; font-size: 12px; font-family: 'Segoe UI', sans-serif;"
-# Dot colours: green when at least one session is active, neutral grey
-# when all idle. Matches the in-card status-dot semantics so the user
-# learns one mapping ("green = something is happening") globally.
-# Active dot uses a brighter, more saturated green + bumped font size
-# (16 vs 14) so the pulsing animation reads as a meaningful signal in
-# peripheral vision rather than as ambient noise.
-_STYLE_DOT_ACTIVE = "color: #22c55e; font-size: 16px; font-weight: bold;"
-_STYLE_DOT_IDLE = "color: #6b7280; font-size: 14px;"
+# Active = green equalizer bars; idle = static grey dot. Same colour
+# mapping the panel rows use, just rendered through _RowStatusGlyph
+# instead of a styled QLabel.
+_DOT_RUNNING_COLOR = "#22c55e"
+_DOT_IDLE_COLOR = "#6b7280"
 _BG_COLOR = QColor(18, 18, 18, 230)
 # Capsule background swap when quota crosses the critical threshold —
 # amber that reads "warning, not failure" against the dark text. The
@@ -167,35 +152,22 @@ class CapsuleWindow(QWidget):
 
         self._setup_window()
 
-        # Two labels rather than one so the "●" can pulse independently
-        # of the text. A QGraphicsOpacityEffect on the dot label is the
-        # cleanest way to animate just one part of the pill — animating
-        # the whole label would fade the text in/out, which is
-        # distracting when the user is trying to read the cost.
-        self._dot_label = QLabel("●", self)
-        self._dot_label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
-        )
-        self._dot_label.setStyleSheet(_STYLE_DOT_IDLE)
-        self._dot_opacity = QGraphicsOpacityEffect(self._dot_label)
-        self._dot_opacity.setOpacity(1.0)
-        self._dot_label.setGraphicsEffect(self._dot_opacity)
+        # Status glyph — same widget the panel rows use, dropped into
+        # the pill's left slot. Three states (idle/running/high-cost)
+        # but only idle + running fire here (high-cost reads as "not
+        # currently producing turns" from the capsule's perspective).
+        # When running, the equalizer bars wave; when idle, a single
+        # static dot. Running state previously was the dot's opacity
+        # pulse — same visual story, more obvious indicator.
+        self._dot_label = _RowStatusGlyph(self)
 
         self._label = QLabel("", self)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setStyleSheet(_STYLE_LABEL)
 
-        # Animation is created lazily-armed (target set up front, but
-        # the loop only starts when refresh_sessions detects an active
-        # session). Keeping a single instance avoids a leaking
-        # animation-per-tick pattern.
-        self._breath_anim = QPropertyAnimation(self._dot_opacity, b"opacity", self)
-        self._breath_anim.setDuration(_BREATH_PERIOD_MS)
-        self._breath_anim.setStartValue(_BREATH_OPACITY_PEAK)
-        self._breath_anim.setKeyValueAt(0.5, _BREATH_OPACITY_FLOOR)
-        self._breath_anim.setEndValue(_BREATH_OPACITY_PEAK)
-        self._breath_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-        self._breath_anim.setLoopCount(-1)
+        # is_breathing is the legacy attribute name for "is the
+        # equalizer currently animating" — kept so existing tests /
+        # callers reading capsule._is_breathing keep working.
         self._is_breathing = False
 
         controller.state_changed.connect(self._on_state_changed)
@@ -380,32 +352,40 @@ class CapsuleWindow(QWidget):
         return result
 
     def _refresh_active_state(self) -> None:
-        """Synchronise dot colour + breathing animation with whether
-        any session is currently active. Idempotent — safe to call from
-        every refresh tick; only restarts the animation on transitions."""
+        """Synchronise the equalizer glyph with whether any session is
+        currently active. Idempotent — set_state is a no-op when the
+        target state matches the current one, so safe to call every
+        refresh tick."""
         active = bool(self._active_sessions())
-        self._dot_label.setStyleSheet(
-            _STYLE_DOT_ACTIVE if active else _STYLE_DOT_IDLE
-        )
         if active:
-            self._start_breathing()
+            self._dot_label.set_state(
+                _RowStatusGlyph.STATE_RUNNING,
+                bar_color=_DOT_RUNNING_COLOR,
+            )
+            self._is_breathing = True
         else:
-            self._stop_breathing()
+            self._dot_label.set_state(
+                _RowStatusGlyph.STATE_IDLE,
+                dot_color=_DOT_IDLE_COLOR,
+            )
+            self._is_breathing = False
 
     def _start_breathing(self) -> None:
-        if self._is_breathing:
-            return
+        """Legacy alias kept for tests / external callers — drives
+        through the new glyph state machine."""
+        self._dot_label.set_state(
+            _RowStatusGlyph.STATE_RUNNING,
+            bar_color=_DOT_RUNNING_COLOR,
+        )
         self._is_breathing = True
-        self._breath_anim.start()
 
     def _stop_breathing(self) -> None:
-        if not self._is_breathing:
-            return
+        """Legacy alias kept for tests / external callers."""
+        self._dot_label.set_state(
+            _RowStatusGlyph.STATE_IDLE,
+            dot_color=_DOT_IDLE_COLOR,
+        )
         self._is_breathing = False
-        self._breath_anim.stop()
-        # Snap back to fully visible so the dot doesn't get stranded at
-        # 0.55 alpha after the animation cuts off mid-cycle.
-        self._dot_opacity.setOpacity(1.0)
 
     def refresh_sessions(self, sessions: object) -> None:
         """Called by bridge when sessions list changes (updates count label)."""

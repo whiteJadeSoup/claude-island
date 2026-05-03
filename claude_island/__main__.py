@@ -16,7 +16,33 @@ import sys
 from pathlib import Path
 
 from platformdirs import user_data_dir
+from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
+
+
+def _qt_message_filter(msg_type: QtMsgType, _ctx, message: str) -> None:
+    """Filter Qt's stylesheet-noise warnings out of stderr.
+
+    Qt prints "QFont::setPointSize: Point size <= 0 (-1)" any time a
+    stylesheet sets ``font-size`` in pixels (which we do extensively
+    for layout reasons — pt scaling at 1.5× DPI looks fuzzy). The
+    warning is harmless — Qt clamps the value internally — but it
+    spams stderr enough to drown out real diagnostics. Suppress it
+    while passing every other Qt log line through unchanged so we
+    don't accidentally mute something useful.
+    """
+    text = str(message) if message is not None else ""
+    suppressed_substrings = (
+        "QFont::setPointSize",
+        "This plugin does not support raise()",  # WindowsWindow noise
+    )
+    if any(s in text for s in suppressed_substrings):
+        return
+    # Forward everything else to stderr so genuine warnings still surface.
+    print(text, file=sys.stderr)
+
+
+qInstallMessageHandler(_qt_message_filter)
 
 # ---------------------------------------------------------------------------
 # Section 1: Core layer (no Qt, no OS APIs)

@@ -66,13 +66,17 @@ def controller_with_one_session():
 
 def test_text_omits_cost_when_no_getter(qtbot, controller_with_one_session):
     """Backwards-compat path — constructing without ``get_today_cost``
-    must keep the bare count text. Dot is rendered in a separate label,
-    so the text label itself does not carry the "●" glyph."""
+    must keep the bare count text. The dot/equalizer is rendered by
+    the sibling _RowStatusGlyph widget, so the text label itself
+    carries no glyph at all."""
     capsule = CapsuleWindow(controller_with_one_session)
     qtbot.addWidget(capsule)
     capsule._apply_capsule()  # force out of dot mode
     assert capsule._label.text() == "1 session"
-    assert capsule._dot_label.text() == "●"
+    # _dot_label is now a _RowStatusGlyph, not a QLabel — verify by
+    # state instead of text. Idle session ⇒ IDLE state.
+    from claude_island.ui.expanded_window import _RowStatusGlyph
+    assert capsule._dot_label.state() == _RowStatusGlyph.STATE_IDLE
 
 
 def test_text_omits_cost_when_zero(qtbot, controller_with_one_session):
@@ -273,9 +277,10 @@ def test_session_name_resolution_swallows_composer_exception(qtbot):
 
 
 def test_breathing_starts_when_any_session_active(qtbot):
-    """Active session present → animation running, dot styled green.
-    Idle baseline already covered indirectly elsewhere; this is the
-    positive-side assertion."""
+    """Active session present → glyph in RUNNING state (equalizer
+    bars). _is_breathing kept as a legacy alias for "is the running
+    animation on"."""
+    from claude_island.ui.expanded_window import _RowStatusGlyph
     sess = _session(ago_seconds=0)
     controller = IslandController()
     controller.on_sessions_updated([sess])
@@ -283,15 +288,12 @@ def test_breathing_starts_when_any_session_active(qtbot):
     qtbot.addWidget(capsule)
     capsule._apply_capsule()
     assert capsule._is_breathing is True
-    # Stylesheet flipped to green — substring check rather than exact
-    # equality so future colour tweaks don't break the test for the
-    # wrong reason.
-    assert "22c55e" in capsule._dot_label.styleSheet()
+    assert capsule._dot_label.state() == _RowStatusGlyph.STATE_RUNNING
 
 
 def test_breathing_stops_when_no_session_active(qtbot):
-    """All sessions idle → animation stopped, dot styled neutral, and
-    opacity snapped back to 1.0 so the dot doesn't get stranded mid-cycle."""
+    """All sessions idle → glyph back to IDLE state (static dot)."""
+    from claude_island.ui.expanded_window import _RowStatusGlyph
     sess = _session(ago_seconds=200)
     controller = IslandController()
     controller.on_sessions_updated([sess])
@@ -299,15 +301,15 @@ def test_breathing_stops_when_no_session_active(qtbot):
     qtbot.addWidget(capsule)
     capsule._apply_capsule()
     assert capsule._is_breathing is False
-    assert capsule._dot_opacity.opacity() == pytest.approx(1.0)
-    assert "6b7280" in capsule._dot_label.styleSheet()
+    assert capsule._dot_label.state() == _RowStatusGlyph.STATE_IDLE
 
 
 def test_breathing_transitions_on_session_activity(qtbot):
-    """Idle → active transition (a JSONL write lands) ⇒ breathing
-    starts. The reverse (active → idle) ⇒ breathing stops. Simulated
-    by mutating the controller's session list and re-driving the
-    refresh path the bridge would normally trigger."""
+    """Idle → active transition (a JSONL write lands) ⇒ glyph flips
+    to RUNNING. The reverse (active → idle) ⇒ glyph back to IDLE.
+    Simulated by mutating the controller's session list and
+    re-driving the refresh path the bridge would normally trigger."""
+    from claude_island.ui.expanded_window import _RowStatusGlyph
     idle = _session(ago_seconds=200)
     controller = IslandController()
     controller.on_sessions_updated([idle])
@@ -321,12 +323,13 @@ def test_breathing_transitions_on_session_activity(qtbot):
     controller.on_sessions_updated([replace(idle, last_activity=datetime.now(timezone.utc))])
     capsule.refresh_sessions(None)
     assert capsule._is_breathing is True
+    assert capsule._dot_label.state() == _RowStatusGlyph.STATE_RUNNING
 
     # Back to idle — timestamp older than threshold.
     controller.on_sessions_updated([replace(idle, last_activity=datetime.now(timezone.utc) - timedelta(seconds=200))])
     capsule.refresh_sessions(None)
     assert capsule._is_breathing is False
-    assert capsule._dot_opacity.opacity() == pytest.approx(1.0)
+    assert capsule._dot_label.state() == _RowStatusGlyph.STATE_IDLE
 
 
 def _quota_snap(pct: float) -> "QuotaSnapshot":

@@ -2238,9 +2238,10 @@ class TestSummaryCard:
 
 class TestHighCostRowAlert:
     def test_high_cost_dot_swaps_to_lightning(self, qtbot):
-        """A session whose cumulative cost exceeds the alert threshold
-        should switch the row's status glyph into HIGH_COST state
-        (renders as a yellow ⚡) so it stands out among normal rows."""
+        """An IDLE session whose cumulative cost exceeds the alert
+        threshold should switch the row's status glyph into HIGH_COST
+        state (yellow ⚡). Tested with ago_minutes=10 so the running-
+        path doesn't fire — that path is covered by the next test."""
         from claude_island.core.models import SessionDetails
         from claude_island.ui.expanded_window import _RowStatusGlyph
 
@@ -2262,10 +2263,49 @@ class TestHighCostRowAlert:
             get_session_details=details,
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
-        p.refresh_sessions([_session(1, "/a")])
+        p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
         glyph = p._rows[1]._status_glyph
         assert glyph.state() == _RowStatusGlyph.STATE_HIGH_COST
         assert "high cumulative spend" in glyph.toolTip().lower()
+
+    def test_running_high_cost_combines_signals(self, qtbot):
+        """A session that is BOTH running AND high-cost should show
+        the equalizer animation (running) tinted yellow (high-cost)
+        rather than a static ⚡ — the animation conveys "live" and
+        the colour conveys "expensive", stacked on the same glyph."""
+        from claude_island.core.models import SessionDetails
+        from claude_island.ui.expanded_window import (
+            _RowStatusGlyph, _DOT_YELLOW,
+        )
+
+        def details(session):
+            return SessionDetails(
+                session=session, name="x", ai_title=None, git_branch=None,
+                last_prompt=None, started_at=None, status="busy",
+                cc_version=None, cost_usd=132.0,
+                turn_count=10, sidechain_count=0,
+            )
+
+        capsule = QWidget(); capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule, controller=controller,
+            get_usage_totals=lambda period: __import__(
+                "claude_island.core.models", fromlist=["UsageTotals"]
+            ).UsageTotals(period=period),
+            get_session_details=details,
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        # status="busy" forces running regardless of last_activity.
+        p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
+        glyph = p._rows[1]._status_glyph
+        assert glyph.state() == _RowStatusGlyph.STATE_RUNNING
+        # Bar colour is the high-cost yellow, not the standard green.
+        assert glyph._bar_color == _DOT_YELLOW
+        # Tooltip names both signals so the user understands the combo.
+        tip = glyph.toolTip().lower()
+        assert "running" in tip
+        assert "high cumulative spend" in tip
 
     def test_low_cost_dot_keeps_default_glyph(self, qtbot):
         """Cost below threshold ⇒ glyph stays in IDLE state (single

@@ -518,6 +518,11 @@ class _RowStatusGlyph(QWidget):
         self.setFixedWidth(max(self._DEFAULT_W, 12))
         self._state = self.STATE_IDLE
         self._dot_color = _DOT_GRAY
+        # Bar colour for the RUNNING state. Defaults to the standard
+        # "live" green; callers can override (e.g. yellow when the
+        # session is also high-cost — see _update_row's combined
+        # running + high-cost branch).
+        self._bar_color = _DOT_RUNNING
         # Per-bar height fractions [0..1]. Updated by the animations.
         # Initial values are arbitrary — they're overwritten the moment
         # an animation tick fires.
@@ -544,8 +549,19 @@ class _RowStatusGlyph(QWidget):
             self.update()
         return _set
 
-    def set_state(self, state: str, *, dot_color: str | None = None) -> None:
+    def set_state(
+        self,
+        state: str,
+        *,
+        dot_color: str | None = None,
+        bar_color: str | None = None,
+    ) -> None:
         """Switch which of the three glyphs is rendered.
+
+        - ``dot_color`` only affects IDLE rendering (freshness colour).
+        - ``bar_color`` only affects RUNNING rendering (defaults to
+          live green, but callers can pass yellow for "running AND
+          high-cost" so both signals stack on the same widget).
 
         Idempotent — calling with the same state is a no-op so this
         is safe to call from every refresh tick. Only state
@@ -554,8 +570,10 @@ class _RowStatusGlyph(QWidget):
             state = self.STATE_IDLE
         if dot_color is not None:
             self._dot_color = dot_color
+        if bar_color is not None:
+            self._bar_color = bar_color
         if state == self._state:
-            self.update()  # picks up dot_color change even if state same
+            self.update()  # picks up colour changes even if state same
             return
         prev = self._state
         self._state = state
@@ -585,7 +603,7 @@ class _RowStatusGlyph(QWidget):
         cy = wgt_h // 2
 
         if self._state == self.STATE_RUNNING:
-            painter.setBrush(QColor(_DOT_RUNNING))
+            painter.setBrush(QColor(self._bar_color))
             # Draw the 3 bars centered horizontally + vertically. The
             # bars stretch from a centered baseline so the bounce
             # reads as "growing both up and down" rather than rising
@@ -4340,20 +4358,37 @@ class ExpandedWindow(QWidget):
             running = seconds_since < _ROW_ACTIVE_THRESHOLD_SECONDS
 
         # Drive the leftmost glyph — the equalizer / ⚡ / static-dot
-        # tri-state widget. high_cost beats running beats idle so a
-        # session that's both high-cost AND running shows the warning
-        # glyph (the user wants to see expensive sessions even more
-        # than they want to see live ones).
+        # tri-state widget.
+        #
+        # Combined-signal rule: when a session is BOTH running AND
+        # high-cost we still show the equalizer (running wins for
+        # animation), but in yellow so the warning colour overlays the
+        # liveness signal. The user's previous frustration was "I
+        # can't tell that the expensive session is also running" —
+        # static ⚡ alone hid the live state. Idle high-cost still
+        # gets the plain ⚡ glyph since there's no "live" signal to
+        # combine.
         glyph: _RowStatusGlyph | None = getattr(btn, "_status_glyph", None)
         if glyph is not None:
-            if high_cost:
+            if running and high_cost:
+                glyph.set_state(
+                    _RowStatusGlyph.STATE_RUNNING,
+                    bar_color=_DOT_YELLOW,
+                )
+                glyph.setToolTip(
+                    f"Running · high cumulative spend (${details.cost_usd:.0f})"
+                )
+            elif high_cost:
                 glyph.set_state(_RowStatusGlyph.STATE_HIGH_COST)
                 glyph.setToolTip(
                     f"High cumulative spend (${details.cost_usd:.0f}) — "
                     "consider checking this session"
                 )
             elif running:
-                glyph.set_state(_RowStatusGlyph.STATE_RUNNING)
+                glyph.set_state(
+                    _RowStatusGlyph.STATE_RUNNING,
+                    bar_color=_DOT_RUNNING,
+                )
                 glyph.setToolTip("Currently running — JSONL recently updated")
             else:
                 glyph.set_state(
