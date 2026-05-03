@@ -2647,9 +2647,19 @@ class ExpandedWindow(QWidget):
     def refresh_usage_bar(self, _: object = None) -> None:
         """Refresh both USAGE cards. Kept the legacy method name so the
         existing ``totals_changed`` signal wire-up in __main__.py
-        continues to fire this on every DB change."""
+        continues to fire this on every DB change.
+
+        Calls ``adjustSize`` after the refresh so the panel grows /
+        shrinks to match the new SPEND content (e.g. switching from
+        ``5H`` to ``Today`` adds rows for models the 5h window didn't
+        spend on). Without this call the panel kept its previous size
+        and Qt squeezed the sessions scroll area to make room — the
+        sessions section would visibly shrink when the user did
+        nothing but switch a SPEND tab."""
         self._refresh_spend_card()
         self._refresh_quota_card()
+        self.adjustSize()
+        self._position()
 
     def _on_manual_refresh(self) -> None:
         """User clicked the ↻ button. Force a quota fetch (bypassing
