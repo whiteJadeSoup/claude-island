@@ -351,6 +351,34 @@ def set_selected_provider(name: str) -> None:
     write_provider_config(cfg)
 
 
+def delete_provider_settings(name: str) -> None:
+    """Remove a provider's block from ``providers.json``.
+
+    Used by the right-click → Delete action on quota tabs. After this,
+    the provider's ``detect()`` will fall back to env-var-only checks
+    and (for token-required providers like MiniMax / Zhipu / DeepSeek)
+    return False, so the tab disappears from the strip on the next
+    ``_resolve_available_providers()`` call.
+
+    No-op when the file is missing, the provider entry doesn't exist,
+    or the providers map is malformed — the caller can invoke
+    unconditionally without checking. Atomic write via
+    :func:`write_provider_config`. Anthropic is intentionally not
+    special-cased here (the UI wires the menu only for non-anthropic
+    tabs); this function will happily remove any name handed to it.
+    """
+    cfg = read_provider_config()
+    providers = cfg.get("providers")
+    if not isinstance(providers, dict) or name not in providers:
+        return
+    providers.pop(name, None)
+    # If the deleted provider was the selected one, fall back to anthropic
+    # so the UI doesn't end up pointing at a removed tab on next launch.
+    if cfg.get("selected") == name:
+        cfg["selected"] = "anthropic"
+    write_provider_config(cfg)
+
+
 def set_provider_settings(name: str, fields: dict) -> None:
     """Merge ``fields`` into ``providers.json`` under ``providers[name]``.
 

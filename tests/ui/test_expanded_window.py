@@ -17,6 +17,7 @@ import pytest
 # Force offscreen for headless CI / local runs.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 
 from claude_island.core.models import Session, UsageTotals
@@ -1576,4 +1577,56 @@ class TestPlusButtonVisibility:
         # Drive the save handler directly with realistic args.
         panel._on_dialog_save("zhipu", {"auth_token": "k", "base_url": "https://api.z.ai"})
         assert writes == [("zhipu", {"auth_token": "k", "base_url": "https://api.z.ai"})]
+        assert refreshes == [1]
+
+
+class TestProviderTabContextMenu:
+    """Right-click on a non-anthropic quota tab → Delete option that
+    removes the provider's block from providers.json and triggers a
+    rebuild via the on_provider_config_changed callback."""
+
+    def test_anthropic_tab_has_no_context_menu(self, qtbot):
+        """Anthropic is the always-available baseline; the wiring layer
+        must not install a delete affordance on its pill."""
+        panel = _panel_with_providers(
+            qtbot, ["anthropic", "minimax"], "anthropic",
+            on_provider_config_changed=lambda: None,
+        )
+        anth_btn = panel._provider_btns["anthropic"]
+        assert anth_btn.contextMenuPolicy() != Qt.ContextMenuPolicy.CustomContextMenu
+
+    def test_non_anthropic_tab_has_custom_context_menu(self, qtbot):
+        """MiniMax / Zhipu tabs opt into custom context menus so the
+        Delete action can be wired."""
+        panel = _panel_with_providers(
+            qtbot, ["anthropic", "minimax"], "anthropic",
+            on_provider_config_changed=lambda: None,
+        )
+        mm_btn = panel._provider_btns["minimax"]
+        assert mm_btn.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
+
+    def test_context_menu_skipped_when_callback_not_wired(self, qtbot):
+        """Without on_provider_config_changed the rebuild can't happen,
+        so don't install the menu — would silently corrupt user state."""
+        panel = _panel_with_providers(qtbot, ["anthropic", "minimax"], "anthropic")
+        mm_btn = panel._provider_btns["minimax"]
+        assert mm_btn.contextMenuPolicy() != Qt.ContextMenuPolicy.CustomContextMenu
+
+    def test_delete_invokes_platform_helper_and_callback(self, qtbot, monkeypatch):
+        """Driving _on_delete_provider_clicked directly: it must call
+        delete_provider_settings(name) AND fire the rebuild callback
+        exactly once. Patch the SOURCE symbol because the handler uses
+        a function-local lazy import."""
+        deletes: list[str] = []
+        refreshes: list = []
+        monkeypatch.setattr(
+            "claude_island.platform_.providers.delete_provider_settings",
+            lambda name: deletes.append(name),
+        )
+        panel = _panel_with_providers(
+            qtbot, ["anthropic", "minimax"], "anthropic",
+            on_provider_config_changed=lambda: refreshes.append(1),
+        )
+        panel._on_delete_provider_clicked("minimax")
+        assert deletes == ["minimax"]
         assert refreshes == [1]

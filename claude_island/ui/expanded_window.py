@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -308,11 +309,20 @@ _GROUP_BG_PALETTE = (
 )
 
 
-def _group_bg_color(key: object) -> str:
-    """Stable hash from a group key to a palette colour. Identical
-    keys across refreshes produce the same colour, so the user's eye
-    keeps the same association after the panel reflows."""
-    return _GROUP_BG_PALETTE[hash(key) % len(_GROUP_BG_PALETTE)]
+def _group_bg_color(idx: int) -> str:
+    """Position-based palette assignment. Walking the visible groups
+    top-down and incrementing ``idx`` on each multi-session card
+    guarantees adjacent cards never collide on the same colour —
+    which a hash-based scheme couldn't promise (the previous
+    ``hash(key) % len`` mapping landed two distinct groups on the
+    same red tint when their hashes happened to mod-equal).
+
+    The position is stable as long as the session-sort order is
+    stable (it is — deterministic via ``_session_sort_key``), so
+    cards keep their colour across refreshes unless a group above
+    them appears / disappears. Worth the trade vs the previous
+    "absolutely stable but visually broken" hash."""
+    return _GROUP_BG_PALETTE[idx % len(_GROUP_BG_PALETTE)]
 
 
 class HoverRow(QPushButton):
@@ -749,7 +759,8 @@ def _fmt_model_label(model: str) -> str:
 
     Picks up the canonical family name (sonnet/haiku/opus) when the
     raw id contains it, otherwise truncates an unknown id so it
-    doesn't overflow the row.
+    doesn't overflow the row. Full id remains available via tooltip
+    on the row label so the truncation never hides information.
     """
     lower = (model or "").lower()
     for known in ("haiku", "sonnet", "opus"):
@@ -771,6 +782,11 @@ class _DisplayModelRow:
     truncated id), so multiple raw model ids that map to the same label
     (e.g. ``claude-opus-4-5`` and ``claude-opus-4-6``) get merged here
     rather than rendered as duplicate-looking rows.
+
+    ``full_models`` carries every raw API id that contributed to this
+    row so the UI can surface them via tooltip — important when the
+    label was truncated (``"deepseek-v4-…"``) or when an Anthropic row
+    spans multiple subversions (``"Opus"`` covering 4-5 / 4-6 / 4-7).
     """
     label: str
     cost_usd: float
@@ -778,6 +794,7 @@ class _DisplayModelRow:
     output_tokens: int
     cache_creation_tokens: int
     cache_read_tokens: int
+    full_models: tuple[str, ...] = ()
 
 
 def _aggregate_per_model_for_display(
@@ -805,12 +822,15 @@ def _aggregate_per_model_for_display(
         agg = buckets.setdefault(label, {
             "cost": 0.0,
             "in": 0, "out": 0, "cw": 0, "cr": 0,
+            "models": [],
         })
         agg["cost"] += m.cost_usd
         agg["in"]   += m.input_tokens
         agg["out"]  += m.output_tokens
         agg["cw"]   += m.cache_creation_tokens
         agg["cr"]   += m.cache_read_tokens
+        if m.model and m.model not in agg["models"]:
+            agg["models"].append(m.model)
     rows = [
         _DisplayModelRow(
             label=lbl,
@@ -819,6 +839,7 @@ def _aggregate_per_model_for_display(
             output_tokens=v["out"],
             cache_creation_tokens=v["cw"],
             cache_read_tokens=v["cr"],
+            full_models=tuple(v["models"]),
         )
         for lbl, v in buckets.items()
     ]
@@ -1400,6 +1421,12 @@ class SessionDetailPopup(QFrame):
         name.setStyleSheet("color: #e8e8e8; font-size: 12px;")
         name.setFixedWidth(60)
         name.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        # Tooltip carries every raw API id that contributed to this
+        # display label so users can see e.g. that "Opus" actually
+        # spans "claude-opus-4-7" + legacy "claude-opus-4-5", or that
+        # the truncated "deepseek-v4-…" is "deepseek-v4-pro" in full.
+        if r.full_models:
+            name.setToolTip("\n".join(r.full_models))
         top.addWidget(name)
 
         bar_track = QFrame()
@@ -1993,6 +2020,17 @@ class _AddProviderDialog(QFrame):
                     "padding: 4px 0 2px 0;"
                 )
                 help_lbl.setWordWrap(True)
+                # Anchor the wrap width so heightForWidth works the
+                # first time the form becomes visible. Without an
+                # explicit minimum the wrapped label reports a single-
+                # line sizeHint, the dialog adjusts to that, and the
+                # bottom of the help text gets clipped. _DIALOG_W less
+                # 2×16px outer margins is the actual usable width.
+                help_lbl.setMinimumWidth(self._DIALOG_W - 32)
+                help_lbl.setSizePolicy(
+                    QSizePolicy.Policy.Preferred,
+                    QSizePolicy.Policy.MinimumExpanding,
+                )
                 layout.addWidget(help_lbl)
 
         # Inputs: auth_token first (password), then any other string keys.
@@ -2033,7 +2071,14 @@ class _AddProviderDialog(QFrame):
         # Hide any stale error from the previous provider.
         if hasattr(self, "_status"):
             self._status.hide()
-        self.adjustSize()
+        # Defer adjustSize: a word-wrapped QLabel inside a just-shown
+        # form widget reports a 0-height sizeHint until the layout
+        # engine has run one pass with the new visibility. Calling
+        # adjustSize immediately captures the stale 0-height hint and
+        # the help text gets clipped on the bottom (visible as the
+        # "(api.z.ai, international)..." line being cut). singleShot(0)
+        # punts to the next event-loop tick, after layout settles.
+        QTimer.singleShot(0, self.adjustSize)
 
     def _on_save_clicked(self) -> None:
         if self._active is None:
@@ -2330,8 +2375,18 @@ class ExpandedWindow(QWidget):
         groups = _consecutive_groups(sorted_sessions)
 
         needed_pids: set[int] = set()
+        # Multi-card groups are coloured by their position in the visible
+        # list (not by hashing the group key). Walking with a counter
+        # guarantees adjacent multi-cards never share a tint. Singletons
+        # don't consume a palette slot.
+        multi_idx = 0
         for group in groups:
-            self._session_box.addWidget(self._make_group_widget(group))
+            palette_idx = multi_idx if len(group) > 1 else None
+            self._session_box.addWidget(
+                self._make_group_widget(group, palette_idx=palette_idx)
+            )
+            if palette_idx is not None:
+                multi_idx += 1
             for s in group:
                 needed_pids.add(s.pid)
 
@@ -2597,6 +2652,7 @@ class ExpandedWindow(QWidget):
                 cache_w=mt.cache_creation_tokens,
                 cache_r=mt.cache_read_tokens,
                 color=PALETTE[idx % len(PALETTE)],
+                full_name=mt.model,
             )
 
         # Others row (always last)
@@ -2625,6 +2681,7 @@ class ExpandedWindow(QWidget):
         color: str,
         cache_w: int = 0,
         cache_r: int = 0,
+        full_name: str | None = None,
     ) -> None:
         name_lbl: QLabel = row._spend_name
         bar_fill: QFrame = row._spend_bar_fill
@@ -2632,6 +2689,10 @@ class ExpandedWindow(QWidget):
         token_lbl: QLabel = row._spend_tokens
 
         name_lbl.setText(label)
+        # Tooltip carries the un-truncated model id so users can hover
+        # to see the full name when _fmt_model_label collapsed it
+        # (e.g. "deepseek-v4-pro" → "deepseek-v4-…").
+        name_lbl.setToolTip(full_name if full_name else label)
         cost_lbl.setText(_fmt_money(cost))
         parts = [
             f"in {_fmt_tokens(tokens_in)}",
@@ -2944,6 +3005,18 @@ class ExpandedWindow(QWidget):
                 btn.setStyleSheet(_STYLE_PERIOD_BTN)
                 btn.setChecked(name == self._selected_provider)
                 btn.clicked.connect(lambda _, n=name: self._on_provider_clicked(n))
+                # Right-click on non-Anthropic tabs offers Delete. Anthropic
+                # is the always-available baseline (reads OAuth from
+                # ~/.claude/.credentials.json), so deleting it would just
+                # leave the strip blank — don't even hint at the action.
+                # The wiring layer must be present (_on_provider_config_changed)
+                # for the rebuild after delete to take effect; tests that
+                # construct a panel without it skip the menu entirely.
+                if name != "anthropic" and self._on_provider_config_changed is not None:
+                    btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                    btn.customContextMenuRequested.connect(
+                        lambda pos, n=name, b=btn: self._show_provider_context_menu(n, b, pos)
+                    )
                 layout.addWidget(btn)
                 self._provider_btns[name] = btn
             self._quota_hdr.setText("QUOTA")
@@ -3049,6 +3122,43 @@ class ExpandedWindow(QWidget):
         via :meth:`set_available_providers`."""
         from claude_island.platform_.providers import set_provider_settings
         set_provider_settings(name, fields)
+        if self._on_provider_config_changed is not None:
+            try:
+                self._on_provider_config_changed()
+            except Exception as exc:
+                import sys as _sys
+                print(f"[claude-island] provider-config-changed callback failed: {exc}",
+                      file=_sys.stderr)
+
+    def _show_provider_context_menu(
+        self, name: str, anchor: QPushButton, pos: object
+    ) -> None:
+        """Pop a context menu under the right-clicked provider tab.
+
+        Currently a single Delete action — keeps the menu tiny for
+        what's effectively a one-click affordance. ``pos`` is the
+        local-coordinate QPoint from the customContextMenuRequested
+        signal; we map it through the anchor button so the menu
+        appears under the cursor on a multi-monitor setup.
+        """
+        menu = QMenu(self)
+        delete_action = menu.addAction(f"Delete {name.capitalize()}")
+        delete_action.triggered.connect(
+            lambda _checked=False, n=name: self._on_delete_provider_clicked(n)
+        )
+        menu.exec(anchor.mapToGlobal(pos))
+
+    def _on_delete_provider_clicked(self, name: str) -> None:
+        """Wipe the provider's block from providers.json and rebuild
+        the tab strip via the same callback the add-dialog uses.
+
+        Anthropic is filtered out at the call site (``_build_provider_tab_strip``
+        only wires the menu for non-anthropic tabs), so this method
+        doesn't re-check — keeping the guard in one place avoids the
+        "is anthropic deletable?" rule drifting out of sync between
+        the wiring and the action."""
+        from claude_island.platform_.providers import delete_provider_settings
+        delete_provider_settings(name)
         if self._on_provider_config_changed is not None:
             try:
                 self._on_provider_config_changed()
@@ -3176,24 +3286,30 @@ class ExpandedWindow(QWidget):
     # Card composition (PR2: same-tab grouping)
     # ------------------------------------------------------------------
 
-    def _make_group_widget(self, group: list[Session]) -> QWidget:
+    def _make_group_widget(
+        self, group: list[Session], *, palette_idx: int | None = None
+    ) -> QWidget:
         """One group → one widget. Single-session groups render as a
         standalone rounded button; multi-session groups render as a
-        rounded card with flat internal rows + thin separators."""
+        rounded card with flat internal rows + thin separators.
+
+        ``palette_idx`` is supplied by the caller (it counts multi-card
+        position) so adjacent multi-cards never collide on tint.
+        Singletons ignore it."""
         if len(group) == 1:
             row = self._get_or_create_row(group[0], group, in_card=False, card=None)
             row.setParent(None)  # detach from any prior parent
             return row
-        return self._make_multi_card(group)
+        return self._make_multi_card(group, palette_idx=palette_idx or 0)
 
-    def _make_multi_card(self, sessions: list[Session]) -> QFrame:
+    def _make_multi_card(self, sessions: list[Session], *, palette_idx: int = 0) -> QFrame:
         card = QFrame()
         card.setObjectName("group_card")
-        # Per-group hue tint: hash the (window_handle, project_path)
-        # group key so grouped cards in the list are visually distinct.
-        # Stable across refreshes (same key → same palette index).
-        key = _group_key(sessions[0])
-        bg = _group_bg_color(key) if key is not None else _BG_GROUP
+        # Per-group hue tint indexed by visible position so adjacent
+        # multi-cards always differ. The previous hash-based mapping
+        # landed two unrelated groups on the same red tint when hashes
+        # happened to collide mod 6.
+        bg = _group_bg_color(palette_idx)
         card._base_bg = bg
         card.setStyleSheet(
             f"QFrame#group_card {{ background: {bg}; border-radius: 8px; }}"

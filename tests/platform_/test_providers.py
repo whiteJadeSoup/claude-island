@@ -868,3 +868,63 @@ class TestSetProviderSettings:
         assert block["auth_token"] == "new"
         # base_url survives — only the touched key was replaced.
         assert block["base_url"] == "https://custom"
+
+
+class TestDeleteProviderSettings:
+    """delete_provider_settings — drives the right-click → Delete
+    action on quota tabs. Anthropic is non-deletable per UI policy
+    (the wiring layer skips menu setup for it), but this function
+    is policy-agnostic and will remove any name handed to it."""
+
+    def test_removes_named_provider_block(self, tmp_path):
+        from claude_island.platform_.providers import (
+            read_provider_config, write_provider_config, delete_provider_settings,
+        )
+        path = tmp_path / "providers.json"
+        write_provider_config({
+            "selected": "anthropic",
+            "providers": {
+                "minimax": {"auth_token": "m"},
+                "zhipu":   {"auth_token": "z"},
+            },
+        }, path)
+        with patch("claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path):
+            delete_provider_settings("zhipu")
+        cfg = read_provider_config(path)
+        # zhipu gone, minimax untouched.
+        assert "zhipu" not in cfg["providers"]
+        assert cfg["providers"]["minimax"]["auth_token"] == "m"
+        # selected untouched (it wasn't pointing at zhipu).
+        assert cfg["selected"] == "anthropic"
+
+    def test_resets_selected_when_deleting_active_provider(self, tmp_path):
+        """If you delete the currently-selected provider, the
+        ``selected`` pointer falls back to anthropic so the next
+        launch doesn't open a tab for a removed provider."""
+        from claude_island.platform_.providers import (
+            read_provider_config, write_provider_config, delete_provider_settings,
+        )
+        path = tmp_path / "providers.json"
+        write_provider_config({
+            "selected": "minimax",
+            "providers": {"minimax": {"auth_token": "m"}},
+        }, path)
+        with patch("claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path):
+            delete_provider_settings("minimax")
+        cfg = read_provider_config(path)
+        assert cfg["selected"] == "anthropic"
+        assert "minimax" not in cfg["providers"]
+
+    def test_noop_when_provider_missing(self, tmp_path):
+        """Calling delete on a name that isn't configured is a no-op,
+        so the right-click handler can call unconditionally without
+        re-reading the config."""
+        from claude_island.platform_.providers import (
+            read_provider_config, write_provider_config, delete_provider_settings,
+        )
+        path = tmp_path / "providers.json"
+        original = {"selected": "anthropic", "providers": {"minimax": {"auth_token": "m"}}}
+        write_provider_config(original, path)
+        with patch("claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path):
+            delete_provider_settings("zhipu")  # never configured
+        assert read_provider_config(path) == original
