@@ -98,6 +98,12 @@ from claude_island.platform_.session_discovery import SessionDiscovery
 from claude_island.platform_ import session_state as session_state_reader
 from claude_island.platform_ import session_names as session_names_store
 from claude_island.platform_.window_activator import WindowActivator
+# PR1: TerminalAdapter + OsBackend + AppBackend → dispatcher (data path only;
+# UI action_requested wiring lands in PR2).
+from claude_island.platform_.app_backend import LocalAppBackend
+from claude_island.platform_.dispatcher import TerminalDispatcher
+from claude_island.platform_.terminals import build_registry
+from claude_island.platform_.os import get_os_backend
 
 process_scanner = ProcessScanner()
 file_watcher = FileWatcher()
@@ -106,7 +112,20 @@ session_discovery = SessionDiscovery(
     scanner=process_scanner,
     registry=session_registry,
 )
-# ProviderEngine auto-detects the active provider (Anthropic / MiniMax)
+# PR1: three-port dispatcher (groups sessions via adapter chain; dispatches
+# UI actions by scope. The data path (group_sessions) is injected into the
+# Snapshotter below. The control path (dispatch) is connected to
+# expanded.action_requested in PR2.
+_app_backend = LocalAppBackend(
+    names_store=session_names_store,
+    claude_projects_dir=_CLAUDE_PROJECTS,
+    on_change=lambda: snapshotter.wake() if "snapshotter" in globals() else None,
+)
+_dispatcher = TerminalDispatcher(
+    terminals=build_registry(),
+    os_backend=get_os_backend(),
+    app_backend=_app_backend,
+)
 # and dispatches to the right quota API. Each provider manages its own
 # cache; the engine just calls get() and force_refresh().
 quota_engine = ProviderEngine(
@@ -414,6 +433,7 @@ snapshotter = Snapshotter(
         expanded.selected_provider_name() if "expanded" in globals() else _selected_provider
     ),
     publish=_world_marshaler.snap_ready.emit,
+    group_sessions=_dispatcher.group_sessions,
     debounce_window_s=0.1,
     throttle_first_window_s=0.2,
 )

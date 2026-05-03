@@ -47,6 +47,7 @@ from reactivex.disposable import Disposable
 from reactivex.scheduler import EventLoopScheduler
 from reactivex.subject import BehaviorSubject, Subject
 
+from .capabilities import Capability, FocusGranularity
 from .models import QuotaSnapshot, Session
 
 log = logging.getLogger(__name__)
@@ -89,13 +90,33 @@ class SessionView:
     is_high_cost: bool              # == (cost_usd >= HIGH_COST_USD_THRESHOLD)
     latest_model: str | None        # None when no records yet
     status_word: str | None         # raw "busy" / "idle" / "waiting" / None
-    window_handle: int | None       # passthrough from Session
+    window_handle: int | None       # passthrough from Session (legacy; PR2 will drop)
     # The original Session object the view was composed from. Carried
     # along so UI callbacks that accept a Session (e.g. WindowActivator,
     # the row's _siblings list) don't need to reconstruct one. Frozen
     # like everything else here — once the snapshot is built, the
     # ``session`` reference is stable for the lifetime of the snapshot.
     session: Session
+    # ── Capability framework fields (PR1 added; PR2 makes UI consume) ──
+    # Frozen set of capabilities the user can trigger on this view.
+    # Computed at group time = (terminal adapter caps for this view) ∪
+    # (os backend caps) ∪ (app backend caps). UI checks membership to
+    # decide which buttons to render; dispatcher uses it as a defensive
+    # gate before routing.
+    capabilities: frozenset[Capability] = frozenset()
+    # How precise the FOCUS capability gets for this view. APP means
+    # "best we can do is raise the host application"; PANE means we
+    # can land directly on the right split. Only meaningful when
+    # FOCUS ∈ capabilities. Defaults to APP for backward-compat with
+    # any code path that constructs SessionView without an adapter.
+    focus_granularity: FocusGranularity = FocusGranularity.APP
+    # Opaque token identifying which TerminalAdapter created this view.
+    # The dispatcher uses it to look up the adapter when dispatching
+    # TERMINAL-scope capabilities. UI MUST NOT parse this string — its
+    # value is internal to the platform layer (e.g. "windows-terminal",
+    # "iterm2", "generic-mac"). Empty default for backward-compat with
+    # legacy construction; PR2 makes adapters always populate it.
+    adapter_id: str = ""
 
     def __post_init__(self) -> None:
         # Self-consistency invariant — guards against the UI and the
@@ -104,6 +125,32 @@ class SessionView:
             f"SessionView invariant violated: cost_usd={self.cost_usd}, "
             f"is_high_cost={self.is_high_cost}"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionGroup:
+    """A group of SessionViews that should render as one card.
+
+    Grouping is decided by the TerminalAdapter that emitted these
+    views (e.g. "all sessions in the same WT window" or "all sessions
+    in the same iTerm2 tab"). UI just renders one card per group,
+    iterating ``views`` for inner rows. UI never decides grouping.
+
+    group_id: Adapter-internal stable id (e.g. ``f"wt:{wt_hwnd}"`` or
+        ``f"iterm:{window_id}:{tab_id}"``). Stable across snapshots so
+        UI can keep DOM-equivalent identity (Qt widget reuse, fade
+        animations) when the same group reappears.
+    title_hint: Optional human-readable hint the adapter wants the UI
+        to display as the card title (None ⇒ UI picks its own — e.g.
+        first view's project basename).
+    adapter_id: The terminal adapter that owns this group. Same value
+        as every contained view's ``adapter_id``.
+    views: Non-empty tuple of SessionViews in this group.
+    """
+    group_id: str
+    title_hint: str | None
+    adapter_id: str
+    views: tuple[SessionView, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +175,13 @@ class WorldSnapshot:
     available_providers: tuple[str, ...]
     selected_provider: str | None
     fetched_at: datetime
+    # ── PR1 additive field — UI consumes in PR2 ──
+    # Pre-grouped by the TerminalDispatcher's adapter chain. Currently
+    # populated alongside ``sessions`` (which is a flat sort of every
+    # view across all groups). After PR2 the UI switches to consuming
+    # ``session_groups`` directly, ``sessions`` field is removed, and
+    # the grouping logic in the UI layer is deleted.
+    session_groups: tuple["SessionGroup", ...] = ()
 
     @classmethod
     def empty(cls) -> "WorldSnapshot":
@@ -141,6 +195,7 @@ class WorldSnapshot:
             available_providers=(),
             selected_provider=None,
             fetched_at=datetime.fromtimestamp(0, tz=timezone.utc),
+            session_groups=(),
         )
 
     def render_key(self) -> tuple:
@@ -155,13 +210,19 @@ class WorldSnapshot:
         ``fetched_at`` → defeats deduplication.
 
         ``fetched_at`` stays on the snapshot for debug / telemetry —
-        we just don't let it influence whether the UI re-renders."""
+        we just don't let it influence whether the UI re-renders.
+
+        Includes ``session_groups`` as well as ``sessions`` so that a
+        regrouping (same flat session list, different bucketing) is
+        treated as a real change and triggers re-render — important
+        once UI starts consuming groups in PR2."""
         return (
             self.sessions,
             self.today_cost_usd,
             self.quota,
             self.available_providers,
             self.selected_provider,
+            self.session_groups,
         )
 
 
@@ -260,6 +321,37 @@ class _UsageRegistryProto(Protocol):
 
 class _NamesStoreProto(Protocol):
     def get_session_name(self, uuid: str) -> str | None: ...
+
+
+# Callable signature for the platform-side grouping function. Snapshotter
+# accepts an instance and invokes it on every build to convert the flat
+# sessions list into pre-grouped SessionGroups. Default implementation
+# (``_default_group_sessions``) emits one group per session, matching
+# pre-PR1 behaviour where the UI did its own grouping by window_handle.
+# Production wires in ``TerminalDispatcher.group_sessions`` from the
+# platform layer, which routes through the adapter chain.
+class _GroupSessionsProto(Protocol):
+    def __call__(self, views: list["SessionView"]) -> list["SessionGroup"]: ...
+
+
+def _default_group_sessions(views: list["SessionView"]) -> list["SessionGroup"]:
+    """Fallback grouping: one SessionGroup per view, with empty
+    adapter_id and no title hint.
+
+    Used when no real grouper is injected (most tests, and the boot
+    sequence before ``__main__`` builds the dispatcher). The output
+    is structurally valid — UI consuming session_groups in PR2 will
+    render each as a singleton card. Capabilities on the views are
+    untouched (whatever the view came in with stays)."""
+    return [
+        SessionGroup(
+            group_id=f"singleton:{v.pid}",
+            title_hint=None,
+            adapter_id=v.adapter_id,
+            views=(v,),
+        )
+        for v in views
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +623,7 @@ class Snapshotter:
         get_available_providers: Callable[[], list[str]],
         get_selected_provider: Callable[[], str | None],
         publish: Callable[[WorldSnapshot], None],
+        group_sessions: _GroupSessionsProto = _default_group_sessions,
         debounce_window_s: float = 0.1,
         throttle_first_window_s: float = 0.2,
     ) -> None:
@@ -552,6 +645,12 @@ class Snapshotter:
         self._get_available_providers = get_available_providers
         self._get_selected_provider = get_selected_provider
         self._publish = publish
+        # Injected platform-side grouping. Default produces one
+        # singleton group per view so tests don't need to wire a
+        # dispatcher; production injects ``TerminalDispatcher.group_sessions``
+        # from __main__.py to get real adapter-driven grouping +
+        # capability merging.
+        self._group_sessions = group_sessions
         self._debounce_window_s = debounce_window_s
         self._throttle_first_window_s = throttle_first_window_s
 
@@ -691,6 +790,21 @@ class Snapshotter:
 
         views.sort(key=_session_sort_key)
 
+        # PR1 dual-emit: build SessionGroups via the injected grouper
+        # alongside the flat `sessions` field. UI keeps consuming
+        # `sessions` until PR2 swaps it to `session_groups`. If the
+        # grouper raises (bug in an adapter, etc.), fall back to the
+        # default singleton grouping so `session_groups` is always at
+        # least structurally valid — never propagate a grouper failure
+        # up to the publish path.
+        try:
+            groups = list(self._group_sessions(views))
+        except Exception:
+            log.exception(
+                "group_sessions raised; using singleton fallback grouping"
+            )
+            groups = _default_group_sessions(views)
+
         try:
             today_totals = self._usage_registry.get_totals("today")
             today_cost = float(today_totals.cost_usd)
@@ -723,6 +837,7 @@ class Snapshotter:
             available_providers=available,
             selected_provider=selected,
             fetched_at=datetime.now(timezone.utc),
+            session_groups=tuple(groups),
         )
 
     def _safe_list_sessions(self) -> list[Session]:
