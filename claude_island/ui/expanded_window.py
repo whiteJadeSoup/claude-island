@@ -3086,18 +3086,16 @@ class ExpandedWindow(QWidget):
         self._spend_bar_container.hide()
         layout.addWidget(self._spend_bar_container)
 
-        # Disclosure: ▸ details / ▾ details. Click toggles every row's
-        # token sub-line. Keeps the default view scannable while making
-        # the cache-write / cache-read story one click away.
-        self._spend_details_open = False
-        self._spend_details_btn = QPushButton("▸ details")
-        self._spend_details_btn.setStyleSheet(_STYLE_DETAILS_DISCLOSURE)
-        self._spend_details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._spend_details_btn.clicked.connect(self._toggle_spend_details)
-        # Hidden until at least one row has data — empty SPEND
-        # showing "▸ details" against nothing reads as an orphan link.
-        self._spend_details_btn.hide()
-        layout.addWidget(self._spend_details_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        # No ▸ details disclosure here on purpose — the previous
+        # toggle made the panel grow taller (and on some systems the
+        # token sub-line briefly forced a width recalc), and the user
+        # explicitly asked for the SPEND card to keep a stable size
+        # across all interactions. Per-row breakdowns now live as a
+        # tooltip on the bar row — hover to see "input X · output Y
+        # · cache w A · cache r B" without a single pixel of layout
+        # movement. The same data is also available on right-click of
+        # the corresponding session row in the SessionDetailPopup.
+        self._spend_details_open = False  # kept for legacy callers
 
         return card
 
@@ -3109,41 +3107,14 @@ class ExpandedWindow(QWidget):
             _label, key = self._period_combo_items[index]
             self._on_period(key)
 
-    def _toggle_spend_details(self) -> None:
-        """Show / hide the per-model token sub-lines. The bar rows
-        themselves stay visible regardless — only the cache/in/out
-        detail line on each row toggles.
-
-        No ``adjustSize`` / ``_position`` here on purpose: those calls
-        recompute the panel geometry and re-anchor to the capsule,
-        which made the whole panel (and any subsequent content below)
-        appear to "jump" on every toggle. Qt's layout system already
-        handles vertical reflow when child widgets toggle visibility —
-        the panel grows downward without disturbing its top-left
-        anchor, which is the visual we want."""
-        self._spend_details_open = not self._spend_details_open
-        self._spend_details_btn.setText(
-            "▾ details" if self._spend_details_open else "▸ details"
-        )
-        for row in self._spend_bar_rows:
-            sub = getattr(row, "_spend_tokens", None)
-            if sub is None:
-                continue
-            # Don't override the row's own visibility — only flip the
-            # sub-line when its parent row is shown.
-            if row.isHidden():
-                sub.hide()
-                continue
-            sub.setVisible(self._spend_details_open)
-
     def _build_spend_model_row(self) -> QWidget:
-        """One model row: name · bar · cost · aggregate-tokens, plus a
-        hidden token detail sub-line.
+        """One model row: name · bar · cost · aggregate-tokens.
 
-        Aggregate token count sits on the top line so the user can
-        compare model scale at a glance. The detailed in/out/cw/cr
-        breakdown lives on a sub-line below, hidden by default and
-        collectively toggled by the SPEND card's "▸ details" button.
+        The detailed in/out/cw/cr breakdown is exposed as a tooltip on
+        the row (hover to read) rather than an inline expandable
+        sub-line — the disclosure pattern was making the panel grow /
+        shrink on every click, which the user explicitly rejected.
+        Tooltip keeps the data accessible without any layout impact.
 
         Proportional bar is a QFrame with a fixed-height colored child
         whose width is set as a percentage of the container. Width is
@@ -3206,34 +3177,16 @@ class ExpandedWindow(QWidget):
 
         v.addLayout(top)
 
-        # Token detail sub-line: "input X · output Y · cache write A ·
-        # cache read B" all on one row in dimmed colour. Cache portion
-        # is omitted when both cw/cr are 0. Hidden by default —
-        # toggled by the SPEND card's "▸ details" disclosure so the
-        # default density stays scannable.
-        # Word-wrap on so the full-term spelling ("cache write" / "cache
-        # read") doesn't get clipped at narrow panel widths — the line
-        # naturally flows to a second row when needed instead of losing
-        # the tail of "cache read N" off the right edge.
-        # NO setSizePolicy(Expanding, …) here: that combination with
-        # wordWrap=True makes Qt compute a minimumSizeHint of the
-        # full unwrapped string width, which the panel layout then
-        # propagates upward as a 480 px minimum and conflicts with
-        # the panel's setFixedWidth(_PANEL_W=320). Default policy
-        # (Preferred horizontal) lets the label honour the parent's
-        # width and wrap accordingly.
-        token_lbl = QLabel("")
-        token_lbl.setStyleSheet("color: rgba(156,163,175, 0.6); font-size: 11px;")
-        token_lbl.setWordWrap(True)
-        token_lbl.hide()
-        v.addWidget(token_lbl)
-
-        # Store on the row widget for later access by _show_spend_row
+        # Store on the row widget for later access by _show_spend_row.
+        # _spend_tokens kept as None — legacy attribute slot; the
+        # detail line moved to a row tooltip in the no-layout-change
+        # redesign. Future code that wants the breakdown should set
+        # row.setToolTip(...) via _show_spend_row instead.
         row._spend_name = name_lbl
         row._spend_bar_fill = bar_fill
         row._spend_cost = cost_lbl
         row._spend_aggregate = agg_lbl
-        row._spend_tokens = token_lbl
+        row._spend_tokens = None
         row._spend_bar_track = bar_track
 
         return row
@@ -3270,7 +3223,6 @@ class ExpandedWindow(QWidget):
                 rows = ()
             self._populate_spend_bars(rows, t.cost_usd)
             self._spend_bar_container.show()
-            self._spend_details_btn.show()
             # _show_spend_row already stored _bar_pct on each row.
             # Call _update_spend_bar_widths to set fill widths before the
             # first paint — otherwise bars are invisible (fill has 0 width
@@ -3278,7 +3230,6 @@ class ExpandedWindow(QWidget):
             self._update_spend_bar_widths()
         else:
             self._spend_bar_container.hide()
-            self._spend_details_btn.hide()
 
     def _populate_spend_bars(
         self, model_rows: "tuple[ModelTotals, ...]", total_cost: float
@@ -3369,12 +3320,11 @@ class ExpandedWindow(QWidget):
         name_lbl: QLabel = row._spend_name
         bar_fill: QFrame = row._spend_bar_fill
         cost_lbl: QLabel = row._spend_cost
-        token_lbl: QLabel = row._spend_tokens
 
         name_lbl.setText(label)
-        # Tooltip carries the un-truncated model id so users can hover
-        # to see the full name when _fmt_model_label collapsed it
-        # (e.g. "deepseek-v4-pro" → "deepseek-v4-…").
+        # Tooltip on the name carries the un-truncated model id so users
+        # can hover to see the full name when _fmt_model_label collapsed
+        # it (e.g. "deepseek-v4-pro" → "deepseek-v4-…").
         name_lbl.setToolTip(full_name if full_name else label)
         cost_lbl.setText(_fmt_money(cost))
 
@@ -3386,12 +3336,12 @@ class ExpandedWindow(QWidget):
         if agg_lbl is not None:
             agg_lbl.setText(_fmt_tokens(total_tokens))
 
-        # Detail sub-line — compact "cache w/r" form per user feedback:
-        # "cache write"/"cache read" was readable but pushed the line
-        # past the 320 px panel width and triggered word-wrap +
-        # layout-conflict warnings. "cache w"/"cache r" keeps the
-        # word "cache" so the meaning is still obvious (much better
-        # than the legacy bare "cw"/"cr") while fitting on one line.
+        # Detail breakdown is exposed as a row-level tooltip — hover
+        # to see "input X · output Y · cache w A · cache r B" without
+        # any layout impact. Replaces the previous inline disclosure
+        # which forced the panel to grow / shrink on every click.
+        # Cache portion is omitted when both write and read are 0 so
+        # the tooltip stays scannable for non-cache models.
         parts = [
             f"input {_fmt_tokens(tokens_in)}",
             f"output {_fmt_tokens(tokens_out)}",
@@ -3399,12 +3349,8 @@ class ExpandedWindow(QWidget):
         if cache_w or cache_r:
             parts.append(f"cache w {_fmt_tokens(cache_w)}")
             parts.append(f"cache r {_fmt_tokens(cache_r)}")
-        token_lbl.setText("  " + " · ".join(parts))
-        # Visibility tracks the SPEND card's disclosure toggle, NOT the
-        # row's own visibility — _show_spend_row is called for each
-        # active row, and we always want the sub-line to obey the
-        # global open/closed state.
-        token_lbl.setVisible(getattr(self, "_spend_details_open", False))
+        row.setToolTip(" · ".join(parts))
+
         bar_fill.setStyleSheet(f"background: {color}; border-radius: 4px;")
         # Store on the row for resizeEvent to compute widths after layout
         row._bar_pct = pct
@@ -3511,9 +3457,20 @@ class ExpandedWindow(QWidget):
         self._quota_row_week = row_week
         layout.addWidget(row_week)
 
-        # Compact Weekly status — single line, no bar. Format:
-        # "Weekly 57% used · resets 1h 11m". Filled by
-        # _refresh_quota_card; hidden when no quota snapshot.
+        # Compact 5h + Weekly status lines. Same single-line format as
+        # the Weekly inline ("5h 49% used · resets 3h 12m"). 5h is
+        # also surfaced in the top summary card with a bigger bar; the
+        # inline copy here keeps the QUOTA section readable as a
+        # standalone "current rate-limit health" panel without making
+        # the user dart their eyes back up to the headline. Both hide
+        # when no quota snapshot.
+        self._quota_5h_inline = QLabel("")
+        self._quota_5h_inline.setStyleSheet(
+            "color: #c9c9c9; font-size: 11px;"
+        )
+        self._quota_5h_inline.hide()
+        layout.addWidget(self._quota_5h_inline)
+
         self._quota_weekly_inline = QLabel("")
         self._quota_weekly_inline.setStyleSheet(
             "color: #c9c9c9; font-size: 11px;"
@@ -3551,6 +3508,7 @@ class ExpandedWindow(QWidget):
             # Skip updating the 5h row widgets — that row is hidden
             # under the new summary-card design (5h lives there now).
             self._hide_quota_row(self._quota_bar_week, self._quota_pct_week, self._quota_reset_week)
+            self._quota_5h_inline.hide()
             self._quota_weekly_inline.hide()
             self._show_quota_unavailable_hint()
             return
@@ -3577,18 +3535,28 @@ class ExpandedWindow(QWidget):
             resets_at=snap.seven_day_resets_at,
             stale=snap.is_stale,
         )
-        weekly_pct = max(0, min(100, int(round(snap.seven_day_pct))))
+        # 5h inline — same compact format the Weekly line uses.
+        # Threshold colour rebuilt per refresh so the line tracks state.
+        five_pct = max(0, min(100, int(round(snap.five_hour_pct))))
         stale_marker = " ⚠" if snap.is_stale else ""
+        five_color = _quota_color(five_pct, stale=snap.is_stale)
+        five_reset = _fmt_reset(snap.five_hour_resets_at)
+        self._quota_5h_inline.setStyleSheet(
+            f"color: {five_color}; font-size: 11px;"
+        )
+        self._quota_5h_inline.setText(
+            f"5h     {five_pct}% used{stale_marker} · resets {five_reset}"
+        )
+        self._quota_5h_inline.show()
+
+        weekly_pct = max(0, min(100, int(round(snap.seven_day_pct))))
         weekly_color = _quota_color(weekly_pct, stale=snap.is_stale)
-        reset_text = _fmt_reset(snap.seven_day_resets_at)
-        # Stylesheet is rebuilt per refresh so the colour tracks the
-        # threshold (green/amber/red/grey-stale) without an extra
-        # state machine.
+        weekly_reset = _fmt_reset(snap.seven_day_resets_at)
         self._quota_weekly_inline.setStyleSheet(
             f"color: {weekly_color}; font-size: 11px;"
         )
         self._quota_weekly_inline.setText(
-            f"Weekly {weekly_pct}% used{stale_marker} · resets {reset_text}"
+            f"Weekly {weekly_pct}% used{stale_marker} · resets {weekly_reset}"
         )
         self._quota_weekly_inline.show()
 

@@ -130,16 +130,22 @@ def _resolve_available_providers() -> list[str]:
 
 
 def _on_provider_tab_clicked(name: str) -> None:
-    """User clicked a provider tab. Persist the choice — the next
-    refresh tick will pick up the new selection.
+    """User clicked a provider tab. Persist the choice and immediately
+    re-render the summary + cards so the new provider's quota lands
+    on screen without waiting for the next 60 s heartbeat.
 
-    No force_refresh here: that would block the UI thread on a 3 s
-    HTTP timeout per click. The provider's disk cache (5 min TTL) and
-    the engine's in-memory cache (90 s TTL) make tab switches
-    essentially instant from the user's perspective. The manual ↻
-    button still exists for cases where the user wants to force a
-    network fetch."""
+    No ``force_refresh`` here: that would block the UI thread on a
+    3 s HTTP timeout per click. The provider's disk cache (5 min TTL)
+    and the engine's in-memory cache (90 s TTL) make tab switches
+    essentially instant from the user's perspective — calling
+    refresh_usage_bar just re-reads the cached snapshot for the new
+    provider. The manual ↻ button still exists for cases where the
+    user wants to force a network fetch."""
     set_selected_provider(name)
+    if "expanded" in globals():
+        expanded.refresh_usage_bar()
+    if "capsule" in globals():
+        capsule.refresh_quota()
 
 
 _available_providers = _resolve_available_providers()
