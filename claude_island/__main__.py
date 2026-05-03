@@ -418,18 +418,50 @@ snapshotter = Snapshotter(
     throttle_first_window_s=0.2,
 )
 
+def _safe_render(target_name: str, render_fn):
+    """Wrap a render callable so an exception inside render() is logged
+    but never propagates upstream as ``on_error``.
+
+    Why this matters: reactivex's contract is that once ``on_error``
+    fires, the subscription terminates and no future ``on_next`` will
+    reach the subscriber. After Phase G that subscription is the UI's
+    sole rendering input — one render-time bug = capsule (or panel)
+    permanently frozen until restart, while everything else still
+    runs. Catching inside ``on_next`` keeps the stream alive: the
+    next snap that comes through gets another chance to render.
+    """
+    def _safe(snap):
+        try:
+            render_fn(snap)
+        except Exception as exc:
+            print(
+                f"[claude-island] {target_name}.render(snap) raised "
+                f"(stream preserved): {exc}",
+                file=sys.stderr,
+            )
+    return _safe
+
+
 # UI subscription pipelines: distinct_until_changed against render_key
 # (excludes fetched_at) so periodic ticks producing identical data don't
 # trigger no-op re-renders. observe_on is NOT needed — world.push runs
 # on the Qt main thread (because WorldMarshaler.QueuedConnection
 # guarantees that), so subscribers fire on the main thread by default.
+#
+# render() is wrapped in _safe_render so a render-time exception is
+# logged but the subscription stays alive — Rx's on_error would
+# otherwise terminate the stream on the first failure and leave the
+# UI permanently frozen. on_error is still wired as a backstop for
+# upstream pipeline failures (which terminate regardless), but render
+# bugs no longer reach it.
 _capsule_subscription = (
     world.observable()
     .pipe(ops.distinct_until_changed(key_mapper=lambda s: s.render_key()))
     .subscribe(
-        on_next=capsule.render,
+        on_next=_safe_render("capsule", capsule.render),
         on_error=lambda e: print(
-            f"[claude-island] capsule render pipeline died: {e}", file=sys.stderr
+            f"[claude-island] capsule pipeline died (upstream error): {e}",
+            file=sys.stderr,
         ),
     )
 )
@@ -437,9 +469,10 @@ _expanded_subscription = (
     world.observable()
     .pipe(ops.distinct_until_changed(key_mapper=lambda s: s.render_key()))
     .subscribe(
-        on_next=expanded.render,
+        on_next=_safe_render("expanded", expanded.render),
         on_error=lambda e: print(
-            f"[claude-island] expanded render pipeline died: {e}", file=sys.stderr
+            f"[claude-island] expanded pipeline died (upstream error): {e}",
+            file=sys.stderr,
         ),
     )
 )

@@ -385,3 +385,71 @@ class TestExpandedRender:
         panel.render(_snap(sessions=(v,)))
         # Cached row reused — same widget instance survives across renders.
         assert panel._rows[99] is before
+
+
+class TestDistinctUntilChangedDedup:
+    """Verifies the wiring-layer ``distinct_until_changed(key_mapper=
+    render_key)`` actually skips no-op snapshots.
+
+    Without the key_mapper or with a buggy render_key (e.g. one that
+    accidentally includes ``fetched_at``), the UI would re-render on
+    every Snapshotter tick (every ~2 s and every wake), wasting CPU
+    and visibly flickering. This test catches that regression."""
+
+    def test_two_renders_with_same_data_share_render_key(self):
+        """The contract: distinct_until_changed compares render_key()
+        not full equality, so identical data with different fetched_at
+        timestamps dedupe correctly."""
+        from datetime import datetime, timezone, timedelta
+        v = _view(pid=1, name="alpha")
+        snap_a = WorldSnapshot(
+            sessions=(v,), today_cost_usd=5.0, quota=None,
+            available_providers=("anthropic",), selected_provider="anthropic",
+            fetched_at=datetime.now(timezone.utc),
+        )
+        snap_b = WorldSnapshot(
+            sessions=(v,), today_cost_usd=5.0, quota=None,
+            available_providers=("anthropic",), selected_provider="anthropic",
+            fetched_at=datetime.now(timezone.utc) + timedelta(seconds=10),
+        )
+        # render_key skips fetched_at → equal
+        assert snap_a.render_key() == snap_b.render_key()
+        # but full __eq__ differs → confirms render_key is doing real work
+        assert snap_a != snap_b
+
+    def test_distinct_until_changed_skips_renders_for_equal_render_key(self, qtbot):
+        """End-to-end: subscribe through the same pipe the wiring layer
+        uses. Push two snaps with identical render_key — render fires
+        only once."""
+        import reactivex.operators as ops
+        from claude_island.core.snapshot import world
+
+        renders: list[WorldSnapshot] = []
+        sub = (
+            world.observable()
+            .pipe(ops.distinct_until_changed(key_mapper=lambda s: s.render_key()))
+            .subscribe(on_next=renders.append)
+        )
+        try:
+            from datetime import datetime, timezone, timedelta
+            v = _view(pid=1)
+            snap_a = WorldSnapshot(
+                sessions=(v,), today_cost_usd=5.0, quota=None,
+                available_providers=(), selected_provider=None,
+                fetched_at=datetime.now(timezone.utc),
+            )
+            snap_b = WorldSnapshot(
+                sessions=(v,), today_cost_usd=5.0, quota=None,
+                available_providers=(), selected_provider=None,
+                fetched_at=datetime.now(timezone.utc) + timedelta(seconds=10),
+            )
+            baseline = len(renders)
+            world.push(snap_a)
+            world.push(snap_b)  # same render_key → must dedupe
+            assert len(renders) == baseline + 1, (
+                f"distinct_until_changed failed to dedupe: "
+                f"got {len(renders) - baseline} renders for two snaps "
+                f"with identical render_key"
+            )
+        finally:
+            sub.dispose()

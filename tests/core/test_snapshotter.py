@@ -496,3 +496,147 @@ class TestSnapshotterLifecycle:
             assert len(received) == 1  # only the post-start wake
         finally:
             snap.stop()
+
+    def test_publish_runs_on_worker_thread_not_main(self):
+        """Tightens the threading contract: ``publish`` is invoked on
+        the EventLoopScheduler's worker thread, NOT on the caller's
+        thread. The wiring layer relies on this — its WorldMarshaler
+        emits a Qt Signal with QueuedConnection; if publish ever ran
+        on the main thread by accident the QueuedConnection becomes
+        a same-thread DirectConnection and the marshaling guarantee
+        silently disappears.
+
+        Asserts the ident captured by publish differs from the test's
+        thread ident. Fails fast if a future refactor moves the build
+        path to a synchronous code path."""
+        main_id = threading.get_ident()
+        ident_holder: list[int] = []
+
+        def capture(_snap):
+            ident_holder.append(threading.get_ident())
+
+        snap, _ = _make_snapshotter(publish=capture, debounce_window_s=0.05)
+        snap.start()
+        try:
+            snap.wake()
+            time.sleep(0.2)
+            assert len(ident_holder) == 1
+            assert ident_holder[0] != main_id, (
+                f"publish ran on main thread (id={main_id}) — "
+                f"WorldMarshaler's QueuedConnection guarantee broken"
+            )
+        finally:
+            snap.stop()
+
+    def test_stop_waits_for_in_flight_build(self):
+        """``stop()`` must not return while a build is mid-iteration.
+        Acquiring the build lock inside ``_do_build`` and inside
+        ``stop`` serialises them; this test verifies ``stop`` blocks
+        until the build is done by injecting a slow build."""
+        import threading as _threading
+
+        build_in_progress = _threading.Event()
+        let_build_finish = _threading.Event()
+        build_finished = _threading.Event()
+
+        class SlowSource:
+            @property
+            def sessions(self):
+                build_in_progress.set()
+                # Block until the test releases us — simulates a slow
+                # IO-bound build (e.g. SQLite query, network fetch).
+                let_build_finish.wait(timeout=2.0)
+                return []
+
+        def publish(snap):
+            build_finished.set()
+
+        from claude_island.core.snapshot import Snapshotter
+        snap = Snapshotter(
+            session_source=SlowSource(),
+            state_reader=FakeStateReader(),
+            metadata_provider=FakeMetadataProvider(),
+            usage_registry=FakeUsageRegistry(),
+            names_store=FakeNamesStore(),
+            get_quota=lambda: None,
+            get_available_providers=lambda: [],
+            get_selected_provider=lambda: None,
+            publish=publish,
+            debounce_window_s=0.0,
+            throttle_first_window_s=0.0,
+        )
+        snap.start()
+        snap.wake()
+        # Wait until build has started (worker thread blocked inside
+        # SlowSource.sessions).
+        assert build_in_progress.wait(timeout=2.0), "build never started"
+
+        # Run stop in a thread; it should block on the build_lock.
+        stop_returned = _threading.Event()
+
+        def call_stop():
+            snap.stop()
+            stop_returned.set()
+
+        stop_thread = _threading.Thread(target=call_stop)
+        stop_thread.start()
+
+        # Stop should NOT return while build is in-flight.
+        assert not stop_returned.wait(timeout=0.2), (
+            "stop() returned while build was still mid-iteration — "
+            "_build_lock not acquired by either side"
+        )
+
+        # Release the build; stop should now complete.
+        let_build_finish.set()
+        assert stop_returned.wait(timeout=2.0), "stop() never returned"
+        # And the build's publish call did happen (proving the build
+        # ran to completion before stop's dispose ran).
+        assert build_finished.is_set()
+
+        stop_thread.join(timeout=1.0)
+
+
+class TestEndToEndPublishToRender:
+    """End-to-end: Snapshotter(publish=marshaler.snap_ready.emit) →
+    WorldMarshaler → world.push → render. Verifies the production
+    threading chain produces a render call on the Qt main thread.
+
+    Lives in test_snapshotter.py rather than test_world_marshaler.py
+    because the entry point is Snapshotter — verifying the whole
+    pipeline at once catches integration bugs neither layer's unit
+    tests would surface."""
+
+    def test_full_chain_renders_on_qt_main_thread(self, qtbot):
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from claude_island.core.snapshot import world
+        from claude_island.ui.world_marshaler import WorldMarshaler
+
+        marshaler = WorldMarshaler()
+        main_id = threading.get_ident()
+        idents: list[int] = []
+        world.observable().subscribe(
+            lambda _snap: idents.append(threading.get_ident())
+        )
+        baseline = len(idents)  # initial empty replay landed on main
+
+        snap, _ = _make_snapshotter(
+            publish=marshaler.snap_ready.emit,
+            debounce_window_s=0.05,
+        )
+        snap.start()
+        try:
+            snap.wake()
+            qtbot.wait(300)  # allow build + queued render
+            new_renders = idents[baseline:]
+            assert len(new_renders) >= 1, (
+                f"render never reached the world subscriber; "
+                f"baseline={baseline}, idents={idents}"
+            )
+            for ident in new_renders:
+                assert ident == main_id, (
+                    f"render landed on thread {ident}, expected main {main_id}"
+                )
+        finally:
+            snap.stop()

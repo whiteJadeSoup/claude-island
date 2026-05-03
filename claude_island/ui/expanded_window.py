@@ -1423,43 +1423,42 @@ def _fmt_money(amount: float) -> str:
 # pythonw, sandboxed shells, non-Windows) are always rendered standalone
 # so they don't accidentally collapse together.
 
-def _group_key(s: Session) -> tuple[int, str] | None:
-    if s.window_handle is None:
-        return None
-    return (s.window_handle, _normalize_project_path(s.project_path))
+# _normalize_project_path / _session_sort_key now live in
+# core/snapshot.py — UI panel and capsule must agree on the sort
+# order, so the rule lives once at the snapshot boundary. Both helpers
+# below are thin Session-level adapters that call into the
+# SessionView-level canonical version by constructing a stub view.
+
+from claude_island.core.snapshot import (
+    _normalize_project_path as _snapshot_normalize,
+    _session_sort_key as _snapshot_sort_key,
+)
 
 
 def _normalize_project_path(path) -> str:
-    """Collapse Claude Code worktree paths back to their parent project.
+    """Adapter — delegates to the canonical core/snapshot helper."""
+    return _snapshot_normalize(path)
 
-    Claude Code creates per-feature git worktrees under
-    ``<repo>/.claude/worktrees/<branch-name>``. Users routinely run
-    one claude session in the main repo and another in a worktree,
-    side-by-side as split panes in the same WT tab. With raw cwds the
-    grouping heuristic sees two different paths and fails to merge
-    them. Normalising the worktree back to the repo root restores the
-    "same tab" grouping (and, downstream, lets the activator find a
-    sibling whose console title IS in the WT TabItem set, fixing
-    click-to-switch on the inactive worktree pane).
 
-    Non-worktree paths pass through unchanged.
-    """
-    parts = path.parts
-    for i in range(len(parts) - 1):
-        if parts[i] == ".claude" and parts[i + 1] == "worktrees":
-            return str(Path(*parts[:i]))
-    return str(path)
+def _group_key(s: Session) -> tuple[int, str] | None:
+    """``None`` when the session has no window_handle and so cannot
+    join a group; otherwise (window_handle, normalised cwd)."""
+    if s.window_handle is None:
+        return None
+    return (s.window_handle, _snapshot_normalize(s.project_path))
 
 
 def _session_sort_key(s: Session) -> tuple:
-    """Sort sessions so that members of the same group are adjacent.
-    Ungroupable sessions (window_handle=None) sort to the end and stay
-    in pid order so their position is stable across refreshes."""
-    key = _group_key(s)
-    if key is None:
+    """Sort key for the panel's session list. Identical to
+    ``snapshot._session_sort_key`` but takes a Session (not
+    SessionView) — used by ``_render_sessions`` whose input is the
+    Session list extracted from snap.sessions. The two functions
+    intentionally produce the same order so capsule (consumes
+    snap.sessions in snap order) and panel rows agree visually.
+    """
+    if s.window_handle is None:
         return (1, 0, "", s.pid)
-    wt, path = key
-    return (0, wt, path, s.pid)
+    return (0, s.window_handle, _snapshot_normalize(s.project_path), s.pid)
 
 
 def _consecutive_groups(sessions: list[Session]) -> list[list[Session]]:

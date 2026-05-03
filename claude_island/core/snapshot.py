@@ -428,16 +428,57 @@ def _degraded_view(session: Session) -> SessionView:
     )
 
 
-def _session_sort_key(view: SessionView) -> tuple:
-    """Stable sort key for sessions tuple in WorldSnapshot.
+def _normalize_project_path(path: Path) -> str:
+    """Collapse Claude Code worktree paths back to their parent project.
 
-    Sort order matters: it determines visual order in the panel. Same
-    composite key the panel used previously: group by window_handle
-    first (so split panes of the same WT window cluster), then by
-    project_path, then pid (deterministic tie-break)."""
+    Claude Code creates per-feature git worktrees under
+    ``<repo>/.claude/worktrees/<branch-name>``. Users routinely run
+    one claude session in the main repo and another in a worktree,
+    side-by-side as split panes in the same WT tab. With raw cwds the
+    grouping heuristic sees two different paths and fails to merge
+    them. Normalising the worktree back to the repo root restores the
+    "same tab" grouping (and, downstream, lets the activator find a
+    sibling whose console title IS in the WT TabItem set, fixing
+    click-to-switch on the inactive worktree pane).
+
+    Non-worktree paths pass through unchanged.
+
+    Lives in core/ rather than ui/ because the canonical sort order is
+    a property of the WorldSnapshot — the UI panel and the capsule
+    must agree on order, so the rule lives once at the snapshot
+    boundary instead of being duplicated.
+    """
+    parts = path.parts
+    for i in range(len(parts) - 1):
+        if parts[i] == ".claude" and parts[i + 1] == "worktrees":
+            return str(Path(*parts[:i]))
+    return str(path)
+
+
+def _session_sort_key(view: SessionView) -> tuple:
+    """Canonical sort key for snap.sessions.
+
+    Order rule (matches what the panel used to compute itself before
+    Phase G2):
+
+      * Sessions WITH a window_handle group together first, sorted by
+        (window_handle, normalised_project_path, pid). Adjacent rows
+        share a (handle, path) so the panel's group-card collapse
+        finds them in one consecutive block.
+      * Sessions WITHOUT a window_handle (None — pythonw, sandboxed
+        shells, non-Windows) sort to the END as standalone rows, in
+        pid order for stability.
+
+    The (0/1) prefix groups "with handle" before "no handle" — flipping
+    the prefix for the no-handle case is the trick that puts them last
+    while keeping a single tuple comparison.
+    """
+    if view.window_handle is None:
+        return (1, 0, "", view.pid)
     return (
-        view.window_handle if view.window_handle is not None else 0,
-        str(view.project_path),
+        0,
+        view.window_handle,
+        _normalize_project_path(view.project_path),
         view.pid,
     )
 
@@ -489,10 +530,19 @@ class Snapshotter:
         get_quota: Callable[[], QuotaSnapshot | None],
         get_available_providers: Callable[[], list[str]],
         get_selected_provider: Callable[[], str | None],
-        publish: Callable[[WorldSnapshot], None] = world.push,
+        publish: Callable[[WorldSnapshot], None],
         debounce_window_s: float = 0.1,
         throttle_first_window_s: float = 0.2,
     ) -> None:
+        # ``publish`` is required and keyword-only — it must NEVER
+        # default to ``world.push``. The whole point of the
+        # WorldMarshaler shim is to ensure subscribers (capsule.render,
+        # expanded.render) fire on the Qt main thread; defaulting to
+        # ``world.push`` would silently route _do_build's worker-thread
+        # call straight into the BehaviorSubject's synchronous
+        # dispatch, and the next Qt widget mutation would crash.
+        # Tests must pass a thread-safe callable (e.g. ``received.append``).
+        # Production passes ``WorldMarshaler.snap_ready.emit``.
         self._session_source = session_source
         self._state_reader = state_reader
         self._metadata_provider = metadata_provider
@@ -508,6 +558,15 @@ class Snapshotter:
         self._wake_signal: Subject[None] = Subject()
         self._scheduler: EventLoopScheduler | None = None
         self._wake_subscription: abc.DisposableBase | None = None
+        # Acquired by ``_do_build`` for the duration of one build, and
+        # by ``stop`` to wait for any in-flight build to complete
+        # before disposing the scheduler. Without this, ``stop`` could
+        # return while ``_do_build`` is mid-iteration over the registries
+        # — fine today (everything is in-memory) but a hard crash the
+        # moment a closeable resource (SQLite conn, network socket) is
+        # added to the build path.
+        import threading
+        self._build_lock = threading.Lock()
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -515,17 +574,29 @@ class Snapshotter:
         """Spin up the worker scheduler and subscribe the wake pipeline.
 
         Idempotent — second call is a no-op so it's safe to invoke from
-        more than one wiring path."""
+        more than one wiring path.
+
+        Pipeline:
+          ``ops.observe_on(scheduler)``  ← funnel all upstream emits
+              from arbitrary threads onto the worker thread BEFORE any
+              stateful operator sees them. wake() can fire from the
+              Qt main thread (QTimer / tab clicks), the scanner worker
+              thread (sessions_changed) and the file-watcher thread
+              (totals_changed); without observe_on first, debounce's
+              internal cancellable / has_value state would mutate from
+              all three threads concurrently.
+          ``ops.debounce(window)``       ← coalesce burst of wakes
+          ``ops.throttle_first(cap)``    ← upper-bound build rate
+              (only chained when window > 0; reactivex raises on 0)
+          ``→ _do_build()`` on the scheduler thread
+        """
         if self._scheduler is not None:
             return
         self._scheduler = EventLoopScheduler()
-        # Pipeline:
-        #   wake events → debounce(window) → [optional throttle_first]
-        #               → call _do_build on scheduler thread
-        # throttle_first(0) raises in reactivex, so we only chain it
-        # when a positive cap window was configured. Tests that want
-        # the simpler debounce-only behaviour pass 0 here.
-        operators = [ops.debounce(self._debounce_window_s, scheduler=self._scheduler)]
+        operators = [
+            ops.observe_on(self._scheduler),
+            ops.debounce(self._debounce_window_s, scheduler=self._scheduler),
+        ]
         if self._throttle_first_window_s > 0:
             operators.append(
                 ops.throttle_first(
@@ -539,14 +610,25 @@ class Snapshotter:
         )
 
     def stop(self) -> None:
-        """Tear down: dispose subscription, dispose scheduler (stops
-        worker thread). Idempotent."""
+        """Tear down: dispose subscription, wait for any in-flight
+        build, then dispose the scheduler (stops the worker thread).
+        Idempotent.
+
+        Acquiring ``_build_lock`` blocks until ``_do_build`` (if
+        currently mid-iteration) returns. This prevents the worker
+        from holding references to soon-to-close registry resources
+        when a future iteration adds them — today everything is
+        in-memory and the worst case is "publish a stale snapshot
+        once during shutdown", but the contract should be tight
+        before we add any closeable resource to the build path."""
         if self._wake_subscription is not None:
             self._wake_subscription.dispose()
             self._wake_subscription = None
-        if self._scheduler is not None:
-            self._scheduler.dispose()
-            self._scheduler = None
+        # Wait for in-flight build before disposing the scheduler.
+        with self._build_lock:
+            if self._scheduler is not None:
+                self._scheduler.dispose()
+                self._scheduler = None
 
     # -- public API ---------------------------------------------------------
 
@@ -569,16 +651,21 @@ class Snapshotter:
 
     def _do_build(self) -> None:
         """Build + publish, with top-level exception suppression so a
-        bad source can't take down the worker pipeline."""
-        try:
-            snap = self._build_snapshot()
-        except Exception:
-            log.exception("snapshot build failed; previous snapshot preserved")
-            return
-        try:
-            self._publish(snap)
-        except Exception:
-            log.exception("snapshot publish failed")
+        bad source can't take down the worker pipeline.
+
+        Holds ``_build_lock`` for the full build-and-publish — paired
+        with the same lock acquired by ``stop()`` so a teardown waits
+        for in-flight builds to finish before disposing the scheduler."""
+        with self._build_lock:
+            try:
+                snap = self._build_snapshot()
+            except Exception:
+                log.exception("snapshot build failed; previous snapshot preserved")
+                return
+            try:
+                self._publish(snap)
+            except Exception:
+                log.exception("snapshot publish failed")
 
     def _build_snapshot(self) -> WorldSnapshot:
         sessions_raw = self._safe_list_sessions()
