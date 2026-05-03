@@ -2486,4 +2486,35 @@ class TestRowStatusGlyph:
         g.set_state(_RowStatusGlyph.STATE_IDLE, dot_color="#facc15")
         assert g._dot_color == "#facc15"
 
+    def test_idle_visible_default_true(self, qtbot):
+        """Default constructor leaves the IDLE-state dot visible —
+        capsule pill needs the slot to never read empty."""
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = _RowStatusGlyph()
+        qtbot.addWidget(g)
+        assert g._idle_visible is True
+
+    def test_set_idle_visible_false(self, qtbot):
+        """Row mode toggles IDLE dot off — paintEvent's IDLE branch
+        becomes a no-op so the leftmost slot stays empty unless the
+        glyph transitions to RUNNING. Widget keeps its 12 px width
+        either way so the row layout doesn't shift."""
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = _RowStatusGlyph()
+        qtbot.addWidget(g)
+        g.set_idle_visible(False)
+        assert g._idle_visible is False
+        # Width is the layout-alignment contract — must stay constant
+        # regardless of idle visibility.
+        assert g.width() >= _RowStatusGlyph._MIN_SLOT_W
+
+    def test_row_glyph_starts_with_idle_invisible(self, qtbot, panel):
+        """The panel rows opt in to "scheme 2" by calling
+        set_idle_visible(False) at construction time — the only
+        sessions with anything painted in the leftmost slot are the
+        ones that are currently running."""
+        panel.refresh_sessions([_session(1, "/a", ago_minutes=10)])
+        glyph = panel._rows[1]._status_glyph
+        assert glyph._idle_visible is False
+
 

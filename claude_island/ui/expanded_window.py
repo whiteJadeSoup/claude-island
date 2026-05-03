@@ -534,6 +534,14 @@ class _RowStatusGlyph(QWidget):
         self._dot_color = _DOT_GRAY
         # Bar colour for the RUNNING state.
         self._bar_color = _DOT_RUNNING
+        # Whether to paint anything at all in IDLE state. True → draw
+        # the static dot (capsule pill needs SOMETHING in this slot
+        # so the pill never looks empty when no session is active).
+        # False → IDLE state is a no-op paint (row mode — idle rows
+        # leave the leftmost slot visually empty so RUNNING rows
+        # stand out by being the only rows with anything there;
+        # widget is still 12 px wide so layout stays aligned).
+        self._idle_visible = True
         # Single "phase" 0..1 drives all bars — paintEvent computes
         # each bar's height from a sin() of (phase + bar_offset). One
         # animation, N bars; the wave traveling across is just sin
@@ -609,6 +617,20 @@ class _RowStatusGlyph(QWidget):
         """Currently-displayed state (one of STATE_*)."""
         return self._state
 
+    def set_idle_visible(self, visible: bool) -> None:
+        """Toggle whether the IDLE state paints anything.
+
+        Default True (capsule pill needs the dot so the slot never
+        reads empty). Pass False from the panel rows so an idle row's
+        leftmost slot stays visually empty — that way RUNNING rows
+        are the only rows with anything in that slot, which is the
+        whole point of "scheme 2" (running stands out by exclusion)."""
+        if self._idle_visible == visible:
+            return
+        self._idle_visible = visible
+        if self._state == self.STATE_IDLE:
+            self.update()
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -650,7 +672,12 @@ class _RowStatusGlyph(QWidget):
                     self._BAR_W / 2, self._BAR_W / 2,
                 )
         else:
-            # IDLE — single dot, colour picked by caller (freshness).
+            # IDLE — single dot, colour picked by caller. Skipped
+            # entirely when set_idle_visible(False) was called (row
+            # mode); draws the dot for capsule mode where the pill
+            # needs a constant visual anchor.
+            if not self._idle_visible:
+                return
             painter.setBrush(QColor(self._dot_color))
             r = 3
             painter.drawEllipse(cx - r, cy - r, r * 2, r * 2)
@@ -4257,14 +4284,15 @@ class ExpandedWindow(QWidget):
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(8)
 
-        # Status glyph slot — equalizer bars when running, ⚡ when
-        # high-cost, single dot when idle. Single widget for all three
-        # states so the row layout stays geometrically stable across
-        # state transitions. Replaces the old dot_label QLabel + a
-        # parallel QGraphicsOpacityEffect-driven pulse — _RowStatusGlyph
-        # owns its own animations internally.
+        # Status glyph slot — equalizer bars when running, nothing when
+        # idle. The widget itself stays 12 px wide so the row layout
+        # stays geometrically stable across state transitions; idle
+        # rows just have an empty leftmost slot so RUNNING rows
+        # visually stand out as the only rows with anything painted
+        # there ("scheme 2" of the row-design proposal).
         status_glyph = _RowStatusGlyph(btn)
         status_glyph.setFixedHeight(_ROW_HEIGHT - 12)  # respect outer padding
+        status_glyph.set_idle_visible(False)
         btn._status_glyph = status_glyph
         top.addWidget(status_glyph)
 
