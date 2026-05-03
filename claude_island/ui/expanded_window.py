@@ -331,23 +331,36 @@ def _group_bg_color(idx: int) -> str:
 
 
 class HoverRow(QPushButton):
-    """Session row button. Hover feedback is a 3px left accent bar
-    rather than a bg colour change — preserves the group's colour
-    identity (VS Code / Slack / Linear pattern).
+    """Session row button. Three paint states stacked on top of each
+    other: base background → optional running accent bar → optional
+    hover accent bar. Both accents land on the row's left edge, 3 px
+    wide, inset top/bottom so they read as focus indicators rather
+    than borders. (VS Code / Slack / Linear pattern.)
 
-    Uses WA_Hover=True so Qt fires enter/leave natively. The accent
-    bar is painted in paintEvent (no layout impact). Background is
-    constant and identical to the row's resting bg.
+    The "running" accent is the live-session indicator (Spotify
+    "Now Playing" / Apple Music sidebar pattern: a coloured strip
+    on the left that pulses to signal "this row is alive"). It draws
+    only when ``set_running(True)`` was called and animates its alpha
+    on a 1.4 s sine cycle. Stopping the animation snaps the bar
+    invisible — no stranded mid-cycle alpha.
     """
 
     _ACCENT_W = 3       # px wide
     _ACCENT_INSET = 4   # px from top/bottom edges (so bar < row height)
+    _RUNNING_W = 4      # the running bar is one px wider so it stands
+                         # out next to the hover bar without overlap
+
+    # Bright green that reads "alive". Same hex as the capsule's active
+    # dot so the colour story is unified across surfaces.
+    _RUNNING_COLOR = "#22c55e"
 
     def __init__(self, base_bg: str, parent_card: "QFrame | None" = None, **kwargs):
         super().__init__(**kwargs)
         self._base_bg = base_bg
         self._parent_card = parent_card
         self._hovered = False
+        self._running = False
+        self._running_alpha = 0.0  # 0..1; driven by _running_anim
         # Accent colour: brightened version of the group bg for in-card
         # rows (reinforces group identity); neutral grey for standalone.
         if parent_card is not None:
@@ -359,6 +372,38 @@ class HoverRow(QPushButton):
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         # Style is applied by _get_or_create_row via setStyleSheet; we
         # don't set it here because the row may be in_card or standalone.
+
+        # Running pulse animation. QVariantAnimation drives _running_alpha
+        # via valueChanged callback (no Qt-Property metaclass dance) and
+        # we call update() to repaint each tick. 1.4 s round-trip with
+        # an InOutSine curve: slow enough not to be distracting, fast
+        # enough to clearly read as "live".
+        from PySide6.QtCore import QVariantAnimation
+        self._running_anim = QVariantAnimation(self)
+        self._running_anim.setDuration(1400)
+        self._running_anim.setStartValue(0.30)
+        self._running_anim.setKeyValueAt(0.5, 1.0)
+        self._running_anim.setEndValue(0.30)
+        self._running_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._running_anim.setLoopCount(-1)
+        self._running_anim.valueChanged.connect(self._on_running_alpha)
+
+    def _on_running_alpha(self, v: float) -> None:
+        self._running_alpha = float(v)
+        self.update()
+
+    def set_running(self, running: bool) -> None:
+        """Toggle the persistent left-edge pulse. Idempotent — calling
+        with the same value twice is a no-op."""
+        if self._running == running:
+            return
+        self._running = running
+        if running:
+            self._running_anim.start()
+        else:
+            self._running_anim.stop()
+            self._running_alpha = 0.0
+            self.update()
 
     def set_parent_card(self, card: "QFrame | None") -> None:
         """Re-bind to a new card (or detach). Recomputes accent colour
@@ -384,20 +429,33 @@ class HoverRow(QPushButton):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
-        if not self._hovered:
-            return
         from PySide6.QtGui import QPainter, QColor
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(self._accent_color))
-        # Left-edge rounded bar, inset top/bottom so it doesn't touch
-        # the row corners (looks like a focus indicator, not a border).
-        x = 0
-        y = self._ACCENT_INSET
-        w = self._ACCENT_W
-        h = self.height() - 2 * self._ACCENT_INSET
-        painter.drawRoundedRect(x, y, w, h, w / 2, w / 2)
+
+        # Running pulse first (drawn behind the hover bar so a hover
+        # over an active row reads as "hover on something running"
+        # rather than the hover overwriting the live indicator).
+        if self._running:
+            color = QColor(self._RUNNING_COLOR)
+            color.setAlphaF(self._running_alpha)
+            painter.setBrush(color)
+            x = 0
+            y = self._ACCENT_INSET
+            w = self._RUNNING_W
+            h = self.height() - 2 * self._ACCENT_INSET
+            painter.drawRoundedRect(x, y, w, h, w / 2, w / 2)
+
+        if self._hovered:
+            painter.setBrush(QColor(self._accent_color))
+            # Left-edge rounded bar, inset top/bottom so it doesn't touch
+            # the row corners (looks like a focus indicator, not a border).
+            x = 0
+            y = self._ACCENT_INSET
+            w = self._ACCENT_W
+            h = self.height() - 2 * self._ACCENT_INSET
+            painter.drawRoundedRect(x, y, w, h, w / 2, w / 2)
 
 
 def _lighten_bg(hex_color: str, shift: int = 18) -> str:
@@ -506,48 +564,18 @@ _STYLE_STATUS = "color: #9ca3af; font-size: 10px;"
 
 
 def _row_status_text(
-    details: "SessionDetails | None",
     session: "Session",
 ) -> str:
-    """Compose the bottom-line status text for a row.
+    """Compose the bottom-line text for a row — just the relative
+    activity time ("5m ago"). The running state is conveyed by the
+    row's left-edge pulse animation + the dot's pulse, so the literal
+    word "running" / "idle" was redundant chrome and got dropped.
 
-    Format: ``running · 5m ago`` (or ``idle · 3h ago``, etc.).
-
-    Status word resolution:
-      1. ``details.status`` from ``~/.claude/sessions/<pid>.json`` when
-         present (Claude Code's authoritative state). ``busy`` →
-         ``running`` so the user-facing word matches the visual cue
-         used elsewhere ("running" reads more natural than "busy").
-      2. Activity-based heuristic when state is unknown — last_activity
-         within the active threshold ⇒ ``running``, else ``idle``.
-
-    The relative-time suffix always reflects ``session.last_activity``
-    (NOT details.started_at). Activity is what a viewer wants to know
-    about ("when did this last move?"), not session age.
-    """
-    status_word = "idle"
-    if details is not None and isinstance(details.status, str):
-        canonical = details.status.lower()
-        if canonical == "busy":
-            status_word = "running"
-        elif canonical in ("idle", "waiting"):
-            status_word = canonical
-        else:
-            status_word = canonical
-    else:
-        try:
-            now = datetime.now(timezone.utc)
-            delta = (now - session.last_activity.astimezone(timezone.utc)).total_seconds()
-            status_word = (
-                "running" if delta < _ROW_ACTIVE_THRESHOLD_SECONDS else "idle"
-            )
-        except (TypeError, ValueError):
-            status_word = "idle"
-
-    age = _fmt_started(session.last_activity)  # "5m ago" / "—"
-    if age == "—":
-        return status_word
-    return f"{status_word} · {age}"
+    Returns "—" when session.last_activity isn't usable (e.g. None or
+    a stub Session in tests). Used to be a 2-arg helper that took
+    SessionDetails to derive the status word; the signature simplified
+    once the word itself stopped being part of the output."""
+    return _fmt_started(session.last_activity)
 _STYLE_PERIOD_BTN = """
     QPushButton {
         color: #666;
@@ -4153,19 +4181,31 @@ class ExpandedWindow(QWidget):
         high_cost = (
             details is not None and details.cost_usd >= _HIGH_COST_USD_THRESHOLD
         )
-        # "Currently running" detection — same threshold as the capsule
-        # so both surfaces light up together. Used to drive the row
-        # dot's pulse animation (bright dot + opacity dance is the
-        # most-obvious "this one is moving" cue without changing the
-        # row layout).
-        try:
-            seconds_since = (
-                datetime.now(timezone.utc)
-                - session.last_activity.astimezone(timezone.utc)
-            ).total_seconds()
-        except (TypeError, ValueError):
-            seconds_since = 1e9
-        running = seconds_since < _ROW_ACTIVE_THRESHOLD_SECONDS
+        # "Currently running" detection. Same priority chain as the
+        # capsule:
+        #   1. SessionDetails.status — authoritative when present.
+        #      "busy"/"waiting" ⇒ running, "idle" ⇒ NOT running
+        #      (overrides the heuristic so synthetic-only sessions
+        #      whose JSONL just got a /compact summary don't read
+        #      as live).
+        #   2. Activity heuristic when status is unknown — falls
+        #      back to last_activity for providers without a state file.
+        status_word: str | None = None
+        if details is not None and isinstance(details.status, str):
+            status_word = details.status.lower()
+        if status_word in ("busy", "waiting"):
+            running = True
+        elif status_word == "idle":
+            running = False
+        else:
+            try:
+                seconds_since = (
+                    datetime.now(timezone.utc)
+                    - session.last_activity.astimezone(timezone.utc)
+                ).total_seconds()
+            except (TypeError, ValueError):
+                seconds_since = 1e9
+            running = seconds_since < _ROW_ACTIVE_THRESHOLD_SECONDS
 
         if high_cost:
             dot_color = _DOT_YELLOW
@@ -4203,8 +4243,8 @@ class ExpandedWindow(QWidget):
         # and stacking a pulse on top would make the row jittery.
         anim = getattr(btn, "_dot_animation", None)
         opacity_effect = getattr(btn, "_dot_opacity", None)
+        should_pulse = running and not high_cost
         if anim is not None and opacity_effect is not None:
-            should_pulse = running and not high_cost
             currently = getattr(btn, "_dot_animating", False)
             if should_pulse and not currently:
                 anim.start()
@@ -4214,6 +4254,12 @@ class ExpandedWindow(QWidget):
                 opacity_effect.setOpacity(1.0)
                 btn._dot_animating = False
 
+        # Drive the row's left-edge running accent bar (Spotify-style
+        # "now playing" indicator). HoverRow.set_running is idempotent
+        # so we can safely call every refresh tick.
+        if hasattr(btn, "set_running"):
+            btn.set_running(should_pulse)
+
         name_label = btn.findChild(QLabel, "name_label")
         if name_label is not None and name_label.text() != title:
             name_label.setText(title)
@@ -4222,15 +4268,19 @@ class ExpandedWindow(QWidget):
         if meta_label is not None and meta_label.text() != meta_text:
             meta_label.setText(meta_text)
 
-        # Model chip + status row. Model = highest-cost model in this
-        # session (per_model is sorted desc by cost). Empty per_model
-        # ⇒ chip hidden; a freshly-discovered session may not have any
-        # records yet, and "[—]" looks like a UI bug.
-        model_id = (
-            details.per_model[0].model
-            if details is not None and details.per_model
-            else ""
-        )
+        # Model chip + status row. Model = highest-cost real model in
+        # this session (per_model is sorted desc by cost). We skip
+        # entries whose name starts with "<" — Claude Code emits
+        # "<synthetic>" pseudo-model rows for /compact summaries and
+        # other system-generated turns that are NOT real model calls.
+        # Showing "<synthetic>" as if it were a regular model is
+        # confusing (the user has no model called <synthetic>).
+        model_id = ""
+        if details is not None and details.per_model:
+            for m in details.per_model:
+                if not (m.model or "").startswith("<"):
+                    model_id = m.model
+                    break
         chip_label = btn.findChild(QLabel, "model_chip")
         if chip_label is not None:
             if model_id:
@@ -4249,7 +4299,7 @@ class ExpandedWindow(QWidget):
 
         status_label = btn.findChild(QLabel, "status_label")
         if status_label is not None:
-            status_text = _row_status_text(details, session)
+            status_text = _row_status_text(session)
             if status_label.text() != status_text:
                 status_label.setText(status_text)
 

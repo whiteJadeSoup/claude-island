@@ -331,42 +331,52 @@ class CapsuleWindow(QWidget):
         return basename or None
 
     def _active_sessions(self) -> list[Session]:
-        """Sessions that are currently doing something. Two signals:
+        """Sessions that are currently doing something.
 
-        1. JSONL written within the active threshold — the fast,
-           reliable signal for "model is streaming / tool loop is
-           iterating", since each turn writes a new transcript line.
-        2. ``SessionDetails.status`` is ``busy`` or ``waiting`` —
-           catches the "model is mid-thought" case where the JSONL
-           hasn't ticked in >30 s yet (e.g. a long Opus response).
-           Without this fallback the capsule's name display went silent
-           on the very sessions the user most wants to see.
+        Status takes precedence over the activity heuristic:
+          * ``status == "busy" / "waiting"`` → running (authoritative,
+            comes from Claude Code's own state file).
+          * ``status == "idle"`` → NOT running, even if last_activity is
+            recent. This filters out cases like a "<synthetic>" session
+            that just got a /compact summary written to its JSONL —
+            Claude Code marks it idle, but the JSONL bump made the old
+            heuristic count it as active and that masked the *real*
+            running session in the count check below.
+          * ``status`` unknown (no state file, e.g. non-Anthropic
+            provider) → fall back to the activity heuristic so we
+            still surface obviously-busy sessions.
 
-        Either signal is enough to count a session as active. Status
-        is only consulted when the heuristic missed, so the fast
-        path stays fast for the common case (no active session at all)."""
+        Fast path: when the details composer is unwired, just use the
+        heuristic — keeps tests + minimal setups working as before."""
         now = datetime.now(timezone.utc)
         result: list[Session] = []
         for s in self._controller.sessions:
+            status_word: str | None = None
+            if self._get_session_details is not None:
+                try:
+                    d = self._get_session_details(s)
+                    if d is not None and isinstance(d.status, str):
+                        status_word = d.status.lower()
+                except Exception:
+                    pass
+
+            if status_word == "idle":
+                # Authoritative "not running" — skip even if JSONL
+                # was just written (synthetic / compaction churn).
+                continue
+            if status_word in ("busy", "waiting"):
+                result.append(s)
+                continue
+
+            # status_word is None (unknown) — fall back to the activity
+            # heuristic so the pill still works for providers that
+            # don't write a sessions/<pid>.json state file.
             try:
                 age = (now - s.last_activity).total_seconds()
             except (TypeError, ValueError):
                 continue
             if age < _ACTIVE_THRESHOLD_SECONDS:
                 result.append(s)
-                continue
-            # Slower second pass — only consult details when activity
-            # heuristic missed. Composer is best-effort; a failing call
-            # leaves the session out (worst case: name doesn't show).
-            if self._get_session_details is not None:
-                try:
-                    d = self._get_session_details(s)
-                except Exception:
-                    continue
-                if d is None:
-                    continue
-                if isinstance(d.status, str) and d.status.lower() in ("busy", "waiting"):
-                    result.append(s)
         return result
 
     def _refresh_active_state(self) -> None:

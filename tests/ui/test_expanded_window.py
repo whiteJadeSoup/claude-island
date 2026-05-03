@@ -2062,11 +2062,12 @@ class TestRowStatusLine:
         p.refresh_sessions([_session(1, "/a", ago_minutes=5)])
         status = p._rows[1].findChild(QLabel, "status_label")
         assert status is not None
-        # "running · Nm ago" — exact minute count is fragile across
-        # test execution time, so just assert structure and verb.
+        # Status row dropped the literal "running" / "idle" word —
+        # animation conveys that. What remains is just the relative
+        # activity time ("Nm ago").
         text = status.text()
-        assert text.startswith("running · ")
-        assert "ago" in text
+        assert text.endswith("ago")
+        assert "m" in text or "h" in text or "s" in text
 
 
 class TestModelHelpers:
@@ -2122,52 +2123,26 @@ class TestModelHelpers:
 
 
 class TestRowStatusText:
-    """Composes the bottom-line text. Pins the busy → "running"
-    translation, the activity-based fallback when state is missing,
-    and the "Nm ago" suffix attaching to last_activity."""
+    """Composes the bottom-line text. The literal "running"/"idle"
+    word was dropped — the row's left-edge pulse animation conveys
+    that signal now. Helper just returns the relative time of the
+    most recent JSONL write (e.g. "5m ago")."""
 
-    def test_busy_status_renders_as_running(self):
-        from datetime import datetime, timedelta, timezone
-        from claude_island.core.models import SessionDetails
+    def test_returns_relative_time(self):
         from claude_island.ui.expanded_window import _row_status_text
+        sess = _session(1, "/a", ago_minutes=5)
+        text = _row_status_text(sess)
+        # Allow a small drift in the "minutes ago" boundary.
+        assert text.endswith("ago")
+        assert "m" in text or "h" in text
 
-        sess = _session(1, "/a", ago_minutes=10)
-        details = SessionDetails(
-            session=sess, name=None, ai_title=None, git_branch=None,
-            last_prompt=None, started_at=None, status="busy",
-            cc_version=None, cost_usd=0.0, turn_count=0, sidechain_count=0,
-        )
-        text = _row_status_text(details, sess)
-        assert text.startswith("running · ")
-
-    def test_idle_status_keeps_word(self):
-        from claude_island.core.models import SessionDetails
-        from claude_island.ui.expanded_window import _row_status_text
-
-        sess = _session(1, "/a", ago_minutes=10)
-        details = SessionDetails(
-            session=sess, name=None, ai_title=None, git_branch=None,
-            last_prompt=None, started_at=None, status="idle",
-            cc_version=None, cost_usd=0.0, turn_count=0, sidechain_count=0,
-        )
-        assert _row_status_text(details, sess).startswith("idle · ")
-
-    def test_no_details_uses_activity_heuristic_running(self):
-        """No state file (e.g. a non-Anthropic provider) → fall back
-        to last_activity vs the active threshold. Recent activity
-        (< 30s) reads as "running"."""
+    def test_returns_seconds_for_fresh_activity(self):
         from claude_island.ui.expanded_window import _row_status_text
         sess = _session(1, "/a", ago_minutes=0)
-        # ago_minutes=0 means "now"; but the helper subtracts a few µs
-        # so the delta is a hair > 0. Still well under the 30 s threshold.
-        text = _row_status_text(None, sess)
-        assert text.startswith("running")
-
-    def test_no_details_uses_activity_heuristic_idle(self):
-        from claude_island.ui.expanded_window import _row_status_text
-        sess = _session(1, "/a", ago_minutes=10)  # well past 30 s
-        text = _row_status_text(None, sess)
-        assert text.startswith("idle")
+        text = _row_status_text(sess)
+        # ago_minutes=0 → just-happened → "Ns ago".
+        assert text.endswith("ago")
+        assert "s" in text or "m" in text
 
 
 # ============================================================================
