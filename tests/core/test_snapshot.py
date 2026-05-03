@@ -130,6 +130,42 @@ class TestWorldSnapshot:
         )
         assert snap == same_snap
 
+    def test_render_key_excludes_fetched_at(self):
+        """render_key() is the basis for distinct_until_changed in the
+        UI pipe; it must skip ``fetched_at`` so two snapshots built
+        at different times but with the same data dedupe correctly."""
+        v = _view()
+        ts1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ts2 = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        s1 = WorldSnapshot(
+            sessions=(v,), today_cost_usd=1.0, quota=None,
+            available_providers=("a",), selected_provider="a",
+            fetched_at=ts1,
+        )
+        s2 = WorldSnapshot(
+            sessions=(v,), today_cost_usd=1.0, quota=None,
+            available_providers=("a",), selected_provider="a",
+            fetched_at=ts2,
+        )
+        # Full equality: differ (fetched_at).
+        assert s1 != s2
+        # Render key: equal — UI should not re-render.
+        assert s1.render_key() == s2.render_key()
+
+    def test_render_key_changes_when_sessions_change(self):
+        v1 = _view(cost_usd=1.0)
+        v2 = _view(cost_usd=2.0)
+        ts = datetime.now(timezone.utc)
+        s1 = WorldSnapshot(
+            sessions=(v1,), today_cost_usd=1.0, quota=None,
+            available_providers=(), selected_provider=None, fetched_at=ts,
+        )
+        s2 = WorldSnapshot(
+            sessions=(v2,), today_cost_usd=2.0, quota=None,
+            available_providers=(), selected_provider=None, fetched_at=ts,
+        )
+        assert s1.render_key() != s2.render_key()
+
     def test_session_order_is_significant(self):
         """sessions tuples are order-sensitive — Snapshotter sorts
         deterministically before constructing the snapshot, so the UI
