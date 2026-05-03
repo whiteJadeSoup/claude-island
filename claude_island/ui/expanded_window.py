@@ -2581,12 +2581,39 @@ class ExpandedWindow(QWidget):
         # row appears), making the sessions area "jump" to its max
         # height even when content is smaller. Pinning to content keeps
         # the panel layout stable across refreshes.
-        self._session_container.adjustSize()
-        content_h = self._session_container.sizeHint().height()
-        self._session_scroll.setFixedHeight(min(content_h, self._session_scroll_max_h))
+        self._update_session_scroll_height()
+        # Schedule a second pass on the next event-loop tick so a
+        # stale-sizeHint reading from the immediate call (Qt sometimes
+        # returns 0 right after addWidget when the layout hasn't been
+        # polished) gets corrected once the layout has settled.
+        # Idempotent: same input → same output → no second resize if
+        # the first call was already correct.
+        QTimer.singleShot(0, self._update_session_scroll_height)
 
         self.adjustSize()
         self._position()
+
+    def _update_session_scroll_height(self) -> None:
+        """Resize the scroll area to match its content (capped at max).
+
+        Forces a layout pass via ``activate()`` so the just-added
+        widgets are measured before reading sizeHint — without this
+        the immediate call after ``addWidget`` can return 0, which
+        would collapse the scroll area to invisible (the visible bug
+        was: header shows "CLAUDE SESSIONS · 7" but no rows render).
+
+        Defensive: if sizeHint still reports 0 (widgets pending
+        polishing, or no children at all), keep the previous height
+        rather than shrinking to nothing. The deferred companion
+        call in refresh_sessions retries after the layout settles.
+        """
+        self._session_box.activate()
+        content_h = self._session_box.sizeHint().height()
+        if content_h <= 0:
+            return
+        self._session_scroll.setFixedHeight(
+            min(content_h, self._session_scroll_max_h)
+        )
 
     def refresh_usage_bar(self, _: object = None) -> None:
         """Refresh both USAGE cards. Kept the legacy method name so the
