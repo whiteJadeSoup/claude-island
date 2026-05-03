@@ -124,10 +124,36 @@ app.setQuitOnLastWindowClosed(False)
 from claude_island.ui.capsule_window import CapsuleWindow
 from claude_island.ui.controller import IslandController
 from claude_island.ui.expanded_window import ExpandedWindow
-from claude_island.ui.qt_bridge import QtBridge
 from claude_island.ui.world_marshaler import WorldMarshaler
 
 import reactivex.operators as ops
+from PySide6.QtCore import QObject, Qt, Signal
+
+
+class _ControllerMarshaler(QObject):
+    """Qt Signal bridge marshaling session-list updates from any thread
+    onto the Qt main thread before they reach the IslandController.
+
+    Why: ``session_registry.sessions_changed.on_next(...)`` fires
+    synchronously on whichever thread called ``update()`` — typically
+    the process scanner's worker thread. ``IslandController`` is a
+    QObject with a transitions state machine; its mutator
+    ``on_sessions_updated`` should run on the Qt main thread so the
+    state-machine callbacks (which emit Qt Signals to the UI) end up
+    on the right thread without surprise queueing.
+
+    Constructed on the Qt main thread, so the QueuedConnection always
+    crosses to the main thread when emit is on a worker thread.
+    """
+
+    sessions_ready: Signal = Signal(object)
+
+    def __init__(self, controller: IslandController) -> None:
+        super().__init__()
+        self.sessions_ready.connect(
+            controller.on_sessions_updated,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
 
 def _get_quota_snapshot():
@@ -331,41 +357,19 @@ expanded = ExpandedWindow(
 )
 
 # ---------------------------------------------------------------------------
-# Section 4: Bridge wiring (declarative table)
+# Section 4: Source → controller wiring
 #
-# Each entry: (core Event[T], UI slot)
-# QtBridge marshals the emit from background thread → Qt main thread.
-#
-# Phase G1 — UI render is now driven SOLELY by the WorldSnapshot
-# broadcast (Section 4b below). The only entry left here is the
-# controller's session-list update, which is internal state used by
-# the IslandController state machine (dot ↔ collapsed ↔ expanded
-# transitions). All of capsule.refresh_xxx / expanded.refresh_xxx
-# entries were deleted — the Snapshotter wakes on the same source
-# events and pushes a snapshot that drives render(snap).
-#
-# The capsule.refresh_xxx and expanded.refresh_xxx methods themselves
-# remain in their respective files for now (orphaned dead code from a
-# wiring perspective; still called from inside render(snap) as
-# implementation detail, and exercised by legacy tests). Phase G2
-# inlines them into render() and deletes the public methods + QtBridge
-# + Event[T] entirely; deferred until manual UI verification confirms
-# the snap-driven behaviour matches the legacy paths.
+# After Phase G2, UI rendering is driven SOLELY by the WorldSnapshot
+# broadcast pipeline (Section 4b). The only thing wired here is the
+# controller's session-list update — internal state used by the
+# IslandController state machine (dot ↔ collapsed ↔ expanded
+# transitions). The Snapshotter handles the rest: it wakes on the same
+# source events (sessions_changed, totals_changed) and pushes a
+# snapshot that drives render(snap) on every subscribed UI surface.
 # ---------------------------------------------------------------------------
-_wiring = [
-    (session_registry.sessions_changed, controller.on_sessions_updated),
-]
-# Group by source event so we don't create N redundant QtBridge instances
-# subscribing to the same Event (sessions_changed has 3 slots — they should
-# share one bridge, not three). Matches the QtBridge docstring's example.
-_bridges_by_event: dict[object, QtBridge] = {}
-for event, slot in _wiring:
-    bridge = _bridges_by_event.get(id(event))
-    if bridge is None:
-        bridge = QtBridge(event)
-        _bridges_by_event[id(event)] = bridge
-    bridge.connect_to(slot)
-_bridges = list(_bridges_by_event.values())  # keep references alive
+
+_controller_marshaler = _ControllerMarshaler(controller)  # pin reference
+session_registry.sessions_changed.subscribe(_controller_marshaler.sessions_ready.emit)
 
 # core → core direct subscription: JSONL activity feeds the session registry's
 # override map. update_activity is thread-safe and does not emit, so there is
