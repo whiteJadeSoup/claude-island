@@ -47,12 +47,13 @@ _QUOTA_RIGHT_PAD = 12  # px from pill's right edge to bar's right edge
 _QUOTA_WARN_THRESHOLD = 70
 _QUOTA_CRITICAL_THRESHOLD = 90
 
-# Multi-running carousel cadence. 4 s is long enough to read a name
-# (one casual glance ≈ 0.5–1 s) without making the pill feel busy. A
-# faster rotation looks like the pill is glitching; slower (≥6 s)
-# makes the carousel feel pointless on busy machines where running
-# sessions come and go in the same window.
-_ROTATE_INTERVAL_MS = 4000
+# Multi-running carousel cadence. 3 s lands at the sweet spot: a
+# casual glance reads a name in ~0.5–1 s, so 3 s gives the user
+# enough time to read each name twice without the pill feeling
+# either rushed or stale. Faster (≤2 s) reads as glitching; slower
+# (≥5 s) makes the carousel feel pointless on busy machines where
+# running sessions come and go in the same window.
+_ROTATE_INTERVAL_MS = 3000
 
 # Heuristic for "this session is currently doing something". An active
 # Claude Code session writes a JSONL row at least every few seconds
