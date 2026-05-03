@@ -482,6 +482,146 @@ _DOT_GRAY = "#52525b"     # ≥ 24h
 # rather than "recent". Tested at 12 px and 14 px font sizes.
 _DOT_RUNNING = "#22c55e"
 
+
+class _RowStatusGlyph(QWidget):
+    """Tri-state glyph painted in the row's leftmost slot:
+
+    - ``running`` → 3 vertical bars that wave like an audio equalizer
+      (Spotify "Now Playing" pattern). Each bar's height is animated
+      between 30 % and 100 % of the widget height with a phase offset
+      so the bars never sync up — that's what reads as "live" rather
+      than "loading".
+    - ``high_cost`` → static "⚡" lightning glyph in yellow. Reuses
+      the existing high-spend warning visual.
+    - ``idle`` → single static colour-coded dot (green / yellow /
+      grey based on activity recency, picked by the caller).
+
+    Single widget for all three states so the row layout stays
+    stable — no QStackedLayout shuffle and no widget show/hide
+    fighting Qt's geometry cache."""
+
+    _BAR_W = 2          # px wide per equalizer bar
+    _BAR_GAP = 2        # px between bars
+    _BAR_COUNT = 3
+    _PERIOD_MS = 900    # full bounce cycle per bar
+    _MIN_PCT = 0.28     # bottom of the bounce (% of widget height)
+    _MAX_PCT = 1.00
+    _DEFAULT_W = _BAR_W * _BAR_COUNT + _BAR_GAP * (_BAR_COUNT - 1)  # 10 px
+
+    STATE_IDLE = "idle"
+    STATE_RUNNING = "running"
+    STATE_HIGH_COST = "high_cost"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setFixedWidth(max(self._DEFAULT_W, 12))
+        self._state = self.STATE_IDLE
+        self._dot_color = _DOT_GRAY
+        # Per-bar height fractions [0..1]. Updated by the animations.
+        # Initial values are arbitrary — they're overwritten the moment
+        # an animation tick fires.
+        self._bar_heights = [0.5, 0.7, 0.4]
+        # One QVariantAnimation per bar so each runs independently —
+        # phase offset created by setting setCurrentTime() to a fraction
+        # of the loop duration on construction.
+        from PySide6.QtCore import QVariantAnimation
+        self._anims: list[QVariantAnimation] = []
+        for i in range(self._BAR_COUNT):
+            anim = QVariantAnimation(self)
+            anim.setDuration(self._PERIOD_MS)
+            anim.setStartValue(self._MIN_PCT)
+            anim.setKeyValueAt(0.5, self._MAX_PCT)
+            anim.setEndValue(self._MIN_PCT)
+            anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+            anim.setLoopCount(-1)
+            anim.valueChanged.connect(self._make_height_setter(i))
+            self._anims.append(anim)
+
+    def _make_height_setter(self, idx: int):
+        def _set(value):
+            self._bar_heights[idx] = float(value)
+            self.update()
+        return _set
+
+    def set_state(self, state: str, *, dot_color: str | None = None) -> None:
+        """Switch which of the three glyphs is rendered.
+
+        Idempotent — calling with the same state is a no-op so this
+        is safe to call from every refresh tick. Only state
+        transitions start / stop the animations."""
+        if state not in (self.STATE_IDLE, self.STATE_RUNNING, self.STATE_HIGH_COST):
+            state = self.STATE_IDLE
+        if dot_color is not None:
+            self._dot_color = dot_color
+        if state == self._state:
+            self.update()  # picks up dot_color change even if state same
+            return
+        prev = self._state
+        self._state = state
+        if state == self.STATE_RUNNING and prev != self.STATE_RUNNING:
+            # Stagger phases so the 3 bars are out-of-sync immediately.
+            for i, anim in enumerate(self._anims):
+                anim.start()
+                anim.setCurrentTime((i * self._PERIOD_MS) // self._BAR_COUNT)
+        elif prev == self.STATE_RUNNING and state != self.STATE_RUNNING:
+            for anim in self._anims:
+                anim.stop()
+        self.update()
+
+    def state(self) -> str:
+        """Currently-displayed state (one of STATE_*)."""
+        return self._state
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        from PySide6.QtGui import QPainter, QColor, QFont
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        wgt_w = self.width()
+        wgt_h = self.height()
+        cx = wgt_w // 2
+        cy = wgt_h // 2
+
+        if self._state == self.STATE_RUNNING:
+            painter.setBrush(QColor(_DOT_RUNNING))
+            # Draw the 3 bars centered horizontally + vertically. The
+            # bars stretch from a centered baseline so the bounce
+            # reads as "growing both up and down" rather than rising
+            # off the floor — visually matches a real audio EQ meter.
+            total_w = (
+                self._BAR_W * self._BAR_COUNT
+                + self._BAR_GAP * (self._BAR_COUNT - 1)
+            )
+            x0 = (wgt_w - total_w) // 2
+            usable_h = max(8, wgt_h - 4)  # 2 px breathing room top/bottom
+            for i in range(self._BAR_COUNT):
+                bar_h = max(2, int(usable_h * self._bar_heights[i]))
+                bx = x0 + i * (self._BAR_W + self._BAR_GAP)
+                by = cy - bar_h // 2
+                painter.drawRoundedRect(
+                    bx, by, self._BAR_W, bar_h,
+                    self._BAR_W / 2, self._BAR_W / 2,
+                )
+        elif self._state == self.STATE_HIGH_COST:
+            # ⚡ glyph — drawn via QPainter so we don't have to manage
+            # a separate QLabel for this branch. Slightly bigger font
+            # than the dot so the lightning bolt reads cleanly.
+            painter.setPen(QColor(_DOT_YELLOW))
+            font = QFont("Segoe UI Symbol", 11, QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.drawText(
+                self.rect(),
+                int(Qt.AlignmentFlag.AlignCenter),
+                "⚡",
+            )
+        else:
+            # IDLE — single dot, colour picked by caller (freshness).
+            painter.setBrush(QColor(self._dot_color))
+            r = 3
+            painter.drawEllipse(cx - r, cy - r, r * 2, r * 2)
+
 # Two-line row: top = dot + name + cost, bottom = model chip + status.
 # 52 px holds the 13 px name plus the 11 px status row with breathing
 # room top/bottom — anything shorter clipped descenders on g/y/p.
@@ -4072,34 +4212,16 @@ class ExpandedWindow(QWidget):
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(8)
 
-        dot_label = QLabel("●")
-        dot_label.setObjectName("dot_label")
-        dot_label.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
-        dot_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        dot_label.setFixedWidth(12)
-        dot_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        # Per-row pulse animation. Active when the session is currently
-        # running (last_activity within the active threshold). The
-        # opacity range here is wider than the capsule's (0.25→1.0 vs
-        # 0.55→1.0) and the period faster (1.1 s vs 2 s) so the
-        # in-card indicator reads as "actually doing something" rather
-        # than the more passive ambient glow on the pill. Opacity
-        # effect lives on the dot only — the row's hover accent and
-        # text are unaffected.
-        dot_opacity = QGraphicsOpacityEffect(dot_label)
-        dot_opacity.setOpacity(1.0)
-        dot_label.setGraphicsEffect(dot_opacity)
-        dot_animation = QPropertyAnimation(dot_opacity, b"opacity", btn)
-        dot_animation.setDuration(1100)
-        dot_animation.setStartValue(1.0)
-        dot_animation.setKeyValueAt(0.5, 0.25)
-        dot_animation.setEndValue(1.0)
-        dot_animation.setEasingCurve(QEasingCurve.Type.InOutSine)
-        dot_animation.setLoopCount(-1)
-        btn._dot_opacity = dot_opacity
-        btn._dot_animation = dot_animation
-        btn._dot_animating = False
-        top.addWidget(dot_label)
+        # Status glyph slot — equalizer bars when running, ⚡ when
+        # high-cost, single dot when idle. Single widget for all three
+        # states so the row layout stays geometrically stable across
+        # state transitions. Replaces the old dot_label QLabel + a
+        # parallel QGraphicsOpacityEffect-driven pulse — _RowStatusGlyph
+        # owns its own animations internally.
+        status_glyph = _RowStatusGlyph(btn)
+        status_glyph.setFixedHeight(_ROW_HEIGHT - 12)  # respect outer padding
+        btn._status_glyph = status_glyph
+        top.addWidget(status_glyph)
 
         name_label = QLabel()
         name_label.setObjectName("name_label")
@@ -4217,56 +4339,33 @@ class ExpandedWindow(QWidget):
                 seconds_since = 1e9
             running = seconds_since < _ROW_ACTIVE_THRESHOLD_SECONDS
 
-        if high_cost:
-            dot_color = _DOT_YELLOW
-        elif running:
-            # Brighter green for the running state so the pulsing dot
-            # reads as "live" — distinct from the freshness palette
-            # used for static activity age.
-            dot_color = _DOT_RUNNING
-        else:
-            dot_color = _activity_color(session.last_activity)
-        dot_glyph = "⚡" if high_cost else "●"
-        dot_label = btn.findChild(QLabel, "dot_label")
-        if dot_label is not None:
-            target_style = _STYLE_DOT.format(color=dot_color)
-            if dot_label.styleSheet() != target_style:
-                dot_label.setStyleSheet(target_style)
-            if dot_label.text() != dot_glyph:
-                dot_label.setText(dot_glyph)
-            # Tooltip explains the warning so the user understands why
-            # this one row's dot is different from neighbours.
+        # Drive the leftmost glyph — the equalizer / ⚡ / static-dot
+        # tri-state widget. high_cost beats running beats idle so a
+        # session that's both high-cost AND running shows the warning
+        # glyph (the user wants to see expensive sessions even more
+        # than they want to see live ones).
+        glyph: _RowStatusGlyph | None = getattr(btn, "_status_glyph", None)
+        if glyph is not None:
             if high_cost:
-                dot_label.setToolTip(
+                glyph.set_state(_RowStatusGlyph.STATE_HIGH_COST)
+                glyph.setToolTip(
                     f"High cumulative spend (${details.cost_usd:.0f}) — "
                     "consider checking this session"
                 )
             elif running:
-                dot_label.setToolTip("Currently running — JSONL recently updated")
+                glyph.set_state(_RowStatusGlyph.STATE_RUNNING)
+                glyph.setToolTip("Currently running — JSONL recently updated")
             else:
-                dot_label.setToolTip("")
-
-        # Drive the per-row pulse animation. Running ⇒ start (idempotent);
-        # idle ⇒ stop and snap opacity back to 1.0 so the dot doesn't
-        # get stranded mid-cycle. High-cost sessions don't animate —
-        # the ⚡ glyph + yellow colour already screams loudly enough,
-        # and stacking a pulse on top would make the row jittery.
-        anim = getattr(btn, "_dot_animation", None)
-        opacity_effect = getattr(btn, "_dot_opacity", None)
-        should_pulse = running and not high_cost
-        if anim is not None and opacity_effect is not None:
-            currently = getattr(btn, "_dot_animating", False)
-            if should_pulse and not currently:
-                anim.start()
-                btn._dot_animating = True
-            elif not should_pulse and currently:
-                anim.stop()
-                opacity_effect.setOpacity(1.0)
-                btn._dot_animating = False
+                glyph.set_state(
+                    _RowStatusGlyph.STATE_IDLE,
+                    dot_color=_activity_color(session.last_activity),
+                )
+                glyph.setToolTip("")
 
         # Drive the row's left-edge running accent bar (Spotify-style
         # "now playing" indicator). HoverRow.set_running is idempotent
         # so we can safely call every refresh tick.
+        should_pulse = running and not high_cost
         if hasattr(btn, "set_running"):
             btn.set_running(should_pulse)
 

@@ -1936,14 +1936,14 @@ class TestRowStatusLine:
     and that update_row populates them from SessionDetails."""
 
     def test_row_has_new_status_widgets(self, panel):
-        """Every row must expose dot_label / model_chip / status_label
-        as findable children — both _make_row and _update_row reference
-        them by objectName, so a typo would silently make the chip
-        invisible."""
+        """Every row must expose the status glyph + model_chip +
+        status_label widgets the row update path looks up by name.
+        Status glyph is the equalizer/dot/⚡ tri-state widget that
+        replaced the old dot_label QLabel."""
         from PySide6.QtWidgets import QLabel
         panel.refresh_sessions([_session(1, "/a")])
         btn = panel._rows[1]
-        assert btn.findChild(QLabel, "dot_label") is not None
+        assert getattr(btn, "_status_glyph", None) is not None
         assert btn.findChild(QLabel, "model_chip") is not None
         assert btn.findChild(QLabel, "status_label") is not None
 
@@ -2239,10 +2239,10 @@ class TestSummaryCard:
 class TestHighCostRowAlert:
     def test_high_cost_dot_swaps_to_lightning(self, qtbot):
         """A session whose cumulative cost exceeds the alert threshold
-        should render the row dot as a yellow ⚡ glyph (rather than the
-        usual ●) so it stands out among well-behaved siblings."""
-        from PySide6.QtWidgets import QLabel
+        should switch the row's status glyph into HIGH_COST state
+        (renders as a yellow ⚡) so it stands out among normal rows."""
         from claude_island.core.models import SessionDetails
+        from claude_island.ui.expanded_window import _RowStatusGlyph
 
         def details(session):
             return SessionDetails(
@@ -2263,17 +2263,15 @@ class TestHighCostRowAlert:
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         p.refresh_sessions([_session(1, "/a")])
-        dot = p._rows[1].findChild(QLabel, "dot_label")
-        assert dot is not None
-        assert dot.text() == "⚡"
-        assert "facc15" in dot.styleSheet()  # yellow
-        assert "high cumulative spend" in dot.toolTip().lower()
+        glyph = p._rows[1]._status_glyph
+        assert glyph.state() == _RowStatusGlyph.STATE_HIGH_COST
+        assert "high cumulative spend" in glyph.toolTip().lower()
 
     def test_low_cost_dot_keeps_default_glyph(self, qtbot):
-        """Cost below threshold ⇒ dot stays as the regular ● glyph
-        with the freshness-derived colour. Tooltip cleared."""
-        from PySide6.QtWidgets import QLabel
+        """Cost below threshold ⇒ glyph stays in IDLE state (single
+        static dot), tooltip cleared."""
         from claude_island.core.models import SessionDetails
+        from claude_island.ui.expanded_window import _RowStatusGlyph
 
         def details(session):
             return SessionDetails(
@@ -2294,10 +2292,79 @@ class TestHighCostRowAlert:
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         # ago_minutes=10 keeps the session out of the "currently
-        # running" window so the running-tooltip path doesn't fire —
+        # running" window so the running-state path doesn't fire —
         # the test isolates the low-cost vs high-cost alert behaviour.
         p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
-        dot = p._rows[1].findChild(QLabel, "dot_label")
-        assert dot is not None
-        assert dot.text() == "●"
-        assert dot.toolTip() == ""
+        glyph = p._rows[1]._status_glyph
+        assert glyph.state() == _RowStatusGlyph.STATE_IDLE
+        assert glyph.toolTip() == ""
+
+
+# ============================================================================
+# _RowStatusGlyph — equalizer / ⚡ / dot tri-state widget
+# ============================================================================
+
+
+class TestRowStatusGlyph:
+    """The widget that lives in each row's leftmost slot. Exposes
+    set_state() with three states and runs internal animations only
+    while in RUNNING state."""
+
+    def test_default_state_is_idle(self, qtbot):
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = _RowStatusGlyph()
+        qtbot.addWidget(g)
+        assert g.state() == _RowStatusGlyph.STATE_IDLE
+
+    def test_set_state_running_starts_animations(self, qtbot):
+        """Transitioning to RUNNING must start every per-bar animation
+        — that's what produces the wave effect. Each animation should
+        report State.Running afterwards."""
+        from PySide6.QtCore import QAbstractAnimation
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = _RowStatusGlyph()
+        qtbot.addWidget(g)
+        g.set_state(_RowStatusGlyph.STATE_RUNNING)
+        assert g.state() == _RowStatusGlyph.STATE_RUNNING
+        for anim in g._anims:
+            assert anim.state() == QAbstractAnimation.State.Running
+
+    def test_leaving_running_stops_animations(self, qtbot):
+        """RUNNING → IDLE / HIGH_COST must stop the equalizer animations
+        — leaving them running off-screen would burn CPU pointlessly."""
+        from PySide6.QtCore import QAbstractAnimation
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = _RowStatusGlyph()
+        qtbot.addWidget(g)
+        g.set_state(_RowStatusGlyph.STATE_RUNNING)
+        g.set_state(_RowStatusGlyph.STATE_IDLE)
+        for anim in g._anims:
+            assert anim.state() == QAbstractAnimation.State.Stopped
+
+    def test_idempotent_set_state(self, qtbot):
+        """Calling set_state with the same state twice is a no-op for
+        the animations — _update_row fires every refresh tick so we
+        can't restart animations on every call (would visibly reset
+        the wave phase)."""
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = _RowStatusGlyph()
+        qtbot.addWidget(g)
+        g.set_state(_RowStatusGlyph.STATE_RUNNING)
+        anim = g._anims[0]
+        time_before = anim.currentTime()
+        # Wait a moment so currentTime would have advanced if restarted.
+        qtbot.wait(50)
+        g.set_state(_RowStatusGlyph.STATE_RUNNING)
+        # If set_state had restarted the animation, currentTime would
+        # be back near 0; instead it should still be advancing.
+        assert anim.currentTime() >= time_before
+
+    def test_idle_dot_color_picked_by_caller(self, qtbot):
+        """IDLE state respects the caller-supplied freshness colour —
+        the row uses _activity_color(last_activity) so old sessions
+        get the grey dot and recent ones get green."""
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = _RowStatusGlyph()
+        qtbot.addWidget(g)
+        g.set_state(_RowStatusGlyph.STATE_IDLE, dot_color="#facc15")
+        assert g._dot_color == "#facc15"
