@@ -1071,6 +1071,8 @@ class SessionDetailPopup(QFrame):
         details: SessionDetails | None,
         fallback: Session,
         parent: QWidget | None = None,
+        *,
+        on_rename: "Callable[[str, str], None] | None" = None,
     ) -> None:
         super().__init__(parent)
         # Frameless + Popup = "I behave like a context menu":
@@ -1084,6 +1086,15 @@ class SessionDetailPopup(QFrame):
 
         self._details = details
         self._fallback = fallback
+        # on_rename: caller-supplied (uuid, new_name) -> None invoked when
+        # the user commits a name change via the inline edit. None disables
+        # the edit affordance entirely. The popup itself has no platform
+        # dependency — it just hands the values back to the wiring layer.
+        self._on_rename = on_rename
+        # Inline rename state — only populated while the user is editing.
+        self._name_label: QLabel | None = None
+        self._name_edit: "QLineEdit | None" = None
+        self._edit_btn: QPushButton | None = None
         # Prompt collapse state — toggled by the [展开] / [收起] link
         # in the LAST PROMPT section header. Default collapsed so the
         # popup stays compact until the user opts in.
@@ -1200,13 +1211,34 @@ class SessionDetailPopup(QFrame):
         name = QLabel(title)
         name.setStyleSheet(_STYLE_NAME)
         head.addWidget(name, 1)
+        # Hold a reference so the inline-rename swap (label → QLineEdit
+        # → label) can reach the widget. Same head layout slot is reused
+        # so the popup geometry doesn't shift while editing.
+        self._name_label = name
+        self._name_head_layout = head
 
-        # Right-side action icons. Order: ⧉ Copy ID, ↗ Open folder,
-        # ⟲ Reset thinking blocks. The first two are safe & high-freq;
-        # the reset is destructive-but-reversible (writes a .bak first)
-        # so it sits last and gets a red hover tint as a soft warning.
-        # All three only appear when their action is applicable.
+        # Right-side action icons. Order: ✎ Edit name, ⧉ Copy ID,
+        # ↗ Open folder, ⟲ Reset thinking blocks. The first three are
+        # safe & high-freq; the reset is destructive-but-reversible
+        # (writes a .bak first) so it sits last and gets a red hover
+        # tint as a soft warning. All only appear when applicable.
         sess_uuid = self._effective_uuid()
+        # ✎ Edit shows only when the wiring layer wired on_rename AND
+        # we have a session uuid to key the override on. Without uuid
+        # the override has nowhere to land (sessions whose transcript
+        # hasn't been resolved yet — rare but possible during the
+        # ProcessScanner-fast → JsonlParser settle window).
+        if sess_uuid and self._on_rename is not None:
+            self._edit_btn = QPushButton("✎")
+            self._edit_btn.setStyleSheet(_STYLE_HEADER_ICON)
+            self._edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._edit_btn.setToolTip(
+                "Rename session (claude-island display only — does not "
+                "change the terminal tab title)"
+            )
+            self._edit_btn.setFixedSize(24, 22)
+            self._edit_btn.clicked.connect(self._enter_rename_mode)
+            head.addWidget(self._edit_btn)
         if sess_uuid:
             self._copy_id_btn = QPushButton("⧉")
             self._copy_id_btn.setStyleSheet(_STYLE_HEADER_ICON)
@@ -1581,6 +1613,130 @@ class SessionDetailPopup(QFrame):
         path = self._fallback.project_path
         _open_in_explorer(path)
         self._show_status(f"✓ Opened {path}", color="#9ca3af")
+
+    # ------------------------------------------------------------------
+    # Inline session rename
+    # ------------------------------------------------------------------
+
+    def _enter_rename_mode(self) -> None:
+        """Swap the title QLabel for a QLineEdit so the user can type
+        a new name. Enter commits, Esc cancels. The edit ✎ button
+        hides while editing — its slot is taken by the inline field.
+
+        Idempotent: a no-op if already editing or if the rename
+        affordance was suppressed (no on_rename callback / no uuid).
+        """
+        if self._on_rename is None or self._name_label is None:
+            return
+        if self._name_edit is not None:
+            return  # already in edit mode
+        from PySide6.QtWidgets import QLineEdit
+
+        edit = QLineEdit(self._name_label.text())
+        edit.setStyleSheet(
+            "QLineEdit {"
+            "    color: #e8e8e8;"
+            "    background: #1a1a1a;"
+            "    border: 1px solid #4a4a4a;"
+            "    border-radius: 4px;"
+            "    padding: 2px 6px;"
+            "    font-size: 13px;"
+            "}"
+            "QLineEdit:focus { border-color: #6b7280; }"
+        )
+        edit.setPlaceholderText("Display name (leave blank to restore default)")
+        # Enter → commit; Esc → cancel. Both wire through dedicated
+        # slots so the rename can have side effects (callback fires
+        # only on commit) and Esc is unambiguous.
+        edit.returnPressed.connect(self._commit_rename)
+        # Esc handled via key filter on QLineEdit — easier than
+        # subclassing for one keystroke.
+        edit.installEventFilter(self)
+
+        # Replace the label widget in-place so the head row geometry
+        # stays put (no layout shift while typing).
+        idx = self._name_head_layout.indexOf(self._name_label)
+        if idx < 0:
+            return
+        self._name_head_layout.removeWidget(self._name_label)
+        self._name_label.hide()
+        self._name_head_layout.insertWidget(idx, edit, 1)
+        self._name_edit = edit
+        if self._edit_btn is not None:
+            self._edit_btn.setEnabled(False)
+        edit.setFocus()
+        edit.selectAll()
+
+    def _exit_rename_mode(self) -> None:
+        """Tear down the QLineEdit and restore the QLabel. Caller is
+        responsible for updating the label's text first if a save
+        happened — _commit_rename does this; _cancel_rename leaves
+        the original text untouched."""
+        if self._name_edit is None or self._name_label is None:
+            return
+        idx = self._name_head_layout.indexOf(self._name_edit)
+        if idx >= 0:
+            self._name_head_layout.removeWidget(self._name_edit)
+        self._name_edit.deleteLater()
+        self._name_edit = None
+        self._name_head_layout.insertWidget(idx if idx >= 0 else 0, self._name_label, 1)
+        self._name_label.show()
+        if self._edit_btn is not None:
+            self._edit_btn.setEnabled(True)
+
+    def _commit_rename(self) -> None:
+        """Persist the new name via the on_rename callback, update the
+        label text, and exit edit mode. Empty input clears the
+        override (restores Claude Code's default name) — the platform
+        helper translates "" into a delete.
+        """
+        if self._name_edit is None or self._on_rename is None:
+            return
+        new_name = self._name_edit.text().strip()
+        sess_uuid = self._effective_uuid()
+        if not sess_uuid:
+            # Shouldn't happen — we only show the edit button when uuid
+            # is non-empty — but guard so a race with session shutdown
+            # doesn't blow up the popup.
+            self._exit_rename_mode()
+            return
+        try:
+            self._on_rename(sess_uuid, new_name)
+        except Exception as exc:
+            self._show_status(f"Rename failed: {exc}", color="#ef4444")
+            self._exit_rename_mode()
+            return
+        # Update the label optimistically — the panel's refresh will
+        # also re-render but the popup keeps showing the live value
+        # until the user dismisses it.
+        if self._name_label is not None:
+            displayed = new_name if new_name else self._title_text()
+            self._name_label.setText(displayed)
+        self._exit_rename_mode()
+        self._show_status("✓ Renamed", color="#4ade80")
+
+    def _cancel_rename(self) -> None:
+        """Exit edit mode without saving. Triggered by Esc."""
+        self._exit_rename_mode()
+
+    def eventFilter(self, obj: object, event: object) -> bool:  # type: ignore[override]
+        """Catch Esc on the inline rename QLineEdit to cancel editing.
+
+        QLineEdit doesn't expose an escapePressed signal, and
+        subclassing for one key would be heavier than this filter.
+        """
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QKeyEvent
+        if (
+            self._name_edit is not None
+            and obj is self._name_edit
+            and isinstance(event, QKeyEvent)
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Escape
+        ):
+            self._cancel_rename()
+            return True
+        return super().eventFilter(obj, event)
 
     def _on_toggle_prompt(self) -> None:
         """Swap between the collapsed QLabel preview and an expanded
@@ -2197,6 +2353,10 @@ class ExpandedWindow(QWidget):
         # — its presence is mutually exclusive with any row.
         self._rows: dict[int, QPushButton] = {}
         self._placeholder: QLabel | None = None
+        # Last session snapshot — populated by refresh_sessions, read
+        # by user-triggered re-renders (rename) so we don't have to
+        # wait for the next scan tick.
+        self._latest_sessions: list[Session] = []
 
         self._setup_window()
         self._build_ui()
@@ -2367,6 +2527,13 @@ class ExpandedWindow(QWidget):
         across the 10s scan tick. Cards are rebuilt every refresh
         (cheap; just QFrame + QVBoxLayout).
         """
+        # Cache the latest list so user-triggered refreshes (e.g. after
+        # a session rename) can re-render without waiting for the next
+        # scan tick. The registry's emit is the only other path that
+        # touches this list, and it always passes a complete snapshot,
+        # so caching here is safe.
+        self._latest_sessions = list(sessions)
+
         self._clear_session_layout()
         # Count badge in the header — makes overflow discoverable when
         # the list scrolls past the visible window.
@@ -3191,6 +3358,29 @@ class ExpandedWindow(QWidget):
                 print(f"[claude-island] provider-config-changed callback failed: {exc}",
                       file=_sys.stderr)
 
+    def _on_session_renamed(self, sess_uuid: str, new_name: str) -> None:
+        """Persist a custom session display name and re-render rows.
+
+        Wired to ``SessionDetailPopup.on_rename``. Empty ``new_name``
+        clears the override (restores the auto-detected name) — the
+        platform helper handles the empty-as-delete sentinel.
+
+        After persisting we re-call ``refresh_sessions`` with the
+        cached snapshot so the row label reflects the new name without
+        waiting for the next 10s scan tick. The composer
+        ``_get_session_details`` is responsible for re-reading the
+        override on each call (which it does, via the wiring layer's
+        ``_build_session_details``)."""
+        from claude_island.platform_ import session_names as _names
+        _names.set_session_name(sess_uuid, new_name)
+        # Re-render with the cached snapshot so the new name appears
+        # immediately. _latest_sessions stays empty until the first
+        # refresh_sessions call, but rename can only happen via the
+        # popup which only opens after at least one row is shown — so
+        # the cache is guaranteed populated at this point.
+        if self._latest_sessions:
+            self.refresh_sessions(self._latest_sessions)
+
     def set_available_providers(
         self, providers: list[str], selected: str | None = None
     ) -> None:
@@ -3455,7 +3645,10 @@ class ExpandedWindow(QWidget):
                 import sys as _sys
                 print(f"[claude-island] detail popup composer failed: {exc}",
                       file=_sys.stderr)
-        popup = SessionDetailPopup(details, session, parent=self)
+        popup = SessionDetailPopup(
+            details, session, parent=self,
+            on_rename=self._on_session_renamed,
+        )
         # Map the row-local right-click position to global screen
         # coordinates. ``btn.mapToGlobal`` does the right thing across
         # multi-monitor / DPI setups.

@@ -1329,6 +1329,113 @@ def test_detail_popup_open_folder_calls_helper(qtbot, monkeypatch):
 
 
 # ============================================================================
+# Inline session rename — ✎ button on the detail popup header swaps the
+# title for a QLineEdit; Enter commits via on_rename callback, Esc cancels.
+# ============================================================================
+
+class TestDetailPopupRename:
+    """Edit affordance on the detail popup header."""
+
+    @staticmethod
+    def _popup(qtbot, *, with_rename: bool):
+        from claude_island.ui.expanded_window import SessionDetailPopup
+        s = _session(1, "/proj")
+        details = _make_full_details(s, effective_uuid="uuid-1")
+        renames: list = []
+        popup = SessionDetailPopup(
+            details, s,
+            on_rename=(lambda u, n: renames.append((u, n))) if with_rename else None,
+        )
+        qtbot.addWidget(popup)
+        return popup, renames
+
+    def test_edit_button_visible_when_callback_wired_and_uuid_present(self, qtbot):
+        popup, _ = self._popup(qtbot, with_rename=True)
+        assert popup._edit_btn is not None
+        assert popup._edit_btn.text() == "✎"
+        assert "Rename" in popup._edit_btn.toolTip()
+
+    def test_edit_button_hidden_without_callback(self, qtbot):
+        # Tests / detached use that don't supply on_rename → no edit
+        # affordance, popup stays read-only.
+        popup, _ = self._popup(qtbot, with_rename=False)
+        assert popup._edit_btn is None
+
+    def test_enter_rename_mode_swaps_label_for_lineedit(self, qtbot):
+        popup, _ = self._popup(qtbot, with_rename=True)
+        from PySide6.QtWidgets import QLineEdit
+        assert popup._name_edit is None
+        popup._enter_rename_mode()
+        assert popup._name_edit is not None
+        assert isinstance(popup._name_edit, QLineEdit)
+        # Edit button disabled while editing so the user can't double-fire.
+        assert popup._edit_btn is not None and not popup._edit_btn.isEnabled()
+        # Original label preserved (hidden) so cancel can restore it.
+        assert popup._name_label is not None and popup._name_label.isHidden()
+
+    def test_enter_rename_mode_idempotent(self, qtbot):
+        # Double-clicking ✎ shouldn't create a second QLineEdit.
+        popup, _ = self._popup(qtbot, with_rename=True)
+        popup._enter_rename_mode()
+        first_edit = popup._name_edit
+        popup._enter_rename_mode()
+        assert popup._name_edit is first_edit
+
+    def test_commit_rename_invokes_callback_and_exits_edit(self, qtbot):
+        popup, renames = self._popup(qtbot, with_rename=True)
+        popup._enter_rename_mode()
+        popup._name_edit.setText("frontend refactor")
+        popup._commit_rename()
+        assert renames == [("uuid-1", "frontend refactor")]
+        # Edit mode torn down, label restored, edit button re-enabled.
+        # Use isHidden() not isVisible() — the popup itself is never
+        # shown in tests, so isVisible would always return False.
+        # isHidden() checks the explicit hide() flag.
+        assert popup._name_edit is None
+        assert popup._edit_btn.isEnabled()
+        assert not popup._name_label.isHidden()
+        assert popup._name_label.text() == "frontend refactor"
+
+    def test_commit_empty_clears_override(self, qtbot):
+        # Saving an empty string is the "restore default" gesture —
+        # the callback receives "" and the platform layer translates
+        # it into a delete.
+        popup, renames = self._popup(qtbot, with_rename=True)
+        popup._enter_rename_mode()
+        popup._name_edit.setText("   ")
+        popup._commit_rename()
+        assert renames == [("uuid-1", "")]
+
+    def test_cancel_rename_does_not_invoke_callback(self, qtbot):
+        popup, renames = self._popup(qtbot, with_rename=True)
+        original = popup._name_label.text()
+        popup._enter_rename_mode()
+        popup._name_edit.setText("typed but cancelled")
+        popup._cancel_rename()
+        assert renames == []
+        # Label text untouched.
+        assert popup._name_label.text() == original
+        assert popup._name_edit is None
+
+    def test_callback_exception_keeps_popup_alive(self, qtbot):
+        # If on_rename raises (e.g. disk full), surface a status line
+        # and exit edit mode — but don't crash the popup.
+        from claude_island.ui.expanded_window import SessionDetailPopup
+        s = _session(1, "/proj")
+        details = _make_full_details(s, effective_uuid="uuid-1")
+        def boom(u, n):
+            raise RuntimeError("disk full")
+        popup = SessionDetailPopup(details, s, on_rename=boom)
+        qtbot.addWidget(popup)
+        popup._enter_rename_mode()
+        popup._name_edit.setText("anything")
+        popup._commit_rename()
+        # Popup still alive, edit mode exited, error in status.
+        assert popup._name_edit is None
+        assert "Rename failed" in popup._repair_status.text()
+
+
+# ============================================================================
 # Add-provider dialog (in-app + button) — frameless popup that lets the
 # user paste credentials and have a new tab appear without restart.
 # ============================================================================

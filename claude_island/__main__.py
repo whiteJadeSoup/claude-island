@@ -69,6 +69,7 @@ ensure_provider_config()
 # to __main__.py is needed.
 from claude_island.platform_.session_discovery import SessionDiscovery
 from claude_island.platform_ import session_state as session_state_reader
+from claude_island.platform_ import session_names as session_names_store
 from claude_island.platform_.window_activator import WindowActivator
 
 process_scanner = ProcessScanner()
@@ -224,9 +225,15 @@ def _build_session_details(session):
     # (MiniMax sessions don't write ~/.claude/sessions/<pid>.json).
     if started_at is None:
         started_at = meta.get("started_at")
+    # User's custom name (set via the detail popup's edit affordance)
+    # wins over Claude Code's auto-generated name. Falls through to the
+    # state-file name when not overridden, then to ai_title / basename
+    # downstream in the UI.
+    custom_name = session_names_store.get_session_name(sess_uuid or "")
+    state_name = state.get("name") if isinstance(state.get("name"), str) else None
     return SessionDetails(
         session=session,
-        name=state.get("name") if isinstance(state.get("name"), str) else None,
+        name=custom_name or state_name,
         ai_title=meta.get("ai_title"),
         git_branch=meta.get("git_branch"),
         last_prompt=meta.get("last_prompt"),
