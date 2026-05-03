@@ -32,23 +32,28 @@ class MacOsBackend(_CapabilityProvider):
 
     @capability(Capability.REVEAL_CWD)
     def reveal_cwd(self, view: SessionView) -> bool:
+        # `open -R <path>` selects the path in Finder. Returns 0 when
+        # successful, non-zero when the path is missing — propagate
+        # that as the bool result so the popup can show "❌ Failed".
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["open", "-R", str(view.project_path)],
                 check=False, timeout=_TIMEOUT_S,
             )
-            return True
+            return result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False
 
     @capability(Capability.COPY_PATH)
     def copy_path(self, view: SessionView) -> bool:
+        # pbcopy reads UTF-8 by default in modern macOS locales.
+        # Returns 0 when the clipboard write succeeded.
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["pbcopy"],
                 input=str(view.project_path).encode("utf-8"),
                 check=False, timeout=_TIMEOUT_S,
             )
-            return True
+            return result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False

@@ -137,26 +137,36 @@ def test_placeholder_disappears_when_sessions_arrive(panel):
     assert set(panel._rows.keys()) == {1}
 
 
-def test_session_click_emits_latest_view_snapshot(panel, qtbot):
+def test_session_click_dispatches_focus_with_latest_view(qtbot):
     """Property carrier (_session) on the button must be refreshed on each
-    update so a click after activity changed emits the new last_activity.
-    PR2: signal is now action_requested(view, capability, kwargs)."""
+    update so a click after activity changed dispatches the new view.
+    PR2: actions flow through the injected dispatch callable."""
     from claude_island.core.capabilities import Capability
+    received: list = []
+
+    capsule = QWidget(); capsule.show()
+    controller = IslandController()
+    panel = ExpandedWindow(
+        capsule=capsule,
+        controller=controller,
+        get_usage_totals=lambda period: UsageTotals(period=period),
+        dispatch=lambda v, cap, **kw: (received.append((v, cap, kw)) or True),
+    )
+    qtbot.addWidget(panel); qtbot.addWidget(capsule)
+
     panel._render_sessions([_session(1, "/a", ago_minutes=10)])
     btn = panel._rows[1]
     fresh = _session(1, "/a", ago_minutes=0)
     panel._render_sessions([fresh])
 
-    received: list = []
-    panel.action_requested.connect(
-        lambda v, cap, kw: received.append((v, cap, kw))
-    )
     btn.click()
 
     assert len(received) == 1
     view, cap, kwargs = received[0]
     assert cap == Capability.FOCUS
-    assert kwargs == {}
+    # siblings is always passed (empty for singleton groups) — see
+    # WindowsTerminalAdapter.focus for why this kwarg is required.
+    assert kwargs == {"siblings": []}
     assert view.last_activity == fresh.last_activity
 
 
@@ -834,113 +844,62 @@ def test_repair_icon_hidden_when_no_uuid(qtbot):
     assert not popup._repair_status.isVisible()
 
 
-def test_repair_button_strips_thinking_and_disables_self(qtbot, tmp_path):
-    """Click → strip_thinking_blocks runs → status reads "Removed N
-    blocks", button becomes disabled with text "Done"."""
-    import json
-    from unittest.mock import patch
+def test_repair_button_calls_callback_and_disables_self_on_success(qtbot):
+    """Click → on_strip_thinking callback fires → status reads success,
+    button becomes disabled with text "Done". The popup itself does
+    no JSONL/file work — that's the callback's job (which routes via
+    the dispatcher to LocalAppBackend.reset_thinking)."""
     from claude_island.ui.expanded_window import SessionDetailPopup
 
-    # Use a short project_path (NOT pytest's nested tmp_path) so the
-    # final slug stays well under Windows' 260-char MAX_PATH limit —
-    # the .bak.<unix-ts> suffix adds another 14 chars.
     s = _session(1, "C:/X")
     full_uuid = "abc12345-6789-0000-0000-000000000000"
     details = _make_full_details(s, effective_uuid=full_uuid)
 
-    # Build a transcript on disk that the popup will try to repair.
-    # Path follows Claude Code's convention: ~/.claude/projects/<slug>/<uuid>.jsonl
-    # — we patch _claude_projects_root() to redirect at that root.
-    from claude_island.core.models import project_hash
-    fake_home = tmp_path / "fake_home"
-    proj_dir = fake_home / ".claude" / "projects" / project_hash(s.project_path)
-    proj_dir.mkdir(parents=True)
-    jsonl_path = proj_dir / f"{full_uuid}.jsonl"
-    jsonl_path.write_text(
-        json.dumps({"message": {"content": [
-            {"type": "thinking", "thinking": "x", "signature": "abc"},
-            {"type": "text", "text": "hello"},
-        ]}}) + "\n",
-        encoding="utf-8"
-    )
+    callback_calls: list[bool] = []
+    def on_strip():
+        callback_calls.append(True)
+        return True   # success
 
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, s, on_strip_thinking=on_strip)
     qtbot.addWidget(popup)
+    popup._on_strip_thinking()
 
-    with patch(
-        "claude_island.ui.expanded_window._claude_projects_root",
-        return_value=fake_home / ".claude" / "projects"
-    ):
-        popup._on_strip_thinking()
-
-    # File should no longer contain the thinking block, and a backup
-    # should have been written alongside.
-    cleaned = json.loads(jsonl_path.read_text(encoding="utf-8").strip())
-    types = [c.get("type") for c in cleaned["message"]["content"]]
-    assert types == ["text"]
-    backups = list(proj_dir.glob(f"{full_uuid}.jsonl.bak.*"))
-    assert len(backups) == 1
-    # Status reflects the result; icon becomes disabled and shows "Done".
-    assert "Removed 1 thinking block" in popup._repair_status.text()
+    assert callback_calls == [True]
+    assert "Stripped" in popup._repair_status.text()
     assert popup._repair_icon.isEnabled() is False
     assert popup._repair_icon.text() == "Done"
 
 
-def test_repair_button_handles_missing_transcript(qtbot, tmp_path):
-    """If the JSONL doesn't exist (session moved / wrong cwd), surface
-    a clear error in the status line — never crash the popup."""
-    from unittest.mock import patch
+def test_repair_button_shows_error_on_callback_failure(qtbot):
+    """Callback returns False (e.g. transcript not found, session has
+    no uuid) → popup shows the failure message and KEEPS the button
+    enabled so the user can retry after fixing the underlying issue."""
     from claude_island.ui.expanded_window import SessionDetailPopup
 
-    s = _session(1, str(tmp_path))
+    s = _session(1, "C:/X")
     details = _make_full_details(s, effective_uuid="abc12345-6789-0000-0000-000000000000")
-    popup = SessionDetailPopup(details, s)
+
+    popup = SessionDetailPopup(details, s, on_strip_thinking=lambda: False)
     qtbot.addWidget(popup)
+    popup._on_strip_thinking()
 
-    fake_home = tmp_path / "empty_home"   # nothing under here
-    fake_home.mkdir()
-    with patch(
-        "claude_island.ui.expanded_window._claude_projects_root",
-        return_value=fake_home / ".claude" / "projects"
-    ):
-        popup._on_strip_thinking()  # must not raise
-
-    assert "Transcript not found" in popup._repair_status.text()
-    # Icon still active so the user can retry after fixing the path.
+    assert "Failed" in popup._repair_status.text()
     assert popup._repair_icon.isEnabled() is True
 
 
-def test_repair_button_zero_blocks_message(qtbot, tmp_path):
-    """A clean transcript should report 'No thinking blocks found' and
-    still leave a backup (for symmetry / forensic clarity)."""
-    import json
-    from unittest.mock import patch
+def test_repair_button_handles_unwired_callback(qtbot):
+    """When the popup is constructed without on_strip_thinking (e.g.
+    legacy test fixture, isolated unit test), clicking the button
+    surfaces a clear "not wired" message instead of silently no-oping."""
     from claude_island.ui.expanded_window import SessionDetailPopup
-    from claude_island.core.models import project_hash
 
-    s = _session(1, "C:/Y")  # short path → short slug → fits MAX_PATH
-    full_uuid = "abc12345-6789-0000-0000-000000000000"
-    details = _make_full_details(s, effective_uuid=full_uuid)
-
-    fake_home = tmp_path / "fake_home"
-    proj_dir = fake_home / ".claude" / "projects" / project_hash(s.project_path)
-    proj_dir.mkdir(parents=True)
-    jsonl_path = proj_dir / f"{full_uuid}.jsonl"
-    jsonl_path.write_text(
-        json.dumps({"message": {"content": [{"type": "text", "text": "ok"}]}}) + "\n",
-        encoding="utf-8"
-    )
-
-    popup = SessionDetailPopup(details, s)
+    s = _session(1, "C:/X")
+    details = _make_full_details(s, effective_uuid="abc12345-6789-0000-0000-000000000000")
+    popup = SessionDetailPopup(details, s)  # on_strip_thinking=None
     qtbot.addWidget(popup)
-    with patch(
-        "claude_island.ui.expanded_window._claude_projects_root",
-        return_value=fake_home / ".claude" / "projects"
-    ):
-        popup._on_strip_thinking()
+    popup._on_strip_thinking()
 
-    assert "No thinking blocks found" in popup._repair_status.text()
-    assert len(list(proj_dir.glob(f"{full_uuid}.jsonl.bak.*"))) == 1
+    assert "not wired" in popup._repair_status.text()
 
 
 # ============================================================================
@@ -1184,20 +1143,23 @@ def test_detail_popup_copy_id_action_writes_clipboard(qtbot):
     assert "deadbeef" in popup._repair_status.text()
 
 
-def test_detail_popup_path_click_opens_folder(qtbot, monkeypatch):
-    """Path value is clickable and opens the folder in explorer (same as
-    the ↗ button). Clicking the path label invokes _open_in_explorer."""
+def test_detail_popup_path_click_invokes_open_folder_callback(qtbot):
+    """Path value is clickable and routes through the on_open_folder
+    callback (which the wiring layer connects to dispatcher → OS
+    backend's REVEAL_CWD)."""
     from PySide6.QtCore import Qt, QPointF
     from PySide6.QtGui import QMouseEvent
-    from claude_island.ui import expanded_window as ew
     from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/some/proj/path")
     details = _make_full_details(s)
-    popup = SessionDetailPopup(details, s)
+
+    called: list[bool] = []
+    popup = SessionDetailPopup(
+        details, s, on_open_folder=lambda: (called.append(True) or True),
+    )
     qtbot.addWidget(popup)
     popup.show()
 
-    # Path label is now a plain QLabel (not _ClickToCopyLabel)
     from PySide6.QtWidgets import QLabel
     path_label = None
     for lbl in popup.findChildren(QLabel):
@@ -1207,14 +1169,12 @@ def test_detail_popup_path_click_opens_folder(qtbot, monkeypatch):
     assert path_label is not None
     assert path_label.toolTip() == "Open project folder in file explorer"
 
-    called: list[Path] = []
-    monkeypatch.setattr(ew, "_open_in_explorer", lambda p: called.append(p))
     path_label.mousePressEvent(QMouseEvent(
         QMouseEvent.Type.MouseButtonPress,
         QPointF(), QPointF(), QPointF(),
         Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
     ))
-    assert called == [s.project_path]
+    assert called == [True]
 
 
 def test_detail_popup_header_layout_stable_when_prompt_toggles(qtbot):
@@ -1243,21 +1203,35 @@ def test_detail_popup_header_layout_stable_when_prompt_toggles(qtbot):
     assert geom_before.topLeft() == geom_after.topLeft()
 
 
-def test_detail_popup_open_folder_calls_helper(qtbot, monkeypatch):
-    """Clicking 'Open folder' invokes _open_in_explorer with the
-    project_path. Helper is patched so the test doesn't actually shell
-    out."""
-    from claude_island.ui import expanded_window as ew
+def test_detail_popup_open_folder_invokes_callback(qtbot):
+    """Clicking 'Open folder' fires the on_open_folder callback (which
+    the wiring layer routes to dispatcher → REVEAL_CWD). Popup itself
+    has no platform knowledge."""
     from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/test/proj")
     details = _make_full_details(s)
-    popup = SessionDetailPopup(details, s)
+
+    called: list[bool] = []
+    popup = SessionDetailPopup(
+        details, s, on_open_folder=lambda: (called.append(True) or True),
+    )
     qtbot.addWidget(popup)
 
-    called: list[Path] = []
-    monkeypatch.setattr(ew, "_open_in_explorer", lambda p: called.append(p))
     popup._on_open_folder()
-    assert called == [s.project_path]
+    assert called == [True]
+    assert "Opened" in popup._repair_status.text()
+
+
+def test_detail_popup_open_folder_unwired_shows_error(qtbot):
+    """Without the on_open_folder callback wired (test fixture / dev
+    setup), clicking surfaces the not-wired status — no silent no-op."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    s = _session(1, "/test/proj")
+    details = _make_full_details(s)
+    popup = SessionDetailPopup(details, s)  # no on_open_folder
+    qtbot.addWidget(popup)
+    popup._on_open_folder()
+    assert "not wired" in popup._repair_status.text()
 
 
 # ============================================================================
@@ -1274,9 +1248,12 @@ class TestDetailPopupRename:
         s = _session(1, "/proj")
         details = _make_full_details(s, effective_uuid="uuid-1")
         renames: list = []
+        # Callback returns True on success — required for the popup to
+        # commit the rename. Old contract returned None (truthy ≠ True);
+        # new dispatch contract uses bool.
         popup = SessionDetailPopup(
             details, s,
-            on_rename=(lambda u, n: renames.append((u, n))) if with_rename else None
+            on_rename=(lambda u, n: renames.append((u, n)) or True) if with_rename else None
         )
         qtbot.addWidget(popup)
         return popup, renames
@@ -2030,19 +2007,21 @@ class TestRowStatusText:
 
     def test_returns_relative_time(self):
         from claude_island.ui.expanded_window import _row_status_text
-        sess = _session(1, "/a", ago_minutes=5)
-        text = _row_status_text(sess)
-        # Allow a small drift in the "minutes ago" boundary.
+        from claude_island.core.snapshot import _degraded_view
+        view = _degraded_view(_session(1, "/a", ago_minutes=5))
+        text = _row_status_text(view)
         assert text.endswith("ago")
         assert "m" in text or "h" in text
 
-    def test_returns_seconds_for_fresh_activity(self):
+    def test_returns_now_for_fresh_activity(self):
+        """Activity within 5 seconds renders as "now" — the old
+        "0s ago" / "3s ago" jittered chaotically for running sessions
+        on every Snapshotter rebuild and read like a bug."""
         from claude_island.ui.expanded_window import _row_status_text
-        sess = _session(1, "/a", ago_minutes=0)
-        text = _row_status_text(sess)
-        # ago_minutes=0 → just-happened → "Ns ago".
-        assert text.endswith("ago")
-        assert "s" in text or "m" in text
+        from claude_island.core.snapshot import _degraded_view
+        view = _degraded_view(_session(1, "/a", ago_minutes=0))
+        text = _row_status_text(view)
+        assert text == "now"
 
 
 # ============================================================================

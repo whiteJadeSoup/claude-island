@@ -108,10 +108,10 @@ session_discovery = SessionDiscovery(
     scanner=process_scanner,
     registry=session_registry,
 )
-# PR1: three-port dispatcher (groups sessions via adapter chain; dispatches
-# UI actions by scope. The data path (group_sessions) is injected into the
-# Snapshotter below. The control path (dispatch) is connected to
-# expanded.action_requested in PR2.
+# Three-port dispatcher (groups sessions via adapter chain; dispatches
+# UI actions by scope). Two outbound wirings:
+# - data path: dispatcher.group_sessions injected into Snapshotter
+# - control path: dispatcher.dispatch injected into ExpandedWindow
 _app_backend = LocalAppBackend(
     names_store=session_names_store,
     claude_projects_dir=_CLAUDE_PROJECTS,
@@ -369,6 +369,11 @@ expanded = ExpandedWindow(
     selected_provider=_selected_provider,
     on_provider_selected=_on_provider_tab_clicked,
     on_provider_config_changed=_on_provider_config_changed,
+    # Capability dispatch (FOCUS / REVEAL_CWD / RENAME / RESET_THINKING).
+    # The dispatcher routes each by scope: TERMINAL → adapter chain,
+    # OS → os_backend, APP → app_backend. UI calls this for every
+    # user-triggered action and never imports platform code itself.
+    dispatch=_dispatcher.dispatch,
 )
 
 # ---------------------------------------------------------------------------
@@ -507,13 +512,6 @@ snapshotter.start()
 # marshaler emit, so this enqueues a push on the Qt main thread that
 # fires once app.exec() begins spinning the event loop.
 _world_marshaler.snap_ready.emit(snapshotter.build_now())
-
-# PR2: UI emits action_requested(view, cap, kwargs) — dispatcher routes
-# by scope (TERMINAL → adapter, OS → os_backend, APP → app_backend).
-# Fires on the Qt main thread (µs-level call, no bridge needed).
-expanded.action_requested.connect(
-    lambda v, c, kw=None: _dispatcher.dispatch(v, c, **(kw or {}))
-)
 
 # ---------------------------------------------------------------------------
 # Start background services

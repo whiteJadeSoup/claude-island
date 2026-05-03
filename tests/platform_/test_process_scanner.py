@@ -38,14 +38,13 @@ def patched_process_iter():
     """Yield a list that tests can populate with fake procs; patches
     psutil.process_iter to return them when scan() asks.
 
-    Also stubs the orphan-filter helpers so tests that don't care about
-    orphan logic stay simple:
-    - ``get_console_info`` returns a dummy success value so every session
-      survives the AttachConsole probe.
-    - ``walk_to_visible_host`` returns None so ``window_handle`` stays
-      None (matching the legacy behaviour the older tests assumed).
-    Tests that exercise the new orphan / wt_hwnd behaviour override
-    these inside their own ``with patch(...)`` blocks.
+    Also stubs the orphan-filter helper so tests that don't care about
+    orphan logic stay simple: ``get_console_info`` returns a dummy
+    success value so every session survives the AttachConsole probe.
+    Tests that exercise orphan filtering override this inside their
+    own ``with patch(...)`` blocks. wt_hwnd discovery moved out of
+    process_scanner in PR2 (now lives in WindowsTerminalAdapter), so
+    no walk_to_visible_host patch is needed here.
     """
     fake_procs: list = []
 
@@ -57,8 +56,6 @@ def patched_process_iter():
               side_effect=fake_iter),
         patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
               return_value=(1, "any-title")),
-        patch("claude_island.platform_.process_scanner.window_activator.walk_to_visible_host",
-              return_value=None)
     ):
         yield fake_procs
 

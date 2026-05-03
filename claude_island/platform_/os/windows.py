@@ -35,6 +35,10 @@ class WindowsOsBackend(_CapabilityProvider):
         # No space after the comma — explorer.exe's CLI parser is
         # fussy about it. The trailing slash on the path is OK either
         # way; we just stringify whatever Path object we got.
+        # Note: explorer.exe is unusual — it returns 1 even on success
+        # for a `/select,<path>` call. Treat any completed run as OK
+        # (returncode is unreliable here); only catch the OS-level
+        # failures that mean we couldn't even spawn the process.
         try:
             subprocess.run(
                 ["explorer", f"/select,{view.project_path}"],
@@ -46,12 +50,17 @@ class WindowsOsBackend(_CapabilityProvider):
 
     @capability(Capability.COPY_PATH)
     def copy_path(self, view: SessionView) -> bool:
+        # clip.exe relies on a UTF-16-LE BOM (\xff\xfe) to recognise
+        # Unicode input. Without the BOM it falls back to the system
+        # OEM codepage, which mojibakes any CJK / non-ASCII path.
+        # Return value follows clip's exit code; 0 means the clipboard
+        # was set, anything else means we couldn't reach the clipboard.
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["clip"],
-                input=str(view.project_path).encode("utf-16-le"),
+                input=b"\xff\xfe" + str(view.project_path).encode("utf-16-le"),
                 check=False, timeout=_TIMEOUT_S,
             )
-            return True
+            return result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False

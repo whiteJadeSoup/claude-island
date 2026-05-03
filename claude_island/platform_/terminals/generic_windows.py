@@ -55,13 +55,19 @@ class GenericWindowsAdapter(_CapabilityProvider):
         return groups
 
     @capability(Capability.FOCUS)
-    def focus(self, view: SessionView) -> bool:
+    def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
         """Activate via ancestor-pid EnumWindows walk.
 
         Same logic as the legacy WindowActivator._activate_windows
         fallback. Won't select a specific tab, but will bring the
         host window to the foreground — which is the best we can do
-        for non-WT hosts."""
+        for non-WT hosts.
+
+        ``siblings`` is accepted (and ignored) so the dispatcher can
+        pass the same kwargs to every adapter regardless of which one
+        ends up handling the view. The WT adapter uses siblings for
+        inactive-pane tab fallback; non-WT hosts have no analogue."""
+        del siblings  # ignored — generic Windows hosts have no tab concept
         try:
             import win32con
             import win32gui

@@ -338,7 +338,8 @@ def _group_bg_color(idx: int) -> str:
     same red tint when their hashes happened to mod-equal).
 
     The position is stable as long as the session-sort order is
-    stable (it is — deterministic via ``_session_sort_key``), so
+    stable (it is — adapter chain emits SessionGroups in deterministic
+    insertion order based on bucket key), so
     cards keep their colour across refreshes unless a group above
     them appears / disappears. Worth the trade vs the previous
     "absolutely stable but visually broken" hash."""
@@ -1286,27 +1287,6 @@ def _aggregate_per_model_for_display(
     return tuple(rows)
 
 
-def _open_in_explorer(path: Path) -> None:
-    """Reveal ``path`` in the OS file manager.
-
-    Best-effort — failures are logged to stderr but never raised so a
-    missing folder / OS quirk can't crash the popup. Windows is the
-    primary target; macOS branch covers laptop dev usage.
-    """
-    import os
-    import subprocess
-    import sys as _sys
-    try:
-        if _sys.platform == "win32":
-            os.startfile(str(path))  # type: ignore[attr-defined]
-        elif _sys.platform == "darwin":
-            subprocess.run(["open", str(path)], check=False)
-        else:
-            subprocess.run(["xdg-open", str(path)], check=False)
-    except Exception as exc:
-        print(f"[claude-island] open_in_explorer failed: {exc}", file=_sys.stderr)
-
-
 def _short_uuid(uuid: str) -> str:
     """First 8 chars of a UUID, or "—" when missing.
     Matches the convention used by `git log --oneline` for commits."""
@@ -1347,11 +1327,19 @@ def _fmt_started(dt: datetime | None) -> str:
     Created field. Dropped the "started " prefix — the field's own
     label ("Created") already supplies that context, and the prefix
     pushed the combined "datetime + relative" string past the value
-    column's width on common popup sizes, cropping " ago)"."""
+    column's width on common popup sizes, cropping " ago)".
+
+    For very fresh activity (under 5s) we render ``"now"`` rather than
+    ``"0s ago"`` / ``"3s ago"`` — those tiny numbers tick chaotically
+    on every Snapshotter rebuild for an actively-running session and
+    read as a bug. The pulse glyph + accent bar already convey "live
+    right now"; the text just needs to NOT contradict that."""
     if dt is None:
         return "—"
     delta = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
     s = int(delta.total_seconds())
+    if s < 5:
+        return "now"
     if s < 60:
         return f"{s}s ago"
     if s < 3600:
@@ -1435,7 +1423,9 @@ class SessionDetailPopup(QFrame):
         fallback: Session,
         parent: QWidget | None = None,
         *,
-        on_rename: "Callable[[str, str], None] | None" = None,
+        on_rename: "Callable[[str, str], bool] | None" = None,
+        on_open_folder: "Callable[[], bool] | None" = None,
+        on_strip_thinking: "Callable[[], bool] | None" = None,
     ) -> None:
         super().__init__(parent)
         # Frameless + Popup = "I behave like a context menu":
@@ -1449,11 +1439,15 @@ class SessionDetailPopup(QFrame):
 
         self._details = details
         self._fallback = fallback
-        # on_rename: caller-supplied (uuid, new_name) -> None invoked when
-        # the user commits a name change via the inline edit. None disables
-        # the edit affordance entirely. The popup itself has no platform
-        # dependency — it just hands the values back to the wiring layer.
+        # All three callbacks are caller-supplied closures that route
+        # to the dispatcher in production. Each returns bool — True on
+        # success, False on missing capability / failure. The popup
+        # itself holds zero platform knowledge. ``_cb`` suffix avoids
+        # name collisions with same-named slot methods (_on_open_folder
+        # is also a Qt slot below).
         self._on_rename = on_rename
+        self._on_open_folder_cb = on_open_folder
+        self._on_strip_thinking_cb = on_strip_thinking
         # Inline rename state — only populated while the user is editing.
         self._name_label: QLabel | None = None
         self._name_edit: "QLineEdit | None" = None
@@ -2010,8 +2004,13 @@ class SessionDetailPopup(QFrame):
 
     def _on_open_folder(self) -> None:
         path = self._fallback.project_path
-        _open_in_explorer(path)
-        self._show_status(f"✓ Opened {path}", color="#9ca3af")
+        if self._on_open_folder_cb is None:
+            self._show_status("Open-folder action is not wired", color="#ef4444")
+            return
+        if self._on_open_folder_cb():
+            self._show_status(f"✓ Opened {path}", color="#9ca3af")
+        else:
+            self._show_status(f"❌ Failed to open {path}", color="#ef4444")
 
     # ------------------------------------------------------------------
     # Inline session rename
@@ -2106,9 +2105,13 @@ class SessionDetailPopup(QFrame):
             self._exit_rename_mode()
             return
         try:
-            self._on_rename(sess_uuid, new_name)
+            ok = self._on_rename(sess_uuid, new_name)
         except Exception as exc:
             self._show_status(f"Rename failed: {exc}", color="#ef4444")
+            self._exit_rename_mode()
+            return
+        if not ok:
+            self._show_status("Rename failed (action returned False)", color="#ef4444")
             self._exit_rename_mode()
             return
         # Update the label optimistically — the panel's refresh will
@@ -2240,53 +2243,34 @@ class SessionDetailPopup(QFrame):
         return view
 
     def _on_strip_thinking(self) -> None:
-        """Resolve the JSONL path from the session, run the repair, and
-        report status. The repair function backs the original up to a
-        ``.bak.<unix-ts>`` sibling — the button mentions this so a
-        wary user knows there's an undo path."""
-        from claude_island.core.models import project_hash
-        from claude_island.core.session_repair import strip_thinking_blocks
+        """Delegate to the injected callback (which routes through the
+        dispatcher → AppBackend.reset_thinking).
 
-        sess_uuid = self._effective_uuid()
-        slug = project_hash(self._fallback.project_path)
-        jsonl_path = (
-            _claude_projects_root() / slug / f"{sess_uuid}.jsonl"
-        )
-        try:
-            count = strip_thinking_blocks(jsonl_path)
-        except FileNotFoundError:
-            self._show_status(
-                "❌ Transcript not found. The session may have been moved or "
-                "started in a different project directory.",
-                color="#ef4444",
-            )
+        The callback returns bool — we lost the granular count/error
+        from the legacy in-popup path, but the .bak file beside the
+        original is the durable evidence the user can inspect to
+        confirm what changed."""
+        if self._on_strip_thinking_cb is None:
+            self._show_status("Strip-thinking action is not wired", color="#ef4444")
             return
-        except OSError as e:
+        if self._on_strip_thinking_cb():
             self._show_status(
-                f"❌ Repair failed: {e}. Original file is unchanged.",
-                color="#ef4444",
-            )
-            return
-
-        if count == 0:
-            self._show_status(
-                "No thinking blocks found — nothing to remove. "
-                "(A backup was still saved.)",
-                color="#9ca3af",
-            )
-        else:
-            noun = "block" if count == 1 else "blocks"
-            self._show_status(
-                f"✓ Removed {count} thinking {noun}. "
-                f"Exit (Ctrl+C) and re-enter the session — Claude can "
-                f"now continue from this transcript.",
+                "✓ Stripped thinking blocks (.bak saved). "
+                "Exit (Ctrl+C) and re-enter the session — Claude can "
+                "now continue from this transcript.",
                 color="#4ade80",
             )
-        # Disable the button so a panicked re-click doesn't write a
-        # second backup over an already-clean file.
-        if self._repair_btn is not None:
-            self._repair_btn.setEnabled(False)
-            self._repair_btn.setText("Done")
+            # Disable so a panicked re-click doesn't write a second
+            # backup over an already-clean file.
+            if self._repair_btn is not None:
+                self._repair_btn.setEnabled(False)
+                self._repair_btn.setText("Done")
+        else:
+            self._show_status(
+                "❌ Failed to strip thinking blocks. Transcript may be "
+                "missing, locked, or the session has no recorded uuid.",
+                color="#ef4444",
+            )
 
     def _show_status(self, text: str, *, color: str) -> None:
         self._repair_status.setText(text)
@@ -2670,14 +2654,13 @@ class ExpandedWindow(QWidget):
     Shows the session list (clicking activates the terminal) and a usage
     summary with a period selector (Daily / Weekly / Monthly).
 
-    ``action_requested`` is connected in __main__.py to the dispatcher, which
-    routes by scope (TERMINAL → adapter, OS → os_backend, APP → app_backend).
-    The UI layer never imports platform code directly.
+    User actions (row click → FOCUS, popup buttons → REVEAL_CWD / RENAME /
+    RESET_THINKING) all flow through the injected ``dispatch`` callable.
+    The default no-op makes the UI safe to construct in tests without
+    wiring the full platform stack; production injects
+    ``TerminalDispatcher.dispatch`` from __main__.py. The UI itself never
+    imports platform code — capability routing is the dispatcher's job.
     """
-
-    # Args: view (SessionView), capability (Capability), kwargs (dict).
-    # kwargs carries action-specific data (e.g. new_name for RENAME).
-    action_requested: Signal = Signal(object, object, dict)
 
     def __init__(
         self,
@@ -2693,6 +2676,7 @@ class ExpandedWindow(QWidget):
         get_totals_by_model: Callable[[str], "tuple[ModelTotals, ...]"] | None = None,
         get_quota_snapshot: Callable[[], "QuotaSnapshot | None"] | None = None,
         on_provider_config_changed: Callable[[], None] | None = None,
+        dispatch: "Callable[..., bool] | None" = None,
     ) -> None:
         super().__init__()
         self._capsule = capsule
@@ -2767,6 +2751,14 @@ class ExpandedWindow(QWidget):
         # the first frame is the latest world state, not whatever
         # we last rendered before being collapsed.
         self._latest_snap: WorldSnapshot | None = None
+        # Capability dispatcher (injected). Returns bool — True when
+        # the action was accepted/completed, False on missing capability,
+        # missing target, or backend failure. Default no-op so unwired
+        # tests that never trigger an action don't need to construct a
+        # full dispatcher; production wires this to TerminalDispatcher.
+        self._dispatch: "Callable[..., bool]" = dispatch or (
+            lambda *args, **kwargs: False
+        )
 
         self._setup_window()
         self._build_ui()
@@ -4223,34 +4215,12 @@ class ExpandedWindow(QWidget):
                 print(f"[claude-island] provider-config-changed callback failed: {exc}",
                       file=_sys.stderr)
 
-    def _on_session_renamed(self, sess_uuid: str, new_name: str) -> None:
-        """Persist a custom session display name and re-render rows.
-
-        Wired to ``SessionDetailPopup.on_rename``. Empty ``new_name``
-        clears the override (restores the auto-detected name) — the
-        platform helper handles the empty-as-delete sentinel.
-
-        Strict per-session: the rename only affects THIS session. An
-        earlier dual-key design also wrote a per-project entry so the
-        rename would survive Claude Code's sessionId rotation, but
-        that caused renames to bleed across sibling sessions sharing
-        a project_path — worse than the rotation case.
-
-        After persisting we re-call ``refresh_sessions`` with the
-        cached snapshot so the row label reflects the new name without
-        waiting for the next 10s scan tick. The composer
-        ``_get_session_details`` is responsible for re-reading the
-        override on each call (which it does, via the wiring layer's
-        ``_build_session_details``)."""
-        from claude_island.platform_ import session_names as _names
-        _names.set_session_name(sess_uuid, new_name)
-        # Re-render with the cached snapshot so the new name appears
-        # immediately. _latest_sessions stays empty until the first
-        # _render_sessions call, but rename can only happen via the
-        # popup which only opens after at least one row is shown — so
-        # the cache is guaranteed populated at this point.
-        if self._latest_sessions:
-            self._render_sessions(self._latest_sessions)
+    # _on_session_renamed deleted in PR2 cleanup: rename now flows
+    # popup → on_rename callback (provided by _show_detail_popup) →
+    # self._dispatch(view, Capability.RENAME, new_name=...) → AppBackend.
+    # The AppBackend's on_change closure (snapshotter.wake) refreshes
+    # the UI within the debounce window, so we no longer need to
+    # manually re-render here.
 
     def set_available_providers(
         self, providers: list[str], selected: str | None = None
@@ -4683,9 +4653,26 @@ class ExpandedWindow(QWidget):
                 import sys as _sys
                 print(f"[claude-island] detail popup composer failed: {exc}",
                       file=_sys.stderr)
+        # All capability actions flow through the injected dispatch.
+        # Each callback closes over `view` so the popup itself never
+        # holds capability/scope knowledge — it just calls the closure.
+        # The popup's own try/except catches any escape (dispatcher is
+        # supposed to swallow internally, but a defence-in-depth catch
+        # at the popup boundary keeps the UI alive even if it doesn't).
+        def _do_rename(_uuid: str, new_name: str) -> bool:
+            return bool(self._dispatch(view, Capability.RENAME, new_name=new_name))
+
+        def _do_open_folder() -> bool:
+            return bool(self._dispatch(view, Capability.REVEAL_CWD))
+
+        def _do_strip_thinking() -> bool:
+            return bool(self._dispatch(view, Capability.RESET_THINKING))
+
         popup = SessionDetailPopup(
             details, view.session, parent=self,
-            on_rename=self._on_session_renamed,
+            on_rename=_do_rename,
+            on_open_folder=_do_open_folder,
+            on_strip_thinking=_do_strip_thinking,
         )
         # Map the row-local right-click position to global screen
         # coordinates. ``btn.mapToGlobal`` does the right thing across
@@ -4703,7 +4690,14 @@ class ExpandedWindow(QWidget):
         # still on top (StaysOnTopHint) we are the foreground process, which
         # is the only state in which SetForegroundWindow is allowed to
         # surface another process's window.
-        self.action_requested.emit(view, Capability.FOCUS, {})
+        # Sibling pids are needed by WindowsTerminalAdapter for the
+        # inactive-split-pane case: when the clicked row's own console
+        # title isn't in any UIA TabItem.Name (only the active pane's
+        # title is exposed), we need to fall back to a sibling's title
+        # to actually switch the WT tab. See commit 7daa451 for the
+        # original incident; PR2 lost it, restored in PR2.5.
+        sibling_pids = [s.session.pid for s in siblings]
+        self._dispatch(view, Capability.FOCUS, siblings=sibling_pids)
         self._controller.toggle_expanded()
 
     def resizeEvent(self, event: object) -> None:  # type: ignore[override]

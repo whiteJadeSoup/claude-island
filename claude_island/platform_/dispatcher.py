@@ -20,13 +20,10 @@ from __future__ import annotations
 
 import collections
 import logging
-import sys
 import time
-from typing import Callable
 
 from claude_island.core.app_backend import AppBackend
 from claude_island.core.capabilities import CAPABILITY_SCOPE, Capability, Scope
-from claude_island.core.models import Session
 from claude_island.core.os_backend import OsBackend
 from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals.protocols import TerminalAdapter
@@ -127,25 +124,48 @@ class TerminalDispatcher:
     # ── Control flow ────────────────────────────────────────────────────
 
     def dispatch(self, view: SessionView, cap: Capability, **kwargs) -> bool:
+        # Observable no-ops: each early-return path logs at INFO so
+        # "I clicked but nothing happened" is diagnosable from stderr
+        # without having to add print() to UI / popup. INFO (not
+        # WARNING) because legitimate "capability not advertised"
+        # cases (like dispatch from a test stub) are common; WARNING
+        # is reserved for "method existed and raised mid-flight".
         if cap not in view.capabilities:
+            log.info(
+                "dispatch: %s not in view.capabilities (adapter_id=%r)",
+                cap, view.adapter_id,
+            )
             return False
         scope = CAPABILITY_SCOPE.get(cap)
         if scope is None:
+            log.info("dispatch: no scope mapping for %s", cap)
             return False
         try:
             target = self._resolve_target(scope, view.adapter_id)
-        except Exception:
+        except Exception as e:
+            log.warning("dispatch: resolve_target raised for %s: %s", cap, e)
             return False
         if target is None:
+            log.info(
+                "dispatch: no target for scope=%s, adapter_id=%r",
+                scope, view.adapter_id,
+            )
             return False
         method = getattr(target, cap.value, None)
         if method is None:
+            log.info(
+                "dispatch: %s.%s not implemented",
+                type(target).__name__, cap.value,
+            )
             return False
         try:
-            return bool(method(view, **kwargs))
+            ok = bool(method(view, **kwargs))
         except Exception as e:
             log.warning("%s.%s failed: %s", type(target).__name__, cap.value, e)
             return False
+        if not ok:
+            log.info("dispatch: %s.%s returned False", type(target).__name__, cap.value)
+        return ok
 
     # ── Internal ────────────────────────────────────────────────────────
 

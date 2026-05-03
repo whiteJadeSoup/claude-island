@@ -164,9 +164,20 @@ class WindowsTerminalAdapter(_CapabilityProvider):
     # ── FOCUS ────────────────────────────────────────────────────────────
 
     @capability(Capability.FOCUS)
-    def focus(self, view: SessionView) -> bool:
-        """Bring the WT window to foreground + select the matching tab."""
-        return _activate_windows(view.session.pid)
+    def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
+        """Bring the WT window to foreground + select the matching tab.
+
+        ``siblings`` is the list of pids of other sessions in the same
+        SessionGroup (i.e. other panes in the same WT window+project).
+        Used as a fallback when the clicked row is an inactive split
+        pane: WT's UIA TabItem.Name only exposes the active pane's
+        title, so a click on an inactive pane has no matching tab title
+        — we then try each sibling's title in turn, and one of them
+        IS the active pane (whose title DOES match a tab). Without
+        this fallback, clicking an inactive pane only foregrounds the
+        WT window without switching tabs (the regression originally
+        fixed in commit 7daa451)."""
+        return _activate_windows(view.session.pid, list(siblings))
 
 
 # ---------------------------------------------------------------------------
@@ -174,12 +185,17 @@ class WindowsTerminalAdapter(_CapabilityProvider):
 # boundaries preserved.
 # ---------------------------------------------------------------------------
 
-def _activate_windows(pid: int) -> bool:
-    """Resolve console window → SetForegroundWindow → UIA tab select.
+def _activate_windows(pid: int, sibling_pids: list[int] | None = None) -> bool:
+    """Resolve console window → UIA tab select (with sibling fallback)
+    → SetForegroundWindow.
 
-    Mirrors legacy WindowActivator._activate_windows, minus the
-    sibling-fallback path (that was always UI-layer logic — pass the
-    sibling_list from the adapter's group if we ever need it again).
+    Mirrors legacy WindowActivator._activate_windows including the
+    sibling-fallback path for inactive split panes (originally fixed
+    in commit 7daa451). When the clicked row is an inactive pane, its
+    own console title doesn't appear in any TabItem.Name — UI exposes
+    only the active pane's title in the tab strip. Walking sibling
+    pids tries each sibling's console title; one of them IS the active
+    pane in the same tab and its title DOES match.
     """
     try:
         import win32con
@@ -198,9 +214,14 @@ def _activate_windows(pid: int) -> bool:
     if resolved is not None:
         hwnd, title = resolved
         from claude_island.platform_ import wt_uia
-        if not wt_uia.select_tab_by_title(hwnd, title):
-            # Tab selection failed — still go to foreground anyway.
-            pass
+        if not wt_uia.select_tab_by_title(hwnd, title) and sibling_pids:
+            # Fallback for inactive split-pane clicks — try each sibling's
+            # console title; one of them is the active pane and its title
+            # matches a tab. Reuses the legacy helper so the AttachConsole
+            # dance is shared between adapter and (future-deletable) legacy
+            # WindowActivator.
+            from claude_island.platform_.window_activator import _select_tab_via_siblings
+            _select_tab_via_siblings(hwnd, sibling_pids)
     else:
         from claude_island.platform_.window_activator import _ancestor_pids, _find_window_for_pids
         candidate_pids = _ancestor_pids(pid)

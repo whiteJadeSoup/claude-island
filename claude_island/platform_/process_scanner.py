@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import psutil
 
 from claude_island.core.models import Session
-from claude_island.platform_ import win32_console, window_activator
+from claude_island.platform_ import win32_console
 
 # Claude Code is a Node.js CLI; on Windows it may appear as node.exe wrapping
 # the claude script, or as a bundled "claude.exe".
@@ -53,12 +52,14 @@ class ProcessScanner:
 
     def scan_fast(self) -> list[Session]:
         """Same psutil enumeration as :meth:`scan` but without the
-        ``_filter_orphans`` pass. Returns sessions immediately — their
-        ``window_handle`` fields will be ``None``.
+        ``_filter_orphans`` pass. Returns sessions immediately.
 
         Used at startup so the UI populates sessions in ~200ms. A
         follow-up ``scan()`` call ~500ms later runs the full orphan
-        filter and updates the window_handle.
+        filter. Per-session WT window discovery (the wt_hwnd that drives
+        same-tab grouping) now happens inside
+        ``WindowsTerminalAdapter.group()``, not here — process_scanner
+        only enumerates and orphan-filters.
         """
         sessions: list[Session] = []
         for proc in psutil.process_iter(["pid", "name", "create_time"]):
@@ -112,20 +113,15 @@ class ProcessScanner:
 # ---------------------------------------------------------------------------
 
 def _filter_orphans(sessions: list[Session]) -> list[Session]:
-    """Drop orphan sessions and label live ones with their host wt_hwnd.
+    """Drop orphan sessions whose console pipe was severed.
 
-    Two passes per session in one loop:
-    1. ``get_console_info(pid)``: if AttachConsole fails the process has
-       no console attached — its conPTY pipe was severed when its WT
-       pane closed. Drop it.
-    2. ``walk_to_visible_host(conpty_hwnd)``: walks GW_OWNER from the
-       conPTY HWND up to the visible WT main window. The result is
-       stored on ``Session.window_handle`` so the UI can group sessions
-       sharing the same wt_hwnd into one card (same-tab proxy).
+    A single pass: ``get_console_info(pid)`` — if AttachConsole fails
+    the process has no console attached (its conPTY pipe was severed
+    when its WT pane closed) and we drop it.
 
-    The wt_hwnd is the same HWND ``WindowActivator`` resolves at click
-    time, but caching it on the Session lets the UI render groups
-    without doing its own AttachConsole walk.
+    The wt_hwnd discovery that PR1 used to do here moved to
+    ``WindowsTerminalAdapter.group()`` along with the rest of WT
+    integration. process_scanner stays pure psutil + AttachConsole.
 
     Sanity tripwire: if every session would be filtered (system-wide
     AttachConsole brokenness, scan-thread race with our own console
@@ -134,14 +130,6 @@ def _filter_orphans(sessions: list[Session]) -> list[Session]:
     """
     if not sessions:
         return sessions
-
-    win32gui = None
-    try:
-        import win32gui as _w32g
-        win32gui = _w32g
-    except ImportError:
-        pass  # walk_to_visible_host needs win32gui; without it we keep
-              # the orphan filter active but skip the wt_hwnd labelling.
 
     kept: list[Session] = []
     for s in sessions:

@@ -96,6 +96,17 @@ class SessionView:
     # like everything else here — once the snapshot is built, the
     # ``session`` reference is stable for the lifetime of the snapshot.
     session: Session
+    # Resolved session UUID — sourced from ~/.claude/sessions/<pid>.json's
+    # ``sessionId`` field with fallback to ``session.session_uuid``.
+    # ProcessScanner can't fill in the uuid (it'd need to read the
+    # transcript), so ``session.session_uuid`` is empty in nearly every
+    # session built from a fresh scan. compose_session_view does the
+    # state-file lookup once and pins the result here so capability
+    # backends (RENAME / RESET_THINKING) and the popup all read from
+    # one canonical place instead of re-running the resolution.
+    # Empty string when no uuid could be resolved (transcript not
+    # written yet); backends treat empty as "skip, no-op".
+    session_uuid: str = ""
     # ── Capability framework fields (PR1 added; PR2 makes UI consume) ──
     # Frozen set of capabilities the user can trigger on this view.
     # Computed at group time = (terminal adapter caps for this view) ∪
@@ -423,6 +434,7 @@ def compose_session_view(
         is_high_cost=float(cost) >= high_cost_threshold,
         latest_model=latest_model,
         status_word=status_word.lower() if status_word else None,
+        session_uuid=sess_uuid or "",
         session=session,
     )
 
@@ -503,6 +515,11 @@ def _degraded_view(session: Session) -> SessionView:
         latest_model=None,
         status_word=None,
         session=session,
+        # Propagate whatever uuid the Session already carries — usually
+        # empty (ProcessScanner doesn't read transcripts) but tests
+        # construct Sessions with explicit uuids and rely on the
+        # degraded view exposing them.
+        session_uuid=session.session_uuid or "",
     )
 
 

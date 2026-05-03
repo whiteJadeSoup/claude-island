@@ -85,7 +85,11 @@ class LocalAppBackend(_CapabilityProvider):
         up the new name on the next snapshot via the names_store
         lookup in compose_session_view; on_change accelerates that.
         """
-        uuid = view.session.session_uuid
+        # Read the resolved uuid off the view (NOT view.session.session_uuid
+        # — that one is empty for nearly every session because ProcessScanner
+        # doesn't read transcripts). compose_session_view pins the resolved
+        # value at view.session_uuid for exactly this purpose.
+        uuid = view.session_uuid
         if not uuid:
             return False
         try:
@@ -114,7 +118,7 @@ class LocalAppBackend(_CapabilityProvider):
         # pulling session_repair into modules that don't need it.
         from claude_island.core.session_repair import strip_thinking_blocks
 
-        uuid = view.session.session_uuid
+        uuid = view.session_uuid  # see rename() for why not view.session.session_uuid
         if not uuid:
             return False
         jsonl_path = (

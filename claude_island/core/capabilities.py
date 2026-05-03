@@ -109,6 +109,19 @@ def capability(cap: Capability):
     The decorator stamps a ``_capability`` attribute on the
     function object; ``_CapabilityProvider.__init_subclass__``
     scans for it to build the frozen capability set on the class.
+
+    Constraint on capability values
+    -------------------------------
+    ``Capability.value`` MUST be a valid Python identifier — the
+    dispatcher resolves backend methods via ``getattr(target,
+    cap.value)`` (see :class:`TerminalDispatcher`). If you ever need
+    a capability whose value is not a valid identifier (e.g. a
+    kebab-case string for UI display), the dispatch mechanism has
+    to switch from reflection-by-name to an explicit
+    ``{Capability: method}`` registration table — at the cost of one
+    line of boilerplate per capability per backend. Today every
+    value happens to be lowercase + underscores so the cheaper
+    by-name approach works.
     """
     def deco(fn):
         if fn.__name__ != cap.value:

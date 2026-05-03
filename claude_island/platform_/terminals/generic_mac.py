@@ -59,12 +59,17 @@ class GenericMacAdapter(_CapabilityProvider):
         return groups
 
     @capability(Capability.FOCUS)
-    def focus(self, view: SessionView) -> bool:
+    def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
         """Raise the host app to front via osascript.
 
         Pane/tab-level focus requires a specific terminal adapter
         (e.g. iTerm2 with AppleScript tty matching). This generic
-        fallback can only guarantee the app is frontmost."""
+        fallback can only guarantee the app is frontmost.
+
+        ``siblings`` is accepted (and ignored) for dispatch-kwargs
+        uniformity — see GenericWindowsAdapter.focus for the same
+        rationale."""
+        del siblings  # ignored — generic mac focus can't disambiguate panes
         script = (
             'tell application "System Events" to set frontmost of '
             f'(first process whose unix id is {view.session.pid}) to true'
