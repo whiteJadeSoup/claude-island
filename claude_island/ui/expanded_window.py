@@ -2280,9 +2280,22 @@ class ExpandedWindow(QWidget):
         )
         # Exact multiple of (row + gap) so the visible boundary aligns
         # with a row edge — no half-cropped trailing row.
-        self._session_scroll.setMaximumHeight(
+        self._session_scroll_max_h = (
             _ROW_HEIGHT * _SESSION_SCROLL_VISIBLE_ROWS
             + _GROUP_GAP * (_SESSION_SCROLL_VISIBLE_ROWS - 1)
+        )
+        self._session_scroll.setMaximumHeight(self._session_scroll_max_h)
+        # Vertical Fixed sizePolicy keeps the scroll area at exactly
+        # its set height. The default Expanding policy lets it absorb
+        # any slack the panel hands it (panel.adjustSize() can grow
+        # the panel for unrelated reasons — e.g. an extra SPEND row),
+        # which made the sessions area visually "jump" to the max
+        # whenever something else in the panel reflowed. Pinning the
+        # vertical policy here means the only thing that changes the
+        # scroll area's height is the explicit setFixedHeight() call
+        # in refresh_sessions, which clamps to actual content.
+        self._session_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._session_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._session_scroll.setStyleSheet(
@@ -2391,6 +2404,17 @@ class ExpandedWindow(QWidget):
                 needed_pids.add(s.pid)
 
         self._gc_rows(needed_pids)
+
+        # Lock the scroll area's height to the actual content size,
+        # capped at the visible-row maximum. Without this, the scroll
+        # area's default Expanding sizePolicy would let it absorb any
+        # slack from the panel's adjustSize() (e.g. when an extra SPEND
+        # row appears), making the sessions area "jump" to its max
+        # height even when content is smaller. Pinning to content keeps
+        # the panel layout stable across refreshes.
+        self._session_container.adjustSize()
+        content_h = self._session_container.sizeHint().height()
+        self._session_scroll.setFixedHeight(min(content_h, self._session_scroll_max_h))
 
         self.adjustSize()
         self._position()
