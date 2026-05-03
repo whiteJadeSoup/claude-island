@@ -2833,10 +2833,15 @@ class ExpandedWindow(QWidget):
         # — its presence is mutually exclusive with any row.
         self._rows: dict[int, QPushButton] = {}
         self._placeholder: QLabel | None = None
-        # Last session snapshot — populated by refresh_sessions, read
+        # Last session snapshot — populated by _render_sessions, read
         # by user-triggered re-renders (rename) so we don't have to
         # wait for the next scan tick.
         self._latest_sessions: list[Session] = []
+        # Last full WorldSnapshot — populated by render(snap). Read
+        # by _on_state_changed when the user expands the panel so
+        # the first frame is the latest world state, not whatever
+        # we last rendered before being collapsed.
+        self._latest_snap: WorldSnapshot | None = None
 
         self._setup_window()
         self._build_ui()
@@ -2988,50 +2993,31 @@ class ExpandedWindow(QWidget):
         self.setStyleSheet(_STYLE_PANEL)
 
     # ------------------------------------------------------------------
-    # New unified entry point — render(snap)
+    # Sole entry point — render(snap)
     # ------------------------------------------------------------------
 
     def render(self, snap: WorldSnapshot) -> None:
         """Render the panel from a single ``WorldSnapshot``.
 
-        This is the new entry point introduced by the state-broadcast
-        refactor. It supersedes the three legacy ``refresh_xxx``
-        methods (refresh_sessions, refresh_usage_bar, refresh_row_states)
-        which remain wired in parallel during the migration so the two
-        paths can be visually compared. Phase G will delete the legacy
-        methods and have ``_update_row`` consume ``SessionView`` directly
-        instead of round-tripping through the composer.
-
-        Phase D scope (this commit): converts ``snap.sessions`` back to
-        ``list[Session]`` and delegates to the existing rebuild
-        machinery. The cards (summary / SPEND / QUOTA) keep reading
-        from registries because they're not the consistency-bug source
-        — the row indicators were, and those go through the snap
-        sessions list.
+        Pure "draw what's in the snap":
+          - sessions list: rebuild from snap.sessions
+          - summary / SPEND / QUOTA cards: refresh (these still read
+            from the injected getters / registries — those data
+            sources are the single source of truth for token / quota
+            data, and the snap is for sessions; both stay in sync
+            because the same Snapshotter tick both pushes a snap and
+            updates the registries the cards read from)
         """
-        # Cache the snapshot so a (Phase G) refactor can have
-        # _update_row read pre-resolved fields off the SessionView
-        # directly instead of re-running the composer.
         self._latest_snap = snap
-
-        # Build the legacy session-list shape from snap.sessions and
-        # delegate. refresh_sessions calls _update_row per row, which
-        # in turn (today) calls the composer for the SessionDetails
-        # the row needs. Phase G replaces that round-trip with a
-        # direct SessionView read.
         sessions = [v.session for v in snap.sessions]
-        self.refresh_sessions(sessions)
-
-        # Cards refresh from registries on the same tick — keeps
-        # summary $, SPEND breakdown and QUOTA bars synchronized with
-        # the row state we just rebuilt.
-        self.refresh_usage_bar()
+        self._render_sessions(sessions)
+        self._render_cards()
 
     # ------------------------------------------------------------------
-    # Legacy slots (Phase G will delete these once render is the only path)
+    # Internal render helpers (called by render(snap))
     # ------------------------------------------------------------------
 
-    def refresh_sessions(self, sessions: list[Session]) -> None:
+    def _render_sessions(self, sessions: list[Session]) -> None:
         """Render sessions as a list of cards.
 
         Sessions sharing the same ``(window_handle, project_path)`` key
@@ -3139,10 +3125,13 @@ class ExpandedWindow(QWidget):
             min(content_h, self._session_scroll_max_h)
         )
 
-    def refresh_usage_bar(self, _: object = None) -> None:
-        """Refresh summary + both USAGE cards. Kept the legacy method
-        name so the existing ``totals_changed`` signal wire-up in
-        __main__.py continues to fire this on every DB change.
+    def _render_cards(self) -> None:
+        """Refresh summary + SPEND + QUOTA cards.
+
+        Pulls token / quota data from the injected getters
+        (registries / quota providers). Called by render(snap) on
+        every snapshotter tick so cards stay in sync with the row
+        list.
 
         Calls ``adjustSize`` after the refresh so the panel grows /
         shrinks to match the new SPEND content (e.g. switching from
@@ -3156,29 +3145,6 @@ class ExpandedWindow(QWidget):
         self._refresh_quota_card()
         self.adjustSize()
         self._position()
-
-    def refresh_row_states(self, _: object = None) -> None:
-        """Re-evaluate per-row state (running glyph, cost colour, model
-        chip) without rebuilding the layout.
-
-        Wired to ``usage_registry.totals_changed`` in __main__.py so a
-        JSONL write — the most reliable "this session is producing
-        turns" signal — propagates to every row's running indicator
-        within one Qt event-loop tick. Without this hook, rows would
-        only re-evaluate on the 10-s process-scan tick and so could lag
-        the capsule (which already listens to totals_changed via
-        refresh_cost → _refresh_active_state) by up to 10 s, producing
-        the visible "capsule says island-dev running, row says idle"
-        bug from image #133.
-
-        Cheap: no layout rebuild, just setText / setStyleSheet /
-        set_state on existing children — same surface area as a hover
-        repaint. Iterates the cached rows dict so it's O(visible rows),
-        not O(all sessions ever)."""
-        for btn in self._rows.values():
-            session = btn.property("_session")
-            if session is not None:
-                self._update_row(btn, session)
 
     def _on_manual_refresh(self) -> None:
         """User clicked the ↻ button. Force a quota fetch (bypassing
@@ -3197,7 +3163,7 @@ class ExpandedWindow(QWidget):
                 import sys as _sys
                 print(f"[claude-island] manual refresh failed: {exc}",
                       file=_sys.stderr)
-        self.refresh_usage_bar()
+        self._render_cards()
 
     # ------------------------------------------------------------------
     # USAGE: SPEND card (period-selectable, cross-provider)
@@ -4060,8 +4026,15 @@ class ExpandedWindow(QWidget):
 
     def _on_state_changed(self, state: str) -> None:
         if state == "expanded":
-            self.refresh_sessions(self._controller.sessions)
-            self.refresh_usage_bar()
+            # Render from the latest snapshot if we have one (normal
+            # boot path: snap arrived before the user expanded). Fall
+            # back to controller.sessions if not — covers tests that
+            # construct an ExpandedWindow without the snap pipeline.
+            if self._latest_snap is not None:
+                self.render(self._latest_snap)
+            else:
+                self._render_sessions(self._controller.sessions)
+                self._render_cards()
             self._position()
             self.show()
             self.raise_()
@@ -4093,7 +4066,7 @@ class ExpandedWindow(QWidget):
                         combo.setCurrentIndex(idx)
                         combo.blockSignals(False)
                     break
-        self.refresh_usage_bar()
+        self._render_cards()
 
     # ------------------------------------------------------------------
     # Multi-provider tab handlers + getter
@@ -4131,7 +4104,7 @@ class ExpandedWindow(QWidget):
                 import sys as _sys
                 print(f"[claude-island] provider-select callback failed: {exc}",
                       file=_sys.stderr)
-        self.refresh_usage_bar()
+        self._render_cards()
 
     # ------------------------------------------------------------------
     # Provider tab strip — construction, in-place rebuild, and the
@@ -4351,11 +4324,11 @@ class ExpandedWindow(QWidget):
         _names.set_session_name(sess_uuid, new_name)
         # Re-render with the cached snapshot so the new name appears
         # immediately. _latest_sessions stays empty until the first
-        # refresh_sessions call, but rename can only happen via the
+        # _render_sessions call, but rename can only happen via the
         # popup which only opens after at least one row is shown — so
         # the cache is guaranteed populated at this point.
         if self._latest_sessions:
-            self.refresh_sessions(self._latest_sessions)
+            self._render_sessions(self._latest_sessions)
 
     def set_available_providers(
         self, providers: list[str], selected: str | None = None
@@ -4375,7 +4348,7 @@ class ExpandedWindow(QWidget):
         elif self._selected_provider not in providers and providers:
             self._selected_provider = providers[0]
         self._rebuild_provider_tab_strip()
-        self.refresh_usage_bar()
+        self._render_cards()
 
     # ------------------------------------------------------------------
     # Session row factory
