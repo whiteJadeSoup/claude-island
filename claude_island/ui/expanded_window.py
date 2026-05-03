@@ -1190,19 +1190,14 @@ class SessionDetailPopup(QFrame):
         still scanning the popup."""
         d = self._details
         title = self._title_text()
-        # Italic subtitle = "what this session would have been called
-        # without the user's rename". Prefer the AI-generated title
-        # (it's the most descriptive); fall back to the auto-detected
-        # state.name so renamed sessions WITHOUT an ai_title still
-        # surface their original name. Suppressed when it'd just echo
-        # the title (no rename, or ai_title == name).
-        subtitle_candidates = [
-            d.ai_title if d else None,
-            d.original_name if d else None,
-        ]
-        subtitle_ai = next(
-            (c for c in subtitle_candidates if c and c != title),
-            None,
+        # Italic subtitle = the title Claude itself generated for this
+        # session (from the JSONL ai-title row). Suppressed when it'd
+        # just echo the visible title (e.g. no rename and no separate
+        # AI title). When Claude never wrote an ai-title row, no
+        # subtitle is shown — that's the correct outcome, not a bug
+        # to paper over with the auto-detected state.name fallback.
+        subtitle_ai = (
+            d.ai_title if d and d.ai_title and d.ai_title != title else None
         )
 
         wrap = QWidget()

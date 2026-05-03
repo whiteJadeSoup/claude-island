@@ -239,7 +239,6 @@ def _build_session_details(session):
     return SessionDetails(
         session=session,
         name=custom_name or state_name,
-        original_name=state_name,
         ai_title=meta.get("ai_title"),
         git_branch=meta.get("git_branch"),
         last_prompt=meta.get("last_prompt"),

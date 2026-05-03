@@ -196,12 +196,6 @@ class SessionDetails:
     # ``Session.session_uuid`` is often "" coming out of ProcessScanner).
     # The detail popup shows this in the ID row.
     effective_uuid: str | None = None
-    # The auto-detected name BEFORE any user rename — typically the
-    # ``state.name`` field from ``sessions/<pid>.json``. Carried
-    # separately so the popup can surface "renamed FROM <original>"
-    # as a subtitle even when ``ai_title`` is absent. None when the
-    # underlying source had no name.
-    original_name: str | None = None
 
 
 @dataclass(frozen=True)
