@@ -88,13 +88,16 @@ register_model_colors({
     "MiniMax":      "#EC4899",
 })
 register_model_short_names({
-    # The name table mirrors the family-version split — the chip should
-    # convey "which M-version" without restating "MiniMax" each time.
-    "MiniMax-M2.7": "M2.7",
-    "MiniMax-M2.5": "M2.5",
-    "MiniMax-M2.1": "M2.1",
-    "MiniMax-M2":   "M2",
-    "MiniMax-M*":   "MiniMax",  # wildcard — show family name
+    # Prefix "MiniMax" so the chip reads as self-explanatory —
+    # "MiniMax M2.7" rather than bare "M2.7". Anthropic models
+    # (Opus/Sonnet/Haiku) are globally recognised; MiniMax
+    # version codes aren't, so the provider name gives the
+    # user the context a casual glance needs.
+    "MiniMax-M2.7": "MiniMax M2.7",
+    "MiniMax-M2.5": "MiniMax M2.5",
+    "MiniMax-M2.1": "MiniMax M2.1",
+    "MiniMax-M2":   "MiniMax M2",
+    "MiniMax-M*":   "MiniMax",
     "MiniMax":      "MiniMax",
 })
 

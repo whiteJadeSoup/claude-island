@@ -2119,20 +2119,14 @@ class TestModelHelpers:
 
     def test_short_name_deepseek_tiers(self):
         from claude_island.ui.expanded_window import _resolve_model_short_name
-        # Tier-specific keys MUST win over the generic "deepseek" key —
-        # otherwise a Pro model would render as "DeepSeek" and lose
-        # the tier signal.
-        assert _resolve_model_short_name("deepseek-v4-pro") == "V4 Pro"
-        assert _resolve_model_short_name("deepseek-v4-flash") == "V4 Flash"
+        assert _resolve_model_short_name("deepseek-v4-pro") == "DeepSeek V4 Pro"
+        assert _resolve_model_short_name("deepseek-v4-flash") == "DeepSeek V4 Flash"
         assert _resolve_model_short_name("deepseek-r1") == "DeepSeek"
 
     def test_short_name_minimax_versions(self):
         from claude_island.ui.expanded_window import _resolve_model_short_name
-        # MiniMax-M2.7-highspeed: longest match is "minimax-m2.7" → "M2.7".
-        assert _resolve_model_short_name("MiniMax-M2.7-highspeed") == "M2.7"
-        assert _resolve_model_short_name("MiniMax-M2.5") == "M2.5"
-        # Bare "MiniMax" with no version suffix — falls through to the
-        # family-only entry "MiniMax".
+        assert _resolve_model_short_name("MiniMax-M2.7-highspeed") == "MiniMax M2.7"
+        assert _resolve_model_short_name("MiniMax-M2.5") == "MiniMax M2.5"
         assert _resolve_model_short_name("MiniMax") == "MiniMax"
 
     def test_short_name_unknown_falls_back_to_prefix(self):

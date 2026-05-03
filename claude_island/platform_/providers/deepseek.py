@@ -57,7 +57,10 @@ register_model_colors({
     "deepseek":          "#EA580C",
 })
 register_model_short_names({
-    "deepseek-v4-pro":   "V4 Pro",
-    "deepseek-v4-flash": "V4 Flash",
+    # Prefix "DeepSeek" so the chip reads as self-explanatory. Without
+    # it, "V4 Pro" on its own is ambiguous (Google Gemini uses "Pro",
+    # AMD/Nvidia have "V4" product lines, etc). Matches the MiniMax fix.
+    "deepseek-v4-pro":   "DeepSeek V4 Pro",
+    "deepseek-v4-flash": "DeepSeek V4 Flash",
     "deepseek":          "DeepSeek",
 })
