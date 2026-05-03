@@ -160,22 +160,24 @@ def _resolve_available_providers() -> list[str]:
 
 
 def _on_provider_tab_clicked(name: str) -> None:
-    """User clicked a provider tab. Persist the choice and immediately
-    re-render the summary + cards so the new provider's quota lands
-    on screen without waiting for the next 60 s heartbeat.
+    """User clicked a provider tab. Persist the choice and poke the
+    snapshotter so the new provider's quota lands on screen without
+    waiting for the next 60 s heartbeat.
+
+    Phase G1: was two refresh_xxx calls; now a single snapshotter.wake().
+    The next snap will pick up the new selected_provider via the
+    ``get_selected_provider`` closure injected at Snapshotter
+    construction, fetch its cached quota, and push to render(snap).
 
     No ``force_refresh`` here: that would block the UI thread on a
     3 s HTTP timeout per click. The provider's disk cache (5 min TTL)
     and the engine's in-memory cache (90 s TTL) make tab switches
-    essentially instant from the user's perspective — calling
-    refresh_usage_bar just re-reads the cached snapshot for the new
-    provider. The manual ↻ button still exists for cases where the
-    user wants to force a network fetch."""
+    essentially instant from the user's perspective. The manual ↻
+    button still exists for cases where the user wants to force a
+    network fetch."""
     set_selected_provider(name)
-    if "expanded" in globals():
-        expanded.refresh_usage_bar()
-    if "capsule" in globals():
-        capsule.refresh_quota()
+    if "snapshotter" in globals():
+        snapshotter.wake()
 
 
 _available_providers = _resolve_available_providers()
@@ -201,16 +203,17 @@ if _selected_provider not in _available_providers:
 
 
 def _force_refresh_selected() -> None:
-    """Manual-refresh button hook. Re-fetches whichever provider the
-    user is currently looking at and pushes the new snapshot into
-    BOTH the panel (expanded.refresh_usage_bar fires after this
-    callback returns) and the capsule's mini quota bar (which would
-    otherwise wait up to 60 s for the heartbeat to pick up the
-    fresh data)."""
+    """Manual-refresh button hook. Force a network fetch (bypasses
+    the QuotaProvider's TTL) and poke the snapshotter so the fresh
+    snapshot reaches both UI surfaces in one go.
+
+    Phase G1: was an explicit refresh_quota call on the capsule; now
+    just wake the snapshotter — the next snap rebuild reads the
+    freshly-fetched quota and pushes it through render(snap)."""
     selected = expanded.selected_provider_name() if "expanded" in globals() else _selected_provider
     quota_engine.force_refresh(provider_name=selected)
-    if "capsule" in globals():
-        capsule.refresh_quota()
+    if "snapshotter" in globals():
+        snapshotter.wake()
 
 
 def _on_provider_config_changed() -> None:
@@ -237,6 +240,10 @@ def _on_provider_config_changed() -> None:
     expanded.set_available_providers(new_available, selected=selected)
     if selected:
         quota_engine.force_refresh(provider_name=selected)
+    # Phase G1: poke the snapshotter so the new provider list /
+    # quota land in render(snap) on the next tick.
+    if "snapshotter" in globals():
+        snapshotter.wake()
 
 
 def _build_session_details(session):
@@ -328,23 +335,25 @@ expanded = ExpandedWindow(
 #
 # Each entry: (core Event[T], UI slot)
 # QtBridge marshals the emit from background thread → Qt main thread.
+#
+# Phase G1 — UI render is now driven SOLELY by the WorldSnapshot
+# broadcast (Section 4b below). The only entry left here is the
+# controller's session-list update, which is internal state used by
+# the IslandController state machine (dot ↔ collapsed ↔ expanded
+# transitions). All of capsule.refresh_xxx / expanded.refresh_xxx
+# entries were deleted — the Snapshotter wakes on the same source
+# events and pushes a snapshot that drives render(snap).
+#
+# The capsule.refresh_xxx and expanded.refresh_xxx methods themselves
+# remain in their respective files for now (orphaned dead code from a
+# wiring perspective; still called from inside render(snap) as
+# implementation detail, and exercised by legacy tests). Phase G2
+# inlines them into render() and deletes the public methods + QtBridge
+# + Event[T] entirely; deferred until manual UI verification confirms
+# the snap-driven behaviour matches the legacy paths.
 # ---------------------------------------------------------------------------
 _wiring = [
     (session_registry.sessions_changed, controller.on_sessions_updated),
-    (session_registry.sessions_changed, capsule.refresh_sessions),
-    (session_registry.sessions_changed, expanded.refresh_sessions),
-    (usage_registry.totals_changed,     expanded.refresh_usage_bar),
-    # JSONL writes also need to bump the per-row state (running glyph,
-    # cost colour, model chip) — without this the row indicator only
-    # re-evaluated on the 10-s process scan tick and lagged the capsule
-    # (which already listens to totals_changed) by up to that interval,
-    # producing the visible "capsule says island-dev running, row says
-    # idle" mismatch from image #133.
-    (usage_registry.totals_changed,     expanded.refresh_row_states),
-    # Capsule shows today's $ alongside session count — mirror the
-    # expanded panel's wiring so backfill / live JSONL writes both
-    # propagate to the pill within one Qt event loop tick.
-    (usage_registry.totals_changed,     capsule.refresh_cost),
 ]
 # Group by source event so we don't create N redundant QtBridge instances
 # subscribing to the same Event (sessions_changed has 3 slots — they should
@@ -467,12 +476,13 @@ file_watcher.start()
 # construction (above Section 2). No daemon thread needed here.
 
 # 60s heartbeat: tick the 5h reset countdown and pull a fresh quota
-# snapshot. QuotaProvider gates HTTP internally on its 300s TTL, so this
-# only issues a network call every 5 min. The pill's mini quota bar
-# rides the same heartbeat — same data, same cadence, no extra timer.
+# snapshot. QuotaProvider gates HTTP internally on its 300s TTL, so
+# this only issues a network call every 5 min. After Phase G1 the
+# heartbeat just pokes the snapshotter — the rebuild flow handles
+# the rest (fresh quota → new snapshot → distinct_until_changed →
+# render(snap) on both surfaces).
 _usage_heartbeat = QTimer()
-_usage_heartbeat.timeout.connect(expanded.refresh_usage_bar)
-_usage_heartbeat.timeout.connect(capsule.refresh_quota)
+_usage_heartbeat.timeout.connect(snapshotter.wake)
 _usage_heartbeat.start(60_000)
 
 # UI first — capsule shows immediately. All process scanning happens
