@@ -304,6 +304,17 @@ _BG_PRESSED = "#333333"
 # read as "the group container, just tinted" rather than as alarming
 # coloured chrome. Group → palette index is hash(group_key) % len so
 # the assignment is stable across refreshes.
+# Colour of the 2 px vertical line that brackets a same-project group
+# in the session list. Dim grey reads as "metadata, not content" so
+# the line stays out of the way of the row text. Uniform across all
+# groups (no per-group hue) — group identity is conveyed by which
+# rows share the line, not by which colour the line is.
+_GROUP_LINE_COLOR = "#3a3a3a"
+# Inner padding the group card reserves for the left line plus a
+# small gap so row content doesn't sit flush against the bracket.
+_GROUP_LINE_PAD_PX = 6
+
+
 _GROUP_BG_PALETTE = (
     "#1d2638",   # indigo
     "#2b1d38",   # violet
@@ -4523,29 +4534,45 @@ class ExpandedWindow(QWidget):
         return self._make_multi_card(group, palette_idx=palette_idx or 0)
 
     def _make_multi_card(self, sessions: list[Session], *, palette_idx: int = 0) -> QFrame:
+        """Render a same-project session group as a flat list bound by
+        a left-side vertical line (Linear / GitHub PR thread / VS Code
+        outline pattern). Replaces the earlier coloured ``group bg``
+        approach which nested too many visual blocks per the
+        Material/HIG "blocks within blocks" warning.
+
+        ``palette_idx`` kept in the signature for backwards compat
+        with callers but no longer used — group identity is conveyed
+        by structure (the shared left line) not colour.
+        """
+        del palette_idx  # unused; line colour is uniform across groups now
         card = QFrame()
         card.setObjectName("group_card")
-        # Per-group hue tint indexed by visible position so adjacent
-        # multi-cards always differ. The previous hash-based mapping
-        # landed two unrelated groups on the same red tint when hashes
-        # happened to collide mod 6.
-        bg = _group_bg_color(palette_idx)
-        card._base_bg = bg
+        # Transparent background + 2 px left border drawn via stylesheet.
+        # The border spans the whole card so all rows in the group are
+        # visually bound by the line. Padding-left makes room for the
+        # line without rows overlapping it.
+        # _base_bg is a hex value (NOT "transparent") because HoverRow
+        # uses it as input to _lighten_bg() for the hover-accent
+        # colour calculation; "transparent" wouldn't parse. We use
+        # _BG_GROUP since that matches what the rows visually sit on
+        # (the panel's neutral bg shows through the transparent card).
+        card._base_bg = _BG_GROUP
         card.setStyleSheet(
-            f"QFrame#group_card {{ background: {bg}; border-radius: 8px; }}"
+            "QFrame#group_card {"
+            f" background: transparent;"
+            f" border-left: 2px solid {_GROUP_LINE_COLOR};"
+            f" padding-left: {_GROUP_LINE_PAD_PX}px;"
+            "}"
         )
         # Card bg never changes on hover (left-accent-bar pattern), so
         # WA_Hover stays at the default — no OS overlay to suppress.
         layout = QVBoxLayout(card)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        for i, session in enumerate(sessions):
-            if i > 0:
-                sep = QFrame()
-                sep.setFixedHeight(1)
-                sep.setStyleSheet(_STYLE_GROUP_ROW_SEP)
-                sep.setAttribute(Qt.WidgetAttribute.WA_Hover, False)
-                layout.addWidget(sep)
+        # Tighter internal spacing so same-group rows feel like one
+        # chunk; the gap between groups is the bigger _GROUP_GAP and
+        # carries the divider.
+        layout.setSpacing(2)
+        for session in sessions:
             row = self._get_or_create_row(session, sessions, in_card=True, card=card)
             row.setParent(None)
             layout.addWidget(row)
