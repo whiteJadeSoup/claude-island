@@ -284,6 +284,7 @@ def _build_session_details(session):
         turn_count=turns,
         sidechain_count=sides,
         per_model=per_model,
+        latest_model=usage_registry.get_latest_model(sess_uuid) if sess_uuid else None,
         effective_uuid=sess_uuid or None,
     )
 

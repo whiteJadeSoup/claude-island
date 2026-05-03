@@ -263,6 +263,12 @@ class SessionDetails:
     # Empty tuple when the composer / registry isn't wired yet — the
     # popup degrades gracefully (renders just the cumulative cost row).
     per_model: tuple[ModelTotals, ...] = ()
+    # The model id from the most recent UsageRecord for this session.
+    # None until the JSONL parser has indexed at least one real turn.
+    # Used by the row chip — when a session switches models mid-life
+    # (e.g. started on Opus, switched to DeepSeek), the chip should
+    # show the current model, not the highest-cumulative-cost one.
+    latest_model: str | None = None
     # The session_uuid actually used to look up records and metadata
     # (composer resolves it from sessions/<pid>.json's ``sessionId``;
     # ``Session.session_uuid`` is often "" coming out of ProcessScanner).

@@ -315,6 +315,29 @@ class UsageRegistry:
             rs = [r for r in self._records if r.session_uuid == session_uuid]
         return _aggregate_by_model(rs)
 
+    def get_latest_model(self, session_uuid: str) -> str | None:
+        """Return the model id from the most recent UsageRecord for
+        ``session_uuid``. Used by the row chip to show "what model is
+        this session *currently* using" rather than "what model has
+        the highest cumulative cost over the session's lifetime"
+        (which was misleading for sessions that had switched models
+        mid-lifecycle — the old expensive model outranked the cheap
+        current one)."""
+        with self._lock:
+            best_ts = None
+            best_model = None
+            for r in self._records:
+                if r.session_uuid != session_uuid:
+                    continue
+                # Skip synthetic records — /compact summaries etc
+                # would bias the chip toward "<synthetic>".
+                if (r.model or "").startswith("<"):
+                    continue
+                if best_ts is None or r.timestamp > best_ts:
+                    best_ts = r.timestamp
+                    best_model = r.model
+        return best_model
+
     def get_session_window(
         self,
         *,

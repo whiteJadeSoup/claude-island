@@ -4475,19 +4475,27 @@ class ExpandedWindow(QWidget):
         else:
             btn.setToolTip("")
 
-        # Model chip + status row. Model = highest-cost real model in
-        # this session (per_model is sorted desc by cost). We skip
-        # entries whose name starts with "<" — Claude Code emits
-        # "<synthetic>" pseudo-model rows for /compact summaries and
-        # other system-generated turns that are NOT real model calls.
-        # Showing "<synthetic>" as if it were a regular model is
-        # confusing (the user has no model called <synthetic>).
+        # Model chip. Priority:
+        #   1. ``latest_model`` — the model from the most recent
+        #      UsageRecord. Reflects "what model is the session using
+        #      *right now*", not "what model cost the most over the
+        #      session's lifetime" (which was misleading for sessions
+        #      that switched from an expensive to a cheap model).
+        #      Updated by _build_session_details via
+        #      usage_registry.get_latest_model on every refresh tick,
+        #      so model switches propagate within a tick.
+        #   2. ``per_model[0]`` — legacy fallback for code paths that
+        #      don't populate latest_model (older composers, tests).
+        #   3. Empty string — chip hidden.
         model_id = ""
-        if details is not None and details.per_model:
-            for m in details.per_model:
-                if not (m.model or "").startswith("<"):
-                    model_id = m.model
-                    break
+        if details is not None:
+            if details.latest_model and not details.latest_model.startswith("<"):
+                model_id = details.latest_model
+            elif details.per_model:
+                for m in details.per_model:
+                    if not (m.model or "").startswith("<"):
+                        model_id = m.model
+                        break
         chip_label = btn.findChild(QLabel, "model_chip")
         if chip_label is not None:
             if model_id:
