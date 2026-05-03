@@ -313,23 +313,39 @@ _usage_heartbeat = QTimer()
 _usage_heartbeat.timeout.connect(expanded.refresh_usage_bar)
 _usage_heartbeat.start(60_000)
 
-# UI first — capsule shows immediately. Two-phase scan fills sessions
-# fast (psutil only, ~200ms) then precisely (orphan filter, ~500ms later).
+# UI first — capsule shows immediately. All process scanning happens
+# off the Qt main thread so neither psutil enumeration nor the slow
+# Win32 AttachConsole probe inside _filter_orphans can stall the UI.
 capsule.show()
 
-def _fast_scan_and_update() -> None:
-    sessions = process_scanner.scan_fast()
-    session_registry.update(sessions)
 
-def _full_scan_and_update() -> None:
-    sessions = process_scanner.scan()
-    session_registry.update(sessions)
+def _bootstrap_session_discovery() -> None:
+    """Background-thread bootstrap for the session pipeline.
 
-QTimer.singleShot(0, _fast_scan_and_update)
-QTimer.singleShot(500, _full_scan_and_update)
+    Two phases on the worker thread:
+      1. scan_fast() — pure psutil, no Win32. Sessions appear in the
+         UI within ~200ms because session_registry.update marshals
+         sessions_changed back to the Qt main thread via QtBridge.
+      2. session_discovery.start() — runs one full scan() (with the
+         orphan filter that costs ~1-2s) and arms the periodic
+         10-second timer. Doing this on the worker thread means the
+         user sees the fast-scan result instantly and the full
+         filtered list lands a second later, while the Qt main thread
+         stays responsive throughout startup.
+    """
+    try:
+        sessions = process_scanner.scan_fast()
+        session_registry.update(sessions)
+    except Exception as exc:
+        import sys as _sys
+        print(f"[claude-island] fast scan failed: {exc}", file=_sys.stderr)
+    # session_discovery.start() runs the first scan() synchronously
+    # then arms a Timer for periodic ticks; both stay on this worker.
+    session_discovery.start()
 
-# Periodic process scanning (10s). scan() includes orphan filtering.
-session_discovery.start()
+
+import threading as _threading
+_threading.Thread(target=_bootstrap_session_discovery, daemon=True).start()
 
 # ---------------------------------------------------------------------------
 # Event loop + cleanup
