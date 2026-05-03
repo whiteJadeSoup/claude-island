@@ -198,9 +198,15 @@ if _selected_provider not in _available_providers:
 
 def _force_refresh_selected() -> None:
     """Manual-refresh button hook. Re-fetches whichever provider the
-    user is currently looking at, not the auto-detected default."""
+    user is currently looking at and pushes the new snapshot into
+    BOTH the panel (expanded.refresh_usage_bar fires after this
+    callback returns) and the capsule's mini quota bar (which would
+    otherwise wait up to 60 s for the heartbeat to pick up the
+    fresh data)."""
     selected = expanded.selected_provider_name() if "expanded" in globals() else _selected_provider
     quota_engine.force_refresh(provider_name=selected)
+    if "capsule" in globals():
+        capsule.refresh_quota()
 
 
 def _on_provider_config_changed() -> None:
