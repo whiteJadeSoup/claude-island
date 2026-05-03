@@ -180,13 +180,13 @@ _GAP = 6  # px gap between capsule bottom and panel top
 
 # Bound the sessions list so a heavy user with 20+ sessions doesn't
 # get a panel taller than the screen. Computed as an *exact* multiple
-# of (row + gap) so the visible boundary always lands on a row edge —
-# the previous 196 px value chopped the last row in half.
+# of (row + gap) so the visible boundary always lands on a row edge.
 #
-# 6 standalone rows × _ROW_HEIGHT(36) + 5 gaps × _GROUP_GAP(8) = 256 px.
-# Past 6 rows the user scrolls inside this region; the USAGE block
-# stays anchored below.
-_SESSION_SCROLL_VISIBLE_ROWS = 6
+# 5 standalone rows × _ROW_HEIGHT(52) + 4 gaps × _GROUP_GAP(8) = 292 px.
+# Dropped from 6 to 5 visible rows when row height grew from 36→52 px
+# (P0.3 status row); a 6-row 52 px area would push the panel ~360 px
+# tall, eating into the USAGE block visibility on small monitors.
+_SESSION_SCROLL_VISIBLE_ROWS = 5
 
 
 def _claude_projects_root() -> Path:
@@ -415,8 +415,86 @@ _DOT_GREEN = "#4ade80"   # < 1h since last activity
 _DOT_YELLOW = "#facc15"  # < 24h
 _DOT_GRAY = "#52525b"    # ≥ 24h
 
-_ROW_HEIGHT = 36
+# Two-line row: top = dot + name + cost, bottom = model chip + status.
+# 52 px holds the 13 px name plus the 11 px status row with breathing
+# room top/bottom — anything shorter clipped descenders on g/y/p.
+_ROW_HEIGHT = 52
 _ROW_PAD_H = 12
+
+# Activity heuristic for the row status text. Same threshold as the
+# capsule's breathing animation so "running" / "idle" reads consistently
+# between the pill and the panel rows.
+_ROW_ACTIVE_THRESHOLD_SECONDS = 30
+
+# Inline model → display-name map. Length-descending substring match
+# with the same logic as ``usage_registry._resolve_pricing`` so the
+# longest matching key wins (e.g. ``minimax-m2.7`` resolves to "M2.7"
+# before the family-only "MiniMax"). Will be replaced by a declarative
+# per-provider registry in P2; keeping it inline here per the staged
+# rollout in the design plan.
+_MODEL_SHORT_NAMES: dict[str, str] = {
+    "opus":           "Opus",
+    "sonnet":         "Sonnet",
+    "haiku":          "Haiku",
+    "deepseek-v4-pro":   "V4 Pro",
+    "deepseek-v4-flash": "V4 Flash",
+    "deepseek":       "DeepSeek",
+    "minimax-m2.7":   "M2.7",
+    "minimax-m2":     "M2",
+    "minimax-m1":     "M1",
+    "minimax":        "MiniMax",
+    "glm-pro":        "GLM Pro",
+    "glm-air":        "GLM Air",
+    "glm":            "GLM",
+}
+
+# Inline model → chip colour. Same provider-tier scheme described in
+# the design plan: Anthropic cool family (purple/blue/green), DeepSeek
+# warm orange family, MiniMax magenta, Zhipu cyan. Unknown ⇒ neutral
+# grey so the chip remains readable rather than guessing.
+_MODEL_COLORS: dict[str, str] = {
+    "opus":              "#8B5CF6",  # purple
+    "sonnet":            "#3B82F6",  # blue
+    "haiku":             "#10B981",  # green
+    "deepseek-v4-pro":   "#EA580C",  # deep orange
+    "deepseek-v4-flash": "#FB923C",  # light orange
+    "deepseek":          "#EA580C",
+    "minimax":           "#EC4899",  # magenta
+    "glm-pro":           "#0891B2",  # cyan
+    "glm-air":           "#22D3EE",  # bright cyan
+    "glm":               "#0891B2",
+}
+_MODEL_COLOR_FALLBACK = "#6B7280"   # neutral grey for unknown families
+
+
+def _resolve_model_short_name(model: str) -> str:
+    """Map an API model id to a short display label.
+
+    Returns the longest matching ``_MODEL_SHORT_NAMES`` entry; falls
+    back to a 12-char prefix of the raw id so an unknown future
+    family at least shows something recognisable rather than nothing.
+    """
+    if not model:
+        return ""
+    lower = model.lower()
+    for key in sorted(_MODEL_SHORT_NAMES.keys(), key=len, reverse=True):
+        if key in lower:
+            return _MODEL_SHORT_NAMES[key]
+    return model[:12]
+
+
+def _resolve_model_color(model: str) -> str:
+    """Map an API model id to its chip colour.
+
+    Same length-descending lookup as ``_resolve_model_short_name``.
+    Returns ``_MODEL_COLOR_FALLBACK`` for unknown families."""
+    if not model:
+        return _MODEL_COLOR_FALLBACK
+    lower = model.lower()
+    for key in sorted(_MODEL_COLORS.keys(), key=len, reverse=True):
+        if key in lower:
+            return _MODEL_COLORS[key]
+    return _MODEL_COLOR_FALLBACK
 
 _STYLE_SINGLE_ROW = f"""
     QPushButton {{
@@ -452,6 +530,69 @@ _GROUP_GAP = 8
 _STYLE_DOT = "color: {color}; font-size: 11px;"
 _STYLE_NAME = "color: #e8e8e8; font-size: 13px;"
 _STYLE_AGE = "color: #6b7280; font-size: 11px;"
+# Small coloured pill label used in the row's status line. Background
+# is the model's hue at 18 % alpha so the chip reads as "tinted" against
+# the row bg without overpowering the name typography. Border shares
+# the same hue at higher alpha for legibility.
+_STYLE_MODEL_CHIP = (
+    "QLabel {{"
+    " color: {color};"
+    " background: rgba(255, 255, 255, 0);"
+    " border: 1px solid {color};"
+    " border-radius: 6px;"
+    " padding: 0px 6px;"
+    " font-size: 10px;"
+    " font-weight: 600;"
+    "}}"
+)
+# Status line typography: same dimmer grey as _STYLE_AGE so the text
+# settles into the secondary tier; size matched to chip height.
+_STYLE_STATUS = "color: #9ca3af; font-size: 10px;"
+
+
+def _row_status_text(
+    details: "SessionDetails | None",
+    session: "Session",
+) -> str:
+    """Compose the bottom-line status text for a row.
+
+    Format: ``running · 5m ago`` (or ``idle · 3h ago``, etc.).
+
+    Status word resolution:
+      1. ``details.status`` from ``~/.claude/sessions/<pid>.json`` when
+         present (Claude Code's authoritative state). ``busy`` →
+         ``running`` so the user-facing word matches the visual cue
+         used elsewhere ("running" reads more natural than "busy").
+      2. Activity-based heuristic when state is unknown — last_activity
+         within the active threshold ⇒ ``running``, else ``idle``.
+
+    The relative-time suffix always reflects ``session.last_activity``
+    (NOT details.started_at). Activity is what a viewer wants to know
+    about ("when did this last move?"), not session age.
+    """
+    status_word = "idle"
+    if details is not None and isinstance(details.status, str):
+        canonical = details.status.lower()
+        if canonical == "busy":
+            status_word = "running"
+        elif canonical in ("idle", "waiting"):
+            status_word = canonical
+        else:
+            status_word = canonical
+    else:
+        try:
+            now = datetime.now(timezone.utc)
+            delta = (now - session.last_activity.astimezone(timezone.utc)).total_seconds()
+            status_word = (
+                "running" if delta < _ROW_ACTIVE_THRESHOLD_SECONDS else "idle"
+            )
+        except (TypeError, ValueError):
+            status_word = "idle"
+
+    age = _fmt_started(session.last_activity)  # "5m ago" / "—"
+    if age == "—":
+        return status_word
+    return f"{status_word} · {age}"
 _STYLE_PERIOD_BTN = """
     QPushButton {
         color: #666;
@@ -3536,18 +3677,22 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _make_row(self, session: Session, parent_card: QFrame | None = None) -> HoverRow:
-        """Build a click-target row with a 3-element horizontal layout:
-        ``● name ............... cost``.
+        """Build a click-target row with a two-line layout:
 
-        The HoverRow supplies enter/leave hover transitions via native
-        Qt hover detection (WA_Hover=True). A QHBoxLayout inside the
-        button positions three QLabels (dot / name / meta). Each label
-        has WA_TransparentForMouseEvents so clicks anywhere on the row
-        fall through to the button.
+        ::
 
-        Right-click opens a SessionDetailPopup with the rich metadata
-        (id / cwd / created / per-model tokens / last prompt). Left
-        click activates the WT tab as before.
+            ● name                                $cost
+              [Model] · running · 5m ago
+
+        The top line carries the activity dot, the (possibly renamed)
+        session name, and the cumulative cost. The bottom line carries
+        a colour-coded model chip plus the running/idle status word
+        and a relative-time ``5m ago`` suffix.
+
+        Hover feedback is supplied by HoverRow's left-edge accent bar
+        (WA_Hover=True). All sub-labels carry WA_TransparentForMouseEvents
+        so clicks anywhere on the row reach the button. Right-click
+        still routes to the rich SessionDetailPopup.
         """
         btn = HoverRow(base_bg=_BG_SINGLE, parent_card=parent_card)
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -3555,16 +3700,29 @@ class ExpandedWindow(QWidget):
         btn.setProperty("_session", session)
         btn.setProperty("_siblings", [])
 
-        layout = QHBoxLayout(btn)
-        layout.setContentsMargins(_ROW_PAD_H, 0, _ROW_PAD_H, 0)
-        layout.setSpacing(8)
+        outer = QVBoxLayout(btn)
+        outer.setContentsMargins(_ROW_PAD_H, 6, _ROW_PAD_H, 6)
+        outer.setSpacing(2)
+
+        # ---- top row: dot + name + cost ---------------------------------
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
+
+        dot_label = QLabel("●")
+        dot_label.setObjectName("dot_label")
+        dot_label.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
+        dot_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        dot_label.setFixedWidth(12)
+        dot_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        top.addWidget(dot_label)
 
         name_label = QLabel()
         name_label.setObjectName("name_label")
         name_label.setStyleSheet(_STYLE_NAME)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        layout.addWidget(name_label, 1)
+        top.addWidget(name_label, 1)
 
         # Right-side meta slot. Shows cumulative session cost.
         meta_label = QLabel()
@@ -3572,7 +3730,31 @@ class ExpandedWindow(QWidget):
         meta_label.setStyleSheet(_STYLE_AGE)
         meta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         meta_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(meta_label)
+        top.addWidget(meta_label)
+
+        outer.addLayout(top)
+
+        # ---- bottom row: indent + model chip + status -------------------
+        # Indent the bottom row so the model chip sits under the name,
+        # not under the dot — visually couples the two lines as one block.
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(20, 0, 0, 0)  # 12 (dot width) + 8 (spacing)
+        bottom.setSpacing(6)
+
+        model_chip = QLabel()
+        model_chip.setObjectName("model_chip")
+        model_chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        model_chip.setStyleSheet(_STYLE_MODEL_CHIP.format(color=_MODEL_COLOR_FALLBACK))
+        bottom.addWidget(model_chip)
+
+        status_label = QLabel()
+        status_label.setObjectName("status_label")
+        status_label.setStyleSheet(_STYLE_STATUS)
+        status_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        bottom.addWidget(status_label)
+        bottom.addStretch()
+
+        outer.addLayout(bottom)
 
         self._update_row(btn, session)
         btn.clicked.connect(lambda: self._on_row_clicked(
@@ -3589,7 +3771,12 @@ class ExpandedWindow(QWidget):
         return btn
 
     def _update_row(self, btn: QPushButton, session: Session) -> None:
-        """Refresh name and right-side cost on every refresh tick."""
+        """Refresh dot / name / cost / model chip / status on every tick.
+
+        Each label is updated only when its computed value differs from
+        the current text (Qt repaints on setText regardless of whether
+        the string changed) — keeps the row stable through the periodic
+        refresh cadence."""
         details: SessionDetails | None = None
         if self._get_session_details is not None:
             try:
@@ -3611,6 +3798,15 @@ class ExpandedWindow(QWidget):
         # ("this column is always cost").
         meta_text = _fmt_money(details.cost_usd) if details is not None else "—"
 
+        # Activity dot — green/yellow/grey based on freshness. Same
+        # palette as the capsule so the user learns one mapping globally.
+        dot_color = _activity_color(session.last_activity)
+        dot_label = btn.findChild(QLabel, "dot_label")
+        if dot_label is not None:
+            target_style = _STYLE_DOT.format(color=dot_color)
+            if dot_label.styleSheet() != target_style:
+                dot_label.setStyleSheet(target_style)
+
         name_label = btn.findChild(QLabel, "name_label")
         if name_label is not None and name_label.text() != title:
             name_label.setText(title)
@@ -3618,6 +3814,37 @@ class ExpandedWindow(QWidget):
         meta_label = btn.findChild(QLabel, "meta_label")
         if meta_label is not None and meta_label.text() != meta_text:
             meta_label.setText(meta_text)
+
+        # Model chip + status row. Model = highest-cost model in this
+        # session (per_model is sorted desc by cost). Empty per_model
+        # ⇒ chip hidden; a freshly-discovered session may not have any
+        # records yet, and "[—]" looks like a UI bug.
+        model_id = (
+            details.per_model[0].model
+            if details is not None and details.per_model
+            else ""
+        )
+        chip_label = btn.findChild(QLabel, "model_chip")
+        if chip_label is not None:
+            if model_id:
+                chip_text = _resolve_model_short_name(model_id)
+                chip_color = _resolve_model_color(model_id)
+                target_chip_style = _STYLE_MODEL_CHIP.format(color=chip_color)
+                if chip_label.text() != chip_text:
+                    chip_label.setText(chip_text)
+                if chip_label.styleSheet() != target_chip_style:
+                    chip_label.setStyleSheet(target_chip_style)
+                if chip_label.isHidden():
+                    chip_label.show()
+            else:
+                if not chip_label.isHidden():
+                    chip_label.hide()
+
+        status_label = btn.findChild(QLabel, "status_label")
+        if status_label is not None:
+            status_text = _row_status_text(details, session)
+            if status_label.text() != status_text:
+                status_label.setText(status_text)
 
         # Right-click triggers the rich popup; tooltip would compete
         # for the same surface, so it's gone. Explicit empty string

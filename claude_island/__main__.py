@@ -251,7 +251,17 @@ def _build_session_details(session):
 
 
 controller = IslandController()
-capsule = CapsuleWindow(controller)
+capsule = CapsuleWindow(
+    controller,
+    # Pull today's cumulative spend lazily — usage_registry is rebuilt
+    # from JSONL on every start, so the call is just a list comprehension
+    # over in-memory records (cheap, sub-ms at typical user scale).
+    get_today_cost=lambda: usage_registry.get_totals("today").cost_usd,
+    # Capsule shows the running session's name when exactly one is
+    # active. Reuse the same composer the panel rows use so the pill
+    # picks up custom renames + ai-titles consistently.
+    get_session_details=_build_session_details,
+)
 expanded = ExpandedWindow(
     capsule=capsule,
     controller=controller,
@@ -277,6 +287,10 @@ _wiring = [
     (session_registry.sessions_changed, capsule.refresh_sessions),
     (session_registry.sessions_changed, expanded.refresh_sessions),
     (usage_registry.totals_changed,     expanded.refresh_usage_bar),
+    # Capsule shows today's $ alongside session count — mirror the
+    # expanded panel's wiring so backfill / live JSONL writes both
+    # propagate to the pill within one Qt event loop tick.
+    (usage_registry.totals_changed,     capsule.refresh_cost),
 ]
 # Group by source event so we don't create N redundant QtBridge instances
 # subscribing to the same Event (sessions_changed has 3 slots — they should

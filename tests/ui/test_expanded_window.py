@@ -1894,3 +1894,248 @@ class TestProviderTabContextMenu:
         panel._on_delete_provider_clicked("minimax")
         assert deletes == ["minimax"]
         assert refreshes == [1]
+
+
+# ============================================================================
+# Row v2 layout — dot + name + cost on top, model chip + status below
+# (P0.3 — added with the Dynamic Island redesign)
+# ============================================================================
+
+
+class TestRowStatusLine:
+    """The new two-line row layout adds three labels on top of the
+    existing name/meta pair: an activity dot (left), a model chip
+    (bottom-left), and a status text (bottom-centre). These tests pin
+    the contract that those labels exist with the expected objectNames
+    and that update_row populates them from SessionDetails."""
+
+    def test_row_has_new_status_widgets(self, panel):
+        """Every row must expose dot_label / model_chip / status_label
+        as findable children — both _make_row and _update_row reference
+        them by objectName, so a typo would silently make the chip
+        invisible."""
+        from PySide6.QtWidgets import QLabel
+        panel.refresh_sessions([_session(1, "/a")])
+        btn = panel._rows[1]
+        assert btn.findChild(QLabel, "dot_label") is not None
+        assert btn.findChild(QLabel, "model_chip") is not None
+        assert btn.findChild(QLabel, "status_label") is not None
+
+    def test_row_height_grew_to_fit_two_lines(self, panel):
+        """Row height jumped from 36 to 52 when the status row was
+        added. Locking the value down so a future code change can't
+        accidentally squash the bottom line and clip descenders."""
+        from claude_island.ui.expanded_window import _ROW_HEIGHT
+        panel.refresh_sessions([_session(1, "/a")])
+        assert _ROW_HEIGHT == 52
+        assert panel._rows[1].height() == 52
+
+    def test_chip_hidden_when_no_per_model_data(self, qtbot):
+        """A freshly-discovered session has no UsageRecords yet ⇒
+        per_model is empty ⇒ rendering "[]" or a blank pill would
+        read as a bug. The chip must hide entirely."""
+        from PySide6.QtWidgets import QLabel
+        from claude_island.core.models import SessionDetails
+
+        def details(session):
+            return SessionDetails(
+                session=session, name="x", ai_title=None, git_branch=None,
+                last_prompt=None, started_at=None, status=None,
+                cc_version=None, cost_usd=0.0, turn_count=0,
+                sidechain_count=0, per_model=(),
+            )
+
+        capsule = QWidget()
+        capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule,
+            controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+            get_session_details=details,
+        )
+        qtbot.addWidget(p)
+        qtbot.addWidget(capsule)
+
+        p.refresh_sessions([_session(1, "/a")])
+        chip = p._rows[1].findChild(QLabel, "model_chip")
+        assert chip is not None
+        assert chip.isHidden()
+
+    def test_chip_shows_model_short_name_and_color(self, qtbot):
+        """When per_model has entries, the chip uses the highest-cost
+        model's short name + its tier-coded colour. Sonnet → blue is
+        the canonical Anthropic mid-tier mapping."""
+        from PySide6.QtWidgets import QLabel
+        from claude_island.core.models import (
+            ModelTotals, SessionDetails,
+        )
+
+        def details(session):
+            return SessionDetails(
+                session=session, name="x", ai_title=None, git_branch=None,
+                last_prompt=None, started_at=None, status=None,
+                cc_version=None, cost_usd=10.0, turn_count=2,
+                sidechain_count=0,
+                per_model=(
+                    ModelTotals(
+                        model="claude-sonnet-4-6",
+                        input_tokens=1, output_tokens=1,
+                        cache_creation_tokens=0, cache_read_tokens=0,
+                        cost_usd=8.0,
+                    ),
+                ),
+            )
+
+        capsule = QWidget()
+        capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule,
+            controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+            get_session_details=details,
+        )
+        qtbot.addWidget(p)
+        qtbot.addWidget(capsule)
+
+        p.refresh_sessions([_session(1, "/a")])
+        chip = p._rows[1].findChild(QLabel, "model_chip")
+        assert chip is not None
+        assert chip.text() == "Sonnet"
+        assert "3B82F6" in chip.styleSheet()
+        assert not chip.isHidden()
+
+    def test_status_label_shows_state_and_age(self, qtbot):
+        """status="busy" should render as "running" (user-friendly verb,
+        matches the capsule's vocabulary), suffixed with a relative
+        ``Nm ago`` derived from session.last_activity."""
+        from PySide6.QtWidgets import QLabel
+        from claude_island.core.models import SessionDetails
+
+        def details(session):
+            return SessionDetails(
+                session=session, name="x", ai_title=None, git_branch=None,
+                last_prompt=None, started_at=None, status="busy",
+                cc_version=None, cost_usd=0.0, turn_count=0,
+                sidechain_count=0,
+            )
+
+        capsule = QWidget()
+        capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule,
+            controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+            get_session_details=details,
+        )
+        qtbot.addWidget(p)
+        qtbot.addWidget(capsule)
+
+        p.refresh_sessions([_session(1, "/a", ago_minutes=5)])
+        status = p._rows[1].findChild(QLabel, "status_label")
+        assert status is not None
+        # "running · Nm ago" — exact minute count is fragile across
+        # test execution time, so just assert structure and verb.
+        text = status.text()
+        assert text.startswith("running · ")
+        assert "ago" in text
+
+
+class TestModelHelpers:
+    """Inline model-name + colour resolvers (precursor to the full
+    declarative registry coming in P2). Length-descending substring
+    match — same algorithm as ``usage_registry._resolve_pricing`` so
+    long keys like ``minimax-m2.7`` win over short family tokens."""
+
+    def test_short_name_anthropic_families(self):
+        from claude_island.ui.expanded_window import _resolve_model_short_name
+        assert _resolve_model_short_name("claude-opus-4-7") == "Opus"
+        assert _resolve_model_short_name("claude-sonnet-4-6") == "Sonnet"
+        assert _resolve_model_short_name("claude-haiku-4-5-20251001") == "Haiku"
+
+    def test_short_name_deepseek_tiers(self):
+        from claude_island.ui.expanded_window import _resolve_model_short_name
+        # Tier-specific keys MUST win over the generic "deepseek" key —
+        # otherwise a Pro model would render as "DeepSeek" and lose
+        # the tier signal.
+        assert _resolve_model_short_name("deepseek-v4-pro") == "V4 Pro"
+        assert _resolve_model_short_name("deepseek-v4-flash") == "V4 Flash"
+        assert _resolve_model_short_name("deepseek-r1") == "DeepSeek"
+
+    def test_short_name_minimax_versions(self):
+        from claude_island.ui.expanded_window import _resolve_model_short_name
+        # MiniMax-M2.7-highspeed: longest match is "minimax-m2.7" → "M2.7".
+        assert _resolve_model_short_name("MiniMax-M2.7-highspeed") == "M2.7"
+        assert _resolve_model_short_name("MiniMax-M1") == "M1"
+
+    def test_short_name_unknown_falls_back_to_prefix(self):
+        from claude_island.ui.expanded_window import _resolve_model_short_name
+        # Unknown families get a safe truncation rather than empty —
+        # the user at least sees something they can recognise.
+        assert _resolve_model_short_name("brand-new-llama-4-405b") == "brand-new-ll"
+        # Empty string → empty (defensive; no model id ⇒ no chip).
+        assert _resolve_model_short_name("") == ""
+
+    def test_color_known_families(self):
+        from claude_island.ui.expanded_window import (
+            _resolve_model_color, _MODEL_COLOR_FALLBACK,
+        )
+        assert _resolve_model_color("claude-opus-4-7") == "#8B5CF6"
+        assert _resolve_model_color("deepseek-v4-flash") == "#FB923C"
+        assert _resolve_model_color("GLM-Air") == "#22D3EE"
+        # Unknown returns neutral grey, NOT a randomised colour — design
+        # rules out hash-based colour assignment so the same unknown
+        # model always renders identically across runs.
+        assert _resolve_model_color("gpt-mystery") == _MODEL_COLOR_FALLBACK
+        assert _resolve_model_color("") == _MODEL_COLOR_FALLBACK
+
+
+class TestRowStatusText:
+    """Composes the bottom-line text. Pins the busy → "running"
+    translation, the activity-based fallback when state is missing,
+    and the "Nm ago" suffix attaching to last_activity."""
+
+    def test_busy_status_renders_as_running(self):
+        from datetime import datetime, timedelta, timezone
+        from claude_island.core.models import SessionDetails
+        from claude_island.ui.expanded_window import _row_status_text
+
+        sess = _session(1, "/a", ago_minutes=10)
+        details = SessionDetails(
+            session=sess, name=None, ai_title=None, git_branch=None,
+            last_prompt=None, started_at=None, status="busy",
+            cc_version=None, cost_usd=0.0, turn_count=0, sidechain_count=0,
+        )
+        text = _row_status_text(details, sess)
+        assert text.startswith("running · ")
+
+    def test_idle_status_keeps_word(self):
+        from claude_island.core.models import SessionDetails
+        from claude_island.ui.expanded_window import _row_status_text
+
+        sess = _session(1, "/a", ago_minutes=10)
+        details = SessionDetails(
+            session=sess, name=None, ai_title=None, git_branch=None,
+            last_prompt=None, started_at=None, status="idle",
+            cc_version=None, cost_usd=0.0, turn_count=0, sidechain_count=0,
+        )
+        assert _row_status_text(details, sess).startswith("idle · ")
+
+    def test_no_details_uses_activity_heuristic_running(self):
+        """No state file (e.g. a non-Anthropic provider) → fall back
+        to last_activity vs the active threshold. Recent activity
+        (< 30s) reads as "running"."""
+        from claude_island.ui.expanded_window import _row_status_text
+        sess = _session(1, "/a", ago_minutes=0)
+        # ago_minutes=0 means "now"; but the helper subtracts a few µs
+        # so the delta is a hair > 0. Still well under the 30 s threshold.
+        text = _row_status_text(None, sess)
+        assert text.startswith("running")
+
+    def test_no_details_uses_activity_heuristic_idle(self):
+        from claude_island.ui.expanded_window import _row_status_text
+        sess = _session(1, "/a", ago_minutes=10)  # well past 30 s
+        text = _row_status_text(None, sess)
+        assert text.startswith("idle")
