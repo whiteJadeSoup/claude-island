@@ -1560,10 +1560,11 @@ class TestDetailPopupSubtitle:
         assert self._label_with_text(popup, "cc-learning") is not None
 
     def test_no_subtitle_when_all_candidates_echo_title(self, qtbot):
-        # Both ai_title and original_name match the rename → nothing
-        # to add. Subtitle suppressed, only the title shown.
+        # ai_title and original_name both match the rename, AND the
+        # project basename also matches → nothing to add. Subtitle
+        # suppressed, only the title shown.
         from claude_island.ui.expanded_window import SessionDetailPopup
-        s = _session(1, "/proj")
+        s = _session(1, "/Same")  # path basename also "Same"
         details = _make_full_details(
             s, name="Same",
             ai_title="Same",
@@ -1572,6 +1573,23 @@ class TestDetailPopupSubtitle:
         popup = SessionDetailPopup(details, s)
         qtbot.addWidget(popup)
         assert self._count_labels(popup, "Same") == 1
+
+    def test_basename_fallback_when_renamed_and_no_other_names(self, qtbot):
+        # The bug fix: user renamed but state.name was never written
+        # AND no ai_title exists. Without this fallback the popup
+        # would show only the custom title and nothing underneath —
+        # leaving the user wondering what Claude would have called it.
+        # The project basename is the last-ditch "natural" name.
+        from claude_island.ui.expanded_window import SessionDetailPopup
+        s = _session(1, "/home/me/claude-island")
+        details = _make_full_details(
+            s, name="claude-island-dev",
+            ai_title=None,
+            original_name=None,
+        )
+        popup = SessionDetailPopup(details, s)
+        qtbot.addWidget(popup)
+        assert self._label_with_text(popup, "claude-island") is not None
 
 
 # ============================================================================

@@ -1188,27 +1188,39 @@ class SessionDetailPopup(QFrame):
         still scanning the popup."""
         d = self._details
         title = self._title_text()
-        # Italic subtitle = "what this session would have been called
-        # without the user's rename":
-        #   - Prefer ai_title (the AI-generated title from the JSONL
-        #     ai-title row) when it exists and differs from the title.
-        #   - When Claude never wrote an ai-title row AND the user
-        #     renamed, fall back to the Claude-Code-assigned
-        #     ``original_name`` so the user can still see the
-        #     "before-rename" context. The is-renamed check (name !=
-        #     original_name) means we never surface state.name as
-        #     subtitle for unmodified sessions — that'd just be noise.
-        #   - Suppressed when no candidate differs from the title.
-        was_renamed = bool(
-            d and d.name and d.original_name and d.name != d.original_name
-        )
-        candidates: list[str | None] = [d.ai_title if d else None]
-        if was_renamed:
-            candidates.append(d.original_name)
-        subtitle_ai = next(
-            (c for c in candidates if c and c != title),
+        # Italic subtitle = "what Claude would have called this session
+        # if the user hadn't customized the name". Two-tier resolution:
+        #
+        #   1. Prefer ``ai_title`` (the AI-generated descriptive title
+        #      from the JSONL ai-title row) when it exists and differs
+        #      from the visible title — works whether or not the user
+        #      renamed, so unmodified sessions still show their AI
+        #      title underneath the auto name.
+        #   2. Else, walk the "natural" name chain
+        #      [original_name, ai_title, project_basename] and pick
+        #      the first non-None entry. Show it when it differs from
+        #      the title — i.e., when the user renamed. Falling all
+        #      the way down to the project basename is what catches
+        #      sessions whose ``state.name`` was never written
+        #      (otherwise the rename has no anchor to compare against
+        #      and no italic would surface).
+        natural = next(
+            (
+                c for c in (
+                    d.original_name if d else None,
+                    d.ai_title if d else None,
+                    self._fallback.project_path.name or None,
+                )
+                if c
+            ),
             None,
         )
+        if d and d.ai_title and d.ai_title != title:
+            subtitle_ai = d.ai_title
+        elif natural and natural != title:
+            subtitle_ai = natural
+        else:
+            subtitle_ai = None
 
         wrap = QWidget()
         # Refuse vertical stretch so layout surplus can't pull this
