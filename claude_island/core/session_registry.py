@@ -4,7 +4,8 @@ import dataclasses
 import threading
 from datetime import datetime
 
-from .events import Event
+from reactivex.subject import Subject
+
 from .models import Session, project_hash
 
 
@@ -24,7 +25,9 @@ class SessionRegistry:
     """
 
     def __init__(self) -> None:
-        self.sessions_changed: Event[list[Session]] = Event()
+        # Reactivex Subject (was Event[T] pre-Phase G2). on_next(list[Session])
+        # synchronously notifies subscribers on the calling thread.
+        self.sessions_changed: Subject[list[Session]] = Subject()
         self._sessions: list[Session] = []
         self._activity_overrides: dict[str, datetime] = {}
         # Sentinel != any real list (None never compares equal to a list)
@@ -47,7 +50,7 @@ class SessionRegistry:
             if enriched == self._last_emitted:
                 return
             self._last_emitted = list(enriched)
-        self.sessions_changed.emit(enriched)
+        self.sessions_changed.on_next(enriched)
 
     def update_activity(self, payload: tuple[str, datetime]) -> None:
         """Record a JSONL activity timestamp for a project.

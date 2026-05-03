@@ -30,7 +30,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
-from .events import Event
+from reactivex.subject import Subject
+
 from .models import (
     PRICING,
     DEFAULT_PRICING,
@@ -172,7 +173,9 @@ class UsageRegistry:
     """
 
     def __init__(self) -> None:
-        self.totals_changed: Event[None] = Event()
+        # Reactivex Subject (was Event[None] pre-Phase G2). on_next(None)
+        # synchronously notifies subscribers on the calling thread.
+        self.totals_changed: Subject[None] = Subject()
         self._records: list[UsageRecord] = []
         # Dedup keyed by Anthropic ``message.id``. One API response is
         # spread across N JSONL lines (one per content block: text +
@@ -214,7 +217,7 @@ class UsageRegistry:
             if not kept:
                 return
             self._records.extend(kept)
-        self.totals_changed.emit(None)
+        self.totals_changed.on_next(None)
 
     def record(self, record: UsageRecord) -> None:
         """Single-record convenience wrapper around record_many."""

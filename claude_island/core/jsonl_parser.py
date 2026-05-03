@@ -7,7 +7,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .events import Event
+from reactivex.subject import Subject
+
 from .models import UsageRecord
 from .usage_registry import UsageRegistry
 
@@ -48,7 +49,10 @@ class JsonlParser:
         usage_registry: UsageRegistry,
         claude_projects_dir: Path,
     ) -> None:
-        self.activity_updated: Event[tuple[str, datetime]] = Event()
+        # Reactivex Subject (was Event[T] pre-Phase G2). API-equivalent:
+        # ``subscribe(cb)`` registers, ``on_next(payload)`` emits.
+        # Synchronously dispatches to subscribers on the calling thread.
+        self.activity_updated: Subject[tuple[str, datetime]] = Subject()
         self._usage = usage_registry
         self._projects_dir = claude_projects_dir
         # Per-file locks replace the old single global lock so backfill
@@ -309,7 +313,7 @@ class JsonlParser:
         self._usage.record_many(batch)
 
         if last_activity is not None:
-            self.activity_updated.emit((project_path, last_activity))
+            self.activity_updated.on_next((project_path, last_activity))
 
 
 def _parse_ts(entry: dict) -> datetime | None:
