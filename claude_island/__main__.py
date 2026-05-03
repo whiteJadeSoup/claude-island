@@ -49,6 +49,7 @@ qInstallMessageHandler(_qt_message_filter)
 # ---------------------------------------------------------------------------
 from claude_island.core.jsonl_parser import JsonlParser
 from claude_island.core.session_registry import SessionRegistry
+from claude_island.core.snapshot import Snapshotter, world
 from claude_island.core.usage_registry import UsageRegistry
 
 # JSONL transcripts are the single source of truth — UsageRegistry is
@@ -124,6 +125,9 @@ from claude_island.ui.capsule_window import CapsuleWindow
 from claude_island.ui.controller import IslandController
 from claude_island.ui.expanded_window import ExpandedWindow
 from claude_island.ui.qt_bridge import QtBridge
+from claude_island.ui.world_marshaler import WorldMarshaler
+
+import reactivex.operators as ops
 
 
 def _get_quota_snapshot():
@@ -359,6 +363,89 @@ _bridges = list(_bridges_by_event.values())  # keep references alive
 # no need to marshal through Qt — the parser thread can call it directly.
 jsonl_parser.activity_updated.subscribe(session_registry.update_activity)
 
+# ---------------------------------------------------------------------------
+# Section 4b: WorldSnapshot broadcast (Phase E — runs IN PARALLEL with the
+# legacy wiring above).
+#
+# Architecture:
+#
+#   sources ── wake() ──→ Snapshotter (worker thread)
+#                              │
+#                              │ build → publish=marshaler.snap_ready.emit
+#                              ▼
+#                       WorldMarshaler (Qt main thread, QueuedConnection)
+#                              │
+#                              ▼
+#                       world.push(snap)        ← all on Qt main thread
+#                              │
+#                              │ pipe(distinct_until_changed(render_key))
+#                              ▼
+#               capsule.render(snap), expanded.render(snap)
+#
+# The legacy refresh_xxx slots above stay wired during Phase E/F so behaviour
+# can be visually compared. Phase G deletes the legacy slots, the QtBridge,
+# and Event[T] entirely.
+# ---------------------------------------------------------------------------
+
+_world_marshaler = WorldMarshaler()  # pin reference: QObject lifetime
+
+snapshotter = Snapshotter(
+    session_source=session_registry,
+    state_reader=session_state_reader,
+    metadata_provider=jsonl_parser,
+    usage_registry=usage_registry,
+    names_store=session_names_store,
+    get_quota=_get_quota_snapshot,
+    get_available_providers=_resolve_available_providers,
+    get_selected_provider=lambda: (
+        expanded.selected_provider_name() if "expanded" in globals() else _selected_provider
+    ),
+    publish=_world_marshaler.snap_ready.emit,
+    debounce_window_s=0.1,
+    throttle_first_window_s=0.2,
+)
+
+# UI subscription pipelines: distinct_until_changed against render_key
+# (excludes fetched_at) so periodic ticks producing identical data don't
+# trigger no-op re-renders. observe_on is NOT needed — world.push runs
+# on the Qt main thread (because WorldMarshaler.QueuedConnection
+# guarantees that), so subscribers fire on the main thread by default.
+_capsule_subscription = (
+    world.observable()
+    .pipe(ops.distinct_until_changed(key_mapper=lambda s: s.render_key()))
+    .subscribe(
+        on_next=capsule.render,
+        on_error=lambda e: print(
+            f"[claude-island] capsule render pipeline died: {e}", file=sys.stderr
+        ),
+    )
+)
+_expanded_subscription = (
+    world.observable()
+    .pipe(ops.distinct_until_changed(key_mapper=lambda s: s.render_key()))
+    .subscribe(
+        on_next=expanded.render,
+        on_error=lambda e: print(
+            f"[claude-island] expanded render pipeline died: {e}", file=sys.stderr
+        ),
+    )
+)
+
+# Wake hooks: every legacy event source also pokes the snapshotter so a
+# JSONL write / process scan triggers a snap rebuild within the debounce
+# window. wake() is thread-safe — no QtBridge marshaling needed.
+session_registry.sessions_changed.subscribe(lambda _: snapshotter.wake())
+usage_registry.totals_changed.subscribe(lambda _: snapshotter.wake())
+# jsonl_parser.activity_updated already feeds session_registry, which then
+# emits sessions_changed → wakes via the line above. No extra hook needed.
+
+snapshotter.start()
+# Boot the UI with one snapshot synchronously so capsule + panel render
+# real data on first paint instead of the empty default. publish is the
+# marshaler emit, so this enqueues a push on the Qt main thread that
+# fires once app.exec() begins spinning the event loop.
+_world_marshaler.snap_ready.emit(snapshotter.build_now())
+
 # Platform → UI direct connection (session activation: UI emits, platform handles).
 # No bridge needed — session_activated fires on the Qt main thread already.
 expanded.session_activated.connect(window_activator.activate)
@@ -461,6 +548,13 @@ _session_names_gc_timer.start(6 * 60 * 60 * 1000)  # 6 hours
 #   4. usage_registry.close()    — DB closed; nothing left to write to it
 # ---------------------------------------------------------------------------
 exit_code = app.exec()
+
+# Stop the snapshotter first so a tick fired during shutdown doesn't
+# try to read from registries that are about to close. dispose() is
+# idempotent on the underlying subscriptions.
+snapshotter.stop()
+_capsule_subscription.dispose()
+_expanded_subscription.dispose()
 
 session_discovery.stop()
 file_watcher.stop()

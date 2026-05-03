@@ -24,6 +24,14 @@ from claude_island.core.snapshot import (
 # SessionView
 # ---------------------------------------------------------------------------
 
+# Fixed timestamp shared by all _view() instances — using datetime.now()
+# inside the fixture leaks timing variability into "structural equality"
+# assertions (two _view() calls would compare ≠ if the clock advanced
+# between them, even by a microsecond). Tests that need a varying
+# timestamp construct it explicitly.
+_FIXED_TS = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
 def _view(
     *,
     cost_usd: float = 1.0,
@@ -38,14 +46,14 @@ def _view(
     sess = Session(
         pid=1234, project_path=Path("/tmp/test"),
         session_uuid="", window_handle=None,
-        last_activity=datetime.now(timezone.utc),
+        last_activity=_FIXED_TS,
     )
     return SessionView(
         pid=1234,
         name="test",
         project_path=Path("/tmp/test"),
         project_basename="test",
-        last_activity=datetime.now(timezone.utc),
+        last_activity=_FIXED_TS,
         is_running=is_running,
         cost_usd=cost_usd,
         is_high_cost=is_high_cost,
