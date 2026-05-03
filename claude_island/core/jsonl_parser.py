@@ -83,6 +83,26 @@ class JsonlParser:
             executor.shutdown(wait=False, cancel_futures=True)
             self._backfill_executor = None
 
+    def known_session_uuids(self) -> set[str]:
+        """Return every session_uuid the parser knows about — i.e.
+        every transcript filename stem under the projects dir.
+
+        Used by the periodic ``session_names`` cleanup so renamed-and-
+        then-deleted sessions don't leave stale override entries
+        accumulating in ``~/.claude-island/session_names.json``.
+
+        Implemented as a fresh ``rglob`` rather than reading
+        ``self._session_meta`` so the answer reflects what's on disk
+        right now (the meta dict only sees files the parser actually
+        touched). Cheap — same scan ``backfill_all`` already does.
+        Errors during enumeration return an empty set so the caller
+        skips its mutation, which is the safe default for a gc.
+        """
+        try:
+            return {p.stem for p in self._projects_dir.rglob("*.jsonl")}
+        except OSError:
+            return set()
+
     def _get_file_lock(self, path_str: str) -> threading.Lock:
         """Return (or create) the per-file lock for *path_str*.
 

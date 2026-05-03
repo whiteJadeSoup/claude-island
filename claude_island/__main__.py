@@ -354,6 +354,33 @@ def _bootstrap_session_discovery() -> None:
 import threading as _threading
 _threading.Thread(target=_bootstrap_session_discovery, daemon=True).start()
 
+# Periodic cleanup of session_names.json — drop overrides whose
+# session_uuid no longer corresponds to any transcript on disk so
+# the file doesn't accumulate dead entries from sessions the user
+# renamed and then closed permanently. Cadence is generous (every
+# 6 hours) because the work is cheap, the file is tiny, and stale
+# entries are harmless until the next rename anyway. First fire is
+# also delayed 6 hours, by which time backfill_all has finished
+# and known_session_uuids() returns a complete picture.
+#
+# The actual gc runs on a daemon thread because both the rglob over
+# ~/.claude/projects/ and the read-modify-write of the names file
+# touch disk — a slow disk shouldn't be able to stutter the Qt main
+# thread. The QTimer just dispatches; the worker does the work.
+def _gc_session_names_tick() -> None:
+    def _work() -> None:
+        try:
+            session_names_store.gc_session_names(jsonl_parser.known_session_uuids())
+        except Exception as exc:
+            import sys as _sys
+            print(f"[claude-island] session_names gc failed: {exc}", file=_sys.stderr)
+    _threading.Thread(target=_work, daemon=True).start()
+
+
+_session_names_gc_timer = QTimer()
+_session_names_gc_timer.timeout.connect(_gc_session_names_tick)
+_session_names_gc_timer.start(6 * 60 * 60 * 1000)  # 6 hours
+
 # ---------------------------------------------------------------------------
 # Event loop + cleanup
 #
