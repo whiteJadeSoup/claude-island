@@ -12,6 +12,13 @@ dependencies = [
     "watchdog>=4.0",
     "transitions>=0.9",
     "platformdirs>=4.0",
+    # State broadcast layer: BehaviorSubject for the WorldSnapshot stream
+    # and QtScheduler for marshaling renders onto the Qt main thread.
+    # Pure Python (py3-none-any wheel), no native deps — Windows + macOS
+    # + Linux ship the same package. Pin <5 so a future major bump can't
+    # silently break the operator pipeline (we only use 4 ops, but the
+    # API stability guarantee only covers v4.x).
+    "reactivex>=4.1,<5",
     "pywin32>=306; sys_platform == 'win32'",
     "uiautomation>=2.0; sys_platform == 'win32'",
 ]
@@ -36,7 +43,10 @@ include = ["claude_island*"]
 root_packages = ["claude_island"]
 include_external_packages = true
 
-# P2: Core never touches UI frameworks or OS-specific libs
+# P2: Core never touches UI frameworks or OS-specific libs.
+# reactivex is allowed — pure Python, no UI / OS dependency. It carries
+# the WorldSnapshot broadcast Subject; the QtScheduler binding lives in
+# the UI layer (__main__.py wiring), not in core.
 [[tool.importlinter.contracts]]
 name = "core must not import UI frameworks"
 type = "forbidden"
