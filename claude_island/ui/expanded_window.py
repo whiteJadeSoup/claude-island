@@ -331,40 +331,27 @@ def _group_bg_color(idx: int) -> str:
 
 
 class HoverRow(QPushButton):
-    """Session row button. Four paint layers stacked on top of each
+    """Session row button. Three paint layers stacked on top of each
     other: base background → optional running accent (left edge) →
-    optional high-cost accent (right edge) → optional hover accent
-    (left edge). The two persistent accents (running, high-cost) sit
-    on opposite edges so they're independent signal channels — running
-    is "is this session live right now", high-cost is "has this
-    session accumulated a lot of spend over its lifetime". Putting
-    them on opposite sides means both can fire simultaneously without
-    fighting for the same paint slot.
+    optional hover accent (left edge). The running accent animates
+    its alpha on a 1.4 s sine cycle (Spotify "Now Playing" / Apple
+    Music sidebar pattern).
 
-    The "running" accent (left) animates its alpha on a 1.4 s sine
-    cycle (Spotify "Now Playing" / Apple Music sidebar pattern). The
-    "high-cost" accent (right) is intentionally STATIC — cumulative
-    cost is a fact about the session, not a live state, so an
-    animation would misrepresent it as something changing.
+    High-cost used to live on the row's right edge as a static yellow
+    bar — moved to colour-coding the cost label itself instead. The
+    bar was too easy to miss against narrow row geometry; a yellow
+    "$132" reads as expensive on first glance without a separate
+    legend.
     """
 
     _ACCENT_W = 3       # px wide
     _ACCENT_INSET = 4   # px from top/bottom edges (so bar < row height)
     _RUNNING_W = 4      # the running bar is one px wider so it stands
                          # out next to the hover bar without overlap
-    _HIGH_COST_W = 4    # mirror of running width — same visual weight
-                         # on the opposite edge
 
     # Bright green that reads "alive". Same hex as the capsule's active
     # dot so the colour story is unified across surfaces.
     _RUNNING_COLOR = "#22c55e"
-    # Yellow with the same vibrance as the alert dot used elsewhere —
-    # high-cost is a "warning, not failure" tone, never red.
-    _HIGH_COST_COLOR = "#facc15"
-    # Static alpha for the high-cost bar. < 1.0 so it sits visually
-    # subordinate to the animated running bar (animation > static
-    # in the visual hierarchy), > 0.5 so it's still clearly visible.
-    _HIGH_COST_ALPHA = 0.85
 
     def __init__(self, base_bg: str, parent_card: "QFrame | None" = None, **kwargs):
         super().__init__(**kwargs)
@@ -373,10 +360,6 @@ class HoverRow(QPushButton):
         self._hovered = False
         self._running = False
         self._running_alpha = 0.0  # 0..1; driven by _running_anim
-        # High-cost (cumulative spend over threshold) is a static
-        # condition — no animation, paint or don't paint a yellow
-        # bar on the right edge.
-        self._high_cost = False
         # Accent colour: brightened version of the group bg for in-card
         # rows (reinforces group identity); neutral grey for standalone.
         if parent_card is not None:
@@ -421,15 +404,6 @@ class HoverRow(QPushButton):
             self._running_alpha = 0.0
             self.update()
 
-    def set_high_cost(self, high_cost: bool) -> None:
-        """Toggle the static right-edge yellow bar that flags
-        high-cumulative-spend sessions. Idempotent — same value twice
-        is a no-op (avoids needless repaints on every refresh tick)."""
-        if self._high_cost == high_cost:
-            return
-        self._high_cost = high_cost
-        self.update()
-
     def set_parent_card(self, card: "QFrame | None") -> None:
         """Re-bind to a new card (or detach). Recomputes accent colour
         so a row that moves between groups picks up the new identity."""
@@ -468,20 +442,6 @@ class HoverRow(QPushButton):
             x = 0
             y = self._ACCENT_INSET
             w = self._RUNNING_W
-            h = self.height() - 2 * self._ACCENT_INSET
-            painter.drawRoundedRect(x, y, w, h, w / 2, w / 2)
-
-        # High-cost — static yellow bar mirrored onto the RIGHT edge so
-        # it's an independent signal channel from running. Both can
-        # paint simultaneously (running on left, high-cost on right);
-        # neither overwrites the other.
-        if self._high_cost:
-            color = QColor(self._HIGH_COST_COLOR)
-            color.setAlphaF(self._HIGH_COST_ALPHA)
-            painter.setBrush(color)
-            w = self._HIGH_COST_W
-            x = self.width() - w
-            y = self._ACCENT_INSET
             h = self.height() - 2 * self._ACCENT_INSET
             painter.drawRoundedRect(x, y, w, h, w / 2, w / 2)
 
@@ -538,36 +498,33 @@ class _RowStatusGlyph(QWidget):
     signals on this widget caused user confusion ("why is this ⚡
     instead of EQ when it's also running?")."""
 
-    _BAR_W = 2          # px wide per equalizer bar
-    _BAR_GAP = 2        # px between bars
-    _BAR_COUNT = 3
-    # 900 ms per bounce cycle was tuned by feel: 600 ms reads as a
-    # frantic loading spinner, 1100 ms reads as a slow heartbeat.
-    # 900 ms hits the "live but calm" sweet spot Apple uses on the
-    # AirPods battery animation and Spotify's "Now Playing".
-    _PERIOD_MS = 900
-    # Min height fraction. 0.28 (not the docstring-friendly 0.30) is
-    # the value where the bar still reads as a distinct rectangle on
-    # 1× DPI without looking like a thin line.
-    _MIN_PCT = 0.28
+    # 5 narrow bars (1.5 px each) read as a traveling wave; 3 bars at
+    # period/3 phase offset reads as "all bouncing in sync" because
+    # the eye doesn't get enough samples to perceive the wavefront.
+    # Width still ~10 px total to fit the dot slot.
+    _BAR_W = 1
+    _BAR_GAP = 1
+    _BAR_COUNT = 5
+    # 1200 ms full wave traversal — slower than the previous 900 ms
+    # bounce because the wave needs more time per cycle to read as
+    # "scrolling left to right" rather than "all bars wiggling".
+    _PERIOD_MS = 1200
+    # Wave amplitude bounds. The wave height function is computed in
+    # paintEvent via sin() — these bound the output of that math.
+    _MIN_PCT = 0.20
     _MAX_PCT = 1.00
-    _DEFAULT_W = _BAR_W * _BAR_COUNT + _BAR_GAP * (_BAR_COUNT - 1)  # 10 px
+    _DEFAULT_W = _BAR_W * _BAR_COUNT + _BAR_GAP * (_BAR_COUNT - 1)
     # Slot width floor matches the legacy dot_label.setFixedWidth(12)
     # so swapping into the row layout doesn't shift other widgets.
     _MIN_SLOT_W = 12
 
     STATE_IDLE = "idle"
     STATE_RUNNING = "running"
-    # STATE_HIGH_COST removed — high-cost moved to HoverRow's right
-    # edge bar so the leftmost slot is a pure running/idle channel.
-    # Legacy attribute kept as an alias to STATE_IDLE so external
-    # callers that still reference it (older tests, future code that
-    # forgets the move) degrade gracefully instead of crashing.
+    # STATE_HIGH_COST removed — high-cost moved to the cost label
+    # colour (yellow + bold). Legacy attribute kept as an alias to
+    # STATE_IDLE so external callers that still reference it degrade
+    # gracefully instead of crashing.
     STATE_HIGH_COST = "idle"
-
-    # _HIGH_COST_FONT / _HIGH_COST_PEN constants removed — the ⚡
-    # glyph paint branch is gone now that high-cost lives on the
-    # row's right edge as a static yellow bar (HoverRow paints it).
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -575,35 +532,34 @@ class _RowStatusGlyph(QWidget):
         self.setFixedWidth(max(self._DEFAULT_W, self._MIN_SLOT_W))
         self._state = self.STATE_IDLE
         self._dot_color = _DOT_GRAY
-        # Bar colour for the RUNNING state. Defaults to the standard
-        # "live" green; callers can override (e.g. yellow when the
-        # session is also high-cost — see _update_row's combined
-        # running + high-cost branch).
+        # Bar colour for the RUNNING state.
         self._bar_color = _DOT_RUNNING
-        # Per-bar height fractions [0..1]. Updated by the animations.
-        # Initial values are arbitrary — they're overwritten the moment
-        # an animation tick fires.
-        self._bar_heights = [0.5, 0.7, 0.4]
-        # One QVariantAnimation per bar so each runs independently —
-        # phase offset created by setting setCurrentTime() to a fraction
-        # of the loop duration on construction.
-        self._anims: list[QVariantAnimation] = []
-        for i in range(self._BAR_COUNT):
-            anim = QVariantAnimation(self)
-            anim.setDuration(self._PERIOD_MS)
-            anim.setStartValue(self._MIN_PCT)
-            anim.setKeyValueAt(0.5, self._MAX_PCT)
-            anim.setEndValue(self._MIN_PCT)
-            anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-            anim.setLoopCount(-1)
-            anim.valueChanged.connect(self._make_height_setter(i))
-            self._anims.append(anim)
+        # Single "phase" 0..1 drives all bars — paintEvent computes
+        # each bar's height from a sin() of (phase + bar_offset). One
+        # animation, N bars; the wave traveling across is just sin
+        # math, no per-bar animation objects. (B-002 review note:
+        # this is also the cheaper path — 1 anim instead of N.)
+        self._phase = 0.0
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(self._PERIOD_MS)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        # Linear so the wave scrolls at constant speed — InOutSine
+        # would make the wave appear to slow down at the loop edges,
+        # breaking the illusion of continuous left-to-right motion.
+        self._anim.setEasingCurve(QEasingCurve.Type.Linear)
+        self._anim.setLoopCount(-1)
+        self._anim.valueChanged.connect(self._on_phase)
 
-    def _make_height_setter(self, idx: int):
-        def _set(value):
-            self._bar_heights[idx] = float(value)
-            self.update()
-        return _set
+    def _on_phase(self, value: float) -> None:
+        self._phase = float(value)
+        self.update()
+
+    # Backwards-compat alias for tests that look up the old per-bar
+    # animation list. Single shared animation now lives in self._anim.
+    @property
+    def _anims(self) -> list[QVariantAnimation]:
+        return [self._anim]
 
     def set_state(
         self,
@@ -640,18 +596,13 @@ class _RowStatusGlyph(QWidget):
         prev = self._state
         self._state = state
         if state == self.STATE_RUNNING and prev != self.STATE_RUNNING:
-            # Stagger phases so the 3 bars are out-of-sync immediately.
-            # Seek first, THEN start — Qt docs allow either order, but
-            # PySide6's first internal tick after start() can overwrite
-            # a subsequent setCurrentTime, leaving all 3 bars synced
-            # at phase 0 (visual reads as a "loading spinner" not a
-            # "live equalizer"). Seek-then-start pins the offset.
-            for i, anim in enumerate(self._anims):
-                anim.setCurrentTime((i * self._PERIOD_MS) // self._BAR_COUNT)
-                anim.start()
+            # Single shared phase animation — paintEvent reads
+            # (phase + bar_index/N) into sin() to compute each bar's
+            # height. The wave traveling left-to-right falls out of
+            # the math; no per-bar animation staggering needed.
+            self._anim.start()
         elif prev == self.STATE_RUNNING and state != self.STATE_RUNNING:
-            for anim in self._anims:
-                anim.stop()
+            self._anim.stop()
         self.update()
 
     def state(self) -> str:
@@ -670,18 +621,28 @@ class _RowStatusGlyph(QWidget):
 
         if self._state == self.STATE_RUNNING:
             painter.setBrush(QColor(self._bar_color))
-            # Draw the 3 bars centered horizontally + vertically. The
-            # bars stretch from a centered baseline so the bounce
-            # reads as "growing both up and down" rather than rising
-            # off the floor — visually matches a real audio EQ meter.
+            # Traveling-wave equalizer: each bar's height is a sin()
+            # of (phase + i / N). The phase scrolls 0→1 over the
+            # period, so the wavefront moves left-to-right by exactly
+            # one wavelength per cycle. Bars centered vertically (top
+            # + bottom grow together) so the wave reads as a true
+            # waveform, not as bars rising off a floor.
             total_w = (
                 self._BAR_W * self._BAR_COUNT
                 + self._BAR_GAP * (self._BAR_COUNT - 1)
             )
             x0 = (wgt_w - total_w) // 2
             usable_h = max(8, wgt_h - 4)  # 2 px breathing room top/bottom
+            import math
+            amplitude_range = self._MAX_PCT - self._MIN_PCT
             for i in range(self._BAR_COUNT):
-                bar_h = max(2, int(usable_h * self._bar_heights[i]))
+                # sin returns -1..1; map to MIN_PCT..MAX_PCT.
+                # Two wavelengths visible across the bar set so the
+                # wave reads as denser / more obviously moving.
+                t = self._phase + (i / self._BAR_COUNT) * 2.0
+                normalized = (math.sin(t * 2 * math.pi) + 1) / 2  # 0..1
+                fraction = self._MIN_PCT + normalized * amplitude_range
+                bar_h = max(2, int(usable_h * fraction))
                 bx = x0 + i * (self._BAR_W + self._BAR_GAP)
                 by = cy - bar_h // 2
                 painter.drawRoundedRect(
@@ -755,6 +716,13 @@ _GROUP_GAP = 8
 _STYLE_DOT = "color: {color}; font-size: 11px;"
 _STYLE_NAME = "color: #e8e8e8; font-size: 13px;"
 _STYLE_AGE = "color: #6b7280; font-size: 11px;"
+# Cost label styles — default dim grey for normal sessions, yellow +
+# bold for sessions whose cumulative spend crossed the alert
+# threshold. Putting the warning on the number itself (rather than
+# adding a separate icon / accent bar) is the YNAB / Mint pattern:
+# the value being expensive IS the warning, no second visual needed.
+_STYLE_COST_DEFAULT = "color: #c9c9c9; font-size: 11px;"
+_STYLE_COST_HIGH = "color: #facc15; font-size: 11px; font-weight: 600;"
 # Small coloured pill label used in the row's status line. Background
 # is the model's hue at 18 % alpha so the chip reads as "tinted" against
 # the row bg without overpowering the name typography. Border shares
@@ -4310,7 +4278,7 @@ class ExpandedWindow(QWidget):
         # Right-side meta slot. Shows cumulative session cost.
         meta_label = QLabel()
         meta_label.setObjectName("meta_label")
-        meta_label.setStyleSheet(_STYLE_AGE)
+        meta_label.setStyleSheet(_STYLE_COST_DEFAULT)
         meta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         meta_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         top.addWidget(meta_label)
@@ -4416,16 +4384,12 @@ class ExpandedWindow(QWidget):
                 seconds_since = 1e9
             running = seconds_since < _ROW_ACTIVE_THRESHOLD_SECONDS
 
-        # Two independent signal channels drive the row chrome:
-        #   - Leftmost slot (glyph + running accent bar) → liveness:
-        #     equalizer-bars while running, static dot while idle.
-        #   - Rightmost edge (high-cost accent bar) → cumulative spend
-        #     warning: static yellow bar when ≥ threshold, nothing
-        #     otherwise.
-        # Splitting the two onto opposite sides means a session can be
-        # BOTH live AND expensive without either signal hiding the
-        # other (the previous design overloaded the leftmost slot for
-        # both, which made users repeatedly ask "why is it ⚡?").
+        # Two independent signal channels:
+        #   - Leftmost slot (glyph + running accent bar) → liveness.
+        #   - Cost label colour                          → high-cost.
+        # The cost label IS the high-cost warning — a yellow "$132"
+        # is more direct than a separate icon or edge bar (YNAB /
+        # Mint pattern: the expensive value highlights itself).
         glyph: _RowStatusGlyph | None = getattr(btn, "_status_glyph", None)
         if glyph is not None:
             if running:
@@ -4442,20 +4406,6 @@ class ExpandedWindow(QWidget):
         if hasattr(btn, "set_running"):
             btn.set_running(running)
 
-        # Right-edge high-cost accent bar — static yellow when set.
-        # Tooltip lives on the row itself so a hover anywhere on the
-        # row explains both signals (vs. requiring the user to find
-        # the specific edge bar).
-        if hasattr(btn, "set_high_cost"):
-            btn.set_high_cost(high_cost)
-        if high_cost and details is not None:
-            btn.setToolTip(
-                f"High cumulative spend (${details.cost_usd:.0f}) — "
-                "consider checking this session"
-            )
-        else:
-            btn.setToolTip("")
-
         name_label = btn.findChild(QLabel, "name_label")
         if name_label is not None and name_label.text() != title:
             name_label.setText(title)
@@ -4463,6 +4413,25 @@ class ExpandedWindow(QWidget):
         meta_label = btn.findChild(QLabel, "meta_label")
         if meta_label is not None and meta_label.text() != meta_text:
             meta_label.setText(meta_text)
+
+        # Cost label colour — yellow + bold when high-cost so the
+        # number itself flags the warning without a separate icon.
+        if meta_label is not None:
+            target_cost_style = (
+                _STYLE_COST_HIGH if high_cost else _STYLE_COST_DEFAULT
+            )
+            if meta_label.styleSheet() != target_cost_style:
+                meta_label.setStyleSheet(target_cost_style)
+
+        # Tooltip on the row explains the warning when present so a
+        # hover anywhere on the row surfaces it.
+        if high_cost and details is not None:
+            btn.setToolTip(
+                f"High cumulative spend (${details.cost_usd:.0f}) — "
+                "consider checking this session"
+            )
+        else:
+            btn.setToolTip("")
 
         # Model chip + status row. Model = highest-cost real model in
         # this session (per_model is sorted desc by cost). We skip

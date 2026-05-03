@@ -2272,12 +2272,12 @@ class TestSummaryCard:
 
 
 class TestHighCostRowAlert:
-    def test_high_cost_idle_row_paints_right_edge_bar(self, qtbot):
+    def test_high_cost_idle_row_paints_yellow_cost_label(self, qtbot):
         """An IDLE session whose cumulative cost exceeds the alert
-        threshold should set HoverRow._high_cost=True. The leftmost
-        glyph stays in IDLE state — high-cost is now its own
-        independent signal channel on the row's RIGHT edge, not a
-        glyph variant. Row tooltip explains the warning."""
+        threshold renders the cost label in yellow (+ bold). The
+        glyph stays in IDLE — the cost number IS the warning, no
+        separate icon needed."""
+        from PySide6.QtWidgets import QLabel
         from claude_island.core.models import SessionDetails
         from claude_island.ui.expanded_window import _RowStatusGlyph
 
@@ -2303,19 +2303,20 @@ class TestHighCostRowAlert:
         btn = p._rows[1]
         # Left-side glyph is IDLE — high-cost no longer hijacks it.
         assert btn._status_glyph.state() == _RowStatusGlyph.STATE_IDLE
-        # Right-side high-cost bar is on.
-        assert btn._high_cost is True
-        # Tooltip lives on the row, not the glyph.
+        # Cost label is yellow + bold.
+        meta = btn.findChild(QLabel, "meta_label")
+        assert meta is not None
+        css = meta.styleSheet()
+        assert "facc15" in css
+        assert "600" in css  # font-weight bold-ish
+        # Tooltip lives on the row.
         assert "high cumulative spend" in btn.toolTip().lower()
 
-    def test_running_high_cost_combines_signals(self, qtbot):
-        """A session that is BOTH running AND high-cost should run
-        the equalizer (running) on the LEFT and paint the static
-        yellow bar (high-cost) on the RIGHT — two independent signal
-        channels, neither hides the other. This was the previous
-        design's failure: combining both onto the leftmost slot meant
-        the user repeatedly couldn't tell that an expensive session
-        was also currently running."""
+    def test_running_high_cost_independent_signals(self, qtbot):
+        """A session that is BOTH running AND high-cost runs the
+        equalizer on the LEFT and renders cost in yellow on the
+        RIGHT — two independent visual channels, no overlap."""
+        from PySide6.QtWidgets import QLabel
         from claude_island.core.models import SessionDetails
         from claude_island.ui.expanded_window import _RowStatusGlyph
 
@@ -2337,17 +2338,47 @@ class TestHighCostRowAlert:
             get_session_details=details,
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
-        # status="busy" forces running regardless of last_activity.
         p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
         btn = p._rows[1]
-        # Left side runs the equalizer; right side paints high-cost.
+        # Left runs the equalizer; right colours the cost yellow.
         assert btn._status_glyph.state() == _RowStatusGlyph.STATE_RUNNING
         assert btn._running is True
-        assert btn._high_cost is True
-        # The glyph's bar colour stays the standard green — yellow
-        # means "high cost" and that signal lives on the row's
-        # right edge now, not overlaid on the equalizer.
+        meta = btn.findChild(QLabel, "meta_label")
+        assert "facc15" in meta.styleSheet()
+        # Glyph bar colour stays standard green — cost colour now
+        # owns the high-cost signal, the equalizer doesn't.
         assert btn._status_glyph._bar_color == "#22c55e"
+
+    def test_low_cost_idle_keeps_default_cost_color(self, qtbot):
+        """Low-cost session: cost label uses the default dim grey,
+        no warning state."""
+        from PySide6.QtWidgets import QLabel
+        from claude_island.core.models import SessionDetails
+        from claude_island.ui.expanded_window import _STYLE_COST_DEFAULT
+
+        def details(session):
+            return SessionDetails(
+                session=session, name="x", ai_title=None, git_branch=None,
+                last_prompt=None, started_at=None, status=None,
+                cc_version=None, cost_usd=4.50,
+                turn_count=2, sidechain_count=0,
+            )
+
+        capsule = QWidget(); capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule, controller=controller,
+            get_usage_totals=lambda period: __import__(
+                "claude_island.core.models", fromlist=["UsageTotals"]
+            ).UsageTotals(period=period),
+            get_session_details=details,
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
+        btn = p._rows[1]
+        meta = btn.findChild(QLabel, "meta_label")
+        assert meta.styleSheet() == _STYLE_COST_DEFAULT
+        assert btn.toolTip() == ""
 
     def test_low_cost_dot_keeps_default_glyph(self, qtbot):
         """Cost below threshold ⇒ glyph stays in IDLE state (single
@@ -2456,41 +2487,3 @@ class TestRowStatusGlyph:
         assert g._dot_color == "#facc15"
 
 
-class TestHoverRowHighCost:
-    """The right-edge high-cost accent bar — independent paint
-    channel from the running pulse, so a session can fire both
-    signals simultaneously without either hiding the other."""
-
-    def test_high_cost_default_off(self, qtbot):
-        from claude_island.ui.expanded_window import HoverRow
-        row = HoverRow(base_bg="#181818")
-        qtbot.addWidget(row)
-        assert row._high_cost is False
-
-    def test_set_high_cost_idempotent(self, qtbot):
-        """set_high_cost(True) twice doesn't trigger an extra repaint
-        (would burn cycles on every refresh tick where cost was
-        already over threshold)."""
-        from claude_island.ui.expanded_window import HoverRow
-        row = HoverRow(base_bg="#181818")
-        qtbot.addWidget(row)
-        row.set_high_cost(True)
-        assert row._high_cost is True
-        # Second True call is a no-op — no easy way to assert "no
-        # repaint scheduled", so just verify state stays consistent.
-        row.set_high_cost(True)
-        assert row._high_cost is True
-        # Toggle off works.
-        row.set_high_cost(False)
-        assert row._high_cost is False
-
-    def test_running_and_high_cost_independent(self, qtbot):
-        """Both flags can be on simultaneously — no mutual exclusion.
-        That's the whole point of putting them on opposite edges."""
-        from claude_island.ui.expanded_window import HoverRow
-        row = HoverRow(base_bg="#181818")
-        qtbot.addWidget(row)
-        row.set_running(True)
-        row.set_high_cost(True)
-        assert row._running is True
-        assert row._high_cost is True
