@@ -74,20 +74,21 @@ class FakeTerminalAdapter(_CapabilityProvider):
     def can_handle(self, session: Session) -> bool:
         return session.pid in self.handle
 
-    def group(self, sessions: list[Session]) -> list[SessionGroup]:
-        self.group_log.append(sessions)
-        views = []
-        for s in sessions:
-            v = _degraded_view(s)
-            v = replace(v, adapter_id=self.name,
-                        focus_granularity=FocusGranularity.PANE,
-                        capabilities=type(self).capabilities)
-            views.append(v)
+    def group(self, views: list[SessionView]) -> list[SessionGroup]:
+        self.group_log.append(views)
+        stamped = [
+            replace(
+                v, adapter_id=self.name,
+                focus_granularity=FocusGranularity.PANE,
+                capabilities=type(self).capabilities,
+            )
+            for v in views
+        ]
         return [SessionGroup(
             group_id="test-group",
             title_hint="test group",
             adapter_id=self.name,
-            views=tuple(views)
+            views=tuple(stamped),
         )]
 
     @capability(Capability.FOCUS)
@@ -98,7 +99,7 @@ class BuggyAdapter(FakeTerminalAdapter):
     name = "buggy-terminal"
     _priority = 50
 
-    def group(self, sessions):
+    def group(self, views):
         raise RuntimeError("simulated adapter bug")
 
 
@@ -109,17 +110,16 @@ class TestGroupSessions:
         d = TerminalDispatcher(terminals={}, os_backend=StubOs(), app_backend=StubApp())
         assert d.group_sessions([]) == []
 
-    def test_default_empty_registry_returns_empty(self):
+    def test_default_empty_registry_returns_empty(self, view_a):
         d = TerminalDispatcher(terminals={}, os_backend=StubOs(), app_backend=StubApp())
-        s = Session(pid=1, project_path="/x", session_uuid="", last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
-        groups = d.group_sessions([s])
-        # No registered terminal adapter — sessions fall through.
+        groups = d.group_sessions([view_a])
+        # No registered terminal adapter — views fall through.
         assert groups == []
 
     def test_adapter_claims_sessions(self, view_a, view_b):
         ad = FakeTerminalAdapter(handle={10, 20})
         d = TerminalDispatcher(terminals={ad.name: ad}, os_backend=StubOs(), app_backend=StubApp())
-        groups = d.group_sessions([view_a.session, view_b.session])
+        groups = d.group_sessions([view_a, view_b])
         assert len(groups) == 1
         g = groups[0]
         assert len(g.views) == 2
@@ -128,7 +128,7 @@ class TestGroupSessions:
     def test_os_app_caps_merged_into_views(self, view_a):
         ad = FakeTerminalAdapter(handle={10})
         d = TerminalDispatcher(terminals={ad.name: ad}, os_backend=StubOs(), app_backend=StubApp())
-        groups = d.group_sessions([view_a.session])
+        groups = d.group_sessions([view_a])
         v = groups[0].views[0]
         # Terminal caps + OS caps + APP caps
         assert Capability.FOCUS in v.capabilities
@@ -142,7 +142,7 @@ class TestGroupSessions:
         ad2.name = "ad2"; ad2._priority = 50
         d = TerminalDispatcher(terminals={ad1.name: ad1, ad2.name: ad2},
                                os_backend=StubOs(), app_backend=StubApp())
-        groups = d.group_sessions([view_a.session, view_b.session])
+        groups = d.group_sessions([view_a, view_b])
         assert len(groups) == 2
         names = {g.adapter_id for g in groups}
         assert names == {"ad1", "ad2"}
@@ -153,7 +153,7 @@ class TestGroupSessions:
         good.name = "good"; good._priority = 40
         d = TerminalDispatcher(terminals={buggy.name: buggy, good.name: good},
                                os_backend=StubOs(), app_backend=StubApp())
-        groups = d.group_sessions([view_a.session])
+        groups = d.group_sessions([view_a])
         # Buggy raises → skipped. Good claims the rest.
         assert len(groups) == 1
         assert groups[0].adapter_id == "good"
@@ -162,7 +162,7 @@ class TestGroupSessions:
         buggy = BuggyAdapter(handle={10})
         d = TerminalDispatcher(terminals={buggy.name: buggy},
                                os_backend=StubOs(), app_backend=StubApp())
-        groups = d.group_sessions([view_a.session])
+        groups = d.group_sessions([view_a])
         # Only one adapter, and it raises → no groups
         assert groups == []
 

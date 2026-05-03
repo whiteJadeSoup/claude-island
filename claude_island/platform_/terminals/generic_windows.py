@@ -10,23 +10,16 @@ so no session falls through the cracks.
 """
 from __future__ import annotations
 
-import sys
 from dataclasses import replace
 from typing import ClassVar
 
-from claude_island.core.capabilities import Capability, FocusGranularity, _CapabilityProvider, capability
+from claude_island.core.capabilities import (
+    Capability, FocusGranularity, _CapabilityProvider, capability,
+)
 from claude_island.core.models import Session
-from claude_island.core.snapshot import SessionGroup, SessionView, compose_session_view
+from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
 from claude_island.platform_.terminals.protocols import TerminalAdapter
-
-# Reuse the null deps from windows_terminal — generic adapters don't
-# need real compose_session_view sources because their emitted views
-# are shells. The Snapshotter's own composition path fills in the
-# actual fields.
-from claude_island.platform_.terminals.windows_terminal import (
-    _no_state, _no_meta, _no_usage, _no_names,
-)
 
 
 @adapter("generic-windows", priority=0, platform="win")
@@ -41,24 +34,23 @@ class GenericWindowsAdapter(_CapabilityProvider):
         so only unclaimed sessions reach here."""
         return True
 
-    def group(self, sessions: list[Session]) -> list[SessionGroup]:
+    def group(self, views: list[SessionView]) -> list[SessionGroup]:
+        """Each view becomes its own singleton group, stamped with the
+        generic-windows adapter identity. No re-resolution — the views
+        are already fully populated by the snapshotter."""
         groups: list[SessionGroup] = []
-        for s in sessions:
-            v = compose_session_view(
-                s, state_reader=_no_state, metadata_provider=_no_meta,
-                usage_registry=_no_usage, names_store=_no_names,
-            )
-            v = replace(
+        for v in views:
+            stamped = replace(
                 v,
                 adapter_id=self.name,
                 focus_granularity=FocusGranularity.APP,
                 capabilities=type(self).capabilities,
             )
             groups.append(SessionGroup(
-                group_id=f"win:{s.pid}",
+                group_id=f"win:{stamped.pid}",
                 title_hint=None,
                 adapter_id=self.name,
-                views=(v,),
+                views=(stamped,),
             ))
         return groups
 

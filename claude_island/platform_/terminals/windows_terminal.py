@@ -20,8 +20,8 @@ import sys
 from typing import ClassVar
 
 from claude_island.core.capabilities import Capability, FocusGranularity, _CapabilityProvider, capability
-from claude_island.core.models import Session, project_hash
-from claude_island.core.snapshot import SessionGroup, SessionView, compose_session_view, _degraded_view
+from claude_island.core.models import Session
+from claude_island.core.snapshot import SessionGroup, SessionView, _normalize_project_path
 from claude_island.platform_.terminals import adapter
 from claude_island.platform_.terminals.protocols import TerminalAdapter
 
@@ -69,11 +69,18 @@ class WindowsTerminalAdapter(_CapabilityProvider):
 
     # ── group ───────────────────────────────────────────────────────────
 
-    def group(self, sessions: list[Session]) -> list[SessionGroup]:
-        """Filter orphans, label with wt_hwnd, group by wt_hwnd.
+    def group(self, views: list[SessionView]) -> list[SessionGroup]:
+        """Bucket views by WT window, drop orphans, stamp adapter identity.
 
-        Each group renders as one sesson card in the panel — every
-        session in the same WT window collaps under that card."""
+        Input is already-resolved SessionViews from the snapshotter — we
+        do NOT re-run compose_session_view. Per-view work here is just:
+          1. AttachConsole probe to drop orphans (no console attached).
+          2. walk_to_visible_host to compute the wt_hwnd grouping key.
+          3. Stamp adapter_id / focus_granularity / capabilities.
+
+        Each emitted SessionGroup renders as one card in the panel,
+        with one row per pane in that WT window."""
+        from dataclasses import replace
         from claude_island.platform_ import win32_console, window_activator
 
         win32gui = None
@@ -83,55 +90,52 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         except ImportError:
             pass
 
-        # --- orphan filter + wt_hwnd labelling ---
-        labelled: list[Session] = []
-        for s in sessions:
-            info = win32_console.get_console_info(s.pid)
+        # --- orphan filter + per-view wt_hwnd ---
+        # Pair each surviving view with the wt_hwnd grouping key. Views
+        # whose AttachConsole fails are dropped (no console = orphan).
+        kept: list[tuple[int, SessionView]] = []
+        for v in views:
+            info = win32_console.get_console_info(v.session.pid)
             if info is None:
-                # AttachConsole failed → no console → orphan → drop.
                 continue
             conpty_hwnd, _title = info
-            wt_hwnd: int | None = None
+            wt_hwnd = 0
             if win32gui is not None and conpty_hwnd:
-                wt_hwnd = window_activator.walk_to_visible_host(
+                resolved = window_activator.walk_to_visible_host(
                     conpty_hwnd, win32gui,
                 )
-            from dataclasses import replace
-            labelled.append(replace(s))
+                if resolved:
+                    wt_hwnd = resolved
+            kept.append((wt_hwnd, v))
 
-        # Tripwire: empty after filter → return originals unchanged.
-        if not labelled:
-            # All filtered — likely a race with our own console state.
-            # Fallback: keep the sessions but use a nil wt_hwnd so the
-            # panel still shows them as ungrouped rows.
-            labelled = sessions
+        # Tripwire: every view filtered → likely a race with our own
+        # console state. Keep the originals as one ungrouped batch so
+        # the user still sees rows.
+        if not kept:
+            kept = [(0, v) for v in views]
 
-        # --- group by wt_hwnd ---
-        groups: dict[int, list[Session]] = {}
-        for s in labelled:
-            key = getattr(s, "window_handle", None) or 0
-            groups.setdefault(key, []).append(s)
+        # --- bucket by wt_hwnd, then stamp identity onto each view ---
+        buckets: dict[int, list[SessionView]] = {}
+        for wt_hwnd, v in kept:
+            buckets.setdefault(wt_hwnd, []).append(v)
 
         result: list[SessionGroup] = []
-        for wt_hwnd, batch in groups.items():
-            views: list[SessionView] = []
-            for s in batch:
-                v = compose_session_view(
-                    s, state_reader=_no_state, metadata_provider=_no_meta,
-                    usage_registry=_no_usage, names_store=_no_names,
-                )
-                views.append(replace(
+        for wt_hwnd, batch in buckets.items():
+            stamped = [
+                replace(
                     v,
                     adapter_id=self.name,
                     focus_granularity=FocusGranularity.TAB,
                     capabilities=type(self).capabilities,
-                ))
+                )
+                for v in batch
+            ]
             gid = f"wt:{wt_hwnd}" if wt_hwnd else f"wt:orphan:{id(batch)}"
-            project_paths = {_normalize_project_path(v.project_path) for v in views}
+            project_paths = {_normalize_project_path(v.project_path) for v in stamped}
             title = ", ".join(sorted(project_paths)[:2]) if project_paths else None
             result.append(SessionGroup(
                 group_id=gid, title_hint=title,
-                adapter_id=self.name, views=tuple(views),
+                adapter_id=self.name, views=tuple(stamped),
             ))
         return result
 
@@ -200,29 +204,3 @@ def _resolve_console_window(pid: int, win32gui) -> tuple[int, str] | None:
     if host is None:
         return None
     return (host, console_title)
-
-
-# ---- Null sources for compose_session_view when we only need the group ----
-# Terminal adapters call compose_session_view during group() to produce
-# views. The real resolution happens inside Snapshotter._build_snapshot
-# (the sessions field). Adapters just stamp identity on a view shell.
-# Passing no-op sources here keeps adapter.group() self-contained.
-
-class _NullStateReader:
-    def read_session_state(self, pid): return None
-
-class _NullMetaProvider:
-    def get_session_metadata(self, uuid): return None
-
-class _NullUsageRegistry:
-    def get_session_summary(self, uuid): return (0.0, 0, 0)
-    def get_latest_model(self, uuid): return None
-    def get_totals(self, period): ...
-
-class _NullNamesStore:
-    def get_session_name(self, uuid): return None
-
-_no_state = _NullStateReader()
-_no_meta = _NullMetaProvider()
-_no_usage = _NullUsageRegistry()
-_no_names = _NullNamesStore()

@@ -89,18 +89,23 @@ class TerminalDispatcher:
 
     # ── Data flow ───────────────────────────────────────────────────────
 
-    def group_sessions(self, sessions: list[Session]) -> list[SessionGroup]:
-        """Walk adapter chain; bucket sessions into groups; inject OS/APP caps.
+    def group_sessions(self, views: list[SessionView]) -> list[SessionGroup]:
+        """Walk adapter chain; bucket views into groups; inject OS/APP caps.
 
-        The Snapshotter injects this into its _build_snapshot pipeline
-        so the grouping + capability annotation runs on every build
-        tick without the Snapshotter importing platform code."""
+        Snapshotter injects this into its _build_snapshot pipeline. Note
+        the input is a list of SessionViews (already resolved by
+        compose_session_view in the snapshotter); adapters just bucket
+        and stamp adapter_id/focus_granularity/capabilities onto them.
+        Adapters MUST NOT re-run compose_session_view — that path is
+        the snapshotter's exclusive responsibility, with the real
+        registries; re-running it inside an adapter would either drop
+        real data (if null sources are passed) or duplicate the cost."""
         groups: list[SessionGroup] = []
-        remaining = list(sessions)
+        remaining = list(views)
         for st in self._chain:
             if st.is_degraded():
                 continue
-            taken = [s for s in remaining if st.adapter.can_handle(s)]
+            taken = [v for v in remaining if st.adapter.can_handle(v.session)]
             if not taken:
                 continue
             try:
@@ -114,7 +119,7 @@ class TerminalDispatcher:
                     _merge_caps(v, self._merged_caps) for v in g.views
                 )
                 groups.append(_replace_views(g, merged_views))
-            remaining = [s for s in remaining if s not in taken]
+            remaining = [v for v in remaining if v not in taken]
             if not remaining:
                 break
         return groups
