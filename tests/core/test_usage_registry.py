@@ -383,6 +383,37 @@ def test_resolve_pricing_length_descending_priority():
     assert p.input_per_mtok == 3.0
 
 
+def test_deepseek_v4_pro_priced_at_promo_rates(registry):
+    """DeepSeek V4 Pro is the proxy-via-Anthropic-format model exposed
+    at api.deepseek.com/anthropic. Pricing matches the Model Details
+    page (75% promo applied): $0.435 input, $0.87 output, $0.003625
+    cache hit. Regression: before the deepseek.py provider module
+    existed, this id fell through to Sonnet's $3 / $15 (~7× over)."""
+    registry.record_many([_record(
+        model="deepseek-v4-pro",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        cache_read_tokens=1_000_000,
+    )])
+    rows = registry.get_totals_by_model("today")
+    # 0.435 (input) + 0.87 (output) + 0.003625 (cache_read) = 1.308625
+    assert abs(rows[0].cost_usd - 1.308625) < 0.0001
+
+
+def test_deepseek_v4_flash_priced_distinctly_from_pro(registry):
+    """Flash and Pro are distinct keys in the registry. The longer
+    "deepseek-v4-pro" key wins for that exact id; "deepseek-v4-flash"
+    must NOT collide with it."""
+    registry.record_many([_record(
+        model="deepseek-v4-flash",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+    )])
+    rows = registry.get_totals_by_model("today")
+    # 0.14 (input) + 0.28 (output) = 0.42
+    assert abs(rows[0].cost_usd - 0.42) < 0.0001
+
+
 def test_pricing_table_cache_rate_fallbacks():
     """When cache_read/write are None, fall back to Anthropic's
     standard ratios (1.25× / 0.1× input). When set, the explicit

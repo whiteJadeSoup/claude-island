@@ -40,6 +40,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from claude_island.core.models import PricingTable, register_pricing
+
 from . import (
     HTTP_TIMEOUT,
     provider,
@@ -47,6 +49,27 @@ from . import (
     get_provider_setting,
     _parse_ms, snapshot_from_cache,
 )
+
+
+# Per-Mtok rates from https://platform.minimax.io/docs/guides/pricing-paygo
+# M2 / M2.1 / M2.5 / M2.7 share input ($0.30) and output ($1.20) rates;
+# only cache_read varies (M2.7 = $0.06, others = $0.03). "-highspeed"
+# variants are 2× input/output, identical cache rates. The Coding-Plan
+# API returns "MiniMax-M*" as a wildcard model name; treat as M2.7
+# (current flagship per MiniMax's own setup docs). Cache write =
+# 1.25 × input falls through to the default. Length-descending substring
+# match in _resolve_pricing means "MiniMax-M2.7-highspeed" picks its
+# specific entry before the shorter "MiniMax-M2.7" / "MiniMax-M*".
+register_pricing({
+    "MiniMax-M2.7-highspeed": PricingTable(0.60, 2.40, cache_read_per_mtok=0.06),
+    "MiniMax-M2.5-highspeed": PricingTable(0.60, 2.40, cache_read_per_mtok=0.03),
+    "MiniMax-M2.1-highspeed": PricingTable(0.60, 2.40, cache_read_per_mtok=0.03),
+    "MiniMax-M2.7":           PricingTable(0.30, 1.20, cache_read_per_mtok=0.06),
+    "MiniMax-M2.5":           PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
+    "MiniMax-M2.1":           PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
+    "MiniMax-M*":             PricingTable(0.30, 1.20, cache_read_per_mtok=0.06),
+    "MiniMax-M2":             PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
+})
 
 
 # Module-level cache of the host that last answered with a real payload.

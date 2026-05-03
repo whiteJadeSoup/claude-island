@@ -499,4 +499,4 @@ def snapshot_from_cache(
 # Placed at the bottom because the decorator's `provider` and the cache /
 # HTTP helpers must be defined before the sub-modules import them.
 # ---------------------------------------------------------------------------
-from . import anthropic, minimax, zhipu  # noqa: F401, E402
+from . import anthropic, minimax, zhipu, deepseek  # noqa: F401, E402

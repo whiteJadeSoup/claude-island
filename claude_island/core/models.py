@@ -90,47 +90,28 @@ class PricingTable:
         return self.input_per_mtok * 0.1
 
 
-# Per-Mtok input/output rates compiled from each provider's official
-# pricing page. Lookup is length-descending substring match (see
+# Per-model pricing registry. Empty by default — provider modules
+# (claude_island/platform_/providers/*.py) declare their own rates
+# via :func:`register_pricing` at import time. This keeps the cost
+# table declarative and provider-owned: adding a new provider means
+# adding one file with its rates, no edit to core/.
+#
+# Lookup is length-descending substring match (see
 # usage_registry._resolve_pricing): a model id like
 # "MiniMax-M2.7-highspeed" matches the longest applicable key first,
 # falling back to the family token (e.g. "sonnet") for unknown
 # version suffixes.
-#
-# Anthropic — https://platform.claude.com/docs/en/about-claude/pricing
-#   Heads-up: Opus dropped from $15/$75 (3.x, 4.0, 4.1) to $5/$25
-#   starting with 4.5 and held through 4.6/4.7 — legacy 4.0/4.1 are
-#   silently 3× under-reported. Acceptable trade-off: recent versions
-#   converge on the new rate.
-#
-# MiniMax — https://platform.minimax.io/docs/guides/pricing-paygo
-#   M2 / M2.1 / M2.5 / M2.7 share input ($0.30) and output ($1.20)
-#   rates; only cache_read varies (M2.7 = $0.06, others = $0.03).
-#   "-highspeed" variants are 2× input/output, identical cache rates.
-#   The MiniMax Coding-Plan API returns "MiniMax-M*" as a wildcard
-#   model name; we treat it as M2.7 (the current flagship that
-#   MiniMax's own setup docs name). Cache write is $0.375/Mtok
-#   (= 1.25 × input, matching Anthropic's ratio) so it falls through
-#   to the default.
-PRICING: dict[str, PricingTable] = {
-    # Anthropic — substring tokens
-    "haiku":  PricingTable(input_per_mtok=1.0, output_per_mtok=5.0),
-    "sonnet": PricingTable(input_per_mtok=3.0, output_per_mtok=15.0),
-    "opus":   PricingTable(input_per_mtok=5.0, output_per_mtok=25.0),
-    # MiniMax — exact + variant suffix matches. Length-descending
-    # iteration in _resolve_pricing means "MiniMax-M2.7-highspeed"
-    # picks its specific entry before the shorter "MiniMax-M2.7" /
-    # "MiniMax-M*" entries.
-    "MiniMax-M2.7-highspeed": PricingTable(0.60, 2.40, cache_read_per_mtok=0.06),
-    "MiniMax-M2.5-highspeed": PricingTable(0.60, 2.40, cache_read_per_mtok=0.03),
-    "MiniMax-M2.1-highspeed": PricingTable(0.60, 2.40, cache_read_per_mtok=0.03),
-    "MiniMax-M2.7":           PricingTable(0.30, 1.20, cache_read_per_mtok=0.06),
-    "MiniMax-M2.5":           PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
-    "MiniMax-M2.1":           PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
-    "MiniMax-M*":             PricingTable(0.30, 1.20, cache_read_per_mtok=0.06),
-    "MiniMax-M2":             PricingTable(0.30, 1.20, cache_read_per_mtok=0.03),
-}
+PRICING: dict[str, PricingTable] = {}
 DEFAULT_PRICING = PricingTable(input_per_mtok=3.0, output_per_mtok=15.0)
+
+
+def register_pricing(table: dict[str, PricingTable]) -> None:
+    """Merge per-model pricing entries into the global registry.
+
+    Provider modules call this at import time to install their rates.
+    Idempotent — re-registering an existing key overwrites it.
+    """
+    PRICING.update(table)
 
 
 @dataclass
