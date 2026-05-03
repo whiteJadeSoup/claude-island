@@ -3045,6 +3045,20 @@ class ExpandedWindow(QWidget):
         )
         layout.addWidget(row_week)
 
+        # "Unavailable" hint, hidden at rest. Shown by _refresh_quota_card
+        # when the provider's fetch returns None — replaces the silent
+        # empty bars (which previously left users staring at "5h" /
+        # "Weekly" labels with no values and no clue why). Wraps because
+        # the tip references an environment variable / file path that
+        # can be longer than the card width.
+        self._quota_unavailable = QLabel("")
+        self._quota_unavailable.setStyleSheet(
+            "color: #9ca3af; font-size: 11px; padding: 4px 0 0 0;"
+        )
+        self._quota_unavailable.setWordWrap(True)
+        self._quota_unavailable.hide()
+        layout.addWidget(self._quota_unavailable)
+
         return card
 
     def _refresh_quota_card(self) -> None:
@@ -3060,7 +3074,13 @@ class ExpandedWindow(QWidget):
             self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
             self._hide_quota_row(self._quota_bar_5h, self._quota_pct_5h, self._quota_reset_5h)
             self._hide_quota_row(self._quota_bar_week, self._quota_pct_week, self._quota_reset_week)
+            self._show_quota_unavailable_hint()
             return
+
+        # Snapshot is available — make sure the unavailable hint is
+        # gone (would otherwise persist across a recover-from-failure
+        # transition and visually compete with the now-real bars).
+        self._quota_unavailable.hide()
 
         # Provider name no longer prepended to the section title — the
         # section header is just "QUOTA" and the active pill in the
@@ -3087,6 +3107,42 @@ class ExpandedWindow(QWidget):
             resets_at=snap.seven_day_resets_at,
             stale=snap.is_stale,
         )
+
+    def _show_quota_unavailable_hint(self) -> None:
+        """Surface a provider-specific tip explaining why the bars are
+        empty. Each tip points at the most likely fix path so the user
+        doesn't have to grep stderr for ``[claude-island] quota fetch
+        failed`` to figure out what went wrong.
+
+        Picks the tip text from the currently-selected provider name —
+        matches what the tab strip shows so the message reads as "this
+        provider isn't returning data" rather than a generic alert.
+        """
+        provider = self.selected_provider_name() or "anthropic"
+        tips = {
+            "anthropic": (
+                "Quota unavailable. Sign in to Claude Code "
+                "(re-creates ~/.claude/.credentials.json), or hit ↻ "
+                "after a network blip. Errors print to the terminal "
+                "the app was launched from."
+            ),
+            "minimax": (
+                "Quota unavailable. Paste a MiniMax Coding-Plan key "
+                "into the Minimax tab via +, or check that "
+                "ANTHROPIC_AUTH_TOKEN is set in the launching shell."
+            ),
+            "zhipu": (
+                "Quota unavailable. Paste a Z.AI key into the Zhipu "
+                "tab via +, or set ZHIPU_API_KEY in the launching "
+                "shell. Errors print to the terminal."
+            ),
+        }
+        self._quota_unavailable.setText(tips.get(
+            provider,
+            f"Quota unavailable for {provider}. "
+            "Check the provider config and hit ↻ to retry.",
+        ))
+        self._quota_unavailable.show()
 
     def _build_quota_row(self, label: str) -> tuple[QWidget, "QProgressBar", QLabel, QLabel]:
         """Compact two-line widget for one quota window:
