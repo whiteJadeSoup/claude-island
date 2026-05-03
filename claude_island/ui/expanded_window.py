@@ -1192,35 +1192,30 @@ class SessionDetailPopup(QFrame):
         # if the user hadn't customized the name". Two-tier resolution:
         #
         #   1. Prefer ``ai_title`` (the AI-generated descriptive title
-        #      from the JSONL ai-title row) when it exists and differs
-        #      from the visible title — works whether or not the user
-        #      renamed, so unmodified sessions still show their AI
-        #      title underneath the auto name.
-        #   2. Else, walk the "natural" name chain
-        #      [original_name, ai_title, project_basename] and pick
-        #      the first non-None entry. Show it when it differs from
-        #      the title — i.e., when the user renamed. Falling all
-        #      the way down to the project basename is what catches
-        #      sessions whose ``state.name`` was never written
-        #      (otherwise the rename has no anchor to compare against
-        #      and no italic would surface).
-        natural = next(
-            (
-                c for c in (
-                    d.original_name if d else None,
-                    d.ai_title if d else None,
-                    self._fallback.project_path.name or None,
-                )
-                if c
-            ),
-            None,
-        )
+        #      from the JSONL ai-title row) — works whether or not the
+        #      user renamed, so unmodified sessions still surface their
+        #      AI title underneath the auto name.
+        #   2. Else fall back to ``original_name`` (Claude Code's auto
+        #      name from sessions/<pid>.json), or the project basename
+        #      if that's missing too. The basename leg catches sessions
+        #      whose state file was never written — without it, those
+        #      renamed sessions would show no italic at all because
+        #      there's no anchor to display.
+        #
+        # Tier 2 deliberately excludes ai_title even though it'd be
+        # available — tier 1 has already filtered the case where it
+        # could be a useful subtitle; reaching tier 2 means ai_title
+        # is either missing or already echoes the title.
         if d and d.ai_title and d.ai_title != title:
             subtitle_ai = d.ai_title
-        elif natural and natural != title:
-            subtitle_ai = natural
         else:
-            subtitle_ai = None
+            fallback = (
+                (d.original_name if d and d.original_name else None)
+                or (self._fallback.project_path.name or None)
+            )
+            subtitle_ai = (
+                fallback if fallback and fallback != title else None
+            )
 
         wrap = QWidget()
         # Refuse vertical stretch so layout surplus can't pull this
@@ -1704,11 +1699,17 @@ class SessionDetailPopup(QFrame):
         the original text untouched."""
         if self._name_edit is None or self._name_label is None:
             return
-        idx = self._name_head_layout.indexOf(self._name_edit)
-        if idx >= 0:
-            self._name_head_layout.removeWidget(self._name_edit)
-        self._name_edit.deleteLater()
+        # Pop the edit reference into a local FIRST and clear self._name_edit
+        # before any layout / Qt calls. If a Qt operation below raises, the
+        # popup state stays consistent ("not editing") instead of leaving a
+        # dangling reference to a half-deleted widget that the next
+        # _enter_rename_mode would skip past.
+        edit = self._name_edit
         self._name_edit = None
+        idx = self._name_head_layout.indexOf(edit)
+        if idx >= 0:
+            self._name_head_layout.removeWidget(edit)
+        edit.deleteLater()
         self._name_head_layout.insertWidget(idx if idx >= 0 else 0, self._name_label, 1)
         self._name_label.show()
         if self._edit_btn is not None:

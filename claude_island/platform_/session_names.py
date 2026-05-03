@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 # Resolved at call time (not module-load time) so tests can monkeypatch
@@ -41,23 +42,47 @@ from pathlib import Path
 # claude_island.platform_.providers.
 SESSION_NAMES_PATH = Path.home() / ".claude-island" / "session_names.json"
 
+# Serialises every read-modify-write of session_names.json across the
+# process. The hot scenario is the 6-hour gc daemon thread overlapping
+# with a Qt-main-thread rename: without this lock both load the same
+# dict, both _write back, and one update silently overwrites the other.
+# In-process lock is sufficient — the file is only touched by this
+# module, and we're a single-process desktop app.
+_lock = threading.Lock()
+
 
 def _read(path: Path | None = None) -> dict[str, str]:
     """Parse session_names.json into a {uuid: name} dict.
 
-    Returns ``{}`` on any read / parse failure (missing file, malformed
-    JSON, wrong shape) so callers can do a plain ``.get(uuid)`` without
-    try/except sprinkles. Non-string values are filtered out so a
-    corrupted entry doesn't crash the UI.
+    Returns ``{}`` on the file-missing case so callers can do a plain
+    ``.get(uuid)`` without try/except sprinkles. Malformed-JSON /
+    wrong-shape failures also return ``{}`` but log a warning to
+    stderr — without that, a hand-edited corrupt file looks
+    indistinguishable from "user has never renamed anything", which
+    silently hides the user's data.
     """
     if path is None:
         path = SESSION_NAMES_PATH
     try:
         text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        print(f"[claude-island] session_names.json read failed: {e}", file=sys.stderr)
+        return {}
+    try:
         data = json.loads(text)
-    except (OSError, ValueError):
+    except ValueError as e:
+        print(
+            f"[claude-island] session_names.json malformed (renames hidden until fixed): {e}",
+            file=sys.stderr,
+        )
         return {}
     if not isinstance(data, dict):
+        print(
+            "[claude-island] session_names.json is not a JSON object — ignoring",
+            file=sys.stderr,
+        )
         return {}
     return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
@@ -89,6 +114,11 @@ def get_session_name(uuid: str) -> str | None:
     the same directory). Returned strings are guaranteed non-empty
     (an empty value in the file is treated as "unset" so the
     empty-as-delete sentinel doesn't leak through).
+
+    Read path doesn't acquire ``_lock`` — a stale read at worst returns
+    the old name for one render tick, which the next refresh will
+    correct. Holding the lock here would serialise UI hot-path reads
+    behind the gc daemon thread for no real benefit.
     """
     if not uuid:
         return None
@@ -107,20 +137,25 @@ def set_session_name(uuid: str, name: str) -> None:
     No-op when ``uuid`` is empty (the detail popup may pass an empty
     uuid for sessions whose transcript hasn't been resolved yet; we'd
     rather quietly skip than corrupt the file with a "" key).
+
+    The read-modify-write runs under ``_lock`` so a concurrent
+    ``gc_session_names`` (or another rename) can't load the same dict,
+    write back independently, and silently lose one update.
     """
     if not uuid:
         return
     cleaned = (name or "").strip()
-    names = _read()
-    if not cleaned:
-        if uuid in names:
-            names.pop(uuid)
-            _write(names)
-        return
-    if names.get(uuid) == cleaned:
-        return  # idempotent — skip the write if nothing changed
-    names[uuid] = cleaned
-    _write(names)
+    with _lock:
+        names = _read()
+        if not cleaned:
+            if uuid in names:
+                names.pop(uuid)
+                _write(names)
+            return
+        if names.get(uuid) == cleaned:
+            return  # idempotent — skip the write if nothing changed
+        names[uuid] = cleaned
+        _write(names)
 
 
 def delete_session_name(uuid: str) -> None:
@@ -139,11 +174,17 @@ def gc_session_names(known_uuids: set[str]) -> None:
     A ``known_uuids`` of ``set()`` would wipe everything, so callers
     must populate it before invoking — the obvious safety guard
     against running gc before the JSONL parser has indexed anything.
+
+    Runs under ``_lock`` so a concurrent ``set_session_name`` (Qt main
+    thread renaming while we're pruning on the background thread)
+    can't see a partially-pruned file or have its write overwritten
+    by ours.
     """
     if not known_uuids:
         return
-    names = _read()
-    pruned = {uuid: n for uuid, n in names.items() if uuid in known_uuids}
-    if pruned == names:
-        return
-    _write(pruned)
+    with _lock:
+        names = _read()
+        pruned = {uuid: n for uuid, n in names.items() if uuid in known_uuids}
+        if pruned == names:
+            return
+        _write(pruned)

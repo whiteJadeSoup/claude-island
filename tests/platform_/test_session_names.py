@@ -138,6 +138,106 @@ class TestSetSessionName:
         assert session_names.get_session_name("u") == "前端重构 🚀"
 
 
+class TestConcurrentWrites:
+    """The read-modify-write inside set_session_name / gc_session_names
+    runs under a process-wide lock. Without it, the gc daemon thread
+    racing the Qt main thread (renaming) silently lost one update —
+    both threads loaded the same dict, both wrote back independently,
+    last writer won.
+
+    These tests pin the lock by stress-testing concurrent writes and
+    asserting NO entries are lost."""
+
+    def test_concurrent_renames_do_not_lose_updates(self, tmp_path_patched):
+        import threading
+        # 50 workers each writing a distinct uuid → all 50 must be
+        # present afterwards. Pre-lock, this would lose ~half.
+        N = 50
+        threads = [
+            threading.Thread(
+                target=session_names.set_session_name,
+                args=(f"uuid-{i}", f"name-{i}"),
+            )
+            for i in range(N)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # Every uuid wrote exactly one name; every name is recoverable.
+        for i in range(N):
+            assert session_names.get_session_name(f"uuid-{i}") == f"name-{i}"
+
+    def test_gc_concurrent_with_renames(self, tmp_path_patched):
+        import threading
+        # Pre-seed alive entries that gc should KEEP.
+        for i in range(20):
+            session_names.set_session_name(f"alive-{i}", f"name-{i}")
+        # Pre-seed dead entries that gc should drop.
+        for i in range(20):
+            session_names.set_session_name(f"dead-{i}", f"stale-{i}")
+
+        known = {f"alive-{i}" for i in range(20)}
+        # New entries the gc must NOT lose, even if added mid-cycle.
+        new_uuids = [f"new-{i}" for i in range(20)]
+        known.update(new_uuids)
+
+        def gc_worker():
+            session_names.gc_session_names(known)
+
+        def add_worker(idx):
+            session_names.set_session_name(new_uuids[idx], f"newname-{idx}")
+
+        threads = [threading.Thread(target=gc_worker)]
+        threads += [
+            threading.Thread(target=add_worker, args=(i,)) for i in range(20)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Alive entries survive.
+        for i in range(20):
+            assert session_names.get_session_name(f"alive-{i}") == f"name-{i}"
+        # All new entries survive (none lost to gc's overwrite).
+        for i in range(20):
+            assert session_names.get_session_name(f"new-{i}") == f"newname-{i}"
+        # Dead entries gone (gc's pruning didn't get clobbered).
+        # Note: this is a weaker check — the gc may not have even
+        # observed all dead entries depending on interleave — but
+        # at least one gc pass should have run somewhere.
+        # The strong check is the survival of alive + new entries.
+
+
+class TestReadFailureLogging:
+    """Read-time failures (corrupt JSON, wrong shape) used to silently
+    return {}, hiding renames from the user with no diagnostic. These
+    tests verify warnings now reach stderr."""
+
+    def test_malformed_json_logs_warning(self, tmp_path_patched, capsys):
+        tmp_path_patched.write_text("not json {[", encoding="utf-8")
+        result = session_names.get_session_name("any")
+        assert result is None
+        err = capsys.readouterr().err
+        assert "malformed" in err.lower()
+
+    def test_wrong_shape_logs_warning(self, tmp_path_patched, capsys):
+        # Top-level array instead of object — JSON-valid but wrong.
+        tmp_path_patched.write_text('["not", "an", "object"]', encoding="utf-8")
+        result = session_names.get_session_name("any")
+        assert result is None
+        err = capsys.readouterr().err
+        assert "object" in err.lower() or "ignoring" in err.lower()
+
+    def test_missing_file_does_NOT_log(self, tmp_path_patched, capsys):
+        # First-time-user case (file never created) — must stay silent
+        # so the absence isn't mistaken for an error in the user's logs.
+        assert session_names.get_session_name("any") is None
+        err = capsys.readouterr().err
+        assert err == ""
+
+
 # --------------------------------------------------------------------------
 # delete_session_name — convenience wrapper
 # --------------------------------------------------------------------------
