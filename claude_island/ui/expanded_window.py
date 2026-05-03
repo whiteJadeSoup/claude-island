@@ -304,15 +304,17 @@ _BG_PRESSED = "#333333"
 # read as "the group container, just tinted" rather than as alarming
 # coloured chrome. Group → palette index is hash(group_key) % len so
 # the assignment is stable across refreshes.
-# Colour of the 2 px vertical line that brackets a same-project group
-# in the session list. Dim grey reads as "metadata, not content" so
-# the line stays out of the way of the row text. Uniform across all
-# groups (no per-group hue) — group identity is conveyed by which
-# rows share the line, not by which colour the line is.
-_GROUP_LINE_COLOR = "#3a3a3a"
-# Inner padding the group card reserves for the left line plus a
-# small gap so row content doesn't sit flush against the bracket.
-_GROUP_LINE_PAD_PX = 6
+# Same-project session groups are bracketed by a thin outline (1 px
+# rounded border, no fill) around the rows. Dim grey so the outline
+# reads as "metadata frame" not as content — sits at the "last 10 %"
+# tier of visual hierarchy that dividers and outlines belong to.
+# Uniform across all groups (no per-group hue) — group identity is
+# conveyed by which rows the outline contains, not by colour.
+_GROUP_OUTLINE_COLOR = "#3a3a3a"
+# Inner padding inside the group outline so rows don't touch the
+# border. 4 px on all sides keeps the rows breathing without
+# inflating the group's footprint much.
+_GROUP_OUTLINE_PAD_PX = 4
 
 
 _GROUP_BG_PALETTE = (
@@ -4535,34 +4537,31 @@ class ExpandedWindow(QWidget):
         return self._make_multi_card(group, palette_idx=palette_idx or 0)
 
     def _make_multi_card(self, sessions: list[Session], *, palette_idx: int = 0) -> QFrame:
-        """Render a same-project session group as a flat list bound by
-        a left-side vertical line (Linear / GitHub PR thread / VS Code
-        outline pattern). Replaces the earlier coloured ``group bg``
-        approach which nested too many visual blocks per the
-        Material/HIG "blocks within blocks" warning.
+        """Render a same-project session group as a flat list bracketed
+        by a 1 px rounded outline (ghost-card pattern). The outline
+        replaces the earlier coloured group bg + later left vertical
+        line — a single subtle box around the group is the most
+        unambiguous visual signal of "these rows are one group" while
+        staying at the "metadata frame" tier of visual hierarchy.
 
         ``palette_idx`` kept in the signature for backwards compat
         with callers but no longer used — group identity is conveyed
-        by structure (the shared left line) not colour.
+        by the outline shape, not by colour.
         """
-        del palette_idx  # unused; line colour is uniform across groups now
+        del palette_idx  # unused; outline colour is uniform now
         card = QFrame()
         card.setObjectName("group_card")
-        # Transparent background + 2 px left border drawn via stylesheet.
-        # The border spans the whole card so all rows in the group are
-        # visually bound by the line. Padding-left makes room for the
-        # line without rows overlapping it.
-        # _base_bg is a hex value (NOT "transparent") because HoverRow
-        # uses it as input to _lighten_bg() for the hover-accent
-        # colour calculation; "transparent" wouldn't parse. We use
-        # _BG_GROUP since that matches what the rows visually sit on
-        # (the panel's neutral bg shows through the transparent card).
+        # Transparent fill + 1 px rounded outline. _base_bg is a real
+        # hex (not "transparent") because HoverRow's hover-accent calc
+        # feeds it through _lighten_bg(), which expects #RRGGBB. The
+        # visual is still transparent — the maths just needs a colour.
         card._base_bg = _BG_GROUP
         card.setStyleSheet(
             "QFrame#group_card {"
             f" background: transparent;"
-            f" border-left: 2px solid {_GROUP_LINE_COLOR};"
-            f" padding-left: {_GROUP_LINE_PAD_PX}px;"
+            f" border: 1px solid {_GROUP_OUTLINE_COLOR};"
+            f" border-radius: 10px;"
+            f" padding: {_GROUP_OUTLINE_PAD_PX}px;"
             "}"
         )
         # Card bg never changes on hover (left-accent-bar pattern), so
