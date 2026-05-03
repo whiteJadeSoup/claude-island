@@ -268,6 +268,74 @@ class TestCapsuleRender:
         assert capsule._is_dot is True
 
 
+def _quota_snap_with_pct(pct: float) -> WorldSnapshot:
+    """Build a WorldSnapshot whose only purpose is to carry a quota
+    snapshot with the given 5h percentage. Reset countdowns and 7-day
+    fields are set to plausible values so the QuotaSnapshot dataclass
+    constructs successfully."""
+    from claude_island.core.models import QuotaSnapshot
+    q = QuotaSnapshot(
+        five_hour_pct=pct,
+        five_hour_resets_at=datetime.now(timezone.utc) + timedelta(hours=2),
+        seven_day_pct=10.0,
+        seven_day_resets_at=datetime.now(timezone.utc) + timedelta(days=5),
+        fetched_at=datetime.now(timezone.utc),
+        is_stale=False,
+    )
+    return WorldSnapshot(
+        sessions=(), today_cost_usd=0.0, quota=q,
+        available_providers=("anthropic",), selected_provider="anthropic",
+        fetched_at=datetime.now(timezone.utc),
+    )
+
+
+class TestCapsuleQuotaBar:
+    """Visibility + colour-threshold contract for the quota mini-bar.
+
+    The bar is hidden below the warn threshold (would just be noise),
+    appears amber once the user crosses warn, and the pill bg flips
+    to a deeper red at the critical threshold."""
+
+    def test_bar_hidden_below_warn_threshold(self, capsule):
+        from claude_island.ui.capsule_window import _QUOTA_WARN_THRESHOLD
+        capsule.render(_quota_snap_with_pct(_QUOTA_WARN_THRESHOLD - 1))
+        assert capsule._should_show_quota_bar() is False
+
+    def test_bar_appears_at_warn_threshold(self, capsule):
+        from claude_island.ui.capsule_window import _QUOTA_WARN_THRESHOLD
+        capsule.render(_quota_snap_with_pct(_QUOTA_WARN_THRESHOLD))
+        assert capsule._should_show_quota_bar() is True
+
+    def test_critical_threshold_widens_pill(self, capsule):
+        """When the bar is shown, the pill widens to fit it. This is
+        the visible signal that something needs attention — pre-warn
+        the pill stays compact."""
+        from claude_island.ui.capsule_window import (
+            _CAPSULE_W,
+            _CAPSULE_W_WITH_QUOTA,
+            _QUOTA_CRITICAL_THRESHOLD,
+        )
+        capsule.render(_quota_snap_with_pct(_QUOTA_CRITICAL_THRESHOLD))
+        # _apply_capsule resized via _center_top — width should match
+        # the wider pill constant.
+        assert capsule.width() == _CAPSULE_W_WITH_QUOTA
+        assert _CAPSULE_W_WITH_QUOTA > _CAPSULE_W  # sanity
+
+    def test_dropping_below_threshold_collapses_pill(self, capsule):
+        """Crossing back below warn after being above must shrink the
+        pill back to the compact width — leaving the wider pill
+        in place when there's nothing to flag would mislead."""
+        from claude_island.ui.capsule_window import (
+            _CAPSULE_W,
+            _CAPSULE_W_WITH_QUOTA,
+            _QUOTA_WARN_THRESHOLD,
+        )
+        capsule.render(_quota_snap_with_pct(_QUOTA_WARN_THRESHOLD + 5))
+        assert capsule.width() == _CAPSULE_W_WITH_QUOTA
+        capsule.render(_quota_snap_with_pct(_QUOTA_WARN_THRESHOLD - 5))
+        assert capsule.width() == _CAPSULE_W
+
+
 # ---------------------------------------------------------------------------
 # ExpandedWindow.render(snap)
 # ---------------------------------------------------------------------------

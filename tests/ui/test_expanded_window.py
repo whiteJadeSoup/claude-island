@@ -71,7 +71,7 @@ def _panel_with_session(qtbot, get_session_usage):
 
 
 def test_first_refresh_creates_one_row_per_session(panel):
-    panel.refresh_sessions([_session(1, "/a"), _session(2, "/b")])
+    panel._render_sessions([_session(1, "/a"), _session(2, "/b")])
     assert set(panel._rows.keys()) == {1, 2}
     assert panel._placeholder is None
 
@@ -79,27 +79,27 @@ def test_first_refresh_creates_one_row_per_session(panel):
 def test_repeated_refresh_with_same_pids_reuses_widgets(panel):
     """The core B6 invariant: same pid set must NOT recreate widgets,
     otherwise hover state and any user interaction is lost on every tick."""
-    panel.refresh_sessions([_session(1, "/a"), _session(2, "/b")])
+    panel._render_sessions([_session(1, "/a"), _session(2, "/b")])
     btn1_before = panel._rows[1]
     btn2_before = panel._rows[2]
 
-    panel.refresh_sessions([_session(1, "/a"), _session(2, "/b")])
+    panel._render_sessions([_session(1, "/a"), _session(2, "/b")])
     assert panel._rows[1] is btn1_before  # same widget instance
     assert panel._rows[2] is btn2_before
 
 
 def test_removed_pid_drops_its_widget(panel):
-    panel.refresh_sessions([_session(1, "/a"), _session(2, "/b")])
-    panel.refresh_sessions([_session(1, "/a")])  # 2 gone
+    panel._render_sessions([_session(1, "/a"), _session(2, "/b")])
+    panel._render_sessions([_session(1, "/a")])  # 2 gone
 
     assert set(panel._rows.keys()) == {1}
 
 
 def test_added_pid_inserts_new_widget(panel):
-    panel.refresh_sessions([_session(1, "/a")])
+    panel._render_sessions([_session(1, "/a")])
     btn1 = panel._rows[1]
 
-    panel.refresh_sessions([_session(1, "/a"), _session(2, "/b")])
+    panel._render_sessions([_session(1, "/a"), _session(2, "/b")])
 
     assert set(panel._rows.keys()) == {1, 2}
     assert panel._rows[1] is btn1  # 1's widget preserved
@@ -110,28 +110,28 @@ def test_existing_row_meta_updates_in_place(panel):
     The label is still updated in-place across refreshes (no widget
     rebuild)."""
     from PySide6.QtWidgets import QLabel
-    panel.refresh_sessions([_session(1, "/a")])
+    panel._render_sessions([_session(1, "/a")])
     btn = panel._rows[1]
     label = btn.findChild(QLabel, "meta_label")
     assert label is not None
     # Without a get_session_details composer the meta reads "—".
     assert label.text() == "—"
     # The widget itself isn't recreated on the next refresh.
-    panel.refresh_sessions([_session(1, "/a")])
+    panel._render_sessions([_session(1, "/a")])
     assert btn.findChild(QLabel, "meta_label") is label
 
 
 def test_empty_sessions_shows_placeholder(panel):
-    panel.refresh_sessions([])
+    panel._render_sessions([])
     assert panel._placeholder is not None
     assert panel._rows == {}
 
 
 def test_placeholder_disappears_when_sessions_arrive(panel):
-    panel.refresh_sessions([])
+    panel._render_sessions([])
     assert panel._placeholder is not None
 
-    panel.refresh_sessions([_session(1, "/a")])
+    panel._render_sessions([_session(1, "/a")])
     assert panel._placeholder is None
     assert set(panel._rows.keys()) == {1}
 
@@ -139,10 +139,10 @@ def test_placeholder_disappears_when_sessions_arrive(panel):
 def test_session_click_emits_latest_session_snapshot(panel, qtbot):
     """Property carrier (_session) on the button must be refreshed on each
     update so a click after activity changed emits the new last_activity."""
-    panel.refresh_sessions([_session(1, "/a", ago_minutes=10)])
+    panel._render_sessions([_session(1, "/a", ago_minutes=10)])
     btn = panel._rows[1]
     fresh = _session(1, "/a", ago_minutes=0)
-    panel.refresh_sessions([fresh])
+    panel._render_sessions([fresh])
 
     received: list = []
     panel.session_activated.connect(lambda s, sibs: received.append((s, sibs)))
@@ -170,7 +170,7 @@ def test_two_sessions_same_window_handle_and_path_share_one_card(panel):
     cwd are merged into a single rounded card containing both rows."""
     from PySide6.QtWidgets import QFrame, QPushButton
 
-    panel.refresh_sessions([
+    panel._render_sessions([
         _session(1, "/proj", window_handle=0xAAAA),
         _session(2, "/proj", window_handle=0xAAAA),
     ])
@@ -189,7 +189,7 @@ def test_two_sessions_same_window_handle_and_path_share_one_card(panel):
 def test_different_window_handles_render_as_separate_widgets(panel):
     """G-UI-2: sessions in different WT windows must NOT be grouped,
     even if their cwd matches."""
-    panel.refresh_sessions([
+    panel._render_sessions([
         _session(1, "/proj", window_handle=0xAAAA),
         _session(2, "/proj", window_handle=0xBBBB),
     ])
@@ -202,7 +202,7 @@ def test_same_window_handle_different_paths_render_as_separate_widgets(panel):
     """G-UI-3: same WT but different cwds → different (proxy-)tabs →
     two separate cards. The user's "agent-prompt" + "claude-island"
     in one WT shouldn't collapse into one card."""
-    panel.refresh_sessions([
+    panel._render_sessions([
         _session(1, "/a", window_handle=0xAAAA),
         _session(2, "/b", window_handle=0xAAAA),
     ])
@@ -216,7 +216,7 @@ def test_window_handle_none_renders_standalone(panel):
     (pythonw, sandboxed shell, etc.). Such sessions are always
     standalone — never merged with any other session, even if cwd
     matches a grouped pair."""
-    panel.refresh_sessions([
+    panel._render_sessions([
         _session(1, "/proj", window_handle=0xAAAA),
         _session(2, "/proj", window_handle=0xAAAA),
         _session(3, "/proj", window_handle=None),  # ungroupable
@@ -232,7 +232,7 @@ def test_grouped_row_click_still_emits_session(panel, qtbot):
     must still emit session_activated with the right Session, and
     must include the OTHER group members as siblings (so the activator
     can fall back to their console titles for inactive-pane fix)."""
-    panel.refresh_sessions([
+    panel._render_sessions([
         _session(1, "/proj", window_handle=0xAAAA),
         _session(2, "/proj", window_handle=0xAAAA),
     ])
@@ -255,7 +255,7 @@ def test_worktree_groups_with_parent_repo(panel):
     session whose cwd is the parent repo, when both share the same
     WT window. Common pattern: main repo in pane A, worktree in pane B,
     side-by-side in one tab."""
-    panel.refresh_sessions([
+    panel._render_sessions([
         _session(1, "/repo", window_handle=0xAAAA),
         _session(2, "/repo/.claude/worktrees/feature-x", window_handle=0xAAAA),
     ])
@@ -296,7 +296,7 @@ def test_worktree_normalizer_does_not_overreach():
 def test_two_worktrees_of_same_repo_group_together(panel):
     """G-UI-8: two different worktrees of the same repo should still
     merge — both normalise to the same parent repo path."""
-    panel.refresh_sessions([
+    panel._render_sessions([
         _session(1, "/repo/.claude/worktrees/feat-a", window_handle=0xAAAA),
         _session(2, "/repo/.claude/worktrees/feat-b", window_handle=0xAAAA),
     ])
@@ -309,13 +309,13 @@ def test_row_widget_preserved_when_moving_between_card_and_standalone(panel):
     """G-UI-6: pid 1 starts grouped (with pid 2), then pid 2 disappears.
     The pid-1 row widget should be the same instance (cached by pid)
     in both refreshes — only its parent / style changes."""
-    panel.refresh_sessions([
+    panel._render_sessions([
         _session(1, "/proj", window_handle=0xAAAA),
         _session(2, "/proj", window_handle=0xAAAA),
     ])
     btn1 = panel._rows[1]
 
-    panel.refresh_sessions([_session(1, "/proj", window_handle=0xAAAA)])
+    panel._render_sessions([_session(1, "/proj", window_handle=0xAAAA)])
 
     assert panel._rows[1] is btn1  # same widget instance preserved
 
@@ -396,7 +396,7 @@ def test_quota_card_with_quota_shows_bar_and_pct(qtbot):
     line ("5h N% · M m │ Weekly N% · M m") per user feedback that
     QUOTA needed to feel as light as SPEND now does."""
     p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=53.0))
-    p.refresh_usage_bar()
+    p._render_cards()
 
     # _make_quota fixes seven_day_pct = 17.0; five_pct = 53.0
     assert not p._quota_inline.isHidden()
@@ -411,7 +411,7 @@ def test_quota_card_without_quota_hides_bars(qtbot):
     """U2: no quota snapshot → combined inline status hidden."""
     p = _panel_with_quota(qtbot, quota=None,
                           totals=UsageTotals(period="today", input_tokens=10))
-    p.refresh_usage_bar()
+    p._render_cards()
 
     assert p._quota_inline.isHidden()
 
@@ -421,7 +421,7 @@ def test_quota_card_stale_marks_warning(qtbot):
     ⚠ marker (one per side: 5h and Weekly each get their own marker
     because each half is rendered with its own threshold colour)."""
     p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=20.0, is_stale=True))
-    p.refresh_usage_bar()
+    p._render_cards()
     assert "⚠" in p._quota_inline.text()
 
 
@@ -431,7 +431,7 @@ def test_quota_card_no_quota_dot_gray(qtbot):
     that relied on SessionUsage.end_time."""
     p = _panel_with_quota(qtbot, quota=None,
                           totals=UsageTotals(period="today"))
-    p.refresh_usage_bar()
+    p._render_cards()
     assert "#52525b" in p._quota_dot.styleSheet()
 
 
@@ -440,7 +440,7 @@ def test_spend_card_empty_totals_shows_zero(qtbot):
     combined quota inline stays hidden because quota is None."""
     p = _panel_with_quota(qtbot, quota=None,
                           totals=UsageTotals(period="today"))
-    p.refresh_usage_bar()
+    p._render_cards()
     # _fmt_money(0) returns "$0.001" or "$0.00" (sub-cent path); either way "$" is present
     assert "$" in p._spend_amount.text()
     assert p._quota_inline.isHidden()
@@ -471,7 +471,7 @@ def test_period_toggle_updates_spend_card(qtbot):
     )
     qtbot.addWidget(p)
     qtbot.addWidget(capsule)
-    p.refresh_usage_bar()
+    p._render_cards()
 
     # Default period is "5h" (most actionable window); first refresh
     # populates that. Switching to weekly should re-fetch + re-render.
@@ -517,7 +517,7 @@ def test_quota_bar_color_thresholds(qtbot, pct, expected_color):
     snap = p._get_quota_snapshot()
     from dataclasses import replace
     p._get_quota_snapshot = lambda: replace(snap, seven_day_pct=pct)
-    p.refresh_usage_bar()
+    p._render_cards()
     # Rich text embeds the colour as a CSS span; substring check on
     # the rendered HTML is enough to verify the right hex landed.
     assert expected_color in p._quota_inline.text()
@@ -537,7 +537,7 @@ def test_summary_and_quota_card_use_same_color_for_same_pct(qtbot, pct):
     are the inputs that hit the truncate-vs-round disagreement."""
     snap = _make_quota(five_pct=pct)
     p = _panel_with_quota(qtbot, quota=snap)
-    p.refresh_usage_bar()
+    p._render_cards()
     # The summary card stores the chunk colour in the bar's
     # stylesheet AND in the caption label's stylesheet.
     summary_bar_css = p._summary_quota_bar.styleSheet()
@@ -567,7 +567,7 @@ def test_quota_bar_stale_overrides_red(qtbot):
     from dataclasses import replace
     snap = replace(snap, seven_day_pct=95.0)
     p = _panel_with_quota(qtbot, quota=snap)
-    p.refresh_usage_bar()
+    p._render_cards()
     # Stale grey should appear; danger red should not, because the
     # stale handler short-circuits the threshold colour pick.
     assert "#6b7280" in p._quota_inline.text()
@@ -627,7 +627,7 @@ def test_row_meta_shows_cost_when_details_available(qtbot):
     )
     qtbot.addWidget(panel)
     qtbot.addWidget(capsule)
-    panel.refresh_sessions([s])
+    panel._render_sessions([s])
 
     btn = panel._rows[1]
     assert btn.findChild(_QL, "name_label").text() == "cc-learning"
@@ -641,7 +641,7 @@ def test_row_meta_renders_dash_when_no_details(qtbot):
     """Composer unwired → meta shows ``—`` (not an age fallback)."""
     from PySide6.QtWidgets import QLabel as _QL
     panel = _panel_with_session(qtbot, lambda: None)
-    panel.refresh_sessions([_session(7, "/proj/foo")])
+    panel._render_sessions([_session(7, "/proj/foo")])
     btn = panel._rows[7]
     assert btn.findChild(_QL, "meta_label").text() == "—"
 
@@ -651,7 +651,7 @@ def test_row_has_custom_context_menu_policy(qtbot):
     event. Without this, Qt would either show its built-in
     text-context-menu or do nothing."""
     panel = _panel_with_session(qtbot, lambda: None)
-    panel.refresh_sessions([_session(1, "/a")])
+    panel._render_sessions([_session(1, "/a")])
     btn = panel._rows[1]
     from PySide6.QtCore import Qt as _Qt
     assert btn.contextMenuPolicy() == _Qt.ContextMenuPolicy.CustomContextMenu
@@ -743,7 +743,7 @@ def test_show_detail_popup_constructs_and_holds_reference(qtbot):
     )
     qtbot.addWidget(panel)
     qtbot.addWidget(capsule)
-    panel.refresh_sessions([s])
+    panel._render_sessions([s])
 
     btn = panel._rows[1]
     # Drive the slot directly (bypassing Qt's mouse-event plumbing).
@@ -811,7 +811,7 @@ def test_spend_card_model_breakdown_shows_top_models(qtbot):
         cache_creation_cost=0.4, cache_read_cost=0.27,
     )
     p = _panel_with_quota(qtbot, totals=totals, by_model=by_model)
-    p.refresh_usage_bar()
+    p._render_cards()
 
     # Spend bar container should be shown (cost > 0 and by_model wired).
     # Use isHidden() not isVisible() — isVisible() returns False when the
@@ -1976,7 +1976,7 @@ class TestRowStatusLine:
         Status glyph is the equalizer/dot/⚡ tri-state widget that
         replaced the old dot_label QLabel."""
         from PySide6.QtWidgets import QLabel
-        panel.refresh_sessions([_session(1, "/a")])
+        panel._render_sessions([_session(1, "/a")])
         btn = panel._rows[1]
         assert getattr(btn, "_status_glyph", None) is not None
         assert btn.findChild(QLabel, "model_chip") is not None
@@ -1987,7 +1987,7 @@ class TestRowStatusLine:
         added. Locking the value down so a future code change can't
         accidentally squash the bottom line and clip descenders."""
         from claude_island.ui.expanded_window import _ROW_HEIGHT
-        panel.refresh_sessions([_session(1, "/a")])
+        panel._render_sessions([_session(1, "/a")])
         assert _ROW_HEIGHT == 52
         assert panel._rows[1].height() == 52
 
@@ -2018,7 +2018,7 @@ class TestRowStatusLine:
         qtbot.addWidget(p)
         qtbot.addWidget(capsule)
 
-        p.refresh_sessions([_session(1, "/a")])
+        p._render_sessions([_session(1, "/a")])
         chip = p._rows[1].findChild(QLabel, "model_chip")
         assert chip is not None
         assert chip.isHidden()
@@ -2060,7 +2060,7 @@ class TestRowStatusLine:
         qtbot.addWidget(p)
         qtbot.addWidget(capsule)
 
-        p.refresh_sessions([_session(1, "/a")])
+        p._render_sessions([_session(1, "/a")])
         chip = p._rows[1].findChild(QLabel, "model_chip")
         assert chip is not None
         assert chip.text() == "Sonnet"
@@ -2094,7 +2094,7 @@ class TestRowStatusLine:
         qtbot.addWidget(p)
         qtbot.addWidget(capsule)
 
-        p.refresh_sessions([_session(1, "/a", ago_minutes=5)])
+        p._render_sessions([_session(1, "/a", ago_minutes=5)])
         status = p._rows[1].findChild(QLabel, "status_label")
         assert status is not None
         # Status row dropped the literal "running" / "idle" word —
@@ -2293,7 +2293,7 @@ class TestHighCostRowAlert:
             get_session_details=details,
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
-        p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
+        p._render_sessions([_session(1, "/a", ago_minutes=10)])
         btn = p._rows[1]
         # Left-side glyph is IDLE — high-cost no longer hijacks it.
         assert btn._status_glyph.state() == _RowStatusGlyph.STATE_IDLE
@@ -2332,7 +2332,7 @@ class TestHighCostRowAlert:
             get_session_details=details,
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
-        p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
+        p._render_sessions([_session(1, "/a", ago_minutes=10)])
         btn = p._rows[1]
         # Left runs the equalizer; right colours the cost yellow.
         assert btn._status_glyph.state() == _RowStatusGlyph.STATE_RUNNING
@@ -2368,7 +2368,7 @@ class TestHighCostRowAlert:
             get_session_details=details,
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
-        p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
+        p._render_sessions([_session(1, "/a", ago_minutes=10)])
         btn = p._rows[1]
         meta = btn.findChild(QLabel, "meta_label")
         assert meta.styleSheet() == _STYLE_COST_DEFAULT
@@ -2401,7 +2401,7 @@ class TestHighCostRowAlert:
         # ago_minutes=10 keeps the session out of the "currently
         # running" window so the running-state path doesn't fire —
         # the test isolates the low-cost vs high-cost alert behaviour.
-        p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
+        p._render_sessions([_session(1, "/a", ago_minutes=10)])
         glyph = p._rows[1]._status_glyph
         assert glyph.state() == _RowStatusGlyph.STATE_IDLE
         assert glyph.toolTip() == ""
@@ -2507,113 +2507,18 @@ class TestRowStatusGlyph:
         set_idle_visible(False) at construction time — the only
         sessions with anything painted in the leftmost slot are the
         ones that are currently running."""
-        panel.refresh_sessions([_session(1, "/a", ago_minutes=10)])
+        panel._render_sessions([_session(1, "/a", ago_minutes=10)])
         glyph = panel._rows[1]._status_glyph
         assert glyph._idle_visible is False
 
 
-class TestRefreshRowStates:
-    """``refresh_row_states()`` is the JSONL-write hook that keeps the
-    expanded panel rows in lockstep with the capsule.
-
-    Without this hook, rows would only re-evaluate their
-    running-glyph / cost-colour / model-chip state on the 10 s
-    process-scan tick (``sessions_changed``). The capsule already
-    re-evaluates on every JSONL write (``totals_changed`` →
-    ``capsule.refresh_cost`` → ``_refresh_active_state``). The hook
-    closes that gap: the row's ``_update_row`` runs on the same
-    ``totals_changed`` event the capsule listens to, so they read
-    ``SessionDetails.status`` at (effectively) the same instant and
-    can't disagree.
-    """
-
-    def test_running_glyph_flips_when_status_changes_without_full_rebuild(
-        self, qtbot,
-    ):
-        """The user-visible bug from image #133: capsule shows
-        ``island-dev`` running, but the row's running indicator is
-        absent. Reproduces the bug by letting the row render with
-        ``status=idle`` first (no indicator), then flipping the
-        composer to return ``status=busy`` and calling only
-        ``refresh_row_states()`` — the row must pick up the new
-        running state without a full ``refresh_sessions`` rebuild
-        (which is what would happen on the next 10 s scan tick)."""
-        from claude_island.core.models import SessionDetails
-        from claude_island.ui.expanded_window import _RowStatusGlyph
-
-        # Mutable holder so the closure can flip what details() returns
-        # between calls — same shape as a status-file edit between two
-        # JSONL-write events.
-        current_status = ["idle"]
-
-        def details(session):
-            return SessionDetails(
-                session=session, name="x", ai_title=None, git_branch=None,
-                last_prompt=None, started_at=None,
-                status=current_status[0],
-                cc_version=None, cost_usd=4.0,
-                turn_count=1, sidechain_count=0,
-            )
-
-        capsule = QWidget(); capsule.show()
-        controller = IslandController()
-        p = ExpandedWindow(
-            capsule=capsule, controller=controller,
-            get_usage_totals=lambda period: UsageTotals(period=period),
-            get_session_details=details,
-        )
-        qtbot.addWidget(p); qtbot.addWidget(capsule)
-
-        # Initial render: status=idle ⇒ row's glyph stays IDLE even
-        # though last_activity is recent. This is the priority-chain
-        # contract _update_row implements.
-        p.refresh_sessions([_session(1, "/a", ago_minutes=0)])
-        btn = p._rows[1]
-        assert btn._status_glyph.state() == _RowStatusGlyph.STATE_IDLE
-        assert btn._running is False
-
-        # Now flip the underlying status — same as a JSONL write
-        # arriving while the user is reading the panel. The row should
-        # update on totals_changed, not wait 10 s for the next process
-        # scan.
-        current_status[0] = "busy"
-        p.refresh_row_states()
-        assert btn._status_glyph.state() == _RowStatusGlyph.STATE_RUNNING
-        assert btn._running is True
-
-    def test_no_layout_rebuild_preserves_row_identity(self, qtbot):
-        """``refresh_row_states`` must reuse the existing HoverRow
-        widgets — re-creating them would reset hover state, animation
-        phase, and (under load) cause visible flicker. The same widget
-        instance must survive the call."""
-        from claude_island.core.models import SessionDetails
-
-        def details(session):
-            return SessionDetails(
-                session=session, name="x", ai_title=None, git_branch=None,
-                last_prompt=None, started_at=None, status="idle",
-                cc_version=None, cost_usd=1.0,
-                turn_count=1, sidechain_count=0,
-            )
-
-        capsule = QWidget(); capsule.show()
-        controller = IslandController()
-        p = ExpandedWindow(
-            capsule=capsule, controller=controller,
-            get_usage_totals=lambda period: UsageTotals(period=period),
-            get_session_details=details,
-        )
-        qtbot.addWidget(p); qtbot.addWidget(capsule)
-        p.refresh_sessions([_session(1, "/a", ago_minutes=0)])
-        before = p._rows[1]
-        p.refresh_row_states()
-        assert p._rows[1] is before  # same widget instance
-
-    def test_safe_when_no_rows(self, qtbot, panel):
-        """Empty rows dict must not raise — totals_changed can fire
-        before the first refresh_sessions populates rows."""
-        assert panel._rows == {}
-        # Must not raise.
-        panel.refresh_row_states()
+# TestRefreshRowStates removed — refresh_row_states was a Phase E
+# workaround for the bug fixed by the Snapshotter architecture
+# (Phase G1+). Equivalent coverage now lives in
+# tests/ui/test_render_snap.py:
+#   - test_render_replaces_session_list_on_subsequent_call:
+#       successive renders update row state correctly
+#   - test_render_preserves_row_widget_when_pid_persists:
+#       cached HoverRow instance survives across renders
 
 
