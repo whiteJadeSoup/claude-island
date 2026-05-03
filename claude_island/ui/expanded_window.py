@@ -706,9 +706,13 @@ _STYLE_USAGE_SESSION_CARD = f"""
         border-radius: 8px;
     }}
 """
+# SPEND uses the same bg as the other cards (TODAY / SESSIONS / QUOTA).
+# Was {_BG_SINGLE} (#1e1e1e) — that lighter shade was a holdover from
+# when SPEND had a different role; in the unified card system every
+# card shares one bg so the grid reads as one family.
 _STYLE_USAGE_PERIOD_CARD = f"""
     QFrame#usage_period_card {{
-        background: {_BG_SINGLE};
+        background: {_BG_GROUP};
         border-radius: 8px;
     }}
 """
@@ -2715,16 +2719,13 @@ class ExpandedWindow(QWidget):
         self._session_scroll.verticalScrollBar().setSingleStep(8)
         root.addWidget(self._session_scroll)
 
-        # ── Separator ───────────────────────────────────────────────
-        sep = QFrame()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet(_STYLE_SEP)
-        root.addWidget(sep)
-
-        # ── USAGE header (refresh button moved to QUOTA card) ───────
-        usage_title = QLabel("USAGE")
-        usage_title.setStyleSheet(_STYLE_TITLE)
-        root.addWidget(usage_title)
+        # No "USAGE" parent label any more — SPEND and QUOTA each
+        # carry their own card-internal title in the unified design
+        # so the parent wrapper became redundant chrome. The cards
+        # are visually grouped by being adjacent + same colour + same
+        # padding, which is enough.
+        # No separator either — the consistent 8 px card-to-card gap
+        # already does the job a 1 px line used to do, with less ink.
 
         # ── SPEND card: period selector + total + breakdown + I/O ──
         self._spend_card = self._build_spend_card()
@@ -2917,7 +2918,10 @@ class ExpandedWindow(QWidget):
         ))
 
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(14, 12, 14, 12)
+        # Same padding as SPEND / QUOTA cards (12, 10) — the unified
+        # card system means every card uses the same insets so adjacent
+        # cards align edge-to-edge in the grid.
+        layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
 
         # Top row: "TODAY" caption (left) + big $ amount (right).
@@ -3421,15 +3425,14 @@ class ExpandedWindow(QWidget):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(4)
 
-        # No QUOTA section title or status dot in the visible chrome —
-        # the provider tab strip below is enough context, and dropping
-        # both shaved ~30 px off the section's vertical footprint per
-        # user feedback that QUOTA had grown too heavy compared to
-        # SPEND. The widgets are still constructed (hidden) so legacy
-        # code paths and tests that find them by attribute keep working.
+        # QUOTA section title — restored for symmetry with the SPEND
+        # card's "SPEND" title. The unified card system carries one
+        # consistent uppercase label per card so the grid reads as a
+        # set of equal-weight panes, not "some have titles, some
+        # don't". The status dot is still hidden (color of the inline
+        # 5h text already conveys live/closed window state).
         section_title = QLabel("QUOTA")
         section_title.setStyleSheet(_STYLE_TITLE)
-        section_title.hide()
         layout.addWidget(section_title)
 
         # Header: tab strip + refresh button (no leading status dot).
