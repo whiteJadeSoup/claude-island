@@ -707,6 +707,34 @@ _ROW_PAD_H = 12
 # between the pill and the panel rows.
 _ROW_ACTIVE_THRESHOLD_SECONDS = 30
 
+
+class _ElasticRichLabel(QLabel):
+    """A QLabel for RichText whose ``minimumSizeHint`` width is always 0.
+
+    Default QLabel computes ``minimumSizeHint`` from the rendered
+    content width — for RichText (HTML strings with ``<span>`` colour
+    segments) that's the full one-line width of the rendered HTML. When
+    such a label sits inside a layout whose parent has
+    ``setFixedWidth(_PANEL_W=320)``, Qt resolves the conflict by
+    forcing the parent's effective minimum width up to fit the
+    child — producing the QWindowsWindow::setGeometry mintrack=480
+    warning every layout pass.
+
+    ``setSizePolicy(Ignored, ...)`` alone doesn't help: the size policy
+    governs space *allocation*, while ``minimumSizeHint`` governs the
+    layout's minimum-width *propagation*. We need to neuter the
+    width-propagation explicitly. Returning width=0 tells Qt "I'm fine
+    with whatever width the parent gives me" — the rendered text
+    elides naturally if the parent is narrower than the content.
+    """
+
+    from PySide6.QtCore import QSize as _QSize
+
+    def minimumSizeHint(self) -> "QSize":  # type: ignore[override]
+        from PySide6.QtCore import QSize
+        h = super().minimumSizeHint().height()
+        return QSize(0, h)
+
 # Cumulative-spend threshold past which a session's row dot flips to
 # the high-cost ⚡ marker. The user explicitly chose to keep this
 # warning on the card only (NOT the capsule) so the pill stays calm
@@ -3233,9 +3261,18 @@ class ExpandedWindow(QWidget):
         layout.addLayout(top)
 
         # Subtitle — provider name + reset countdown. Hidden when no
-        # provider is configured (e.g. empty providers.json).
-        self._summary_subtitle = QLabel("")
+        # provider is configured (e.g. empty providers.json). Uses
+        # _ElasticRichLabel even though it's plain text: the natural
+        # rendered width (~319 px for "Anthropic · resets in expired")
+        # is a hair under _PANEL_W, but a longer countdown string can
+        # tip it over and trigger the QWindowsWindow::setGeometry
+        # warning. Eliding via the Elastic widget keeps the panel
+        # honest at 320 px no matter what the subtitle says.
+        self._summary_subtitle = _ElasticRichLabel("")
         self._summary_subtitle.setStyleSheet(_STYLE_USAGE_RESET)
+        self._summary_subtitle.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
         layout.addWidget(self._summary_subtitle)
 
         # 5h quota progress bar. Reused QProgressBar (consistent with
@@ -3796,9 +3833,24 @@ class ExpandedWindow(QWidget):
         # setText. Falls back to a single line of ~ 30 chars at 11 px
         # font, which fits within the 320 px panel width with margin
         # to spare. Hidden when no quota snapshot.
-        self._quota_inline = QLabel("")
+        #
+        # Critical: ``setSizePolicy(Ignored, Preferred)`` is required.
+        # RichText QLabels report ``minimumSizeHint().width()`` as the
+        # rendered HTML width — observed at 429 px for the typical
+        # warning-state string. Default Preferred policy would let
+        # that propagate up to the parent card, then to the panel,
+        # which has ``setFixedWidth(_PANEL_W=320)`` set. Qt resolves
+        # the conflict by overriding the fixed-width to fit the
+        # child, producing the QWindowsWindow::setGeometry mintrack
+        # warning every layout pass. Ignored h-policy tells Qt to use
+        # whatever width the parent allocates, which is what we want
+        # for an inline status line.
+        self._quota_inline = _ElasticRichLabel("")
         self._quota_inline.setStyleSheet("font-size: 11px;")
         self._quota_inline.setTextFormat(Qt.TextFormat.RichText)
+        self._quota_inline.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
         self._quota_inline.hide()
         layout.addWidget(self._quota_inline)
         # Legacy attribute slots for tests that look these up by name.
