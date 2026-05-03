@@ -41,7 +41,6 @@ from claude_island.ui.expanded_window import ExpandedWindow
 def _session(pid: int = 1234, cwd: str = "/tmp/proj") -> Session:
     return Session(
         pid=pid, project_path=Path(cwd), session_uuid="",
-        window_handle=None,
         last_activity=datetime.now(timezone.utc),
     )
 
@@ -56,7 +55,6 @@ def _view(
 ) -> SessionView:
     sess = Session(
         pid=pid, project_path=Path(cwd), session_uuid="",
-        window_handle=None,
         last_activity=datetime.now(timezone.utc),
     )
     return SessionView(
@@ -68,7 +66,6 @@ def _view(
         is_high_cost=cost_usd >= HIGH_COST_USD_THRESHOLD,
         latest_model="claude-opus-4-7",
         status_word="busy" if is_running else "idle",
-        window_handle=None,
         session=sess,
     )
 

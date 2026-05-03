@@ -97,9 +97,6 @@ ensure_provider_config()
 from claude_island.platform_.session_discovery import SessionDiscovery
 from claude_island.platform_ import session_state as session_state_reader
 from claude_island.platform_ import session_names as session_names_store
-from claude_island.platform_.window_activator import WindowActivator
-# PR1: TerminalAdapter + OsBackend + AppBackend → dispatcher (data path only;
-# UI action_requested wiring lands in PR2).
 from claude_island.platform_.app_backend import LocalAppBackend
 from claude_island.platform_.dispatcher import TerminalDispatcher
 from claude_island.platform_.terminals import build_registry
@@ -107,7 +104,6 @@ from claude_island.platform_.os import get_os_backend
 
 process_scanner = ProcessScanner()
 file_watcher = FileWatcher()
-window_activator = WindowActivator()
 session_discovery = SessionDiscovery(
     scanner=process_scanner,
     registry=session_registry,
@@ -512,9 +508,12 @@ snapshotter.start()
 # fires once app.exec() begins spinning the event loop.
 _world_marshaler.snap_ready.emit(snapshotter.build_now())
 
-# Platform → UI direct connection (session activation: UI emits, platform handles).
-# No bridge needed — session_activated fires on the Qt main thread already.
-expanded.session_activated.connect(window_activator.activate)
+# PR2: UI emits action_requested(view, cap, kwargs) — dispatcher routes
+# by scope (TERMINAL → adapter, OS → os_backend, APP → app_backend).
+# Fires on the Qt main thread (µs-level call, no bridge needed).
+expanded.action_requested.connect(
+    lambda v, c, kw=None: _dispatcher.dispatch(v, c, **(kw or {}))
+)
 
 # ---------------------------------------------------------------------------
 # Start background services

@@ -58,7 +58,7 @@ def patched_process_iter():
         patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
               return_value=(1, "any-title")),
         patch("claude_island.platform_.process_scanner.window_activator.walk_to_visible_host",
-              return_value=None),
+              return_value=None)
     ):
         yield fake_procs
 
@@ -171,7 +171,7 @@ def test_attached_session_is_kept(patched_process_iter):
 
     with patch(
         "claude_island.platform_.process_scanner.win32_console.get_console_info",
-        return_value=(12345, "any-title"),
+        return_value=(12345, "any-title")
     ):
         sessions = ProcessScanner().scan()
 
@@ -189,7 +189,7 @@ def test_unattached_session_is_filtered(patched_process_iter):
 
     with patch(
         "claude_island.platform_.process_scanner.win32_console.get_console_info",
-        side_effect=fake_get_info,
+        side_effect=fake_get_info
     ):
         sessions = ProcessScanner().scan()
 
@@ -207,7 +207,7 @@ def test_split_pane_inactive_with_attached_console_is_kept(patched_process_iter)
     # AttachConsole still works — keep the session.
     with patch(
         "claude_island.platform_.process_scanner.win32_console.get_console_info",
-        return_value=(99, "✳ inactive-pane-title-not-in-any-tab"),
+        return_value=(99, "✳ inactive-pane-title-not-in-any-tab")
     ):
         sessions = ProcessScanner().scan()
 
@@ -223,7 +223,7 @@ def test_all_filtered_triggers_sanity_fail_open(patched_process_iter):
 
     with patch(
         "claude_island.platform_.process_scanner.win32_console.get_console_info",
-        return_value=None,
+        return_value=None
     ):
         sessions = ProcessScanner().scan()
 
@@ -244,7 +244,7 @@ def test_mixed_attached_and_orphan_passes_normal_filter(patched_process_iter):
 
     with patch(
         "claude_island.platform_.process_scanner.win32_console.get_console_info",
-        side_effect=fake_get_info,
+        side_effect=fake_get_info
     ):
         sessions = ProcessScanner().scan()
 
@@ -264,7 +264,7 @@ def test_window_handle_populated_from_walk_to_visible_host(patched_process_iter)
         patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
               return_value=(0xCAFE, "title")),
         patch("claude_island.platform_.process_scanner.window_activator.walk_to_visible_host",
-              return_value=0xBEEF),
+              return_value=0xBEEF)
     ):
         sessions = ProcessScanner().scan()
 
@@ -283,7 +283,7 @@ def test_window_handle_is_none_when_walk_fails(patched_process_iter):
         patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
               return_value=(0xCAFE, "title")),
         patch("claude_island.platform_.process_scanner.window_activator.walk_to_visible_host",
-              return_value=None),
+              return_value=None)
     ):
         sessions = ProcessScanner().scan()
 
@@ -307,7 +307,7 @@ def test_window_handle_distinguishes_separate_wt_windows(patched_process_iter):
         patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
               side_effect=fake_info),
         patch("claude_island.platform_.process_scanner.window_activator.walk_to_visible_host",
-              side_effect=fake_walk),
+              side_effect=fake_walk)
     ):
         sessions = ProcessScanner().scan()
 

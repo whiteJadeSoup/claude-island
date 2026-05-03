@@ -16,7 +16,7 @@ from typing import ClassVar
 
 from claude_island.core.capabilities import Capability, FocusGranularity, _CapabilityProvider, capability
 from claude_island.core.models import Session
-from claude_island.core.snapshot import SessionGroup, SessionView, compose_session_view, _normalize_project_path
+from claude_island.core.snapshot import SessionGroup, SessionView, compose_session_view
 from claude_island.platform_.terminals import adapter
 from claude_island.platform_.terminals.protocols import TerminalAdapter
 

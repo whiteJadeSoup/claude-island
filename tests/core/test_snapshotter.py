@@ -43,7 +43,6 @@ def _session(
         pid=pid,
         project_path=Path(cwd),
         session_uuid=uuid,
-        window_handle=None,
         last_activity=last_activity or datetime.now(timezone.utc),
     )
 

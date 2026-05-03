@@ -274,7 +274,11 @@ class CapsuleWindow(QWidget):
 
         # Cache the snapshot's session views so the pill text + active
         # state derive from snap-resolved is_running / name fields.
-        self._snap_sessions: tuple[SessionView, ...] = snap.sessions
+        # Flatten session_groups into a flat tuple for carousel / active-state.
+        flat: list[SessionView] = []
+        for g in snap.session_groups:
+            flat.extend(g.views)
+        self._snap_sessions: tuple[SessionView, ...] = tuple(flat)
 
         # Sync the multi-running carousel with the new running set.
         # Must happen before _apply_capsule so the label text and

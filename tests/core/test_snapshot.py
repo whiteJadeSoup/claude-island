@@ -16,7 +16,7 @@ from claude_island.core.snapshot import (
     SessionView,
     WorldSnapshot,
     _WorldStore,
-    world,
+    world
 )
 
 
@@ -36,7 +36,7 @@ def _view(
     *,
     cost_usd: float = 1.0,
     is_high_cost: bool | None = None,
-    is_running: bool = False,
+    is_running: bool = False
 ) -> SessionView:
     """Test fixture producing a valid SessionView with sensible defaults
     so each test only specifies the fields it cares about."""
@@ -45,8 +45,8 @@ def _view(
     from claude_island.core.models import Session
     sess = Session(
         pid=1234, project_path=Path("/tmp/test"),
-        session_uuid="", window_handle=None,
-        last_activity=_FIXED_TS,
+        session_uuid="",
+        last_activity=_FIXED_TS
     )
     return SessionView(
         pid=1234,
@@ -59,8 +59,7 @@ def _view(
         is_high_cost=is_high_cost,
         latest_model="claude-opus-4-7",
         status_word="idle",
-        window_handle=None,
-        session=sess,
+        session=sess
     )
 
 
@@ -133,7 +132,7 @@ class TestWorldSnapshot:
             quota=None,
             available_providers=("anthropic",),
             selected_provider="anthropic",
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=datetime.now(timezone.utc)
         )
         same_snap = WorldSnapshot(
             sessions=(v,),  # tuple element comparison
@@ -141,7 +140,7 @@ class TestWorldSnapshot:
             quota=None,
             available_providers=("anthropic",),
             selected_provider="anthropic",
-            fetched_at=snap.fetched_at,
+            fetched_at=snap.fetched_at
         )
         assert snap == same_snap
 
@@ -155,12 +154,12 @@ class TestWorldSnapshot:
         s1 = WorldSnapshot(
             sessions=(v,), today_cost_usd=1.0, quota=None,
             available_providers=("a",), selected_provider="a",
-            fetched_at=ts1,
+            fetched_at=ts1
         )
         s2 = WorldSnapshot(
             sessions=(v,), today_cost_usd=1.0, quota=None,
             available_providers=("a",), selected_provider="a",
-            fetched_at=ts2,
+            fetched_at=ts2
         )
         # Full equality: differ (fetched_at).
         assert s1 != s2
@@ -173,11 +172,11 @@ class TestWorldSnapshot:
         ts = datetime.now(timezone.utc)
         s1 = WorldSnapshot(
             sessions=(v1,), today_cost_usd=1.0, quota=None,
-            available_providers=(), selected_provider=None, fetched_at=ts,
+            available_providers=(), selected_provider=None, fetched_at=ts
         )
         s2 = WorldSnapshot(
             sessions=(v2,), today_cost_usd=2.0, quota=None,
-            available_providers=(), selected_provider=None, fetched_at=ts,
+            available_providers=(), selected_provider=None, fetched_at=ts
         )
         assert s1.render_key() != s2.render_key()
 
@@ -189,27 +188,26 @@ class TestWorldSnapshot:
         a = _view(cost_usd=1.0)
         b_sess = Session(
             pid=99, project_path=Path("/b"),
-            session_uuid="", window_handle=None,
-            last_activity=datetime.now(timezone.utc),
+            session_uuid="",
+            last_activity=datetime.now(timezone.utc)
         )
         b = SessionView(
             pid=99, name="b", project_path=Path("/b"),
             project_basename="b",
             last_activity=datetime.now(timezone.utc),
             is_running=False, cost_usd=1.0, is_high_cost=False,
-            latest_model=None, status_word=None, window_handle=None,
-            session=b_sess,
+            latest_model=None, status_word=None, session=b_sess
         )
         s1 = WorldSnapshot.empty()
         s_ab = WorldSnapshot(
             sessions=(a, b), today_cost_usd=2.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=s1.fetched_at,
+            fetched_at=s1.fetched_at
         )
         s_ba = WorldSnapshot(
             sessions=(b, a), today_cost_usd=2.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=s1.fetched_at,
+            fetched_at=s1.fetched_at
         )
         assert s_ab != s_ba
 
@@ -228,7 +226,7 @@ class TestWorldStore:
         snap = WorldSnapshot(
             sessions=(_view(),), today_cost_usd=5.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=datetime.now(timezone.utc)
         )
         store.push(snap)
         assert store.current == snap
@@ -241,7 +239,7 @@ class TestWorldStore:
         snap = WorldSnapshot(
             sessions=(), today_cost_usd=42.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=datetime.now(timezone.utc)
         )
         store.push(snap)
 
@@ -262,7 +260,7 @@ class TestWorldStore:
         snap = WorldSnapshot(
             sessions=(), today_cost_usd=1.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=datetime.now(timezone.utc)
         )
         store.push(snap)
 
@@ -290,7 +288,7 @@ class TestWorldStore:
         snap = WorldSnapshot(
             sessions=(_view(),), today_cost_usd=99.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=datetime.now(timezone.utc)
         )
         store.push(snap)
         assert store.current == snap
@@ -312,7 +310,7 @@ class TestWorldStore:
         new_snap = WorldSnapshot(
             sessions=(), today_cost_usd=7.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=datetime.now(timezone.utc)
         )
         store.push(new_snap)
 

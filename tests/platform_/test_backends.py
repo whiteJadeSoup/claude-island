@@ -22,14 +22,14 @@ from claude_island.platform_.app_backend import LocalAppBackend
 @pytest.fixture
 def view_with_uuid() -> SessionView:
     s = Session(pid=10, project_path=Path("/tmp/a"), session_uuid="abc-123",
-                window_handle=None, last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
+                last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
     return _degraded_view(s)
 
 
 @pytest.fixture
 def view_no_uuid() -> SessionView:
     s = Session(pid=10, project_path=Path("/tmp/a"), session_uuid="",
-                window_handle=None, last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
+                last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
     return _degraded_view(s)
 
 
@@ -42,7 +42,7 @@ class TestAppBackendRename:
         on_change = mock.Mock()
         backend = LocalAppBackend(
             names_store=names, claude_projects_dir=Path("/tmp"),
-            on_change=on_change,
+            on_change=on_change
         )
         result = backend.rename(view_with_uuid, new_name="  my session  ")
         assert result is True
@@ -54,7 +54,7 @@ class TestAppBackendRename:
         on_change = mock.Mock()
         backend = LocalAppBackend(
             names_store=names, claude_projects_dir=Path("/tmp"),
-            on_change=on_change,
+            on_change=on_change
         )
         result = backend.rename(view_no_uuid, new_name="test")
         assert result is False
@@ -67,7 +67,7 @@ class TestAppBackendRename:
         on_change = mock.Mock()
         backend = LocalAppBackend(
             names_store=names, claude_projects_dir=Path("/tmp"),
-            on_change=on_change,
+            on_change=on_change
         )
         result = backend.rename(view_with_uuid, new_name="test")
         assert result is False
@@ -86,7 +86,7 @@ class TestAppBackendResetThinking:
         on_change = mock.Mock()
         backend = LocalAppBackend(
             names_store=names, claude_projects_dir=tmp_path,
-            on_change=on_change,
+            on_change=on_change
         )
         result = backend.reset_thinking(view_with_uuid)
         assert result is True
@@ -98,14 +98,14 @@ class TestAppBackendResetThinking:
     def test_no_uuid_returns_false(self, view_no_uuid):
         backend = LocalAppBackend(
             names_store=mock.Mock(), claude_projects_dir=Path("/tmp"),
-            on_change=mock.Mock(),
+            on_change=mock.Mock()
         )
         assert backend.reset_thinking(view_no_uuid) is False
 
     def test_file_not_found_returns_false(self, view_with_uuid, tmp_path):
         backend = LocalAppBackend(
             names_store=mock.Mock(), claude_projects_dir=tmp_path,
-            on_change=mock.Mock(),
+            on_change=mock.Mock()
         )
         assert backend.reset_thinking(view_with_uuid) is False
 
@@ -117,7 +117,7 @@ class TestOsBackendRevealCwd:
         from claude_island.platform_.os.macos import MacOsBackend
         from claude_island.core.snapshot import SessionView
         s = Session(pid=1, project_path=Path("/Users/test/foo"), session_uuid="",
-                    window_handle=None, last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
+                    last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
         v = replace_view_with_caps(_degraded_view(s), {Capability.REVEAL_CWD})
         backend = MacOsBackend()
         with mock.patch("subprocess.run") as run:
@@ -128,7 +128,7 @@ class TestOsBackendRevealCwd:
     def test_macos_oserror_caught(self):
         from claude_island.platform_.os.macos import MacOsBackend
         s = Session(pid=1, project_path=Path("/tmp"), session_uuid="",
-                    window_handle=None, last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
+                    last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
         v = replace_view_with_caps(_degraded_view(s), {Capability.REVEAL_CWD})
         backend = MacOsBackend()
         with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["x"], timeout=3)):
@@ -137,7 +137,7 @@ class TestOsBackendRevealCwd:
     def test_windows_explorer_select(self):
         from claude_island.platform_.os.windows import WindowsOsBackend
         s = Session(pid=1, project_path=Path("C:\\Users\\test\\foo"), session_uuid="",
-                    window_handle=None, last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
+                    last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
         v = replace_view_with_caps(_degraded_view(s), {Capability.REVEAL_CWD})
         backend = WindowsOsBackend()
         with mock.patch("subprocess.run") as run:

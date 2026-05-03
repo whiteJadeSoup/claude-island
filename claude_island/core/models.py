@@ -25,7 +25,6 @@ class Session:
     pid: int
     project_path: Path
     session_uuid: str
-    window_handle: int | None  # None on macOS or if not yet resolved
     last_activity: datetime
 
 

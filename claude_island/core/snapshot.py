@@ -90,7 +90,6 @@ class SessionView:
     is_high_cost: bool              # == (cost_usd >= HIGH_COST_USD_THRESHOLD)
     latest_model: str | None        # None when no records yet
     status_word: str | None         # raw "busy" / "idle" / "waiting" / None
-    window_handle: int | None       # passthrough from Session (legacy; PR2 will drop)
     # The original Session object the view was composed from. Carried
     # along so UI callbacks that accept a Session (e.g. WindowActivator,
     # the row's _siblings list) don't need to reconstruct one. Frozen
@@ -169,19 +168,15 @@ class WorldSnapshot:
          preserves order
     """
 
-    sessions: tuple[SessionView, ...]
     today_cost_usd: float
     quota: QuotaSnapshot | None
     available_providers: tuple[str, ...]
     selected_provider: str | None
     fetched_at: datetime
-    # ── PR1 additive field — UI consumes in PR2 ──
-    # Pre-grouped by the TerminalDispatcher's adapter chain. Currently
-    # populated alongside ``sessions`` (which is a flat sort of every
-    # view across all groups). After PR2 the UI switches to consuming
-    # ``session_groups`` directly, ``sessions`` field is removed, and
-    # the grouping logic in the UI layer is deleted.
-    session_groups: tuple["SessionGroup", ...] = ()
+    # Session views, pre-grouped by the TerminalDispatcher's adapter chain.
+    # Each group renders as one card; inner views are the rows.
+    # Empty tuple = no sessions known yet (boot / empty machine).
+    session_groups: tuple["SessionGroup", ...]
 
     @classmethod
     def empty(cls) -> "WorldSnapshot":
@@ -189,7 +184,6 @@ class WorldSnapshot:
         render this without errors. Represents "we haven't built any
         snapshot yet"."""
         return cls(
-            sessions=(),
             today_cost_usd=0.0,
             quota=None,
             available_providers=(),
@@ -210,19 +204,13 @@ class WorldSnapshot:
         ``fetched_at`` → defeats deduplication.
 
         ``fetched_at`` stays on the snapshot for debug / telemetry —
-        we just don't let it influence whether the UI re-renders.
-
-        Includes ``session_groups`` as well as ``sessions`` so that a
-        regrouping (same flat session list, different bucketing) is
-        treated as a real change and triggers re-render — important
-        once UI starts consuming groups in PR2."""
+        we just don't let it influence whether the UI re-renders."""
         return (
-            self.sessions,
+            self.session_groups,
             self.today_cost_usd,
             self.quota,
             self.available_providers,
             self.selected_provider,
-            self.session_groups,
         )
 
 
@@ -435,7 +423,6 @@ def compose_session_view(
         is_high_cost=float(cost) >= high_cost_threshold,
         latest_model=latest_model,
         status_word=status_word.lower() if status_word else None,
-        window_handle=session.window_handle,
         session=session,
     )
 
@@ -515,7 +502,6 @@ def _degraded_view(session: Session) -> SessionView:
         is_high_cost=False,
         latest_model=None,
         status_word=None,
-        window_handle=session.window_handle,
         session=session,
     )
 
@@ -524,55 +510,15 @@ def _normalize_project_path(path: Path) -> str:
     """Collapse Claude Code worktree paths back to their parent project.
 
     Claude Code creates per-feature git worktrees under
-    ``<repo>/.claude/worktrees/<branch-name>``. Users routinely run
-    one claude session in the main repo and another in a worktree,
-    side-by-side as split panes in the same WT tab. With raw cwds the
-    grouping heuristic sees two different paths and fails to merge
-    them. Normalising the worktree back to the repo root restores the
-    "same tab" grouping (and, downstream, lets the activator find a
-    sibling whose console title IS in the WT TabItem set, fixing
-    click-to-switch on the inactive worktree pane).
-
-    Non-worktree paths pass through unchanged.
-
-    Lives in core/ rather than ui/ because the canonical sort order is
-    a property of the WorldSnapshot — the UI panel and the capsule
-    must agree on order, so the rule lives once at the snapshot
-    boundary instead of being duplicated.
+    ``<repo>/.claude/worktrees/<branch-name>``. Normalising back to the
+    repo root lets adapters produce cleaner title hints (e.g. "repo-a"
+    instead of two different worktree paths for the same project).
     """
     parts = path.parts
     for i in range(len(parts) - 1):
         if parts[i] == ".claude" and parts[i + 1] == "worktrees":
             return str(Path(*parts[:i]))
     return str(path)
-
-
-def _session_sort_key(view: SessionView) -> tuple:
-    """Canonical sort key for snap.sessions.
-
-    Order rule (matches what the panel used to compute itself before
-    Phase G2):
-
-      * Sessions WITH a window_handle group together first, sorted by
-        (window_handle, normalised_project_path, pid). Adjacent rows
-        share a (handle, path) so the panel's group-card collapse
-        finds them in one consecutive block.
-      * Sessions WITHOUT a window_handle (None — pythonw, sandboxed
-        shells, non-Windows) sort to the END as standalone rows, in
-        pid order for stability.
-
-    The (0/1) prefix groups "with handle" before "no handle" — flipping
-    the prefix for the no-handle case is the trick that puts them last
-    while keeping a single tuple comparison.
-    """
-    if view.window_handle is None:
-        return (1, 0, "", view.pid)
-    return (
-        0,
-        view.window_handle,
-        _normalize_project_path(view.project_path),
-        view.pid,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -788,15 +734,10 @@ class Snapshotter:
                 )
                 views.append(_degraded_view(s))
 
-        views.sort(key=_session_sort_key)
-
-        # PR1 dual-emit: build SessionGroups via the injected grouper
-        # alongside the flat `sessions` field. UI keeps consuming
-        # `sessions` until PR2 swaps it to `session_groups`. If the
-        # grouper raises (bug in an adapter, etc.), fall back to the
-        # default singleton grouping so `session_groups` is always at
-        # least structurally valid — never propagate a grouper failure
-        # up to the publish path.
+        # Adapter-driven grouping (dispatcher → chain → sessions bucketed
+        # into SessionGroups). If the grouper raises (bug in an adapter),
+        # fall back to singleton grouping — every session is its own
+        # group — so session_groups is always structurally valid.
         try:
             groups = list(self._group_sessions(views))
         except Exception:
@@ -831,7 +772,6 @@ class Snapshotter:
             selected = None
 
         return WorldSnapshot(
-            sessions=tuple(views),
             today_cost_usd=today_cost,
             quota=quota,
             available_providers=available,

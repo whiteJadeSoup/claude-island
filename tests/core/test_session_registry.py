@@ -17,7 +17,6 @@ def _session(pid: int, cwd: str, started: datetime) -> Session:
         pid=pid,
         project_path=Path(cwd),
         session_uuid="",
-        window_handle=None,
         last_activity=started,
     )
 

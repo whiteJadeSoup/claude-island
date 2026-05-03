@@ -27,14 +27,14 @@ from claude_island.ui.expanded_window import ExpandedWindow
 
 def _session(
     pid: int, cwd: str, ago_minutes: int = 0,
-    window_handle: int | None = None,
+    window_handle: int | None = None
 ) -> Session:
     return Session(
         pid=pid,
         project_path=Path(cwd),
         session_uuid="",
         window_handle=window_handle,
-        last_activity=datetime.now(timezone.utc) - timedelta(minutes=ago_minutes),
+        last_activity=datetime.now(timezone.utc) - timedelta(minutes=ago_minutes)
     )
 
 
@@ -46,7 +46,7 @@ def panel(qtbot):
     panel = ExpandedWindow(
         capsule=capsule,
         controller=controller,
-        get_usage_totals=lambda period: UsageTotals(period=period),
+        get_usage_totals=lambda period: UsageTotals(period=period)
     )
     qtbot.addWidget(panel)
     qtbot.addWidget(capsule)
@@ -63,7 +63,7 @@ def _panel_with_session(qtbot, get_session_usage):
         capsule=capsule,
         controller=controller,
         get_usage_totals=lambda period: UsageTotals(period=period),
-        get_session_usage=get_session_usage,
+        get_session_usage=get_session_usage
     )
     qtbot.addWidget(p)
     qtbot.addWidget(capsule)
@@ -212,14 +212,14 @@ def test_same_window_handle_different_paths_render_as_separate_widgets(panel):
 
 
 def test_window_handle_none_renders_standalone(panel):
-    """G-UI-4: window_handle=None means we couldn't resolve a host
+    """G-UI-4: means we couldn't resolve a host
     (pythonw, sandboxed shell, etc.). Such sessions are always
     standalone — never merged with any other session, even if cwd
     matches a grouped pair."""
     panel._render_sessions([
         _session(1, "/proj", window_handle=0xAAAA),
         _session(2, "/proj", window_handle=0xAAAA),
-        _session(3, "/proj", window_handle=None),  # ungroupable
+        _session(3, "/proj", ),  # ungroupable
     ])
 
     top = _top_level_widgets(panel)
@@ -327,7 +327,7 @@ def test_row_widget_preserved_when_moving_between_card_and_standalone(panel):
 from claude_island.core.models import (
     ModelTotals as _ModelTotals,
     QuotaSnapshot as _QuotaSnapshot,
-    SessionUsage as _SessionUsage,
+    SessionUsage as _SessionUsage
 )
 
 
@@ -337,7 +337,7 @@ def _make_session_usage(
     end_offset_h: float | None = 4.0,     # hours from now (positive=future)
     quota: _QuotaSnapshot | None = None,
     by_model: tuple[_ModelTotals, ...] = (),
-    total_cost: float = 2.67,
+    total_cost: float = 2.67
 ):
     now = datetime.now(timezone.utc)
     start = (now - timedelta(hours=start_offset_h)) if start_offset_h is not None else None
@@ -347,7 +347,7 @@ def _make_session_usage(
         end_time=end,
         by_model=by_model,
         total_cost_usd=total_cost,
-        quota=quota,
+        quota=quota
     )
 
 
@@ -368,7 +368,7 @@ def _panel_with_quota(qtbot, *, quota=None, totals=None, by_model=None):
         controller=IslandController(),
         get_usage_totals=lambda period: (totals or UsageTotals(period=period)),
         get_totals_by_model=(lambda _period: by_model) if by_model is not None else None,
-        get_quota_snapshot=(lambda: quota) if quota is not None else None,
+        get_quota_snapshot=(lambda: quota) if quota is not None else None
     )
     qtbot.addWidget(p)
     qtbot.addWidget(capsule)
@@ -383,7 +383,7 @@ def _make_quota(*, five_pct: float = 53.0, is_stale: bool = False):
         seven_day_pct=17.0,
         seven_day_resets_at=now + timedelta(days=4),
         fetched_at=now if not is_stale else now - timedelta(hours=1),
-        is_stale=is_stale,
+        is_stale=is_stale
     )
 
 
@@ -461,13 +461,13 @@ def test_period_toggle_updates_spend_card(qtbot):
             period=period,
             input_tokens=1000 if period == "5h" else 9999,
             output_tokens=2000,
-            input_cost=1.0 if period == "5h" else 9.99,
+            input_cost=1.0 if period == "5h" else 9.99
         )
 
     p = ExpandedWindow(
         capsule=capsule,
         controller=IslandController(),
-        get_usage_totals=fake_totals,
+        get_usage_totals=fake_totals
     )
     qtbot.addWidget(p)
     qtbot.addWidget(capsule)
@@ -579,7 +579,7 @@ def _make_full_details(s, **overrides):
     only what they care about."""
     from claude_island.core.models import (
         ModelTotals as _MT,
-        SessionDetails as _SD,
+        SessionDetails as _SD
     )
     base = dict(
         session=s,
@@ -599,9 +599,9 @@ def _make_full_details(s, **overrides):
                 cache_read_tokens=5000000, cost_usd=2.40),
             _MT(model="claude-haiku-4-5", input_tokens=100,
                 output_tokens=200, cache_creation_tokens=1000,
-                cache_read_tokens=8000, cost_usd=0.27),
+                cache_read_tokens=8000, cost_usd=0.27)
         ),
-        effective_uuid="abc12345-6789-0000-0000-000000000000",
+        effective_uuid="abc12345-6789-0000-0000-000000000000"
     )
     base.update(overrides)
     return _SD(**base)
@@ -623,7 +623,7 @@ def test_row_meta_shows_cost_when_details_available(qtbot):
         capsule=capsule,
         controller=IslandController(),
         get_usage_totals=lambda p: UsageTotals(period=p),
-        get_session_details=lambda _s: details,
+        get_session_details=lambda _s: details
     )
     qtbot.addWidget(panel)
     qtbot.addWidget(capsule)
@@ -729,7 +729,7 @@ def test_show_detail_popup_constructs_and_holds_reference(qtbot):
     popup from the composer's details and keeps a reference so Qt
     doesn't immediately GC it."""
     from claude_island.ui.expanded_window import (
-        ExpandedWindow, SessionDetailPopup,
+        ExpandedWindow, SessionDetailPopup
     )
     s = _session(1, "/a")
     details = _make_full_details(s)
@@ -739,7 +739,7 @@ def test_show_detail_popup_constructs_and_holds_reference(qtbot):
     panel = ExpandedWindow(
         capsule=capsule, controller=IslandController(),
         get_usage_totals=lambda p: UsageTotals(period=p),
-        get_session_details=lambda _s: details,
+        get_session_details=lambda _s: details
     )
     qtbot.addWidget(panel)
     qtbot.addWidget(capsule)
@@ -782,7 +782,7 @@ def test_detail_popup_uuid_short_display_full_copy(qtbot):
     copyable.mousePressEvent(QMouseEvent(
         QMouseEvent.Type.MouseButtonPress,
         QPointF(), QPointF(), QPointF(),
-        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
     ))
     qtbot.wait(50)
     assert QApplication.clipboard().text() == full_uuid
@@ -799,7 +799,7 @@ def test_spend_card_model_breakdown_shows_top_models(qtbot):
         _ModelTotals(model="claude-sonnet-4-5", input_tokens=0, output_tokens=0,
                      cache_creation_tokens=0, cache_read_tokens=0, cost_usd=2.54),
         _ModelTotals(model="claude-haiku-4-5", input_tokens=0, output_tokens=0,
-                     cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.13),
+                     cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.13)
     )
     # Provide non-zero totals so the bar container is shown (cost_usd > 0 gate)
     # cost_usd is derived from input_cost + output_cost + cache_creation_cost + cache_read_cost
@@ -808,7 +808,7 @@ def test_spend_card_model_breakdown_shows_top_models(qtbot):
         input_tokens=0, output_tokens=0,
         cache_creation_tokens=0, cache_read_tokens=0,
         input_cost=1.0, output_cost=1.0,
-        cache_creation_cost=0.4, cache_read_cost=0.27,
+        cache_creation_cost=0.4, cache_read_cost=0.27
     )
     p = _panel_with_quota(qtbot, totals=totals, by_model=by_model)
     p._render_cards()
@@ -835,7 +835,7 @@ def _build_panel_with_tabs(
     available,
     selected="anthropic",
     on_provider_selected=None,
-    get_session_usage=None,
+    get_session_usage=None
 ):
     capsule = QWidget()
     capsule.show()
@@ -847,7 +847,7 @@ def _build_panel_with_tabs(
         get_session_usage=get_session_usage,
         available_providers=available,
         selected_provider=selected,
-        on_provider_selected=on_provider_selected,
+        on_provider_selected=on_provider_selected
     )
     qtbot.addWidget(p)
     qtbot.addWidget(capsule)
@@ -887,7 +887,7 @@ def test_clicking_tab_updates_state_and_notifies(qtbot):
     p = _build_panel_with_tabs(
         qtbot,
         available=["anthropic", "minimax"],
-        on_provider_selected=fired.append,
+        on_provider_selected=fired.append
     )
     p._provider_btns["minimax"].click()
 
@@ -903,7 +903,7 @@ def test_reclicking_active_tab_is_noop(qtbot):
         qtbot,
         available=["anthropic", "minimax"],
         selected="anthropic",
-        on_provider_selected=fired.append,
+        on_provider_selected=fired.append
     )
     p._provider_btns["anthropic"].click()
     assert fired == []
@@ -919,7 +919,7 @@ def test_tab_callback_failure_does_not_crash_ui(qtbot):
     p = _build_panel_with_tabs(
         qtbot,
         available=["anthropic", "minimax"],
-        on_provider_selected=boom,
+        on_provider_selected=boom
     )
     p._provider_btns["minimax"].click()  # must not raise
     # Selection still flips in-process even though persistence failed.
@@ -990,7 +990,7 @@ def test_repair_button_strips_thinking_and_disables_self(qtbot, tmp_path):
             {"type": "thinking", "thinking": "x", "signature": "abc"},
             {"type": "text", "text": "hello"},
         ]}}) + "\n",
-        encoding="utf-8",
+        encoding="utf-8"
     )
 
     popup = SessionDetailPopup(details, s)
@@ -998,7 +998,7 @@ def test_repair_button_strips_thinking_and_disables_self(qtbot, tmp_path):
 
     with patch(
         "claude_island.ui.expanded_window._claude_projects_root",
-        return_value=fake_home / ".claude" / "projects",
+        return_value=fake_home / ".claude" / "projects"
     ):
         popup._on_strip_thinking()
 
@@ -1030,7 +1030,7 @@ def test_repair_button_handles_missing_transcript(qtbot, tmp_path):
     fake_home.mkdir()
     with patch(
         "claude_island.ui.expanded_window._claude_projects_root",
-        return_value=fake_home / ".claude" / "projects",
+        return_value=fake_home / ".claude" / "projects"
     ):
         popup._on_strip_thinking()  # must not raise
 
@@ -1057,14 +1057,14 @@ def test_repair_button_zero_blocks_message(qtbot, tmp_path):
     jsonl_path = proj_dir / f"{full_uuid}.jsonl"
     jsonl_path.write_text(
         json.dumps({"message": {"content": [{"type": "text", "text": "ok"}]}}) + "\n",
-        encoding="utf-8",
+        encoding="utf-8"
     )
 
     popup = SessionDetailPopup(details, s)
     qtbot.addWidget(popup)
     with patch(
         "claude_island.ui.expanded_window._claude_projects_root",
-        return_value=fake_home / ".claude" / "projects",
+        return_value=fake_home / ".claude" / "projects"
     ):
         popup._on_strip_thinking()
 
@@ -1087,7 +1087,7 @@ def test_aggregate_per_model_dedupes_by_display_label():
         _MT(model="claude-opus-4-6", input_tokens=200, output_tokens=300,
             cache_creation_tokens=30, cache_read_tokens=40, cost_usd=15.0),
         _MT(model="claude-sonnet-4-6", input_tokens=50, output_tokens=60,
-            cache_creation_tokens=5, cache_read_tokens=6, cost_usd=2.0),
+            cache_creation_tokens=5, cache_read_tokens=6, cost_usd=2.0)
     ))
     # Two Opus + one Sonnet input → one Opus + one Sonnet output.
     labels = [r.label for r in rows]
@@ -1109,7 +1109,7 @@ def test_aggregate_per_model_drops_zero_cost_zero_token_rows():
         _MT(model="<synthetic>", input_tokens=0, output_tokens=0,
             cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.0),
         _MT(model="claude-haiku-4-5", input_tokens=10, output_tokens=20,
-            cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.5),
+            cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.5)
     ))
     labels = [r.label for r in rows]
     assert "<synthetic>" not in labels
@@ -1127,7 +1127,7 @@ def test_detail_popup_dedupes_models_in_render(qtbot):
         _MT(model="claude-opus-4-5", input_tokens=100, output_tokens=200,
             cache_creation_tokens=10, cache_read_tokens=20, cost_usd=65.0),
         _MT(model="claude-opus-4-6", input_tokens=200, output_tokens=300,
-            cache_creation_tokens=30, cache_read_tokens=40, cost_usd=64.0),
+            cache_creation_tokens=30, cache_read_tokens=40, cost_usd=64.0)
     ))
     popup = SessionDetailPopup(details, s)
     qtbot.addWidget(popup)
@@ -1149,7 +1149,7 @@ def test_detail_popup_hides_synthetic_zero_cost_row(qtbot):
         _MT(model="<synthetic>", input_tokens=0, output_tokens=0,
             cache_creation_tokens=0, cache_read_tokens=0, cost_usd=0.0),
         _MT(model="claude-sonnet-4-6", input_tokens=100, output_tokens=200,
-            cache_creation_tokens=0, cache_read_tokens=0, cost_usd=1.0),
+            cache_creation_tokens=0, cache_read_tokens=0, cost_usd=1.0)
     ))
     popup = SessionDetailPopup(details, s)
     qtbot.addWidget(popup)
@@ -1341,7 +1341,7 @@ def test_detail_popup_path_click_opens_folder(qtbot, monkeypatch):
     path_label.mousePressEvent(QMouseEvent(
         QMouseEvent.Type.MouseButtonPress,
         QPointF(), QPointF(), QPointF(),
-        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
     ))
     assert called == [s.project_path]
 
@@ -1405,7 +1405,7 @@ class TestDetailPopupRename:
         renames: list = []
         popup = SessionDetailPopup(
             details, s,
-            on_rename=(lambda u, n: renames.append((u, n))) if with_rename else None,
+            on_rename=(lambda u, n: renames.append((u, n))) if with_rename else None
         )
         qtbot.addWidget(popup)
         return popup, renames
@@ -1528,12 +1528,12 @@ class TestDetailPopupSubtitle:
         details = _make_full_details(
             s, name="learning python",
             ai_title="Learn Python and TypeScript basics",
-            original_name="cc-learning",
+            original_name="cc-learning"
         )
         popup = SessionDetailPopup(details, s)
         qtbot.addWidget(popup)
         assert self._label_with_text(
-            popup, "Learn Python and TypeScript basics",
+            popup, "Learn Python and TypeScript basics"
         ) is not None
 
     def test_original_name_shown_when_renamed_and_no_ai_title(self, qtbot):
@@ -1546,7 +1546,7 @@ class TestDetailPopupSubtitle:
         details = _make_full_details(
             s, name="claude md prompt coding",
             ai_title=None,
-            original_name="claude md prompt",
+            original_name="claude md prompt"
         )
         popup = SessionDetailPopup(details, s)
         qtbot.addWidget(popup)
@@ -1562,7 +1562,7 @@ class TestDetailPopupSubtitle:
         details = _make_full_details(
             s, name="cc-learning",
             ai_title=None,
-            original_name="cc-learning",
+            original_name="cc-learning"
         )
         popup = SessionDetailPopup(details, s)
         qtbot.addWidget(popup)
@@ -1577,7 +1577,7 @@ class TestDetailPopupSubtitle:
         details = _make_full_details(
             s, name=None,
             ai_title=None,
-            original_name=None,
+            original_name=None
         )
         popup = SessionDetailPopup(details, s)
         qtbot.addWidget(popup)
@@ -1592,12 +1592,12 @@ class TestDetailPopupSubtitle:
         details = _make_full_details(
             s, name="custom",
             ai_title="The AI Generated Title",
-            original_name="The Original Name",
+            original_name="The Original Name"
         )
         popup = SessionDetailPopup(details, s)
         qtbot.addWidget(popup)
         assert self._label_with_text(
-            popup, "The AI Generated Title",
+            popup, "The AI Generated Title"
         ) is not None
         assert self._label_with_text(popup, "The Original Name") is None
 
@@ -1611,7 +1611,7 @@ class TestDetailPopupSubtitle:
         details = _make_full_details(
             s, name="Refactor",
             ai_title="Refactor",
-            original_name="cc-learning",
+            original_name="cc-learning"
         )
         popup = SessionDetailPopup(details, s)
         qtbot.addWidget(popup)
@@ -1629,7 +1629,7 @@ class TestDetailPopupSubtitle:
         details = _make_full_details(
             s, name="Same",
             ai_title="Same",
-            original_name="Same",
+            original_name="Same"
         )
         popup = SessionDetailPopup(details, s)
         qtbot.addWidget(popup)
@@ -1646,7 +1646,7 @@ class TestDetailPopupSubtitle:
         details = _make_full_details(
             s, name="claude-island-dev",
             ai_title=None,
-            original_name=None,
+            original_name=None
         )
         popup = SessionDetailPopup(details, s)
         qtbot.addWidget(popup)
@@ -1684,7 +1684,7 @@ class TestAddProviderDialog:
         dlg = _AddProviderDialog(
             configurable=[("zhipu", self._zhipu_cfg()),
                           ("minimax", self._minimax_cfg())],
-            on_save=lambda *a: None,
+            on_save=lambda *a: None
         )
         qtbot.addWidget(dlg)
         # Radio strip has one button per configurable provider.
@@ -1697,7 +1697,7 @@ class TestAddProviderDialog:
         from PySide6.QtWidgets import QLineEdit
         dlg = _AddProviderDialog(
             configurable=[("zhipu", self._zhipu_cfg())],
-            on_save=lambda *a: None,
+            on_save=lambda *a: None
         )
         qtbot.addWidget(dlg)
         # auth_token + base_url QLineEdits both registered for the active form.
@@ -1716,7 +1716,7 @@ class TestAddProviderDialog:
         called: list = []
         dlg = _AddProviderDialog(
             configurable=[("zhipu", self._zhipu_cfg())],
-            on_save=lambda *a: called.append(a),
+            on_save=lambda *a: called.append(a)
         )
         qtbot.addWidget(dlg)
         # auth_token starts empty; click Save without typing.
@@ -1733,7 +1733,7 @@ class TestAddProviderDialog:
         captured: list[tuple[str, dict]] = []
         dlg = _AddProviderDialog(
             configurable=[("zhipu", self._zhipu_cfg())],
-            on_save=lambda n, f: captured.append((n, f)),
+            on_save=lambda n, f: captured.append((n, f))
         )
         qtbot.addWidget(dlg)
         # Fill the form: paste a token, change base_url.
@@ -1749,7 +1749,7 @@ class TestAddProviderDialog:
         dlg = _AddProviderDialog(
             configurable=[("zhipu", self._zhipu_cfg()),
                           ("minimax", self._minimax_cfg())],
-            on_save=lambda *a: None,
+            on_save=lambda *a: None
         )
         qtbot.addWidget(dlg)
         # Default-selected is the first provider in the list.
@@ -1767,7 +1767,7 @@ class TestAddProviderDialog:
         from PySide6.QtWidgets import QLabel
         dlg = _AddProviderDialog(
             configurable=[],
-            on_save=lambda *a: None,
+            on_save=lambda *a: None
         )
         qtbot.addWidget(dlg)
         # No radio buttons, no inputs, no save button.
@@ -1788,7 +1788,7 @@ class TestAddProviderDialog:
 
         dlg = _AddProviderDialog(
             configurable=[("zhipu", self._zhipu_cfg())],
-            on_save=boom,
+            on_save=boom
         )
         qtbot.addWidget(dlg)
         dict(dlg._inputs["zhipu"])["auth_token"].setText("k")
@@ -1811,7 +1811,7 @@ def _panel_with_providers(qtbot, available: list[str], selected: str | None = No
         get_usage_totals=lambda period: UsageTotals(period=period),
         available_providers=available,
         selected_provider=selected or (available[0] if available else None),
-        on_provider_config_changed=on_provider_config_changed,
+        on_provider_config_changed=on_provider_config_changed
     )
     qtbot.addWidget(panel)
     qtbot.addWidget(capsule)
@@ -1860,7 +1860,7 @@ class TestPlusButtonVisibility:
         called: list = []
         panel = _panel_with_providers(
             qtbot, ["anthropic"],
-            on_provider_config_changed=lambda: called.append(1),
+            on_provider_config_changed=lambda: called.append(1)
         )
         # The + button is held on the panel as _add_provider_btn.
         assert panel._add_provider_btn is not None
@@ -1876,7 +1876,7 @@ class TestPlusButtonVisibility:
         # All three providers in available → nothing left to add → no +.
         panel = _panel_with_providers(
             qtbot, ["anthropic", "minimax", "zhipu"], "anthropic",
-            on_provider_config_changed=lambda: None,
+            on_provider_config_changed=lambda: None
         )
         assert getattr(panel, "_add_provider_btn", None) is None
 
@@ -1892,12 +1892,12 @@ class TestPlusButtonVisibility:
         refreshes: list = []
         monkeypatch.setattr(
             "claude_island.platform_.providers.set_provider_settings",
-            lambda name, fields: writes.append((name, fields)),
+            lambda name, fields: writes.append((name, fields))
         )
 
         panel = _panel_with_providers(
             qtbot, ["anthropic"],
-            on_provider_config_changed=lambda: refreshes.append(1),
+            on_provider_config_changed=lambda: refreshes.append(1)
         )
         # Drive the save handler directly with realistic args.
         panel._on_dialog_save("zhipu", {"auth_token": "k", "base_url": "https://api.z.ai"})
@@ -1915,7 +1915,7 @@ class TestProviderTabContextMenu:
         must not install a delete affordance on its pill."""
         panel = _panel_with_providers(
             qtbot, ["anthropic", "minimax"], "anthropic",
-            on_provider_config_changed=lambda: None,
+            on_provider_config_changed=lambda: None
         )
         anth_btn = panel._provider_btns["anthropic"]
         assert anth_btn.contextMenuPolicy() != Qt.ContextMenuPolicy.CustomContextMenu
@@ -1925,7 +1925,7 @@ class TestProviderTabContextMenu:
         Delete action can be wired."""
         panel = _panel_with_providers(
             qtbot, ["anthropic", "minimax"], "anthropic",
-            on_provider_config_changed=lambda: None,
+            on_provider_config_changed=lambda: None
         )
         mm_btn = panel._provider_btns["minimax"]
         assert mm_btn.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
@@ -1946,11 +1946,11 @@ class TestProviderTabContextMenu:
         refreshes: list = []
         monkeypatch.setattr(
             "claude_island.platform_.providers.delete_provider_settings",
-            lambda name: deletes.append(name),
+            lambda name: deletes.append(name)
         )
         panel = _panel_with_providers(
             qtbot, ["anthropic", "minimax"], "anthropic",
-            on_provider_config_changed=lambda: refreshes.append(1),
+            on_provider_config_changed=lambda: refreshes.append(1)
         )
         panel._on_delete_provider_clicked("minimax")
         assert deletes == ["minimax"]
@@ -2003,7 +2003,7 @@ class TestRowStatusLine:
                 session=session, name="x", ai_title=None, git_branch=None,
                 last_prompt=None, started_at=None, status=None,
                 cc_version=None, cost_usd=0.0, turn_count=0,
-                sidechain_count=0, per_model=(),
+                sidechain_count=0, per_model=()
             )
 
         capsule = QWidget()
@@ -2013,7 +2013,7 @@ class TestRowStatusLine:
             capsule=capsule,
             controller=controller,
             get_usage_totals=lambda period: UsageTotals(period=period),
-            get_session_details=details,
+            get_session_details=details
         )
         qtbot.addWidget(p)
         qtbot.addWidget(capsule)
@@ -2029,7 +2029,7 @@ class TestRowStatusLine:
         the canonical Anthropic mid-tier mapping."""
         from PySide6.QtWidgets import QLabel
         from claude_island.core.models import (
-            ModelTotals, SessionDetails,
+            ModelTotals, SessionDetails
         )
 
         def details(session):
@@ -2043,9 +2043,9 @@ class TestRowStatusLine:
                         model="claude-sonnet-4-6",
                         input_tokens=1, output_tokens=1,
                         cache_creation_tokens=0, cache_read_tokens=0,
-                        cost_usd=8.0,
-                    ),
-                ),
+                        cost_usd=8.0
+                    )
+                )
             )
 
         capsule = QWidget()
@@ -2055,7 +2055,7 @@ class TestRowStatusLine:
             capsule=capsule,
             controller=controller,
             get_usage_totals=lambda period: UsageTotals(period=period),
-            get_session_details=details,
+            get_session_details=details
         )
         qtbot.addWidget(p)
         qtbot.addWidget(capsule)
@@ -2079,7 +2079,7 @@ class TestRowStatusLine:
                 session=session, name="x", ai_title=None, git_branch=None,
                 last_prompt=None, started_at=None, status="busy",
                 cc_version=None, cost_usd=0.0, turn_count=0,
-                sidechain_count=0,
+                sidechain_count=0
             )
 
         capsule = QWidget()
@@ -2089,7 +2089,7 @@ class TestRowStatusLine:
             capsule=capsule,
             controller=controller,
             get_usage_totals=lambda period: UsageTotals(period=period),
-            get_session_details=details,
+            get_session_details=details
         )
         qtbot.addWidget(p)
         qtbot.addWidget(capsule)
@@ -2139,7 +2139,7 @@ class TestModelHelpers:
 
     def test_color_known_families(self):
         from claude_island.ui.expanded_window import (
-            _resolve_model_color, _MODEL_COLOR_FALLBACK,
+            _resolve_model_color, _MODEL_COLOR_FALLBACK
         )
         assert _resolve_model_color("claude-opus-4-7") == "#8B5CF6"
         assert _resolve_model_color("deepseek-v4-flash") == "#FB923C"
@@ -2191,7 +2191,7 @@ def _quota_snap(pct: float):
         seven_day_pct=10.0,
         seven_day_resets_at=now + timedelta(days=2),
         fetched_at=now,
-        is_stale=False,
+        is_stale=False
     )
 
 
@@ -2211,8 +2211,8 @@ class TestSummaryCard:
             controller=controller,
             get_usage_totals=lambda period: UsageTotals(
                 period=period,
-                input_cost=80.0, output_cost=6.42,
-            ),
+                input_cost=80.0, output_cost=6.42
+            )
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         p._refresh_summary_card()
@@ -2228,7 +2228,7 @@ class TestSummaryCard:
             capsule=capsule,
             controller=controller,
             get_usage_totals=lambda period: UsageTotals(period=period),
-            get_quota_snapshot=lambda: None,
+            get_quota_snapshot=lambda: None
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         p._refresh_summary_card()
@@ -2247,7 +2247,7 @@ class TestSummaryCard:
             capsule=capsule,
             controller=controller,
             get_usage_totals=lambda period: UsageTotals(period=period),
-            get_quota_snapshot=lambda: _quota_snap(78.0),
+            get_quota_snapshot=lambda: _quota_snap(78.0)
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         p._refresh_summary_card()
@@ -2280,7 +2280,7 @@ class TestHighCostRowAlert:
                 session=session, name="x", ai_title=None, git_branch=None,
                 last_prompt=None, started_at=None, status=None,
                 cc_version=None, cost_usd=132.0,  # well above $50
-                turn_count=10, sidechain_count=0,
+                turn_count=10, sidechain_count=0
             )
 
         capsule = QWidget(); capsule.show()
@@ -2290,7 +2290,7 @@ class TestHighCostRowAlert:
             get_usage_totals=lambda period: __import__(
                 "claude_island.core.models", fromlist=["UsageTotals"]
             ).UsageTotals(period=period),
-            get_session_details=details,
+            get_session_details=details
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         p._render_sessions([_session(1, "/a", ago_minutes=10)])
@@ -2319,7 +2319,7 @@ class TestHighCostRowAlert:
                 session=session, name="x", ai_title=None, git_branch=None,
                 last_prompt=None, started_at=None, status="busy",
                 cc_version=None, cost_usd=132.0,
-                turn_count=10, sidechain_count=0,
+                turn_count=10, sidechain_count=0
             )
 
         capsule = QWidget(); capsule.show()
@@ -2329,7 +2329,7 @@ class TestHighCostRowAlert:
             get_usage_totals=lambda period: __import__(
                 "claude_island.core.models", fromlist=["UsageTotals"]
             ).UsageTotals(period=period),
-            get_session_details=details,
+            get_session_details=details
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         p._render_sessions([_session(1, "/a", ago_minutes=10)])
@@ -2355,7 +2355,7 @@ class TestHighCostRowAlert:
                 session=session, name="x", ai_title=None, git_branch=None,
                 last_prompt=None, started_at=None, status=None,
                 cc_version=None, cost_usd=4.50,
-                turn_count=2, sidechain_count=0,
+                turn_count=2, sidechain_count=0
             )
 
         capsule = QWidget(); capsule.show()
@@ -2365,7 +2365,7 @@ class TestHighCostRowAlert:
             get_usage_totals=lambda period: __import__(
                 "claude_island.core.models", fromlist=["UsageTotals"]
             ).UsageTotals(period=period),
-            get_session_details=details,
+            get_session_details=details
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         p._render_sessions([_session(1, "/a", ago_minutes=10)])
@@ -2385,7 +2385,7 @@ class TestHighCostRowAlert:
                 session=session, name="x", ai_title=None, git_branch=None,
                 last_prompt=None, started_at=None, status=None,
                 cc_version=None, cost_usd=4.50,
-                turn_count=2, sidechain_count=0,
+                turn_count=2, sidechain_count=0
             )
 
         capsule = QWidget(); capsule.show()
@@ -2395,7 +2395,7 @@ class TestHighCostRowAlert:
             get_usage_totals=lambda period: __import__(
                 "claude_island.core.models", fromlist=["UsageTotals"]
             ).UsageTotals(period=period),
-            get_session_details=details,
+            get_session_details=details
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         # ago_minutes=10 keeps the session out of the "currently

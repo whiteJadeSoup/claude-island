@@ -42,6 +42,7 @@ from claude_island.core.models import (
     resolve_model_color,
     resolve_model_short_name,
 )
+from claude_island.core.capabilities import Capability
 from claude_island.core.snapshot import SessionView, WorldSnapshot
 from .controller import IslandController
 
@@ -821,11 +822,11 @@ def _row_status_text(
     row's left-edge pulse animation + the dot's pulse, so the literal
     word "running" / "idle" was redundant chrome and got dropped.
 
-    Returns "—" when session.last_activity isn't usable (e.g. None or
+    Returns "—" when view.last_activity isn't usable (e.g. None or
     a stub Session in tests). Used to be a 2-arg helper that took
     SessionDetails to derive the status word; the signature simplified
     once the word itself stopped being part of the output."""
-    return _fmt_started(session.last_activity)
+    return _fmt_started(view.last_activity)
 _STYLE_PERIOD_BTN = """
     QPushButton {
         color: #666;
@@ -1408,83 +1409,8 @@ def _fmt_money(amount: float) -> str:
     return f"${amount / 1000:.1f}K"
 
 
-# --------------------------------------------------------------------------
-# Same-tab grouping (PR2)
-# --------------------------------------------------------------------------
-#
-# Two sessions are visually merged into one rounded card when their
-# (window_handle, project_path) pair matches. window_handle is the WT
-# main HWND populated by ProcessScanner; project_path is the cwd of the
-# claude.exe at scan time. The pair stands in for "same WT tab" because
-# WT's UIA tree doesn't expose pid→tab for inactive panes — and panes in
-# one tab almost always share both wt_hwnd and cwd.
-#
-# Sessions whose window_handle is None (couldn't resolve to a WT host —
-# pythonw, sandboxed shells, non-Windows) are always rendered standalone
-# so they don't accidentally collapse together.
 
-# _normalize_project_path / _session_sort_key now live in
-# core/snapshot.py — UI panel and capsule must agree on the sort
-# order, so the rule lives once at the snapshot boundary. Both helpers
-# below are thin Session-level adapters that call into the
-# SessionView-level canonical version by constructing a stub view.
-
-from claude_island.core.snapshot import (
-    _normalize_project_path as _snapshot_normalize,
-    _session_sort_key as _snapshot_sort_key,
-)
-
-
-def _normalize_project_path(path) -> str:
-    """Adapter — delegates to the canonical core/snapshot helper."""
-    return _snapshot_normalize(path)
-
-
-def _group_key(s: Session) -> tuple[int, str] | None:
-    """``None`` when the session has no window_handle and so cannot
-    join a group; otherwise (window_handle, normalised cwd)."""
-    if s.window_handle is None:
-        return None
-    return (s.window_handle, _snapshot_normalize(s.project_path))
-
-
-def _session_sort_key(s: Session) -> tuple:
-    """Sort key for the panel's session list. Identical to
-    ``snapshot._session_sort_key`` but takes a Session (not
-    SessionView) — used by ``_render_sessions`` whose input is the
-    Session list extracted from snap.sessions. The two functions
-    intentionally produce the same order so capsule (consumes
-    snap.sessions in snap order) and panel rows agree visually.
-    """
-    if s.window_handle is None:
-        return (1, 0, "", s.pid)
-    return (0, s.window_handle, _snapshot_normalize(s.project_path), s.pid)
-
-
-def _consecutive_groups(sessions: list[Session]) -> list[list[Session]]:
-    """Collapse consecutive same-key sessions into a sublist; ungroupable
-    (None-key) sessions form singleton sublists each."""
-    out: list[list[Session]] = []
-    cur: list[Session] = []
-    cur_key: object = object()  # sentinel that no real key matches
-    for s in sessions:
-        key = _group_key(s)
-        if key is None:
-            if cur:
-                out.append(cur)
-                cur = []
-            out.append([s])
-            cur_key = object()
-        elif key == cur_key:
-            cur.append(s)
-        else:
-            if cur:
-                out.append(cur)
-            cur = [s]
-            cur_key = key
-    if cur:
-        out.append(cur)
-    return out
+from claude_island.core.snapshot import SessionGroup
 
 
 class SessionDetailPopup(QFrame):
@@ -2744,14 +2670,14 @@ class ExpandedWindow(QWidget):
     Shows the session list (clicking activates the terminal) and a usage
     summary with a period selector (Daily / Weekly / Monthly).
 
-    ``session_activated`` is connected in __main__.py to WindowActivator.activate
-    so the UI layer never imports platform code directly.
+    ``action_requested`` is connected in __main__.py to the dispatcher, which
+    routes by scope (TERMINAL → adapter, OS → os_backend, APP → app_backend).
+    The UI layer never imports platform code directly.
     """
 
-    # Args: clicked Session, siblings (list[Session] of other group members,
-    # may be empty). Siblings let the activator try sibling console titles
-    # as fallback when the clicked row is an inactive split pane.
-    session_activated: Signal = Signal(Session, list)
+    # Args: view (SessionView), capability (Capability), kwargs (dict).
+    # kwargs carries action-specific data (e.g. new_name for RENAME).
+    action_requested: Signal = Signal(object, object, dict)
 
     def __init__(
         self,
@@ -2998,62 +2924,38 @@ class ExpandedWindow(QWidget):
     def render(self, snap: WorldSnapshot) -> None:
         """Render the panel from a single ``WorldSnapshot``.
 
-        Pure "draw what's in the snap":
-          - sessions list: rebuild from snap.sessions
-          - summary / SPEND / QUOTA cards: refresh (these still read
-            from the injected getters / registries — those data
-            sources are the single source of truth for token / quota
-            data, and the snap is for sessions; both stay in sync
-            because the same Snapshotter tick both pushes a snap and
-            updates the registries the cards read from)
-        """
+        Sessions are consumed from ``snap.session_groups`` — the adapter
+        chain has already grouped them. UI just renders one card per
+        group, one row per view."""
         self._latest_snap = snap
-        sessions = [v.session for v in snap.sessions]
-        self._render_sessions(sessions)
+        self._render_session_groups(snap.session_groups)
         self._render_cards()
 
     # ------------------------------------------------------------------
     # Internal render helpers (called by render(snap))
     # ------------------------------------------------------------------
 
-    def _render_sessions(self, sessions: list[Session]) -> None:
-        """Render sessions as a list of cards.
+    def _render_session_groups(
+        self, groups: tuple["SessionGroup", ...]
+    ) -> None:
+        """Render pre-grouped sessions from the adapter chain.
 
-        Sessions sharing the same ``(window_handle, project_path)`` key
-        are merged into one rounded card with thin internal separators —
-        the iOS-Settings-style group. A session whose ``window_handle``
-        is None (couldn't resolve to a WT host) is rendered as its own
-        standalone rounded button. Single-session groups also render as
-        standalone buttons (visually identical to the flat-list mode).
-
-        Why ``(window_handle, project_path)`` rather than tab id: WT's
-        UIA tree only exposes the *active* pane's title in
-        TabItem.Name, so we cannot directly determine which tab an
-        inactive split-pane belongs to. The wt_hwnd + cwd pair is a
-        practical proxy: split panes inside one tab almost always
-        share both. The known false-positive — same project opened in
-        two separate tabs of the same WT window — is rare in practice.
+        Each ``SessionGroup`` becomes one card; each ``SessionView`` in
+        the group becomes a row inside that card. Grouping decisions
+        live entirely in the adapter — UI just presents them.
 
         Row widgets are cached by pid to preserve hover/pressed state
-        across the 10s scan tick. Cards are rebuilt every refresh
-        (cheap; just QFrame + QVBoxLayout).
-        """
-        # Cache the latest list so user-triggered refreshes (e.g. after
-        # a session rename) can re-render without waiting for the next
-        # scan tick. The registry's emit is the only other path that
-        # touches this list, and it always passes a complete snapshot,
-        # so caching here is safe.
-        self._latest_sessions = list(sessions)
+        across ticks. Cards are rebuilt every refresh."""
+        total_views = sum(len(g.views) for g in groups)
+        self._latest_sessions = list(range(total_views))  # sentinel
 
         self._clear_session_layout()
-        # Count badge in the header — makes overflow discoverable when
-        # the list scrolls past the visible window.
-        if sessions:
-            self._sessions_title.setText(f"CLAUDE SESSIONS · {len(sessions)}")
+        if total_views:
+            self._sessions_title.setText(f"CLAUDE SESSIONS · {total_views}")
         else:
             self._sessions_title.setText("CLAUDE SESSIONS")
 
-        if not sessions:
+        if not groups:
             self._show_placeholder()
             self._gc_rows(set())
             self.adjustSize()
@@ -3062,24 +2964,17 @@ class ExpandedWindow(QWidget):
 
         self._hide_placeholder()
 
-        sorted_sessions = sorted(sessions, key=_session_sort_key)
-        groups = _consecutive_groups(sorted_sessions)
-
         needed_pids: set[int] = set()
-        # Multi-card groups are coloured by their position in the visible
-        # list (not by hashing the group key). Walking with a counter
-        # guarantees adjacent multi-cards never share a tint. Singletons
-        # don't consume a palette slot.
         multi_idx = 0
         for group in groups:
-            palette_idx = multi_idx if len(group) > 1 else None
+            palette_idx = multi_idx if len(group.views) > 1 else None
             self._session_box.addWidget(
                 self._make_group_widget(group, palette_idx=palette_idx)
             )
             if palette_idx is not None:
                 multi_idx += 1
-            for s in group:
-                needed_pids.add(s.pid)
+            for v in group.views:
+                needed_pids.add(v.pid)
 
         self._gc_rows(needed_pids)
 
@@ -4025,14 +3920,9 @@ class ExpandedWindow(QWidget):
 
     def _on_state_changed(self, state: str) -> None:
         if state == "expanded":
-            # Render from the latest snapshot if we have one (normal
-            # boot path: snap arrived before the user expanded). Fall
-            # back to controller.sessions if not — covers tests that
-            # construct an ExpandedWindow without the snap pipeline.
             if self._latest_snap is not None:
                 self.render(self._latest_snap)
             else:
-                self._render_sessions(self._controller.sessions)
                 self._render_cards()
             self._position()
             self.show()
@@ -4353,7 +4243,7 @@ class ExpandedWindow(QWidget):
     # Session row factory
     # ------------------------------------------------------------------
 
-    def _make_row(self, session: Session, parent_card: QFrame | None = None) -> HoverRow:
+    def _make_row(self, view: SessionView, parent_card: QFrame | None = None) -> HoverRow:
         """Build a click-target row with a two-line layout:
 
         ::
@@ -4374,7 +4264,7 @@ class ExpandedWindow(QWidget):
         btn = HoverRow(base_bg=_BG_SINGLE, parent_card=parent_card)
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         btn.setFixedHeight(_ROW_HEIGHT)
-        btn.setProperty("_session", session)
+        btn.setProperty("_session", view)
         btn.setProperty("_siblings", [])
 
         outer = QVBoxLayout(btn)
@@ -4437,7 +4327,7 @@ class ExpandedWindow(QWidget):
 
         outer.addLayout(bottom)
 
-        self._update_row(btn, session)
+        self._update_row(btn, view)
         btn.clicked.connect(lambda: self._on_row_clicked(
             btn.property("_session"),
             btn.property("_siblings") or [],
@@ -4451,7 +4341,7 @@ class ExpandedWindow(QWidget):
         )
         return btn
 
-    def _update_row(self, btn: QPushButton, session: Session) -> None:
+    def _update_row(self, btn: QPushButton, view: SessionView) -> None:
         """Refresh dot / name / cost / model chip / status on every tick.
 
         Each label is updated only when its computed value differs from
@@ -4461,7 +4351,7 @@ class ExpandedWindow(QWidget):
         details: SessionDetails | None = None
         if self._get_session_details is not None:
             try:
-                details = self._get_session_details(session)
+                details = self._get_session_details(view.session)
             except Exception as exc:
                 # Detail composition is enrichment, not load-bearing —
                 # never let a composer hiccup take down the row update.
@@ -4471,8 +4361,8 @@ class ExpandedWindow(QWidget):
         title = (
             (details.name if details and details.name else None)
             or (details.ai_title if details and details.ai_title else None)
-            or session.project_path.name
-            or str(session.project_path)
+            or view.project_path.name
+            or str(view.project_path)
         )
         # "—" when details are unavailable rather than falling back to
         # an age string — keeps the meta slot semantically consistent
@@ -4508,7 +4398,7 @@ class ExpandedWindow(QWidget):
             try:
                 seconds_since = (
                     datetime.now(timezone.utc)
-                    - session.last_activity.astimezone(timezone.utc)
+                    - view.last_activity.astimezone(timezone.utc)
                 ).total_seconds()
             except (TypeError, ValueError):
                 seconds_since = 1e9
@@ -4528,7 +4418,7 @@ class ExpandedWindow(QWidget):
             else:
                 glyph.set_state(
                     _RowStatusGlyph.STATE_IDLE,
-                    dot_color=_activity_color(session.last_activity),
+                    dot_color=_activity_color(view.last_activity),
                 )
                 glyph.setToolTip("")
 
@@ -4610,47 +4500,36 @@ class ExpandedWindow(QWidget):
         # don't blanket-clear it here or the warning gets wiped on
         # every refresh tick.
 
-        btn.setProperty("_session", session)
+        btn.setProperty("_session", view)
 
     # ------------------------------------------------------------------
     # Card composition (PR2: same-tab grouping)
     # ------------------------------------------------------------------
 
     def _make_group_widget(
-        self, group: list[Session], *, palette_idx: int | None = None
+        self, group: "SessionGroup", *, palette_idx: int | None = None
     ) -> QWidget:
-        """One group → one widget. Single-session groups render as a
-        standalone rounded button; multi-session groups render as a
+        """One group → one widget. Single-view groups render as a
+        standalone rounded button; multi-view groups render as a
         rounded card with flat internal rows + thin separators.
 
         ``palette_idx`` is supplied by the caller (it counts multi-card
         position) so adjacent multi-cards never collide on tint.
         Singletons ignore it."""
-        if len(group) == 1:
-            row = self._get_or_create_row(group[0], group, in_card=False, card=None)
-            row.setParent(None)  # detach from any prior parent
+        views = list(group.views)
+        if len(views) == 1:
+            row = self._get_or_create_row(views[0], group, in_card=False, card=None)
+            row.setParent(None)
             return row
-        return self._make_multi_card(group, palette_idx=palette_idx or 0)
+        return self._make_multi_card(views, palette_idx=palette_idx or 0, title_hint=group.title_hint)
 
-    def _make_multi_card(self, sessions: list[Session], *, palette_idx: int = 0) -> QFrame:
-        """Render a same-project session group as a flat list bracketed
-        by a 1 px rounded outline (ghost-card pattern). The outline
-        replaces the earlier coloured group bg + later left vertical
-        line — a single subtle box around the group is the most
-        unambiguous visual signal of "these rows are one group" while
-        staying at the "metadata frame" tier of visual hierarchy.
-
-        ``palette_idx`` kept in the signature for backwards compat
-        with callers but no longer used — group identity is conveyed
-        by the outline shape, not by colour.
-        """
+    def _make_multi_card(self, views: list["SessionView"], *, palette_idx: int = 0,
+                         title_hint: str | None = None) -> QFrame:
+        """Render a session group as a flat list bracketed by a 1 px
+        rounded outline (ghost-card pattern)."""
         del palette_idx  # unused; outline colour is uniform now
         card = QFrame()
         card.setObjectName("group_card")
-        # Transparent fill + 1 px rounded outline. _base_bg is a real
-        # hex (not "transparent") because HoverRow's hover-accent calc
-        # feeds it through _lighten_bg(), which expects #RRGGBB. The
-        # visual is still transparent — the maths just needs a colour.
         card._base_bg = _BG_GROUP
         card.setStyleSheet(
             "QFrame#group_card {"
@@ -4660,51 +4539,32 @@ class ExpandedWindow(QWidget):
             f" padding: {_GROUP_OUTLINE_PAD_PX}px;"
             "}"
         )
-        # Card bg never changes on hover (left-accent-bar pattern), so
-        # WA_Hover stays at the default — no OS overlay to suppress.
         layout = QVBoxLayout(card)
         layout.setContentsMargins(0, 0, 0, 0)
-        # Tighter internal spacing so same-group rows feel like one
-        # chunk; the gap between groups is the bigger _GROUP_GAP and
-        # carries the divider.
         layout.setSpacing(2)
-        for session in sessions:
-            row = self._get_or_create_row(session, sessions, in_card=True, card=card)
+        for view in views:
+            row = self._get_or_create_row(view, views, in_card=True, card=card)
             row.setParent(None)
             layout.addWidget(row)
         return card
 
     def _get_or_create_row(
         self,
-        session: Session,
-        group: list[Session],
+        view: "SessionView",
+        group: list["SessionView"],
         *,
         in_card: bool,
         card: QFrame | None,
     ) -> HoverRow:
-        """Cached factory: same pid keeps the same HoverRow across
-        refreshes (preserves hover state). Style is reapplied each call
-        because a row can move between standalone (rounded) and in-card
-        (flat) layouts as group membership changes.
-
-        ``group`` is the full list of sessions in this row's group
-        (including the row itself). Stored on the button so the click
-        handler can pass siblings to the activator — needed for the
-        inactive-pane case where the row's own console title doesn't
-        appear in any TabItem.Name and we have to fall back to one of
-        the siblings' titles to actually switch the WT tab.
-        """
-        btn = self._rows.get(session.pid)
+        btn = self._rows.get(view.pid)
         if btn is None:
-            btn = self._make_row(session, parent_card=card)
-            self._rows[session.pid] = btn
+            btn = self._make_row(view, parent_card=card)
+            self._rows[view.pid] = btn
         else:
-            # Row may have moved between standalone ↔ group — rebind so
-            # the accent bar picks up the new card's group colour.
             btn.set_parent_card(card)
         btn.setStyleSheet(_STYLE_GROUP_ROW if in_card else _STYLE_SINGLE_ROW)
-        self._update_row(btn, session)
-        siblings = [s for s in group if s.pid != session.pid]
+        self._update_row(btn, view)
+        siblings = [s for s in group if s.pid != view.pid]
         btn.setProperty("_siblings", siblings)
         return btn
 
@@ -4779,19 +4639,19 @@ class ExpandedWindow(QWidget):
         composer are logged and the popup still opens with whatever
         partial data is available — falling back to None when the
         composer is unwired or the lookup raises."""
-        session = btn.property("_session")
-        if session is None:
+        view: SessionView = btn.property("_session")
+        if view is None:
             return
         details: SessionDetails | None = None
         if self._get_session_details is not None:
             try:
-                details = self._get_session_details(session)
+                details = self._get_session_details(view.session)
             except Exception as exc:
                 import sys as _sys
                 print(f"[claude-island] detail popup composer failed: {exc}",
                       file=_sys.stderr)
         popup = SessionDetailPopup(
-            details, session, parent=self,
+            details, view.session, parent=self,
             on_rename=self._on_session_renamed,
         )
         # Map the row-local right-click position to global screen
@@ -4805,12 +4665,12 @@ class ExpandedWindow(QWidget):
         # instance when the new one shows.
         self._active_detail_popup = popup
 
-    def _on_row_clicked(self, session: Session, siblings: list[Session]) -> None:
+    def _on_row_clicked(self, view: "SessionView", siblings: list["SessionView"]) -> None:
         # Activate first, then collapse — order matters: while our panel is
         # still on top (StaysOnTopHint) we are the foreground process, which
         # is the only state in which SetForegroundWindow is allowed to
         # surface another process's window.
-        self.session_activated.emit(session, siblings)
+        self.action_requested.emit(view, Capability.FOCUS, {})
         self._controller.toggle_expanded()
 
     def resizeEvent(self, event: object) -> None:  # type: ignore[override]

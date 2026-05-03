@@ -103,7 +103,6 @@ class ProcessScanner:
             pid=info["pid"],
             project_path=project_path,
             session_uuid="",    # resolved later by JsonlParser activity events
-            window_handle=None, # resolved by WindowActivator on demand
             last_activity=create_time,
         )
 
@@ -150,13 +149,7 @@ def _filter_orphans(sessions: list[Session]) -> list[Session]:
         if info is None:
             # AttachConsole failed → no console attached → orphan.
             continue
-        conpty_hwnd, _title = info
-
-        wt_hwnd: int | None = None
-        if win32gui is not None and conpty_hwnd:
-            wt_hwnd = window_activator.walk_to_visible_host(conpty_hwnd, win32gui)
-
-        kept.append(replace(s, window_handle=wt_hwnd))
+        kept.append(s)
 
     if not kept:
         return sessions  # tripwire: don't wipe everything silently

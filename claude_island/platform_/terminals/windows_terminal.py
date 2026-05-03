@@ -21,7 +21,7 @@ from typing import ClassVar
 
 from claude_island.core.capabilities import Capability, FocusGranularity, _CapabilityProvider, capability
 from claude_island.core.models import Session, project_hash
-from claude_island.core.snapshot import SessionGroup, SessionView, compose_session_view, _degraded_view, _normalize_project_path
+from claude_island.core.snapshot import SessionGroup, SessionView, compose_session_view, _degraded_view
 from claude_island.platform_.terminals import adapter
 from claude_island.platform_.terminals.protocols import TerminalAdapter
 
@@ -97,7 +97,7 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                     conpty_hwnd, win32gui,
                 )
             from dataclasses import replace
-            labelled.append(replace(s, window_handle=wt_hwnd))
+            labelled.append(replace(s))
 
         # Tripwire: empty after filter → return originals unchanged.
         if not labelled:

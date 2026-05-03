@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from claude_island.core.capabilities import (
     CAPABILITY_SCOPE, Capability, FocusGranularity, Scope,
-    _CapabilityProvider, capability,
+    _CapabilityProvider, capability
 )
 from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView, compose_session_view, _degraded_view
@@ -26,14 +26,14 @@ from claude_island.platform_.terminals.protocols import TerminalAdapter
 @pytest.fixture
 def view_a() -> SessionView:
     s = Session(pid=10, project_path=Path("/tmp/a"), session_uuid="u-a",
-                window_handle=None, last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
+                last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
     return _degraded_view(s)
 
 
 @pytest.fixture
 def view_b() -> SessionView:
     s = Session(pid=20, project_path=Path("/tmp/b"), session_uuid="u-b",
-                window_handle=None, last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
+                last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
     return _degraded_view(s)
 
 
@@ -87,7 +87,7 @@ class FakeTerminalAdapter(_CapabilityProvider):
             group_id="test-group",
             title_hint="test group",
             adapter_id=self.name,
-            views=tuple(views),
+            views=tuple(views)
         )]
 
     @capability(Capability.FOCUS)
@@ -111,8 +111,7 @@ class TestGroupSessions:
 
     def test_default_empty_registry_returns_empty(self):
         d = TerminalDispatcher(terminals={}, os_backend=StubOs(), app_backend=StubApp())
-        s = Session(pid=1, project_path="/x", session_uuid="", window_handle=None,
-                    last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
+        s = Session(pid=1, project_path="/x", session_uuid="", last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
         groups = d.group_sessions([s])
         # No registered terminal adapter — sessions fall through.
         assert groups == []
