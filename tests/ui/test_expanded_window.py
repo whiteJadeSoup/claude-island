@@ -27,14 +27,15 @@ from claude_island.ui.expanded_window import ExpandedWindow
 
 def _session(
     pid: int, cwd: str, ago_minutes: int = 0,
-    window_handle: int | None = None
+    window_handle: int | None = None,  # accepted but ignored — was the WT HWND;
+                                       # adapter-internal now (PR2)
 ) -> Session:
+    del window_handle  # signature kept for back-compat with old grouping tests
     return Session(
         pid=pid,
         project_path=Path(cwd),
         session_uuid="",
-        window_handle=window_handle,
-        last_activity=datetime.now(timezone.utc) - timedelta(minutes=ago_minutes)
+        last_activity=datetime.now(timezone.utc) - timedelta(minutes=ago_minutes),
     )
 
 
@@ -136,188 +137,58 @@ def test_placeholder_disappears_when_sessions_arrive(panel):
     assert set(panel._rows.keys()) == {1}
 
 
-def test_session_click_emits_latest_session_snapshot(panel, qtbot):
+def test_session_click_emits_latest_view_snapshot(panel, qtbot):
     """Property carrier (_session) on the button must be refreshed on each
-    update so a click after activity changed emits the new last_activity."""
+    update so a click after activity changed emits the new last_activity.
+    PR2: signal is now action_requested(view, capability, kwargs)."""
+    from claude_island.core.capabilities import Capability
     panel._render_sessions([_session(1, "/a", ago_minutes=10)])
     btn = panel._rows[1]
     fresh = _session(1, "/a", ago_minutes=0)
     panel._render_sessions([fresh])
 
     received: list = []
-    panel.session_activated.connect(lambda s, sibs: received.append((s, sibs)))
+    panel.action_requested.connect(
+        lambda v, cap, kw: received.append((v, cap, kw))
+    )
     btn.click()
 
     assert len(received) == 1
-    session, siblings = received[0]
-    assert session.last_activity == fresh.last_activity
-    assert siblings == []  # singleton group → no siblings
+    view, cap, kwargs = received[0]
+    assert cap == Capability.FOCUS
+    assert kwargs == {}
+    assert view.last_activity == fresh.last_activity
 
 
 # --------------------------------------------------------------------------
-# Same-tab grouping (PR2)
+# Same-tab grouping
+# --------------------------------------------------------------------------
+# Grouping logic moved out of the UI layer in PR2: WindowsTerminalAdapter
+# (claude_island/platform_/terminals/windows_terminal.py) is now responsible
+# for bucketing sessions by wt_hwnd / cwd, and it returns SessionGroup
+# objects to the UI. The UI just renders one card per group.
+#
+# Coverage moved to:
+# - tests/platform_/test_dispatcher.py — adapter chain + capability merging
+# - The grouping rules themselves (wt_hwnd, normalisation, worktree collapse)
+#   are tested at the adapter level once mac/win adapters get richer
+#   integration tests.
 # --------------------------------------------------------------------------
 
 def _top_level_widgets(panel) -> list:
-    """Return the widgets actually placed at the session_box top level
-    (cards or standalone buttons), in layout order."""
+    """Return widgets at the session_box top level (cards or standalone
+    buttons), in layout order. Kept because non-grouping tests below
+    still use it."""
     box = panel._session_box
     return [box.itemAt(i).widget() for i in range(box.count())]
 
 
-def test_two_sessions_same_window_handle_and_path_share_one_card(panel):
-    """G-UI-1: split-pane proxy. Two sessions with the same wt_hwnd and
-    cwd are merged into a single rounded card containing both rows."""
-    from PySide6.QtWidgets import QFrame, QPushButton
-
-    panel._render_sessions([
-        _session(1, "/proj", window_handle=0xAAAA),
-        _session(2, "/proj", window_handle=0xAAAA),
-    ])
-
-    top = _top_level_widgets(panel)
-    assert len(top) == 1, f"expected one merged card, got {len(top)} widgets"
-
-    card = top[0]
-    assert isinstance(card, QFrame)
-    assert card.objectName() == "group_card"
-
-    rows_in_card = card.findChildren(QPushButton)
-    assert {r.property("_session").pid for r in rows_in_card} == {1, 2}
-
-
-def test_different_window_handles_render_as_separate_widgets(panel):
-    """G-UI-2: sessions in different WT windows must NOT be grouped,
-    even if their cwd matches."""
-    panel._render_sessions([
-        _session(1, "/proj", window_handle=0xAAAA),
-        _session(2, "/proj", window_handle=0xBBBB),
-    ])
-
-    top = _top_level_widgets(panel)
-    assert len(top) == 2  # two standalone widgets, not one card
-
-
-def test_same_window_handle_different_paths_render_as_separate_widgets(panel):
-    """G-UI-3: same WT but different cwds → different (proxy-)tabs →
-    two separate cards. The user's "agent-prompt" + "claude-island"
-    in one WT shouldn't collapse into one card."""
-    panel._render_sessions([
-        _session(1, "/a", window_handle=0xAAAA),
-        _session(2, "/b", window_handle=0xAAAA),
-    ])
-
-    top = _top_level_widgets(panel)
-    assert len(top) == 2
-
-
-def test_window_handle_none_renders_standalone(panel):
-    """G-UI-4: means we couldn't resolve a host
-    (pythonw, sandboxed shell, etc.). Such sessions are always
-    standalone — never merged with any other session, even if cwd
-    matches a grouped pair."""
-    panel._render_sessions([
-        _session(1, "/proj", window_handle=0xAAAA),
-        _session(2, "/proj", window_handle=0xAAAA),
-        _session(3, "/proj", ),  # ungroupable
-    ])
-
-    top = _top_level_widgets(panel)
-    # 1 card (pids 1+2) + 1 standalone (pid 3) = 2 top-level widgets
-    assert len(top) == 2
-
-
-def test_grouped_row_click_still_emits_session(panel, qtbot):
-    """G-UI-5: clicking a row that lives inside a multi-session card
-    must still emit session_activated with the right Session, and
-    must include the OTHER group members as siblings (so the activator
-    can fall back to their console titles for inactive-pane fix)."""
-    panel._render_sessions([
-        _session(1, "/proj", window_handle=0xAAAA),
-        _session(2, "/proj", window_handle=0xAAAA),
-    ])
-
-    received: list = []
-    panel.session_activated.connect(lambda s, sibs: received.append((s, sibs)))
-
-    panel._rows[2].click()
-
-    assert len(received) == 1
-    session, siblings = received[0]
-    assert session.pid == 2
-    sibling_pids = {s.pid for s in siblings}
-    assert sibling_pids == {1}  # the other pane in the same group
-
-
-def test_worktree_groups_with_parent_repo(panel):
-    """G-UI-7: a session whose cwd is a Claude Code worktree
-    (``<repo>/.claude/worktrees/<branch>``) groups with another
-    session whose cwd is the parent repo, when both share the same
-    WT window. Common pattern: main repo in pane A, worktree in pane B,
-    side-by-side in one tab."""
-    panel._render_sessions([
-        _session(1, "/repo", window_handle=0xAAAA),
-        _session(2, "/repo/.claude/worktrees/feature-x", window_handle=0xAAAA),
-    ])
-
-    top = _top_level_widgets(panel)
-    assert len(top) == 1, "worktree should merge into the parent's card"
-
-    from PySide6.QtWidgets import QFrame, QPushButton
-    card = top[0]
-    assert isinstance(card, QFrame)
-    rows_in_card = card.findChildren(QPushButton)
-    assert {r.property("_session").pid for r in rows_in_card} == {1, 2}
-
-
-def test_worktree_normalizer_does_not_overreach():
-    """The normaliser must collapse ``.claude/worktrees/...`` only.
-    A path that mentions ``.claude`` for a different reason (e.g. a
-    file inside the user's home claude config) must pass through."""
-    from claude_island.ui.expanded_window import _normalize_project_path
-
-    # The actual case we want to collapse:
-    assert _normalize_project_path(
-        Path("D:/repo/.claude/worktrees/feat-x")
-    ) == "D:\\repo" or _normalize_project_path(
-        Path("D:/repo/.claude/worktrees/feat-x")
-    ) == "D:/repo"
-
-    # Regular project path: untouched.
-    raw = "D:/coding/project-a"
-    assert _normalize_project_path(Path(raw)) in (raw, raw.replace("/", "\\"))
-
-    # ``.claude`` without ``worktrees`` next to it: untouched.
-    p = Path("C:/Users/me/.claude/projects/some-file")
-    out = _normalize_project_path(p)
-    assert "projects" in out  # the .claude dir was kept
-
-
-def test_two_worktrees_of_same_repo_group_together(panel):
-    """G-UI-8: two different worktrees of the same repo should still
-    merge — both normalise to the same parent repo path."""
-    panel._render_sessions([
-        _session(1, "/repo/.claude/worktrees/feat-a", window_handle=0xAAAA),
-        _session(2, "/repo/.claude/worktrees/feat-b", window_handle=0xAAAA),
-    ])
-
-    top = _top_level_widgets(panel)
-    assert len(top) == 1
-
-
-def test_row_widget_preserved_when_moving_between_card_and_standalone(panel):
-    """G-UI-6: pid 1 starts grouped (with pid 2), then pid 2 disappears.
-    The pid-1 row widget should be the same instance (cached by pid)
-    in both refreshes — only its parent / style changes."""
-    panel._render_sessions([
-        _session(1, "/proj", window_handle=0xAAAA),
-        _session(2, "/proj", window_handle=0xAAAA),
-    ])
+def test_row_widget_preserved_across_renders(panel):
+    """Cached row widgets survive renders so hover/pressed state isn't lost."""
+    panel._render_sessions([_session(1, "/proj"), _session(2, "/proj")])
     btn1 = panel._rows[1]
-
-    panel._render_sessions([_session(1, "/proj", window_handle=0xAAAA)])
-
-    assert panel._rows[1] is btn1  # same widget instance preserved
+    panel._render_sessions([_session(1, "/proj")])
+    assert panel._rows[1] is btn1
 
 
 # --------------------------------------------------------------------------
@@ -2044,7 +1915,7 @@ class TestRowStatusLine:
                         input_tokens=1, output_tokens=1,
                         cache_creation_tokens=0, cache_read_tokens=0,
                         cost_usd=8.0
-                    )
+                    ),
                 )
             )
 

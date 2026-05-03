@@ -319,15 +319,17 @@ class TestSnapshotterBuildNow:
     def test_build_now_returns_empty_for_no_sessions(self):
         snap, _ = _make_snapshotter()
         result = snap.build_now()
-        assert result.sessions == ()
+        assert result.session_groups == ()
 
     def test_build_now_includes_sessions(self):
         s1 = _session(pid=1, cwd="/a")
         s2 = _session(pid=2, cwd="/b")
         snap, _ = _make_snapshotter(sessions=[s1, s2])
         result = snap.build_now()
-        assert len(result.sessions) == 2
-        assert {v.pid for v in result.sessions} == {1, 2}
+        # Default group_sessions produces one singleton group per view.
+        flat = [v for g in result.session_groups for v in g.views]
+        assert len(flat) == 2
+        assert {v.pid for v in flat} == {1, 2}
 
     def test_build_now_carries_today_cost(self):
         snap, _ = _make_snapshotter(today_cost=42.5)
@@ -436,7 +438,7 @@ class TestSnapshotterPipeline:
             snap.wake()  # first source.sessions read raises
             time.sleep(0.2)
             assert len(received) == 1
-            assert received[0].sessions == ()  # degraded to empty
+            assert received[0].session_groups == ()  # degraded to empty
 
             snap.wake()  # second read succeeds (returns [])
             time.sleep(0.2)

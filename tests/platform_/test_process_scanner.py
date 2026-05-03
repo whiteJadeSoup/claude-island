@@ -252,64 +252,9 @@ def test_mixed_attached_and_orphan_passes_normal_filter(patched_process_iter):
 
 
 # ==========================================================================
-# G1-G3: window_handle labelling (PR2 grouping foundation)
+# Note: window_handle labelling tests removed in PR2.
+# ProcessScanner no longer fills window_handle on Session — that responsibility
+# moved to TerminalAdapter.group() (see WindowsTerminalAdapter for the
+# AttachConsole + walk_to_visible_host code, now adapter-internal).
+# Adapter-level grouping is covered by tests/platform_/test_dispatcher.py.
 # ==========================================================================
-
-def test_window_handle_populated_from_walk_to_visible_host(patched_process_iter):
-    """G1: scan() populates Session.window_handle with the result of
-    walk_to_visible_host(conpty_hwnd). UI uses this for grouping."""
-    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/proj"))
-
-    with (
-        patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
-              return_value=(0xCAFE, "title")),
-        patch("claude_island.platform_.process_scanner.window_activator.walk_to_visible_host",
-              return_value=0xBEEF)
-    ):
-        sessions = ProcessScanner().scan()
-
-    assert len(sessions) == 1
-    assert sessions[0].window_handle == 0xBEEF
-
-
-def test_window_handle_is_none_when_walk_fails(patched_process_iter):
-    """G2: walk_to_visible_host returns None (e.g. conPTY HWND not
-    associated with any visible host). Session is still kept (it has a
-    valid console), but window_handle stays None — UI treats it as
-    ungroupable and renders standalone."""
-    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/proj"))
-
-    with (
-        patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
-              return_value=(0xCAFE, "title")),
-        patch("claude_island.platform_.process_scanner.window_activator.walk_to_visible_host",
-              return_value=None)
-    ):
-        sessions = ProcessScanner().scan()
-
-    assert len(sessions) == 1
-    assert sessions[0].window_handle is None
-
-
-def test_window_handle_distinguishes_separate_wt_windows(patched_process_iter):
-    """G3: two sessions in different WT windows get different
-    window_handle values, supporting the UI's per-window grouping."""
-    patched_process_iter.append(_fake_proc(100, "claude.exe", cwd="/a"))
-    patched_process_iter.append(_fake_proc(200, "claude.exe", cwd="/b"))
-
-    def fake_walk(conpty_hwnd, _w32):
-        return {0xCAFE: 0xAAAA, 0xBABE: 0xBBBB}.get(conpty_hwnd)
-
-    def fake_info(pid):
-        return {100: (0xCAFE, "a"), 200: (0xBABE, "b")}.get(pid)
-
-    with (
-        patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
-              side_effect=fake_info),
-        patch("claude_island.platform_.process_scanner.window_activator.walk_to_visible_host",
-              side_effect=fake_walk)
-    ):
-        sessions = ProcessScanner().scan()
-
-    by_pid = {s.pid: s.window_handle for s in sessions}
-    assert by_pid == {100: 0xAAAA, 200: 0xBBBB}

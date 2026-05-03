@@ -25,7 +25,7 @@ class TestWorldMarshaler:
         baseline = len(received)
 
         snap = WorldSnapshot(
-            sessions=(), today_cost_usd=5.0, quota=None,
+            session_groups=(), today_cost_usd=5.0, quota=None,
             available_providers=(), selected_provider=None,
             fetched_at=datetime.now(timezone.utc),
         )
@@ -52,7 +52,7 @@ class TestWorldMarshaler:
         baseline = len(received)
 
         snap = WorldSnapshot(
-            sessions=(), today_cost_usd=42.0, quota=None,
+            session_groups=(), today_cost_usd=42.0, quota=None,
             available_providers=(), selected_provider=None,
             fetched_at=datetime.now(timezone.utc),
         )

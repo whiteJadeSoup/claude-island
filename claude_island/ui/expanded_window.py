@@ -815,17 +815,17 @@ _STYLE_STATUS = "color: #9ca3af; font-size: 10px;"
 
 
 def _row_status_text(
-    session: "Session",
+    view: "SessionView",
 ) -> str:
     """Compose the bottom-line text for a row — just the relative
     activity time ("5m ago"). The running state is conveyed by the
     row's left-edge pulse animation + the dot's pulse, so the literal
     word "running" / "idle" was redundant chrome and got dropped.
 
-    Returns "—" when view.last_activity isn't usable (e.g. None or
-    a stub Session in tests). Used to be a 2-arg helper that took
-    SessionDetails to derive the status word; the signature simplified
-    once the word itself stopped being part of the output."""
+    Returns "—" when view.last_activity isn't usable. Used to be a
+    2-arg helper that took SessionDetails to derive the status word;
+    the signature simplified once the word itself stopped being part
+    of the output."""
     return _fmt_started(view.last_activity)
 _STYLE_PERIOD_BTN = """
     QPushButton {
@@ -2935,6 +2935,39 @@ class ExpandedWindow(QWidget):
     # Internal render helpers (called by render(snap))
     # ------------------------------------------------------------------
 
+    def _render_sessions(self, sessions: "list[Session]") -> None:
+        """Test/legacy shim: wrap each Session into a SessionView in its
+        own singleton group, then call the real renderer.
+
+        Production code never reaches this — render(snap) goes straight
+        to ``_render_session_groups`` with adapter-built groups. Tests
+        use this to seed the panel with raw Sessions without spinning
+        up the full Snapshotter + dispatcher pipeline."""
+        from dataclasses import replace as _replace
+        from claude_island.core.snapshot import (
+            SessionGroup as _SG,
+            _degraded_view as _dv,
+        )
+        from claude_island.core.capabilities import (
+            Capability as _Cap,
+            FocusGranularity as _FG,
+        )
+        groups: list[_SG] = []
+        for s in sessions:
+            v = _replace(
+                _dv(s),
+                adapter_id="test",
+                focus_granularity=_FG.APP,
+                capabilities=frozenset({_Cap.FOCUS}),
+            )
+            groups.append(_SG(
+                group_id=f"test:{s.pid}",
+                title_hint=None,
+                adapter_id="test",
+                views=(v,),
+            ))
+        self._render_session_groups(tuple(groups))
+
     def _render_session_groups(
         self, groups: tuple["SessionGroup", ...]
     ) -> None:
@@ -4492,7 +4525,7 @@ class ExpandedWindow(QWidget):
 
         status_label = btn.findChild(QLabel, "status_label")
         if status_label is not None:
-            status_text = _row_status_text(session)
+            status_text = _row_status_text(view)
             if status_label.text() != status_text:
                 status_label.setText(status_text)
 
@@ -4518,7 +4551,7 @@ class ExpandedWindow(QWidget):
         Singletons ignore it."""
         views = list(group.views)
         if len(views) == 1:
-            row = self._get_or_create_row(views[0], group, in_card=False, card=None)
+            row = self._get_or_create_row(views[0], views, in_card=False, card=None)
             row.setParent(None)
             return row
         return self._make_multi_card(views, palette_idx=palette_idx or 0, title_hint=group.title_hint)

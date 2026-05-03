@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QLabel, QWidget
 from claude_island.core.models import Session, UsageTotals
 from claude_island.core.snapshot import (
     HIGH_COST_USD_THRESHOLD,
+    SessionGroup,
     SessionView,
     WorldSnapshot,
 )
@@ -37,6 +38,20 @@ from claude_island.ui.expanded_window import ExpandedWindow
 # ---------------------------------------------------------------------------
 # Snapshot builders
 # ---------------------------------------------------------------------------
+
+def _sg(*views: SessionView) -> tuple[SessionGroup, ...]:
+    """Wrap each view in a singleton SessionGroup so test snapshots can be
+    constructed without spinning up the real adapter chain."""
+    return tuple(
+        SessionGroup(
+            group_id=f"test:{v.pid}",
+            title_hint=None,
+            adapter_id="test",
+            views=(v,),
+        )
+        for v in views
+    )
+
 
 def _session(pid: int = 1234, cwd: str = "/tmp/proj") -> Session:
     return Session(
@@ -75,8 +90,11 @@ def _snap(
     sessions: tuple[SessionView, ...] = (),
     today_cost_usd: float = 0.0,
 ) -> WorldSnapshot:
+    """Build a snapshot from a flat list of views — convenience wrapper
+    that wraps each view in its own singleton SessionGroup so tests
+    don't have to think about grouping unless they care."""
     return WorldSnapshot(
-        sessions=sessions,
+        session_groups=_sg(*sessions),
         today_cost_usd=today_cost_usd,
         quota=None,
         available_providers=(),
@@ -102,34 +120,24 @@ def capsule(qtbot):
 class TestCapsuleRender:
     def test_render_empty_snap_shows_zero_session_count(self, capsule):
         capsule.render(_snap())
-        # Label shows "0 sessions" (no cost suffix because cost == 0)
         assert "0 sessions" in capsule._label.text()
 
     def test_render_one_idle_session_shows_count_not_name(self, capsule):
-        # One session but it's idle → not the "single running" path,
-        # so the label uses count form.
         v = _view(name="my-project", is_running=False)
         capsule.render(_snap(sessions=(v,)))
         assert "1 session" in capsule._label.text()
-        # The session NAME does NOT appear — only the count form
-        # surfaces a name when the session is the unique active one.
         assert "my-project" not in capsule._label.text()
 
     def test_render_one_running_session_shows_its_name(self, capsule):
         v = _view(name="my-feature-branch", is_running=True)
         capsule.render(_snap(sessions=(v,)))
-        # Single running session → name in pill text.
         assert "my-feature-branch" in capsule._label.text()
 
     def test_render_two_running_starts_carousel(self, capsule):
-        """≥2 running sessions: pill rotates through their names every
-        ``_ROTATE_INTERVAL_MS`` instead of degrading to the count form
-        (which loses information about WHICH sessions are live)."""
         v1 = _view(pid=1, name="alpha", cwd="/a", is_running=True)
         v2 = _view(pid=2, name="beta", cwd="/b", is_running=True)
         capsule.render(_snap(sessions=(v1, v2)))
 
-        # Initial render shows the first rotation candidate.
         text = capsule._label.text()
         assert "alpha" in text
         assert capsule._rotation_timer.isActive() is True
@@ -139,12 +147,9 @@ class TestCapsuleRender:
         v2 = _view(pid=2, name="beta", cwd="/b", is_running=True)
         capsule.render(_snap(sessions=(v1, v2)))
         first = capsule._label.text()
-        # Manually tick the rotation handler — bypasses waiting for
-        # the 4 s timer to elapse (test would be slow + flaky).
         capsule._on_rotate_tick()
         second = capsule._label.text()
         assert first != second
-        # Tick again — should wrap back to the first name.
         capsule._on_rotate_tick()
         assert capsule._label.text() == first
 
@@ -155,22 +160,18 @@ class TestCapsuleRender:
         capsule._on_rotate_tick()  # advance to "beta"
         assert capsule._rotation_index == 1
 
-        # New running set — index resets to 0.
         v3 = _view(pid=3, name="gamma", cwd="/c", is_running=True)
         capsule.render(_snap(sessions=(v1, v3)))
         assert capsule._rotation_index == 0
         assert "alpha" in capsule._label.text()
 
     def test_carousel_index_does_not_reset_on_unrelated_snap_change(self, capsule):
-        """Cost ticking up shouldn't jerk the carousel back to position
-        0 — the carousel state is per running-name-set, not per snap."""
         v1 = _view(pid=1, name="alpha", cwd="/a", is_running=True)
         v2 = _view(pid=2, name="beta", cwd="/b", is_running=True)
         capsule.render(_snap(sessions=(v1, v2), today_cost_usd=10.0))
-        capsule._on_rotate_tick()  # advance to index 1 ("beta")
+        capsule._on_rotate_tick()
         assert capsule._rotation_index == 1
 
-        # Same running set, only cost changed → index preserved.
         capsule.render(_snap(sessions=(v1, v2), today_cost_usd=11.0))
         assert capsule._rotation_index == 1
         assert "beta" in capsule._label.text()
@@ -181,11 +182,8 @@ class TestCapsuleRender:
         capsule.render(_snap(sessions=(v1, v2)))
         assert capsule._rotation_timer.isActive() is True
 
-        # Drop to one running.
         v2_idle = _view(pid=2, name="beta", cwd="/b", is_running=False)
         capsule.render(_snap(sessions=(v1, v2_idle)))
-        # No rotation needed when only one is running — timer off, but
-        # the single-running branch still surfaces alpha as the name.
         assert capsule._rotation_timer.isActive() is False
         assert "alpha" in capsule._label.text()
 
@@ -201,20 +199,17 @@ class TestCapsuleRender:
         v = _view(name="x", is_running=True)
         capsule.render(_snap(sessions=(v,), today_cost_usd=42.0))
         text = capsule._label.text()
-        # Cost suffix follows the name with two-space separator.
         assert "$42" in text
         assert "x" in text
 
     def test_render_cost_suffix_omitted_when_zero(self, capsule):
         capsule.render(_snap(sessions=(), today_cost_usd=0.0))
-        # No "$0" trailing — the pill should read cleanly.
         assert "$" not in capsule._label.text()
 
     def test_render_running_state_set_when_any_running(self, capsule):
         from claude_island.ui.expanded_window import _RowStatusGlyph
         v = _view(is_running=True)
         capsule.render(_snap(sessions=(v,)))
-        # Internal state flag flips → equalizer-glyph state goes RUNNING.
         assert capsule._dot_label.state() == _RowStatusGlyph.STATE_RUNNING
         assert capsule._is_breathing is True
 
@@ -226,8 +221,6 @@ class TestCapsuleRender:
         assert capsule._is_breathing is False
 
     def test_render_caches_today_cost_for_paint(self, capsule):
-        # _cost_cache is read by _paint_quota_bar / _compose_label_text;
-        # render should keep it in sync with snap.today_cost_usd.
         capsule.render(_snap(today_cost_usd=99.5))
         assert capsule._cost_cache == 99.5
 
@@ -242,7 +235,7 @@ class TestCapsuleRender:
             is_stale=False,
         )
         snap = WorldSnapshot(
-            sessions=(), today_cost_usd=0.0, quota=q,
+            session_groups=(), today_cost_usd=0.0, quota=q,
             available_providers=("anthropic",), selected_provider="anthropic",
             fetched_at=datetime.now(timezone.utc),
         )
@@ -250,26 +243,18 @@ class TestCapsuleRender:
         assert capsule._quota_pct_cache == 72.5
 
     def test_render_with_no_quota_clears_cache(self, capsule):
-        capsule.render(_snap())  # snap.quota = None
+        capsule.render(_snap())
         assert capsule._quota_pct_cache is None
 
     def test_render_in_dot_mode_is_no_op_for_label(self, capsule):
-        # Force dot mode — render should still cache values but not
-        # touch the (hidden) label widget.
         capsule._is_dot = True
         v = _view(is_running=True, name="x")
         capsule.render(_snap(sessions=(v,), today_cost_usd=10.0))
-        # Caches updated…
         assert capsule._cost_cache == 10.0
-        # …but capsule didn't switch out of dot mode.
         assert capsule._is_dot is True
 
 
 def _quota_snap_with_pct(pct: float) -> WorldSnapshot:
-    """Build a WorldSnapshot whose only purpose is to carry a quota
-    snapshot with the given 5h percentage. Reset countdowns and 7-day
-    fields are set to plausible values so the QuotaSnapshot dataclass
-    constructs successfully."""
     from claude_island.core.models import QuotaSnapshot
     q = QuotaSnapshot(
         five_hour_pct=pct,
@@ -280,18 +265,14 @@ def _quota_snap_with_pct(pct: float) -> WorldSnapshot:
         is_stale=False,
     )
     return WorldSnapshot(
-        sessions=(), today_cost_usd=0.0, quota=q,
+        session_groups=(), today_cost_usd=0.0, quota=q,
         available_providers=("anthropic",), selected_provider="anthropic",
         fetched_at=datetime.now(timezone.utc),
     )
 
 
 class TestCapsuleQuotaBar:
-    """Visibility + colour-threshold contract for the quota mini-bar.
-
-    The bar is hidden below the warn threshold (would just be noise),
-    appears amber once the user crosses warn, and the pill bg flips
-    to a deeper red at the critical threshold."""
+    """Visibility + colour-threshold contract for the quota mini-bar."""
 
     def test_bar_hidden_below_warn_threshold(self, capsule):
         from claude_island.ui.capsule_window import _QUOTA_WARN_THRESHOLD
@@ -304,24 +285,16 @@ class TestCapsuleQuotaBar:
         assert capsule._should_show_quota_bar() is True
 
     def test_critical_threshold_widens_pill(self, capsule):
-        """When the bar is shown, the pill widens to fit it. This is
-        the visible signal that something needs attention — pre-warn
-        the pill stays compact."""
         from claude_island.ui.capsule_window import (
             _CAPSULE_W,
             _CAPSULE_W_WITH_QUOTA,
             _QUOTA_CRITICAL_THRESHOLD,
         )
         capsule.render(_quota_snap_with_pct(_QUOTA_CRITICAL_THRESHOLD))
-        # _apply_capsule resized via _center_top — width should match
-        # the wider pill constant.
         assert capsule.width() == _CAPSULE_W_WITH_QUOTA
-        assert _CAPSULE_W_WITH_QUOTA > _CAPSULE_W  # sanity
+        assert _CAPSULE_W_WITH_QUOTA > _CAPSULE_W
 
     def test_dropping_below_threshold_collapses_pill(self, capsule):
-        """Crossing back below warn after being above must shrink the
-        pill back to the compact width — leaving the wider pill
-        in place when there's nothing to flag would mislead."""
         from claude_island.ui.capsule_window import (
             _CAPSULE_W,
             _CAPSULE_W_WITH_QUOTA,
@@ -360,8 +333,6 @@ class TestExpandedRender:
         assert 42 in panel._rows
 
     def test_render_caches_snapshot_for_phase_g_consumption(self, panel):
-        # Phase G will have _update_row read fields off self._latest_snap
-        # directly. Phase D just stores the cache.
         snap = _snap(sessions=(_view(pid=1),))
         panel.render(snap)
         assert panel._latest_snap is snap
@@ -372,7 +343,6 @@ class TestExpandedRender:
         panel.render(_snap(sessions=(v1,)))
         assert set(panel._rows.keys()) == {1}
         panel.render(_snap(sessions=(v2,)))
-        # pid=1 dropped, pid=2 added.
         assert set(panel._rows.keys()) == {2}
 
     def test_render_preserves_row_widget_when_pid_persists(self, panel):
@@ -380,44 +350,29 @@ class TestExpandedRender:
         panel.render(_snap(sessions=(v,)))
         before = panel._rows[99]
         panel.render(_snap(sessions=(v,)))
-        # Cached row reused — same widget instance survives across renders.
         assert panel._rows[99] is before
 
 
 class TestDistinctUntilChangedDedup:
     """Verifies the wiring-layer ``distinct_until_changed(key_mapper=
-    render_key)`` actually skips no-op snapshots.
-
-    Without the key_mapper or with a buggy render_key (e.g. one that
-    accidentally includes ``fetched_at``), the UI would re-render on
-    every Snapshotter tick (every ~2 s and every wake), wasting CPU
-    and visibly flickering. This test catches that regression."""
+    render_key)`` actually skips no-op snapshots."""
 
     def test_two_renders_with_same_data_share_render_key(self):
-        """The contract: distinct_until_changed compares render_key()
-        not full equality, so identical data with different fetched_at
-        timestamps dedupe correctly."""
-        from datetime import datetime, timezone, timedelta
         v = _view(pid=1, name="alpha")
         snap_a = WorldSnapshot(
-            sessions=(v,), today_cost_usd=5.0, quota=None,
+            session_groups=_sg(v), today_cost_usd=5.0, quota=None,
             available_providers=("anthropic",), selected_provider="anthropic",
             fetched_at=datetime.now(timezone.utc),
         )
         snap_b = WorldSnapshot(
-            sessions=(v,), today_cost_usd=5.0, quota=None,
+            session_groups=_sg(v), today_cost_usd=5.0, quota=None,
             available_providers=("anthropic",), selected_provider="anthropic",
             fetched_at=datetime.now(timezone.utc) + timedelta(seconds=10),
         )
-        # render_key skips fetched_at → equal
         assert snap_a.render_key() == snap_b.render_key()
-        # but full __eq__ differs → confirms render_key is doing real work
         assert snap_a != snap_b
 
     def test_distinct_until_changed_skips_renders_for_equal_render_key(self, qtbot):
-        """End-to-end: subscribe through the same pipe the wiring layer
-        uses. Push two snaps with identical render_key — render fires
-        only once."""
         import reactivex.operators as ops
         from claude_island.core.snapshot import world
 
@@ -428,15 +383,14 @@ class TestDistinctUntilChangedDedup:
             .subscribe(on_next=renders.append)
         )
         try:
-            from datetime import datetime, timezone, timedelta
             v = _view(pid=1)
             snap_a = WorldSnapshot(
-                sessions=(v,), today_cost_usd=5.0, quota=None,
+                session_groups=_sg(v), today_cost_usd=5.0, quota=None,
                 available_providers=(), selected_provider=None,
                 fetched_at=datetime.now(timezone.utc),
             )
             snap_b = WorldSnapshot(
-                sessions=(v,), today_cost_usd=5.0, quota=None,
+                session_groups=_sg(v), today_cost_usd=5.0, quota=None,
                 available_providers=(), selected_provider=None,
                 fetched_at=datetime.now(timezone.utc) + timedelta(seconds=10),
             )

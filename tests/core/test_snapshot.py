@@ -13,11 +13,27 @@ import pytest
 
 from claude_island.core.snapshot import (
     HIGH_COST_USD_THRESHOLD,
+    SessionGroup,
     SessionView,
     WorldSnapshot,
     _WorldStore,
-    world
+    world,
 )
+
+
+def _sg(*views: SessionView) -> tuple[SessionGroup, ...]:
+    """Wrap each view in a singleton SessionGroup so test snapshots can be
+    constructed without spinning up the real adapter chain. Order is
+    preserved so order-sensitivity tests still work."""
+    return tuple(
+        SessionGroup(
+            group_id=f"test:{v.pid}",
+            title_hint=None,
+            adapter_id="test",
+            views=(v,),
+        )
+        for v in views
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +52,7 @@ def _view(
     *,
     cost_usd: float = 1.0,
     is_high_cost: bool | None = None,
-    is_running: bool = False
+    is_running: bool = False,
 ) -> SessionView:
     """Test fixture producing a valid SessionView with sensible defaults
     so each test only specifies the fields it cares about."""
@@ -46,7 +62,7 @@ def _view(
     sess = Session(
         pid=1234, project_path=Path("/tmp/test"),
         session_uuid="",
-        last_activity=_FIXED_TS
+        last_activity=_FIXED_TS,
     )
     return SessionView(
         pid=1234,
@@ -59,7 +75,7 @@ def _view(
         is_high_cost=is_high_cost,
         latest_model="claude-opus-4-7",
         status_word="idle",
-        session=sess
+        session=sess,
     )
 
 
@@ -75,7 +91,6 @@ class TestSessionView:
             v.cost_usd = 999.0  # type: ignore[misc]
 
     def test_high_cost_invariant_true_above_threshold(self):
-        # cost above threshold + is_high_cost=True → ok
         v = _view(cost_usd=HIGH_COST_USD_THRESHOLD + 1, is_high_cost=True)
         assert v.is_high_cost is True
 
@@ -84,16 +99,12 @@ class TestSessionView:
         assert v.is_high_cost is False
 
     def test_high_cost_invariant_violated_raises_on_construct(self):
-        # cost above threshold but is_high_cost=False → invariant violated
         with pytest.raises(AssertionError):
             _view(cost_usd=HIGH_COST_USD_THRESHOLD + 1, is_high_cost=False)
         with pytest.raises(AssertionError):
             _view(cost_usd=0.0, is_high_cost=True)
 
     def test_structural_equality(self):
-        """Two SessionViews with identical fields compare equal — this
-        is the property distinct_until_changed depends on for skipping
-        no-op snapshots."""
         a = _view(cost_usd=5.0)
         b = _view(cost_usd=5.0)
         assert a == b
@@ -112,58 +123,53 @@ class TestSessionView:
 class TestWorldSnapshot:
     def test_empty_is_constructible_and_safe_for_render(self):
         snap = WorldSnapshot.empty()
-        assert snap.sessions == ()
+        assert snap.session_groups == ()
         assert snap.today_cost_usd == 0.0
         assert snap.quota is None
         assert snap.available_providers == ()
         assert snap.selected_provider is None
 
     def test_two_empties_are_equal(self):
-        # Important: distinct_until_changed must skip when an empty
-        # is followed by another empty (e.g. between Snapshotter
-        # rebuilds with no sessions yet).
+        # distinct_until_changed must skip when an empty is followed by
+        # another empty (e.g. between Snapshotter rebuilds with no
+        # sessions yet).
         assert WorldSnapshot.empty() == WorldSnapshot.empty()
 
     def test_with_one_session_is_equal_to_itself(self):
         v = _view()
         snap = WorldSnapshot(
-            sessions=(v,),
+            session_groups=_sg(v),
             today_cost_usd=1.0,
             quota=None,
             available_providers=("anthropic",),
             selected_provider="anthropic",
-            fetched_at=datetime.now(timezone.utc)
+            fetched_at=datetime.now(timezone.utc),
         )
         same_snap = WorldSnapshot(
-            sessions=(v,),  # tuple element comparison
+            session_groups=_sg(v),  # tuple element comparison
             today_cost_usd=1.0,
             quota=None,
             available_providers=("anthropic",),
             selected_provider="anthropic",
-            fetched_at=snap.fetched_at
+            fetched_at=snap.fetched_at,
         )
         assert snap == same_snap
 
     def test_render_key_excludes_fetched_at(self):
-        """render_key() is the basis for distinct_until_changed in the
-        UI pipe; it must skip ``fetched_at`` so two snapshots built
-        at different times but with the same data dedupe correctly."""
         v = _view()
         ts1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
         ts2 = datetime(2026, 1, 2, tzinfo=timezone.utc)
         s1 = WorldSnapshot(
-            sessions=(v,), today_cost_usd=1.0, quota=None,
+            session_groups=_sg(v), today_cost_usd=1.0, quota=None,
             available_providers=("a",), selected_provider="a",
-            fetched_at=ts1
+            fetched_at=ts1,
         )
         s2 = WorldSnapshot(
-            sessions=(v,), today_cost_usd=1.0, quota=None,
+            session_groups=_sg(v), today_cost_usd=1.0, quota=None,
             available_providers=("a",), selected_provider="a",
-            fetched_at=ts2
+            fetched_at=ts2,
         )
-        # Full equality: differ (fetched_at).
         assert s1 != s2
-        # Render key: equal — UI should not re-render.
         assert s1.render_key() == s2.render_key()
 
     def test_render_key_changes_when_sessions_change(self):
@@ -171,43 +177,43 @@ class TestWorldSnapshot:
         v2 = _view(cost_usd=2.0)
         ts = datetime.now(timezone.utc)
         s1 = WorldSnapshot(
-            sessions=(v1,), today_cost_usd=1.0, quota=None,
-            available_providers=(), selected_provider=None, fetched_at=ts
+            session_groups=_sg(v1), today_cost_usd=1.0, quota=None,
+            available_providers=(), selected_provider=None, fetched_at=ts,
         )
         s2 = WorldSnapshot(
-            sessions=(v2,), today_cost_usd=2.0, quota=None,
-            available_providers=(), selected_provider=None, fetched_at=ts
+            session_groups=_sg(v2), today_cost_usd=2.0, quota=None,
+            available_providers=(), selected_provider=None, fetched_at=ts,
         )
         assert s1.render_key() != s2.render_key()
 
     def test_session_order_is_significant(self):
-        """sessions tuples are order-sensitive — Snapshotter sorts
-        deterministically before constructing the snapshot, so the UI
-        can rely on the same order across renders."""
+        """session_groups tuples are order-sensitive — adapters return
+        groups in a deterministic order so the UI can rely on consistent
+        layout across renders."""
         from claude_island.core.models import Session
         a = _view(cost_usd=1.0)
         b_sess = Session(
             pid=99, project_path=Path("/b"),
             session_uuid="",
-            last_activity=datetime.now(timezone.utc)
+            last_activity=datetime.now(timezone.utc),
         )
         b = SessionView(
             pid=99, name="b", project_path=Path("/b"),
             project_basename="b",
             last_activity=datetime.now(timezone.utc),
             is_running=False, cost_usd=1.0, is_high_cost=False,
-            latest_model=None, status_word=None, session=b_sess
+            latest_model=None, status_word=None, session=b_sess,
         )
-        s1 = WorldSnapshot.empty()
+        ts = datetime.now(timezone.utc)
         s_ab = WorldSnapshot(
-            sessions=(a, b), today_cost_usd=2.0, quota=None,
+            session_groups=_sg(a) + _sg(b), today_cost_usd=2.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=s1.fetched_at
+            fetched_at=ts,
         )
         s_ba = WorldSnapshot(
-            sessions=(b, a), today_cost_usd=2.0, quota=None,
+            session_groups=_sg(b) + _sg(a), today_cost_usd=2.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=s1.fetched_at
+            fetched_at=ts,
         )
         assert s_ab != s_ba
 
@@ -224,30 +230,25 @@ class TestWorldStore:
     def test_push_updates_current(self):
         store = _WorldStore()
         snap = WorldSnapshot(
-            sessions=(_view(),), today_cost_usd=5.0, quota=None,
+            session_groups=_sg(_view()), today_cost_usd=5.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=datetime.now(timezone.utc)
+            fetched_at=datetime.now(timezone.utc),
         )
         store.push(snap)
         assert store.current == snap
 
     def test_subscribe_replays_current_value_immediately(self):
-        """BehaviorSubject contract — proven in the smoke test for
-        reactivex itself, but re-asserted on our wrapper to lock the
-        contract our UI render relies on at this layer."""
         store = _WorldStore()
         snap = WorldSnapshot(
-            sessions=(), today_cost_usd=42.0, quota=None,
+            session_groups=(), today_cost_usd=42.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=datetime.now(timezone.utc)
+            fetched_at=datetime.now(timezone.utc),
         )
         store.push(snap)
 
         received: list[WorldSnapshot] = []
         store.observable().subscribe(received.append)
 
-        # Subscriber receives the current value (snap) immediately on
-        # subscribe — without waiting for any further on_next.
         assert received == [snap]
 
     def test_multiple_subscribers_all_receive_pushes(self):
@@ -258,37 +259,27 @@ class TestWorldStore:
         store.observable().subscribe(b.append)
 
         snap = WorldSnapshot(
-            sessions=(), today_cost_usd=1.0, quota=None,
+            session_groups=(), today_cost_usd=1.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=datetime.now(timezone.utc)
+            fetched_at=datetime.now(timezone.utc),
         )
         store.push(snap)
 
-        # Each subscriber received initial empty + snap = 2 values.
         assert len(a) == 2 and a[-1] == snap
         assert len(b) == 2 and b[-1] == snap
 
     def test_observable_does_not_expose_on_next(self):
-        """The returned Observable must not give callers a back-door to
-        push values directly. We can't make this *impossible* in
-        Python (BehaviorSubject upcast still has on_next at runtime),
-        but the type signature should not advertise it. This test
-        documents the intent — a future refactor that wraps the
-        Subject more strictly would tighten this further."""
         store = _WorldStore()
         obs = store.observable()
-        # Observable is the abstract type — type checkers won't allow
-        # ``obs.on_next(...)`` even though runtime would (BehaviorSubject
-        # is the actual class). Static guarantee, not runtime.
         from reactivex import Observable as _Observable
         assert isinstance(obs, _Observable)
 
     def test_reset_for_testing_clears_current(self):
         store = _WorldStore()
         snap = WorldSnapshot(
-            sessions=(_view(),), today_cost_usd=99.0, quota=None,
+            session_groups=_sg(_view()), today_cost_usd=99.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=datetime.now(timezone.utc)
+            fetched_at=datetime.now(timezone.utc),
         )
         store.push(snap)
         assert store.current == snap
@@ -297,25 +288,19 @@ class TestWorldStore:
         assert store.current == WorldSnapshot.empty()
 
     def test_reset_for_testing_disposes_old_subscribers(self):
-        """After reset, callbacks subscribed before the reset must NOT
-        receive new pushes — otherwise stale test fixtures would
-        accumulate across runs and produce confusing failures."""
         store = _WorldStore()
         old_received: list[WorldSnapshot] = []
         store.observable().subscribe(old_received.append)
-        # Initial empty arrived.
         assert len(old_received) == 1
 
         store.reset_for_testing()
         new_snap = WorldSnapshot(
-            sessions=(), today_cost_usd=7.0, quota=None,
+            session_groups=(), today_cost_usd=7.0, quota=None,
             available_providers=(), selected_provider=None,
-            fetched_at=datetime.now(timezone.utc)
+            fetched_at=datetime.now(timezone.utc),
         )
         store.push(new_snap)
 
-        # Old subscriber count unchanged — the new push went to nobody
-        # (nobody re-subscribed yet).
         assert len(old_received) == 1
 
 
@@ -328,7 +313,5 @@ class TestWorldSingleton:
         assert isinstance(world, _WorldStore)
 
     def test_world_starts_with_empty_snapshot(self):
-        # Note: this test relies on conftest.py auto-resetting between
-        # tests. Without that, an earlier test's push would leak here.
         world.reset_for_testing()
         assert world.current == WorldSnapshot.empty()
