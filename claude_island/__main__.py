@@ -13,7 +13,6 @@ Background threads are started here and stopped on QApplication exit.
 from __future__ import annotations
 
 import sys
-import threading
 from pathlib import Path
 
 from platformdirs import user_data_dir
@@ -39,6 +38,11 @@ jsonl_parser = JsonlParser(
     usage_registry=usage_registry,
     claude_projects_dir=_CLAUDE_PROJECTS,
 )
+# Kick off parallel backfill immediately — it runs during Qt construction
+# (~300ms) and finishes well before the user notices the USAGE card.
+# Workers parse different files concurrently via per-file locks; the
+# pool is daemon-threaded so it never blocks shutdown.
+jsonl_parser.start_backfill_pool()
 
 # ---------------------------------------------------------------------------
 # Section 2: Platform layer (psutil, watchdog, pywin32/pyobjc)
@@ -299,9 +303,8 @@ _CLAUDE_PROJECTS.mkdir(parents=True, exist_ok=True)
 file_watcher.watch(_CLAUDE_PROJECTS, jsonl_parser.parse_file)
 file_watcher.start()
 
-# Backfill existing JSONL history in a daemon thread so startup is instant.
-_backfill_thread = threading.Thread(target=jsonl_parser.backfill_all, daemon=True)
-_backfill_thread.start()
+# Backfill runs in a thread pool started immediately after jsonl_parser
+# construction (above Section 2). No daemon thread needed here.
 
 # 60s heartbeat: tick the 5h reset countdown and pull a fresh quota
 # snapshot. QuotaProvider gates HTTP internally on its 300s TTL, so this
@@ -310,8 +313,23 @@ _usage_heartbeat = QTimer()
 _usage_heartbeat.timeout.connect(expanded.refresh_usage_bar)
 _usage_heartbeat.start(60_000)
 
-session_discovery.start()
+# UI first — capsule shows immediately. Two-phase scan fills sessions
+# fast (psutil only, ~200ms) then precisely (orphan filter, ~500ms later).
 capsule.show()
+
+def _fast_scan_and_update() -> None:
+    sessions = process_scanner.scan_fast()
+    session_registry.update(sessions)
+
+def _full_scan_and_update() -> None:
+    sessions = process_scanner.scan()
+    session_registry.update(sessions)
+
+QTimer.singleShot(0, _fast_scan_and_update)
+QTimer.singleShot(500, _full_scan_and_update)
+
+# Periodic process scanning (10s). scan() includes orphan filtering.
+session_discovery.start()
 
 # ---------------------------------------------------------------------------
 # Event loop + cleanup
@@ -329,11 +347,5 @@ exit_code = app.exec()
 session_discovery.stop()
 file_watcher.stop()
 jsonl_parser.request_stop()
-if _backfill_thread is not None:
-    # Bounded join: backfill checks the stop flag at each file boundary,
-    # so in the worst case we wait for the current file's parse to
-    # finish. UsageRegistry is in-memory now, so there's nothing to
-    # close — the GC reclaims the records list when the process exits.
-    _backfill_thread.join(timeout=5.0)
 
 sys.exit(exit_code)

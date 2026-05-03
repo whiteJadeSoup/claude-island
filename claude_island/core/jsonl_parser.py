@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 import threading
@@ -50,26 +51,15 @@ class JsonlParser:
         self.activity_updated: Event[tuple[str, datetime]] = Event()
         self._usage = usage_registry
         self._projects_dir = claude_projects_dir
-        self._lock = threading.Lock()
-        # Per-file byte offsets, kept in memory only. When the process
-        # restarts the dict starts empty and backfill_all re-reads
-        # every transcript from the beginning — JSONL is the source of
-        # truth, the registry is rebuilt from scratch.
+        # Per-file locks replace the old single global lock so backfill
+        # can parse multiple files concurrently via ThreadPoolExecutor.
+        # The dict itself is protected by _file_locks_lock; each value is
+        # a per-path_str Lock that serialises parse_file (watchdog) and
+        # backfill workers on the same file.
+        self._file_locks: dict[str, threading.Lock] = {}
+        self._file_locks_lock = threading.Lock()
         self._offsets: dict[str, int] = {}
-        # Per-session metadata extracted from the JSONL — surfaced in
-        # the UI's hover tooltip. Keyed by ``session_uuid`` (transcript
-        # filename stem). Each value is a dict with optional keys:
-        #   ``ai_title`` (str)    — from a ``type=ai-title`` row
-        #   ``last_prompt`` (str) — from a ``type=last-prompt`` row
-        #   ``git_branch`` (str)  — from any row's ``gitBranch`` field
-        #   ``version`` (str)     — from any row's ``version`` field
-        #   ``turn_count`` (int)  — running count of ``type=assistant`` rows
-        #   ``sidechain_count`` (int) — count of rows with ``isSidechain=True``
-        # In-memory only (matches the rest of post-DB-removal design).
         self._session_meta: dict[str, dict] = {}
-        # Cooperative cancellation for backfill_all. Set by request_stop()
-        # at app shutdown so the daemon thread bails out at the next file
-        # boundary instead of doing redundant work after the UI has gone.
         self._stop_event = threading.Event()
 
     def get_session_metadata(self, session_uuid: str) -> dict:
@@ -80,8 +70,7 @@ class JsonlParser:
         is unknown (transcript not yet parsed). Returned dict is a
         shallow copy so callers can read freely without locking.
         """
-        with self._lock:
-            return dict(self._session_meta.get(session_uuid, {}))
+        return dict(self._session_meta.get(session_uuid, {}))
 
     def request_stop(self) -> None:
         """Signal backfill_all to abort at the next file boundary.
@@ -89,10 +78,27 @@ class JsonlParser:
         Idempotent. Used by the shutdown sequence in __main__.py.
         """
         self._stop_event.set()
+        executor = getattr(self, "_backfill_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+            self._backfill_executor = None
+
+    def _get_file_lock(self, path_str: str) -> threading.Lock:
+        """Return (or create) the per-file lock for *path_str*.
+
+        The dict of locks is itself protected — callers can safely invoke
+        this from any thread without a surrounding lock.
+        """
+        with self._file_locks_lock:
+            lock = self._file_locks.get(path_str)
+            if lock is None:
+                lock = threading.Lock()
+                self._file_locks[path_str] = lock
+            return lock
 
     def parse_file(self, file_path: Path) -> None:
         """Parse new bytes from *file_path*. Safe to call from any thread."""
-        with self._lock:
+        with self._get_file_lock(str(file_path)):
             self._parse_incremental(file_path)
 
     def backfill_all(self) -> None:
@@ -105,8 +111,41 @@ class JsonlParser:
         for jsonl_file in self._projects_dir.rglob("*.jsonl"):
             if self._stop_event.is_set():
                 return
-            with self._lock:
+            with self._get_file_lock(str(jsonl_file)):
                 self._parse_incremental(jsonl_file)
+
+    def start_backfill_pool(self, max_workers: int = 4) -> None:
+        """Launch a thread-pool backfill that parses all JSONL files in
+        parallel. Returns immediately — workers run on daemon threads.
+
+        Files are dispatched to *max_workers* threads. Each thread acquires
+        the per-file lock before parsing, so concurrent workers processing
+        different files never contend; only a watchdog event on the same
+        file will serialise (correctly) with the backfill worker.
+
+        The pool's work finishes silently in the background. The caller
+        (``__main__.py``) can optionally ``join()`` the executor if it
+        needs a clean shutdown, but since all threads are daemon threads
+        the process exits without waiting.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        files = list(self._projects_dir.rglob("*.jsonl"))
+        if not files:
+            return
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        for f in files:
+            if self._stop_event.is_set():
+                break
+            executor.submit(self._parse_file_backfill, f)
+        # Hold a reference so the executor isn't GC'd before workers finish.
+        self._backfill_executor: ThreadPoolExecutor | None = executor
+
+    def _parse_file_backfill(self, file_path: Path) -> None:
+        """Per-file backfill worker — called from the thread pool."""
+        if self._stop_event.is_set():
+            return
+        with self._get_file_lock(str(file_path)):
+            self._parse_incremental(file_path)
 
     # ------------------------------------------------------------------
     # Internal

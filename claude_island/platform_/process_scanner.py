@@ -49,6 +49,17 @@ class ProcessScanner:
     """
 
     def scan(self) -> list[Session]:
+        return _filter_orphans(self.scan_fast())
+
+    def scan_fast(self) -> list[Session]:
+        """Same psutil enumeration as :meth:`scan` but without the
+        ``_filter_orphans`` pass. Returns sessions immediately — their
+        ``window_handle`` fields will be ``None``.
+
+        Used at startup so the UI populates sessions in ~200ms. A
+        follow-up ``scan()`` call ~500ms later runs the full orphan
+        filter and updates the window_handle.
+        """
         sessions: list[Session] = []
         for proc in psutil.process_iter(["pid", "name", "create_time"]):
             try:
@@ -64,7 +75,6 @@ class ProcessScanner:
                 if name not in _NODE_NAMES:
                     continue
 
-                # Node process — only now pay the cmdline cost.
                 try:
                     cmdline = proc.cmdline()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -77,7 +87,7 @@ class ProcessScanner:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 
-        return _filter_orphans(sessions)
+        return sessions
 
     @staticmethod
     def _build(proc: psutil.Process, info: dict) -> Session | None:
