@@ -70,16 +70,26 @@ class WindowsTerminalAdapter(_CapabilityProvider):
     # ── group ───────────────────────────────────────────────────────────
 
     def group(self, views: list[SessionView]) -> list[SessionGroup]:
-        """Bucket views by WT window, drop orphans, stamp adapter identity.
+        """Bucket views by (wt_hwnd, normalized_cwd), drop orphans,
+        stamp adapter identity.
 
-        Input is already-resolved SessionViews from the snapshotter — we
-        do NOT re-run compose_session_view. Per-view work here is just:
+        Input is already-resolved SessionViews from the snapshotter —
+        we do NOT re-run compose_session_view. Per-view work here:
           1. AttachConsole probe to drop orphans (no console attached).
           2. walk_to_visible_host to compute the wt_hwnd grouping key.
-          3. Stamp adapter_id / focus_granularity / capabilities.
+          3. Bucket views by ``(wt_hwnd, normalized_cwd)`` — same WT
+             window AND same project = same card. Different cwds in
+             the same WT window stay separate (e.g. main repo + a
+             different project open in two tabs). The cwd component is
+             worktree-normalised so a Claude Code worktree merges with
+             its parent repo.
+          4. Views whose wt_hwnd can't be resolved (window_handle=None
+             pre-PR2) become singleton groups — one card each, NEVER
+             merged with anything. This avoids the bug where every
+             unresolvable view collapsed into one mega-card just
+             because their key all happened to be 0.
 
-        Each emitted SessionGroup renders as one card in the panel,
-        with one row per pane in that WT window."""
+        Each emitted SessionGroup renders as one card in the panel."""
         from dataclasses import replace
         from claude_island.platform_ import win32_console, window_activator
 
@@ -93,34 +103,43 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # --- orphan filter + per-view wt_hwnd ---
         # Pair each surviving view with the wt_hwnd grouping key. Views
         # whose AttachConsole fails are dropped (no console = orphan).
-        kept: list[tuple[int, SessionView]] = []
+        # ``wt_hwnd`` is None when we couldn't resolve to a WT window —
+        # treated as ungroupable below.
+        kept: list[tuple[int | None, SessionView]] = []
         for v in views:
             info = win32_console.get_console_info(v.session.pid)
             if info is None:
                 continue
             conpty_hwnd, _title = info
-            wt_hwnd = 0
+            wt_hwnd: int | None = None
             if win32gui is not None and conpty_hwnd:
-                resolved = window_activator.walk_to_visible_host(
+                wt_hwnd = window_activator.walk_to_visible_host(
                     conpty_hwnd, win32gui,
                 )
-                if resolved:
-                    wt_hwnd = resolved
             kept.append((wt_hwnd, v))
 
         # Tripwire: every view filtered → likely a race with our own
-        # console state. Keep the originals as one ungrouped batch so
-        # the user still sees rows.
+        # console state. Keep originals as ungroupable singletons so
+        # the user still sees rows (rather than a blank list).
         if not kept:
-            kept = [(0, v) for v in views]
+            kept = [(None, v) for v in views]
 
-        # --- bucket by wt_hwnd, then stamp identity onto each view ---
-        buckets: dict[int, list[SessionView]] = {}
+        # --- bucket by (wt_hwnd, normalized_cwd) ---
+        # Resolved wt_hwnd → ("wt", hwnd, cwd) — same hwnd + same cwd
+        # collapse into one card.
+        # Unresolved wt_hwnd → ("singleton", pid) — never merges with
+        # anything (each unresolvable view gets its own card).
+        buckets: dict[tuple, list[SessionView]] = {}
         for wt_hwnd, v in kept:
-            buckets.setdefault(wt_hwnd, []).append(v)
+            if wt_hwnd is None:
+                key: tuple = ("singleton", v.pid)
+            else:
+                key = ("wt", wt_hwnd, _normalize_project_path(v.project_path))
+            buckets.setdefault(key, []).append(v)
 
+        # --- stamp identity onto each view, build SessionGroups ---
         result: list[SessionGroup] = []
-        for wt_hwnd, batch in buckets.items():
+        for key, batch in buckets.items():
             stamped = [
                 replace(
                     v,
@@ -130,7 +149,10 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 )
                 for v in batch
             ]
-            gid = f"wt:{wt_hwnd}" if wt_hwnd else f"wt:orphan:{id(batch)}"
+            if key[0] == "wt":
+                gid = f"wt:{key[1]}:{key[2]}"
+            else:
+                gid = f"wt:singleton:{key[1]}"
             project_paths = {_normalize_project_path(v.project_path) for v in stamped}
             title = ", ".join(sorted(project_paths)[:2]) if project_paths else None
             result.append(SessionGroup(
