@@ -3019,20 +3019,27 @@ class ExpandedWindow(QWidget):
         # something odd (we've seen 100.5 when the API rounds).
         pct = max(0.0, min(100.0, float(snap.five_hour_pct)))
         self._summary_quota_bar.setValue(int(pct))
-        # Colour the chunk based on threshold — green/amber/red. Done
-        # here on the bar's stylesheet rather than via a stylesheet
-        # selector so we can react to the exact pct without juggling
-        # CSS classes.
-        chunk_color = (
-            "#ef4444" if pct >= 90
-            else "#facc15" if pct >= 70
-            else "#4ade80"
-        )
+        # Threshold colour — delegate to the same _quota_color helper
+        # the QUOTA card uses, so the same percentage NEVER renders in
+        # one colour up here and a different colour down there.
+        # Previously we had a parallel 70/90 threshold here that
+        # disagreed with _quota_color's 60/85; same value would land
+        # in different buckets depending on which surface you read it
+        # from. Single source of truth wins.
+        chunk_color = _quota_color(int(pct), stale=snap.is_stale)
         self._summary_quota_bar.setStyleSheet(
             _STYLE_SUMMARY_PROGRESS.replace("__CHUNK__", chunk_color)
         )
         self._summary_quota_bar.show()
-        self._summary_caption.setText(f"{pct:.0f}% of 5h limit")
+        # Caption text mirrors the chunk colour so the eye gets the
+        # same signal whether it lands on the bar fill or on the
+        # number — was fixed grey before, which buried the warning
+        # state at >60 % when the bar started flashing yellow.
+        self._summary_caption.setStyleSheet(
+            f"color: {chunk_color}; font-size: 11px;"
+        )
+        stale_marker = " ⚠" if snap.is_stale else ""
+        self._summary_caption.setText(f"{pct:.0f}% of 5h limit{stale_marker}")
         self._summary_caption.show()
 
     def _build_spend_card(self) -> QFrame:
