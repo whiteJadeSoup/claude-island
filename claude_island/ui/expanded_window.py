@@ -331,28 +331,40 @@ def _group_bg_color(idx: int) -> str:
 
 
 class HoverRow(QPushButton):
-    """Session row button. Three paint states stacked on top of each
-    other: base background → optional running accent bar → optional
-    hover accent bar. Both accents land on the row's left edge, 3 px
-    wide, inset top/bottom so they read as focus indicators rather
-    than borders. (VS Code / Slack / Linear pattern.)
+    """Session row button. Four paint layers stacked on top of each
+    other: base background → optional running accent (left edge) →
+    optional high-cost accent (right edge) → optional hover accent
+    (left edge). The two persistent accents (running, high-cost) sit
+    on opposite edges so they're independent signal channels — running
+    is "is this session live right now", high-cost is "has this
+    session accumulated a lot of spend over its lifetime". Putting
+    them on opposite sides means both can fire simultaneously without
+    fighting for the same paint slot.
 
-    The "running" accent is the live-session indicator (Spotify
-    "Now Playing" / Apple Music sidebar pattern: a coloured strip
-    on the left that pulses to signal "this row is alive"). It draws
-    only when ``set_running(True)`` was called and animates its alpha
-    on a 1.4 s sine cycle. Stopping the animation snaps the bar
-    invisible — no stranded mid-cycle alpha.
+    The "running" accent (left) animates its alpha on a 1.4 s sine
+    cycle (Spotify "Now Playing" / Apple Music sidebar pattern). The
+    "high-cost" accent (right) is intentionally STATIC — cumulative
+    cost is a fact about the session, not a live state, so an
+    animation would misrepresent it as something changing.
     """
 
     _ACCENT_W = 3       # px wide
     _ACCENT_INSET = 4   # px from top/bottom edges (so bar < row height)
     _RUNNING_W = 4      # the running bar is one px wider so it stands
                          # out next to the hover bar without overlap
+    _HIGH_COST_W = 4    # mirror of running width — same visual weight
+                         # on the opposite edge
 
     # Bright green that reads "alive". Same hex as the capsule's active
     # dot so the colour story is unified across surfaces.
     _RUNNING_COLOR = "#22c55e"
+    # Yellow with the same vibrance as the alert dot used elsewhere —
+    # high-cost is a "warning, not failure" tone, never red.
+    _HIGH_COST_COLOR = "#facc15"
+    # Static alpha for the high-cost bar. < 1.0 so it sits visually
+    # subordinate to the animated running bar (animation > static
+    # in the visual hierarchy), > 0.5 so it's still clearly visible.
+    _HIGH_COST_ALPHA = 0.85
 
     def __init__(self, base_bg: str, parent_card: "QFrame | None" = None, **kwargs):
         super().__init__(**kwargs)
@@ -361,6 +373,10 @@ class HoverRow(QPushButton):
         self._hovered = False
         self._running = False
         self._running_alpha = 0.0  # 0..1; driven by _running_anim
+        # High-cost (cumulative spend over threshold) is a static
+        # condition — no animation, paint or don't paint a yellow
+        # bar on the right edge.
+        self._high_cost = False
         # Accent colour: brightened version of the group bg for in-card
         # rows (reinforces group identity); neutral grey for standalone.
         if parent_card is not None:
@@ -405,6 +421,15 @@ class HoverRow(QPushButton):
             self._running_alpha = 0.0
             self.update()
 
+    def set_high_cost(self, high_cost: bool) -> None:
+        """Toggle the static right-edge yellow bar that flags
+        high-cumulative-spend sessions. Idempotent — same value twice
+        is a no-op (avoids needless repaints on every refresh tick)."""
+        if self._high_cost == high_cost:
+            return
+        self._high_cost = high_cost
+        self.update()
+
     def set_parent_card(self, card: "QFrame | None") -> None:
         """Re-bind to a new card (or detach). Recomputes accent colour
         so a row that moves between groups picks up the new identity."""
@@ -429,7 +454,6 @@ class HoverRow(QPushButton):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
-        from PySide6.QtGui import QPainter, QColor
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -444,6 +468,20 @@ class HoverRow(QPushButton):
             x = 0
             y = self._ACCENT_INSET
             w = self._RUNNING_W
+            h = self.height() - 2 * self._ACCENT_INSET
+            painter.drawRoundedRect(x, y, w, h, w / 2, w / 2)
+
+        # High-cost — static yellow bar mirrored onto the RIGHT edge so
+        # it's an independent signal channel from running. Both can
+        # paint simultaneously (running on left, high-cost on right);
+        # neither overwrites the other.
+        if self._high_cost:
+            color = QColor(self._HIGH_COST_COLOR)
+            color.setAlphaF(self._HIGH_COST_ALPHA)
+            painter.setBrush(color)
+            w = self._HIGH_COST_W
+            x = self.width() - w
+            y = self._ACCENT_INSET
             h = self.height() - 2 * self._ACCENT_INSET
             painter.drawRoundedRect(x, y, w, h, w / 2, w / 2)
 
@@ -484,21 +522,21 @@ _DOT_RUNNING = "#22c55e"
 
 
 class _RowStatusGlyph(QWidget):
-    """Tri-state glyph painted in the row's leftmost slot:
+    """Bi-state glyph painted in the row's leftmost slot:
 
     - ``running`` → 3 vertical bars that wave like an audio equalizer
       (Spotify "Now Playing" pattern). Each bar's height is animated
-      between 30 % and 100 % of the widget height with a phase offset
+      between 28 % and 100 % of the widget height with a phase offset
       so the bars never sync up — that's what reads as "live" rather
       than "loading".
-    - ``high_cost`` → static "⚡" lightning glyph in yellow. Reuses
-      the existing high-spend warning visual.
     - ``idle`` → single static colour-coded dot (green / yellow /
       grey based on activity recency, picked by the caller).
 
-    Single widget for all three states so the row layout stays
-    stable — no QStackedLayout shuffle and no widget show/hide
-    fighting Qt's geometry cache."""
+    High-cost is NOT a glyph state — it lives on the row's right
+    edge as a static yellow bar (HoverRow.set_high_cost), so the
+    leftmost slot stays a pure liveness channel. Combining both
+    signals on this widget caused user confusion ("why is this ⚡
+    instead of EQ when it's also running?")."""
 
     _BAR_W = 2          # px wide per equalizer bar
     _BAR_GAP = 2        # px between bars
@@ -520,13 +558,16 @@ class _RowStatusGlyph(QWidget):
 
     STATE_IDLE = "idle"
     STATE_RUNNING = "running"
-    STATE_HIGH_COST = "high_cost"
+    # STATE_HIGH_COST removed — high-cost moved to HoverRow's right
+    # edge bar so the leftmost slot is a pure running/idle channel.
+    # Legacy attribute kept as an alias to STATE_IDLE so external
+    # callers that still reference it (older tests, future code that
+    # forgets the move) degrade gracefully instead of crashing.
+    STATE_HIGH_COST = "idle"
 
-    # Class-level font + colour for the HIGH_COST glyph — paintEvent
-    # would otherwise allocate fresh QFont / QColor objects every
-    # frame on every running row. These are immutable.
-    _HIGH_COST_FONT = QFont("Segoe UI Symbol", 11, QFont.Weight.Bold)
-    _HIGH_COST_PEN = QColor(_DOT_YELLOW)
+    # _HIGH_COST_FONT / _HIGH_COST_PEN constants removed — the ⚡
+    # glyph paint branch is gone now that high-cost lives on the
+    # row's right edge as a static yellow bar (HoverRow paints it).
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -571,17 +612,23 @@ class _RowStatusGlyph(QWidget):
         dot_color: str | None = None,
         bar_color: str | None = None,
     ) -> None:
-        """Switch which of the three glyphs is rendered.
+        """Switch between IDLE and RUNNING.
 
         - ``dot_color`` only affects IDLE rendering (freshness colour).
-        - ``bar_color`` only affects RUNNING rendering (defaults to
-          live green, but callers can pass yellow for "running AND
-          high-cost" so both signals stack on the same widget).
+        - ``bar_color`` only affects RUNNING rendering — kept for
+          callers that want a different bar tint, but the current
+          design uses the standard green for all running rows
+          (high-cost moved to a separate channel on the row's right
+          edge, so we no longer overload the bar colour to combine
+          signals).
 
         Idempotent — calling with the same state is a no-op so this
         is safe to call from every refresh tick. Only state
         transitions start / stop the animations."""
-        if state not in (self.STATE_IDLE, self.STATE_RUNNING, self.STATE_HIGH_COST):
+        # Anything other than RUNNING collapses to IDLE — keeps the
+        # API permissive for the legacy STATE_HIGH_COST alias and
+        # any future caller that forgets the bi-state contract.
+        if state != self.STATE_RUNNING:
             state = self.STATE_IDLE
         if dot_color is not None:
             self._dot_color = dot_color
@@ -641,18 +688,6 @@ class _RowStatusGlyph(QWidget):
                     bx, by, self._BAR_W, bar_h,
                     self._BAR_W / 2, self._BAR_W / 2,
                 )
-        elif self._state == self.STATE_HIGH_COST:
-            # ⚡ glyph — drawn via QPainter so we don't have to manage
-            # a separate QLabel for this branch. Font + pen are
-            # class-level constants (B-007) so paintEvent doesn't
-            # allocate them every frame on every running row.
-            painter.setPen(self._HIGH_COST_PEN)
-            painter.setFont(self._HIGH_COST_FONT)
-            painter.drawText(
-                self.rect(),
-                int(Qt.AlignmentFlag.AlignCenter),
-                "⚡",
-            )
         else:
             # IDLE — single dot, colour picked by caller (freshness).
             painter.setBrush(QColor(self._dot_color))
@@ -4381,38 +4416,20 @@ class ExpandedWindow(QWidget):
                 seconds_since = 1e9
             running = seconds_since < _ROW_ACTIVE_THRESHOLD_SECONDS
 
-        # Drive the leftmost glyph — the equalizer / ⚡ / static-dot
-        # tri-state widget.
-        #
-        # Combined-signal rule: when a session is BOTH running AND
-        # high-cost we still show the equalizer (running wins for
-        # animation), but in yellow so the warning colour overlays the
-        # liveness signal. The user's previous frustration was "I
-        # can't tell that the expensive session is also running" —
-        # static ⚡ alone hid the live state. Idle high-cost still
-        # gets the plain ⚡ glyph since there's no "live" signal to
-        # combine.
+        # Two independent signal channels drive the row chrome:
+        #   - Leftmost slot (glyph + running accent bar) → liveness:
+        #     equalizer-bars while running, static dot while idle.
+        #   - Rightmost edge (high-cost accent bar) → cumulative spend
+        #     warning: static yellow bar when ≥ threshold, nothing
+        #     otherwise.
+        # Splitting the two onto opposite sides means a session can be
+        # BOTH live AND expensive without either signal hiding the
+        # other (the previous design overloaded the leftmost slot for
+        # both, which made users repeatedly ask "why is it ⚡?").
         glyph: _RowStatusGlyph | None = getattr(btn, "_status_glyph", None)
         if glyph is not None:
-            if running and high_cost:
-                glyph.set_state(
-                    _RowStatusGlyph.STATE_RUNNING,
-                    bar_color=_DOT_YELLOW,
-                )
-                glyph.setToolTip(
-                    f"Running · high cumulative spend (${details.cost_usd:.0f})"
-                )
-            elif high_cost:
-                glyph.set_state(_RowStatusGlyph.STATE_HIGH_COST)
-                glyph.setToolTip(
-                    f"High cumulative spend (${details.cost_usd:.0f}) — "
-                    "consider checking this session"
-                )
-            elif running:
-                glyph.set_state(
-                    _RowStatusGlyph.STATE_RUNNING,
-                    bar_color=_DOT_RUNNING,
-                )
+            if running:
+                glyph.set_state(_RowStatusGlyph.STATE_RUNNING)
                 glyph.setToolTip("Currently running — JSONL recently updated")
             else:
                 glyph.set_state(
@@ -4421,12 +4438,23 @@ class ExpandedWindow(QWidget):
                 )
                 glyph.setToolTip("")
 
-        # Drive the row's left-edge running accent bar (Spotify-style
-        # "now playing" indicator). HoverRow.set_running is idempotent
-        # so we can safely call every refresh tick.
-        should_pulse = running and not high_cost
+        # Left-edge running accent bar — animates while running.
         if hasattr(btn, "set_running"):
-            btn.set_running(should_pulse)
+            btn.set_running(running)
+
+        # Right-edge high-cost accent bar — static yellow when set.
+        # Tooltip lives on the row itself so a hover anywhere on the
+        # row explains both signals (vs. requiring the user to find
+        # the specific edge bar).
+        if hasattr(btn, "set_high_cost"):
+            btn.set_high_cost(high_cost)
+        if high_cost and details is not None:
+            btn.setToolTip(
+                f"High cumulative spend (${details.cost_usd:.0f}) — "
+                "consider checking this session"
+            )
+        else:
+            btn.setToolTip("")
 
         name_label = btn.findChild(QLabel, "name_label")
         if name_label is not None and name_label.text() != title:
@@ -4471,10 +4499,9 @@ class ExpandedWindow(QWidget):
             if status_label.text() != status_text:
                 status_label.setText(status_text)
 
-        # Right-click triggers the rich popup; tooltip would compete
-        # for the same surface, so it's gone. Explicit empty string
-        # in case Qt cached a value from an earlier build of the row.
-        btn.setToolTip("")
+        # NB: row tooltip is owned by the high-cost branch above —
+        # don't blanket-clear it here or the warning gets wiped on
+        # every refresh tick.
 
         btn.setProperty("_session", session)
 

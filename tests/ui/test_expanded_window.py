@@ -2272,11 +2272,12 @@ class TestSummaryCard:
 
 
 class TestHighCostRowAlert:
-    def test_high_cost_dot_swaps_to_lightning(self, qtbot):
+    def test_high_cost_idle_row_paints_right_edge_bar(self, qtbot):
         """An IDLE session whose cumulative cost exceeds the alert
-        threshold should switch the row's status glyph into HIGH_COST
-        state (yellow ⚡). Tested with ago_minutes=10 so the running-
-        path doesn't fire — that path is covered by the next test."""
+        threshold should set HoverRow._high_cost=True. The leftmost
+        glyph stays in IDLE state — high-cost is now its own
+        independent signal channel on the row's RIGHT edge, not a
+        glyph variant. Row tooltip explains the warning."""
         from claude_island.core.models import SessionDetails
         from claude_island.ui.expanded_window import _RowStatusGlyph
 
@@ -2299,19 +2300,24 @@ class TestHighCostRowAlert:
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
-        glyph = p._rows[1]._status_glyph
-        assert glyph.state() == _RowStatusGlyph.STATE_HIGH_COST
-        assert "high cumulative spend" in glyph.toolTip().lower()
+        btn = p._rows[1]
+        # Left-side glyph is IDLE — high-cost no longer hijacks it.
+        assert btn._status_glyph.state() == _RowStatusGlyph.STATE_IDLE
+        # Right-side high-cost bar is on.
+        assert btn._high_cost is True
+        # Tooltip lives on the row, not the glyph.
+        assert "high cumulative spend" in btn.toolTip().lower()
 
     def test_running_high_cost_combines_signals(self, qtbot):
-        """A session that is BOTH running AND high-cost should show
-        the equalizer animation (running) tinted yellow (high-cost)
-        rather than a static ⚡ — the animation conveys "live" and
-        the colour conveys "expensive", stacked on the same glyph."""
+        """A session that is BOTH running AND high-cost should run
+        the equalizer (running) on the LEFT and paint the static
+        yellow bar (high-cost) on the RIGHT — two independent signal
+        channels, neither hides the other. This was the previous
+        design's failure: combining both onto the leftmost slot meant
+        the user repeatedly couldn't tell that an expensive session
+        was also currently running."""
         from claude_island.core.models import SessionDetails
-        from claude_island.ui.expanded_window import (
-            _RowStatusGlyph, _DOT_YELLOW,
-        )
+        from claude_island.ui.expanded_window import _RowStatusGlyph
 
         def details(session):
             return SessionDetails(
@@ -2333,14 +2339,15 @@ class TestHighCostRowAlert:
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         # status="busy" forces running regardless of last_activity.
         p.refresh_sessions([_session(1, "/a", ago_minutes=10)])
-        glyph = p._rows[1]._status_glyph
-        assert glyph.state() == _RowStatusGlyph.STATE_RUNNING
-        # Bar colour is the high-cost yellow, not the standard green.
-        assert glyph._bar_color == _DOT_YELLOW
-        # Tooltip names both signals so the user understands the combo.
-        tip = glyph.toolTip().lower()
-        assert "running" in tip
-        assert "high cumulative spend" in tip
+        btn = p._rows[1]
+        # Left side runs the equalizer; right side paints high-cost.
+        assert btn._status_glyph.state() == _RowStatusGlyph.STATE_RUNNING
+        assert btn._running is True
+        assert btn._high_cost is True
+        # The glyph's bar colour stays the standard green — yellow
+        # means "high cost" and that signal lives on the row's
+        # right edge now, not overlaid on the equalizer.
+        assert btn._status_glyph._bar_color == "#22c55e"
 
     def test_low_cost_dot_keeps_default_glyph(self, qtbot):
         """Cost below threshold ⇒ glyph stays in IDLE state (single
@@ -2447,3 +2454,43 @@ class TestRowStatusGlyph:
         qtbot.addWidget(g)
         g.set_state(_RowStatusGlyph.STATE_IDLE, dot_color="#facc15")
         assert g._dot_color == "#facc15"
+
+
+class TestHoverRowHighCost:
+    """The right-edge high-cost accent bar — independent paint
+    channel from the running pulse, so a session can fire both
+    signals simultaneously without either hiding the other."""
+
+    def test_high_cost_default_off(self, qtbot):
+        from claude_island.ui.expanded_window import HoverRow
+        row = HoverRow(base_bg="#181818")
+        qtbot.addWidget(row)
+        assert row._high_cost is False
+
+    def test_set_high_cost_idempotent(self, qtbot):
+        """set_high_cost(True) twice doesn't trigger an extra repaint
+        (would burn cycles on every refresh tick where cost was
+        already over threshold)."""
+        from claude_island.ui.expanded_window import HoverRow
+        row = HoverRow(base_bg="#181818")
+        qtbot.addWidget(row)
+        row.set_high_cost(True)
+        assert row._high_cost is True
+        # Second True call is a no-op — no easy way to assert "no
+        # repaint scheduled", so just verify state stays consistent.
+        row.set_high_cost(True)
+        assert row._high_cost is True
+        # Toggle off works.
+        row.set_high_cost(False)
+        assert row._high_cost is False
+
+    def test_running_and_high_cost_independent(self, qtbot):
+        """Both flags can be on simultaneously — no mutual exclusion.
+        That's the whole point of putting them on opposite edges."""
+        from claude_island.ui.expanded_window import HoverRow
+        row = HoverRow(base_bg="#181818")
+        qtbot.addWidget(row)
+        row.set_running(True)
+        row.set_high_cost(True)
+        assert row._running is True
+        assert row._high_cost is True
