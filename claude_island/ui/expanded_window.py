@@ -168,10 +168,22 @@ class _HoverRevealRow(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
     def register_reveal(self, widget: QWidget) -> None:
-        """Mark ``widget`` as hover-only and hide it now."""
+        """Mark ``widget`` as hover-only and hide it now.
+
+        ``setRetainSizeWhenHidden(True)`` is critical: without it Qt
+        drops the hidden widget from layout sizing, so the sibling
+        label gets full width at rest and loses ~20 px on hover —
+        triggering wordwrap reflow that grows the row taller and
+        pushes everything below it down (visible as the whole panel
+        "stretching" and the Resume button jumping). With the flag
+        set, the slot is reserved at all times; hover only flips
+        visibility, never the layout."""
         if widget is None:
             return
         self._reveal.append(widget)
+        sp = widget.sizePolicy()
+        sp.setRetainSizeWhenHidden(True)
+        widget.setSizePolicy(sp)
         widget.hide()
 
     def enterEvent(self, event) -> None:  # type: ignore[override]
