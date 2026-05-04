@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -414,17 +415,52 @@ def read_oauth_token(credentials_path: Path) -> str | None:
     have the expected key. This is the OAuth access token Claude
     Code maintains for the user's consumer plan; the
     ``/api/oauth/usage`` endpoint accepts it as a Bearer token.
+
+    macOS: Claude Code does not write the file — credentials live in
+    the login keychain under service ``Claude Code-credentials``. When
+    the file read fails on darwin, fall back to ``/usr/bin/security``.
+    The keychain item's ACL trusts that binary, so no auth prompt.
     """
+    text = _read_credentials_payload(credentials_path)
+    if text is None:
+        return None
     try:
-        text = credentials_path.read_text(encoding="utf-8")
         data = json.loads(text)
-    except (OSError, ValueError):
+    except ValueError:
         return None
     oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
     if not isinstance(oauth, dict):
         return None
     token = oauth.get("accessToken")
     return token if isinstance(token, str) and token else None
+
+
+def _read_credentials_payload(credentials_path: Path) -> str | None:
+    try:
+        return credentials_path.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    if sys.platform != "darwin":
+        return None
+    return _read_keychain_credentials()
+
+
+def _read_keychain_credentials() -> str | None:
+    try:
+        result = subprocess.run(
+            ["/usr/bin/security", "find-generic-password",
+             "-s", "Claude Code-credentials", "-w"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    out = result.stdout.strip()
+    return out or None
 
 
 def http_get(url: str, token: str) -> dict | None:

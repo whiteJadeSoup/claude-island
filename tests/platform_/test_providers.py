@@ -67,10 +67,15 @@ class TestAnthropicProvider:
     def test_fetch_returns_none_when_no_oauth_credential(self, tmp_path):
         # Anthropic reads OAuth from ~/.claude/.credentials.json (not env).
         # Point the module-level path at a non-existent file to simulate
-        # "user has not run Claude Code OAuth login".
+        # "user has not run Claude Code OAuth login". On darwin the
+        # provider falls back to the login keychain, so suppress that
+        # branch too — otherwise this test only fails on macOS dev boxes
+        # that have a real Claude Code login.
         from claude_island.platform_.providers import anthropic as anth
+        from claude_island.platform_ import providers as prov_pkg
         missing = tmp_path / "no-such-credentials.json"
-        with patch.object(anth, "_CREDENTIALS_PATH", missing):
+        with patch.object(anth, "_CREDENTIALS_PATH", missing), \
+             patch.object(prov_pkg, "_read_keychain_credentials", return_value=None):
             p = anth.AnthropicProvider()
             result = p.fetch(cache_dir=tmp_path)
             assert result is None
@@ -328,11 +333,14 @@ class TestExplicitProviderSelection:
         from claude_island.platform_.providers import ProviderEngine
 
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.minimaxi.com/anthropic")
-        with patch.object(anth, "_CREDENTIALS_PATH", tmp_path / "no-cred.json"):
+        from claude_island.platform_ import providers as prov_pkg
+        with patch.object(anth, "_CREDENTIALS_PATH", tmp_path / "no-cred.json"), \
+             patch.object(prov_pkg, "_read_keychain_credentials", return_value=None):
             e = ProviderEngine(cache_dir=tmp_path)
-            # No cred file → Anthropic fetch returns None. The fact that
-            # it returns None instead of falling back to MiniMax proves
-            # the explicit name was honoured.
+            # No cred file (and keychain fallback stubbed out) →
+            # Anthropic fetch returns None. The fact that it returns
+            # None instead of falling back to MiniMax proves the
+            # explicit name was honoured.
             assert e.get(provider_name="anthropic") is None
 
 
