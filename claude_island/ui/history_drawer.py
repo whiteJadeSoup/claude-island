@@ -473,6 +473,24 @@ class HistoryDrawer(QWidget):
         self.setFixedWidth(_DRAWER_WIDTH)
         self.setMinimumHeight(300)
 
+        # QToolTip styling — without this, tooltips inherit the
+        # parent's translucent BG and render as an unreadable black
+        # box (system default text colour ends up dark-on-dark). Same
+        # block ExpandedWindow uses, applied to this widget's
+        # stylesheet so QToolTip on any descendant picks it up via
+        # Qt's stylesheet cascade.
+        self.setStyleSheet(
+            "HistoryDrawer { color: white; font-family: 'Segoe UI', sans-serif; }"
+            "QToolTip {"
+            "  color: #e8e8e8;"
+            "  background-color: #1e1e1e;"
+            "  border: 1px solid #3a3a3a;"
+            "  padding: 6px 8px;"
+            "  border-radius: 4px;"
+            "  font-size: 12px;"
+            "}"
+        )
+
         self._build_ui()
 
         # Esc closes the drawer (does NOT propagate to parent panel).
