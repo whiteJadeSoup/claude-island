@@ -71,6 +71,7 @@ from claude_island.core.capabilities import Capability, LauncherSpawnError
 from claude_island.core.launch_intent import LaunchIntent, LaunchIntentRegistry
 from claude_island.core.models import DormantSession
 from claude_island.core.snapshot import WorldSnapshot
+from claude_island.ui.fonts import UI_FONT_STACK
 from claude_island.ui.collapsible import CollapsibleLinkButton
 from claude_island.ui.expanded_window import (
     _BG_HOVER_SINGLE,
@@ -379,12 +380,16 @@ class RecentsDrawer(QWidget):
         self._prompt_expanded: bool = False
         self._title_expanded: bool = False
 
-        # Same flag combo as ExpandedWindow / SessionDetailPopup.
-        self.setWindowFlags(
+        # Same flag combo as ExpandedWindow. Qt.Tool is dropped on
+        # macOS — see CapsuleWindow._setup_window for the NSPanel
+        # WA_TranslucentBackground rendering bug that motivates it.
+        flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
         )
+        if sys.platform != "darwin":
+            flags |= Qt.WindowType.Tool
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedWidth(_DRAWER_WIDTH_FULL)
         self.setMinimumHeight(300)
@@ -392,7 +397,7 @@ class RecentsDrawer(QWidget):
         # QToolTip styling — without this, tooltips inherit the parent's
         # translucent BG and render as an unreadable black box.
         self.setStyleSheet(
-            "RecentsDrawer { color: white; font-family: 'Segoe UI', sans-serif; }"
+            f"RecentsDrawer {{ color: white; font-family: {UI_FONT_STACK}; }}"
             "QToolTip {"
             "  color: #e8e8e8;"
             "  background-color: #1e1e1e;"

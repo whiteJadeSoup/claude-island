@@ -15,6 +15,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# Install the stderr noise filter BEFORE importing Qt / pyobjc so the
+# pipe redirect catches every C-level write to FD 2 — Qt's font
+# subsystem and macOS Input Method Kit both emit harmless lines that
+# we drop here. No-op on non-darwin platforms.
+from claude_island.core.stderr_noise_filter import install as _install_stderr_filter
+_install_stderr_filter()
+
 from platformdirs import user_data_dir
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from typing import Callable, NamedTuple
 
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from claude_island.core.models import QuotaSnapshot, Session, SessionDetails
 from claude_island.core.snapshot import SessionView, WorldSnapshot
+from .fonts import UI_FONT_FAMILY, UI_FONT_STACK
 from .controller import IslandController
 from .expanded_window import _RowStatusGlyph
 from .window_position import load_position as _load_saved_position
@@ -97,7 +99,7 @@ _ACTIVE_THRESHOLD_SECONDS = 30
 # inside _RowStatusGlyph and runs as the equalizer-bar wave there.
 # Capsule no longer owns a QPropertyAnimation directly.)
 
-_STYLE_LABEL = "color: white; font-size: 12px; font-family: 'Segoe UI', sans-serif;"
+_STYLE_LABEL = f"color: white; font-size: 12px; font-family: {UI_FONT_STACK};"
 # Active = green equalizer bars; idle = static grey dot. Same colour
 # mapping the panel rows use, just rendered through _RowStatusGlyph
 # instead of a styled QLabel.
@@ -339,11 +341,19 @@ class CapsuleWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_window(self) -> None:
-        self.setWindowFlags(
+        # Qt.Tool maps to NSPanel on macOS, which silently refuses to
+        # paint a WA_TranslucentBackground surface — the capsule reports
+        # isVisible=True yet nothing reaches the screen. Drop the flag
+        # on darwin; the capsule still floats (StaysOnTopHint) and stays
+        # frameless. The cosmetic trade-off (it can take focus / show in
+        # Cmd+Tab briefly) beats being invisible. Windows is unaffected.
+        flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
         )
+        if sys.platform != "darwin":
+            flags |= Qt.WindowType.Tool
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
@@ -691,7 +701,7 @@ class CapsuleWindow(QWidget):
         # so we don't have to manage another QLabel + opacity effect.
         from PySide6.QtGui import QFont
         text = f"{int(pct)}%"
-        font = QFont("Segoe UI", 9, QFont.Weight.DemiBold)
+        font = QFont(UI_FONT_FAMILY, 9, QFont.Weight.DemiBold)
         painter.setFont(font)
         text_color = (
             QColor(254, 226, 226) if critical else QColor(253, 230, 138)
