@@ -16,6 +16,8 @@ from claude_island.core.models import QuotaSnapshot, Session, SessionDetails
 from claude_island.core.snapshot import SessionView, WorldSnapshot
 from .controller import IslandController
 from .expanded_window import _RowStatusGlyph
+from .window_position import load_position as _load_saved_position
+from .window_position import save_position as _save_position
 
 # Two widths: normal (no quota mini-bar) vs warning (quota mini-bar
 # appended on the right). Switching between them happens on every
@@ -89,6 +91,28 @@ _QUOTA_BAR_FILL_WARN = QColor(250, 204, 21)     # amber
 _QUOTA_BAR_FILL_CRITICAL = QColor(248, 113, 113)  # bright red
 _STYLE_QUOTA_PCT = "color: #fde68a; font-size: 11px; font-weight: 600;"
 _STYLE_QUOTA_PCT_CRITICAL = "color: #fee2e2; font-size: 11px; font-weight: 600;"
+
+
+def _pos_visible_on_any_screen(x: int, y: int, w: int, h: int) -> bool:
+    """True iff a window of size (w, h) at (x, y) overlaps any
+    currently-connected screen.
+
+    Used to validate a persisted position from disk: a saved (x, y)
+    that lived on a now-disconnected monitor would land off-screen,
+    so the loader falls back to the default centred position. Uses
+    QScreen.geometry() (not availableGeometry) — we want the raw
+    screen bounds, not the menubar/dock-excluded region, so a
+    capsule sitting in the menubar slot on macOS still counts as
+    visible.
+
+    Cross-platform: QScreen API returns identical structures on
+    Windows / macOS / Linux."""
+    from PySide6.QtCore import QRect
+    rect = QRect(x, y, w, h)
+    for screen in QApplication.screens():
+        if screen.geometry().intersects(rect):
+            return True
+    return False
 
 
 def _fmt_money(amount: float) -> str:
@@ -170,6 +194,31 @@ class CapsuleWindow(QWidget):
         # paint code skips the bar entirely.
         self._quota_pct_cache: float | None = None
 
+        # ── Drag state (PR1: horizontal drag along the top) ────────────
+        # User can press-and-hold the pill, then drag it left/right to
+        # reposition it horizontally along the top edge. The X coord
+        # is persisted so the position survives restarts. Y is locked
+        # to top margin in PR1; PR2 will unlock Y via long-press.
+        #
+        # Drag-vs-click discrimination uses
+        # QApplication.startDragDistance() (system-tunable, defaults to
+        # ~10 px on win/mac/linux) so a sloppy click doesn't reposition
+        # the window and a deliberate drag doesn't accidentally toggle
+        # the panel.
+        #
+        # _drag_origin_global: mouse-down global QPoint. None when not
+        #   currently in a press-hold cycle.
+        # _drag_origin_window: capsule's pos() captured at mouse-down.
+        # _is_dragging: True only after the cursor has moved past the
+        #   click-distance threshold; used to decide click-vs-drag at
+        #   release time.
+        # _persisted_pos: (x, y) restored from disk at construction.
+        #   None ⇒ no saved position (first run, or save file deleted).
+        self._drag_origin_global: QPoint | None = None
+        self._drag_origin_window: QPoint | None = None
+        self._is_dragging: bool = False
+        self._persisted_pos: tuple[int, int] | None = _load_saved_position()
+
         self._setup_window()
 
         # Status glyph — same widget the panel rows use, dropped into
@@ -207,10 +256,42 @@ class CapsuleWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
     def _center_top(self, w: int, h: int) -> None:
+        """Position the capsule for the given (w, h).
+
+        Honours the user's persisted drag position when one exists
+        AND lands on a currently-connected screen; otherwise falls
+        back to top-centre on the primary screen (the original
+        behaviour). Called from _apply_dot / _apply_capsule on every
+        size-affecting state change so PR1 must keep the user's
+        chosen X across those transitions.
+
+        Multi-monitor: a persisted position from a now-disconnected
+        monitor would land off-screen; ``_pos_visible_on_any_screen``
+        guards that. Cross-platform (uses Qt screen geometry).
+        """
+        if self._persisted_pos is not None:
+            x, y = self._persisted_pos
+            x = self._clamp_x(x, w)
+            if _pos_visible_on_any_screen(x, y, w, h):
+                self.setGeometry(x, y, w, h)
+                return
+        # Default — primary-screen top centre, original behaviour.
         screen = QApplication.primaryScreen()
         geom = screen.geometry()
         x = geom.center().x() - w // 2
         self.setGeometry(x, geom.top() + _TOP_MARGIN, w, h)
+
+    def _clamp_x(self, x: int, w: int) -> int:
+        """Clamp x so the capsule (width w) stays within the union
+        of all connected screens' horizontal extents. Allows the
+        capsule to live on any monitor in a multi-monitor setup
+        without restricting which one."""
+        screens = QApplication.screens()
+        if not screens:
+            return x
+        leftmost = min(s.geometry().left() for s in screens)
+        rightmost = max(s.geometry().right() for s in screens)
+        return max(leftmost, min(rightmost - w + 1, x))
 
     # ------------------------------------------------------------------
     # State handlers
@@ -482,7 +563,57 @@ class CapsuleWindow(QWidget):
             self._show_context_menu(event.globalPosition().toPoint())
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            # Capture drag origin but DON'T toggle yet — we don't
+            # know if this is a click or a drag until mouseRelease.
+            # toggle_expanded fires from mouseReleaseEvent if the
+            # cursor never moved past the system drag-distance
+            # threshold.
+            self._drag_origin_global = event.globalPosition().toPoint()
+            self._drag_origin_window = self.pos()
+            self._is_dragging = False
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        # No left-button press recorded ⇒ ignore (e.g. mouse wandered
+        # over the pill without pressing). Qt only delivers move
+        # events when a button is held unless setMouseTracking is on,
+        # so this is mostly defensive.
+        if self._drag_origin_global is None or self._drag_origin_window is None:
+            return
+        delta = event.globalPosition().toPoint() - self._drag_origin_global
+        if not self._is_dragging:
+            # Tolerance: system-defined click slop. Below this we
+            # still treat the gesture as a click; above it we commit
+            # to a drag and stop bubbling toggle on release.
+            if delta.manhattanLength() < QApplication.startDragDistance():
+                return
+            self._is_dragging = True
+        # PR1: lock Y to the original top margin — only X moves.
+        # PR2 will allow Y to move too once the user enters free-
+        # drag mode via long-press.
+        new_x = self._clamp_x(
+            self._drag_origin_window.x() + delta.x(), self.width(),
+        )
+        self.move(new_x, self._drag_origin_window.y())
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        was_dragging = self._is_dragging
+        # Reset drag state BEFORE branching so a re-entrant signal
+        # (e.g. toggle_expanded routes back here) sees a clean state.
+        self._drag_origin_global = None
+        self._drag_origin_window = None
+        self._is_dragging = False
+        if not was_dragging:
+            # Pure click — original behaviour.
             self._controller.toggle_expanded()
+            return
+        # Drag completed — persist the new position so it survives
+        # restarts. Save errors are swallowed inside save_position
+        # (best-effort, never crashes the UI).
+        pos = self.pos()
+        self._persisted_pos = (pos.x(), pos.y())
+        _save_position(pos.x(), pos.y())
 
     def _show_context_menu(self, global_pos: QPoint) -> None:
         menu = QMenu(self)

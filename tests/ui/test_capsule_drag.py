@@ -1,0 +1,257 @@
+"""Tests for CapsuleWindow PR1: horizontal drag along the top edge
+plus X-coordinate persistence.
+
+Strategy: drive Qt mouse events directly via QTest so we bypass the
+real OS pointer (works headless under offscreen platform). Patch
+WINDOW_POSITION_PATH at the module attribute so saves go to a tmp
+dir per test.
+
+These tests pin down the click-vs-drag discrimination — a small
+mouse twitch must NOT reposition the window AND must still toggle
+the panel; a real drag must reposition AND must NOT toggle.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+# Force offscreen for headless CI / local runs (mirrors test_expanded_window).
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication
+
+from claude_island.ui import window_position
+from claude_island.ui.capsule_window import CapsuleWindow
+from claude_island.ui.controller import IslandController
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────
+
+@pytest.fixture
+def tmp_position_file(tmp_path, monkeypatch):
+    """Redirect window.json saves to a per-test tmp file. Yields the
+    Path so the test can read what was written."""
+    target = tmp_path / "window.json"
+    monkeypatch.setattr(window_position, "WINDOW_POSITION_PATH", target)
+    yield target
+
+
+@pytest.fixture
+def capsule(qtbot, tmp_position_file):
+    """Construct a CapsuleWindow with no real wiring — controller only.
+    Persisted position is loaded from the patched window.json (which
+    starts absent, so every fresh capsule begins centred)."""
+    controller = IslandController()
+    cap = CapsuleWindow(controller)
+    qtbot.addWidget(cap)
+    yield cap
+
+
+# ── Drag-vs-click discrimination ──────────────────────────────────────
+
+def _press(widget, *, global_pos: QPoint) -> None:
+    """Synthesise a left-button press at ``global_pos``. Both local
+    and global positions need to be supplied to QMouseEvent — local
+    is computed from globalPosition by mapping back."""
+    local = widget.mapFromGlobal(global_pos)
+    ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        local.toPointF() if hasattr(local, "toPointF") else local,
+        global_pos.toPointF() if hasattr(global_pos, "toPointF") else global_pos,
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, ev)
+
+
+def _move(widget, *, global_pos: QPoint) -> None:
+    local = widget.mapFromGlobal(global_pos)
+    ev = QMouseEvent(
+        QMouseEvent.Type.MouseMove,
+        local.toPointF() if hasattr(local, "toPointF") else local,
+        global_pos.toPointF() if hasattr(global_pos, "toPointF") else global_pos,
+        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, ev)
+
+
+def _release(widget, *, global_pos: QPoint) -> None:
+    local = widget.mapFromGlobal(global_pos)
+    ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        local.toPointF() if hasattr(local, "toPointF") else local,
+        global_pos.toPointF() if hasattr(global_pos, "toPointF") else global_pos,
+        Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, ev)
+
+
+def test_small_motion_treated_as_click_toggles_panel(capsule, monkeypatch):
+    """Press → move 2 px → release → controller.toggle_expanded must
+    have been invoked (small motion is below
+    QApplication.startDragDistance and does not promote to a drag).
+
+    Spies on toggle_expanded directly because the controller's state
+    machine no-ops a toggle from 'dot' state (no active sessions),
+    which would mask the click signal in this test."""
+    calls: list[None] = []
+    monkeypatch.setattr(
+        capsule._controller, "toggle_expanded",
+        lambda: calls.append(None),
+    )
+    initial_pos = capsule.pos()
+
+    origin = QPoint(initial_pos.x() + 50, initial_pos.y() + 10)
+    _press(capsule, global_pos=origin)
+    _move(capsule, global_pos=origin + QPoint(2, 0))
+    _release(capsule, global_pos=origin + QPoint(2, 0))
+
+    # Window must NOT have moved.
+    assert capsule.pos() == initial_pos
+    # And the click reached the controller.
+    assert len(calls) == 1
+
+
+def test_large_horizontal_motion_repositions_capsule(capsule, monkeypatch):
+    """Press → move past the drag-distance threshold → release. The
+    window's X must change; Y must stay locked (PR1 horizontal-only).
+    toggle_expanded must NOT be invoked (this is a drag, not a click)."""
+    calls: list[None] = []
+    monkeypatch.setattr(
+        capsule._controller, "toggle_expanded",
+        lambda: calls.append(None),
+    )
+    initial_pos = capsule.pos()
+
+    # Pick a delta well above any reasonable startDragDistance.
+    drag_dx = QApplication.startDragDistance() + 50
+
+    origin = QPoint(initial_pos.x() + 50, initial_pos.y() + 10)
+    _press(capsule, global_pos=origin)
+    _move(capsule, global_pos=origin + QPoint(drag_dx, 0))
+    _release(capsule, global_pos=origin + QPoint(drag_dx, 0))
+
+    new_pos = capsule.pos()
+    # X moved by drag_dx (modulo clamp), Y unchanged.
+    assert new_pos.x() != initial_pos.x()
+    assert new_pos.y() == initial_pos.y()
+    # No toggle on a real drag — the press/release pair was for moving.
+    assert calls == []
+
+
+def test_drag_persists_position_to_disk(capsule, tmp_position_file):
+    """After a drag, window.json must contain the new (x, y)."""
+    initial_pos = capsule.pos()
+    drag_dx = QApplication.startDragDistance() + 50
+
+    origin = QPoint(initial_pos.x() + 50, initial_pos.y() + 10)
+    _press(capsule, global_pos=origin)
+    _move(capsule, global_pos=origin + QPoint(drag_dx, 0))
+    _release(capsule, global_pos=origin + QPoint(drag_dx, 0))
+
+    assert tmp_position_file.exists(), "window.json should be created on drag"
+    data = json.loads(tmp_position_file.read_text(encoding="utf-8"))
+    assert data["x"] == capsule.pos().x()
+    assert data["y"] == capsule.pos().y()
+
+
+def test_click_does_not_persist_position(capsule, tmp_position_file):
+    """A pure click (no move past threshold) must NOT touch window.json."""
+    initial_pos = capsule.pos()
+    origin = QPoint(initial_pos.x() + 50, initial_pos.y() + 10)
+    _press(capsule, global_pos=origin)
+    _release(capsule, global_pos=origin)
+
+    assert not tmp_position_file.exists(), (
+        "window.json must not be written for a pure click"
+    )
+
+
+# ── Persistence load path ─────────────────────────────────────────────
+
+def test_saved_position_restored_on_construction(qtbot, tmp_position_file):
+    """A previously-saved (x, y) must be applied to the new capsule
+    instance instead of the default centred position."""
+    # Pre-seed the position file with a value that's deliberately not
+    # the default centre.
+    saved_x, saved_y = 100, 8
+    tmp_position_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_position_file.write_text(
+        json.dumps({"x": saved_x, "y": saved_y}), encoding="utf-8",
+    )
+
+    controller = IslandController()
+    cap = CapsuleWindow(controller)
+    qtbot.addWidget(cap)
+
+    # The capsule starts in dot mode, so it took the dot-sized branch
+    # of _center_top — but the persisted x must have been honoured
+    # (clamped to the dot width).
+    pos = cap.pos()
+    assert pos.x() == saved_x
+    assert pos.y() == saved_y
+
+
+def test_corrupted_position_file_falls_back_to_default(
+    qtbot, tmp_position_file,
+):
+    """A malformed window.json must NOT crash construction — capsule
+    silently ignores it and uses the default centred position."""
+    tmp_position_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_position_file.write_text("{not valid json", encoding="utf-8")
+
+    controller = IslandController()
+    cap = CapsuleWindow(controller)
+    qtbot.addWidget(cap)
+
+    # Did not crash. Position took the default branch.
+    assert cap._persisted_pos is None
+
+
+def test_off_screen_persisted_position_falls_back_to_centre(
+    qtbot, tmp_position_file,
+):
+    """If the persisted (x, y) lands entirely off-screen (e.g. saved
+    on a now-disconnected monitor), construction falls back to the
+    primary-screen-top-centre default."""
+    # Pick coordinates guaranteed not to overlap any real screen by
+    # an order of magnitude.
+    tmp_position_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_position_file.write_text(
+        json.dumps({"x": -99999, "y": -99999}), encoding="utf-8",
+    )
+
+    controller = IslandController()
+    cap = CapsuleWindow(controller)
+    qtbot.addWidget(cap)
+
+    # _persisted_pos was loaded but rejected by visibility check, so
+    # the geometry must reflect the centred default.
+    primary = QApplication.primaryScreen().geometry()
+    assert primary.contains(cap.pos())
+
+
+# ── Multi-screen clamp ────────────────────────────────────────────────
+
+def test_clamp_keeps_capsule_within_screen_union(capsule):
+    """_clamp_x must never let the capsule's left edge slide past
+    the leftmost screen edge or its right edge past the rightmost."""
+    screens = QApplication.screens()
+    leftmost = min(s.geometry().left() for s in screens)
+    rightmost = max(s.geometry().right() for s in screens)
+    w = capsule.width()
+
+    # Way too far left
+    assert capsule._clamp_x(leftmost - 9999, w) == leftmost
+    # Way too far right
+    assert capsule._clamp_x(rightmost + 9999, w) == rightmost - w + 1
+    # Inside — pass-through
+    inside = leftmost + 50
+    assert capsule._clamp_x(inside, w) == inside
