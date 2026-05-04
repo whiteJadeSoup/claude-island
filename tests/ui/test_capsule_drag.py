@@ -240,6 +240,134 @@ def test_off_screen_persisted_position_falls_back_to_centre(
 
 # ── Multi-screen clamp ────────────────────────────────────────────────
 
+# ── PR2: long-press → free drag → edge snap ───────────────────────────
+
+class TestFreeDrag:
+    """Long-press unlocks 2D drag + 4-edge snap on release.
+
+    Bypasses the long-press timer wait by directly invoking
+    ``_on_long_press`` after a press — this is what the timer
+    callback would do, and avoids 500 ms of real time per test."""
+
+    def _press_and_promote(self, capsule, *, origin: QPoint) -> None:
+        """Helper: synthesise a press, then immediately fire the long-
+        press callback to enter free-drag mode."""
+        _press(capsule, global_pos=origin)
+        capsule._on_long_press()
+
+    def test_long_press_enters_free_drag_with_visual_cue(self, capsule):
+        origin = QPoint(capsule.x() + 50, capsule.y() + 10)
+        self._press_and_promote(capsule, origin=origin)
+
+        assert capsule._is_free_drag is True
+        # Qt quantises windowOpacity to 8-bit (1/256 ≈ 0.004 step).
+        assert capsule.windowOpacity() == pytest.approx(0.7, abs=0.01)
+
+    def test_free_drag_unlocks_y_axis(self, capsule):
+        """In free-drag mode mouseMove updates Y too — proves the
+        PR1 horizontal lock is bypassed."""
+        initial = capsule.pos()
+        origin = QPoint(initial.x() + 50, initial.y() + 10)
+        self._press_and_promote(capsule, origin=origin)
+
+        # Drag down by 100 px (and right by 50). Both axes should move.
+        target = origin + QPoint(50, 100)
+        _move(capsule, global_pos=target)
+
+        new = capsule.pos()
+        assert new.x() != initial.x()
+        assert new.y() != initial.y()
+        assert new.y() == initial.y() + 100
+
+    def test_movement_before_long_press_stays_horizontal(self, capsule):
+        """If the user moves the cursor BEFORE the long-press fires
+        (i.e. they wanted a quick horizontal nudge), the timer is
+        cancelled and Y stays locked. Confirms the race resolves to
+        horizontal-drag, not free-drag."""
+        initial = capsule.pos()
+        origin = QPoint(initial.x() + 50, initial.y() + 10)
+        _press(capsule, global_pos=origin)
+        # Move past startDragDistance immediately — promotes to
+        # horizontal drag, cancels the long-press timer.
+        far = origin + QPoint(QApplication.startDragDistance() + 30, 50)
+        _move(capsule, global_pos=far)
+
+        # Y should NOT have changed despite the +50 cursor delta.
+        assert capsule.pos().y() == initial.y()
+        # And the long-press timer was cancelled.
+        assert not capsule._long_press_timer.isActive()
+        # Free-drag flag stayed off.
+        assert capsule._is_free_drag is False
+
+    def test_release_after_free_drag_snaps_to_nearest_edge(
+        self, capsule, monkeypatch,
+    ):
+        """Release after free-drag must call _snap_to_nearest_edge
+        (which animates) instead of saving the raw release position."""
+        snap_calls: list[None] = []
+        monkeypatch.setattr(
+            capsule, "_snap_to_nearest_edge",
+            lambda: snap_calls.append(None),
+        )
+        origin = QPoint(capsule.x() + 50, capsule.y() + 10)
+        self._press_and_promote(capsule, origin=origin)
+        _move(capsule, global_pos=origin + QPoint(80, 80))
+        _release(capsule, global_pos=origin + QPoint(80, 80))
+
+        assert len(snap_calls) == 1
+        # Opacity must be restored — the visual cue was a transient
+        # signal, not a persistent state.
+        assert capsule.windowOpacity() == pytest.approx(1.0)
+
+    def test_snap_picks_nearest_edge(self, qtbot, tmp_position_file):
+        """Place capsule near the bottom edge; snap should land it on
+        the bottom edge (not top/left/right)."""
+        controller = IslandController()
+        cap = CapsuleWindow(controller)
+        qtbot.addWidget(cap)
+        screen = QApplication.primaryScreen().geometry()
+
+        # Position near the bottom edge so dist_bottom is the min.
+        target_y = screen.bottom() - cap.height() - 40
+        target_x = screen.left() + screen.width() // 2  # mid-x
+        cap.move(target_x, target_y)
+
+        cap._snap_to_nearest_edge()
+        # Animation runs over ~200 ms; force-finish synchronously.
+        if cap._snap_anim is not None:
+            cap._snap_anim.setCurrentTime(cap._snap_anim.duration())
+
+        # Should have landed near the bottom edge (within a margin
+        # for the spring overshoot rounding).
+        landed_y = cap.y()
+        expected_y = screen.bottom() - cap.height() - 8  # _TOP_MARGIN
+        assert abs(landed_y - expected_y) <= 2
+
+    def test_snap_persists_after_animation_finishes(
+        self, qtbot, tmp_position_file,
+    ):
+        """The snapped position must be written to window.json once
+        the animation completes (not the mid-air release point)."""
+        controller = IslandController()
+        cap = CapsuleWindow(controller)
+        qtbot.addWidget(cap)
+        screen = QApplication.primaryScreen().geometry()
+        cap.move(
+            screen.left() + screen.width() // 2,
+            screen.top() + screen.height() - 40 - cap.height(),
+        )
+
+        cap._snap_to_nearest_edge()
+        if cap._snap_anim is not None:
+            cap._snap_anim.setCurrentTime(cap._snap_anim.duration())
+        cap._on_snap_finished()  # belt-and-braces — emit may race
+
+        assert tmp_position_file.exists()
+        data = json.loads(tmp_position_file.read_text(encoding="utf-8"))
+        assert data["x"] == cap.pos().x()
+        assert data["y"] == cap.pos().y()
+
+
 def test_clamp_keeps_capsule_within_screen_union(capsule):
     """_clamp_x must never let the capsule's left edge slide past
     the leftmost screen edge or its right edge past the rightmost."""

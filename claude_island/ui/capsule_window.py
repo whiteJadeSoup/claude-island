@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable
 
-from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtCore import (
+    QEasingCurve, QPoint, QPropertyAnimation, Qt, QTimer,
+)
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,6 +31,20 @@ _CAPSULE_H = 36
 _DOT_W = 12
 _DOT_H = 12
 _TOP_MARGIN = 8
+
+# PR2 — long-press unlock + edge-snap
+# 500 ms is the iOS / Android conventional long-press threshold —
+# long enough to not fire on impatient clicks, short enough to feel
+# responsive. AssistiveTouch and Chat Heads both sit in this range.
+_LONG_PRESS_MS = 500
+# Snap animation: 200 ms with OutBack easing reproduces the "spring
+# to edge" bounce Messenger Chat Heads uses on release. Shorter feels
+# abrupt, longer feels sluggish.
+_SNAP_DURATION_MS = 200
+# Opacity while in free-drag mode. 0.7 gives the user a clear signal
+# they've entered a different mode (compared to default 1.0) without
+# making the pill so faint it's hard to track during the drag.
+_FREE_DRAG_OPACITY = 0.7
 
 _DOT_LEFT_PAD = 12  # px from pill's left edge to dot's left edge
 _DOT_LABEL_W = 14   # px reserved for the "●" glyph
@@ -218,6 +234,36 @@ class CapsuleWindow(QWidget):
         self._drag_origin_window: QPoint | None = None
         self._is_dragging: bool = False
         self._persisted_pos: tuple[int, int] | None = _load_saved_position()
+
+        # ── Free-drag state (PR2: long-press to unlock 2D drag + edge snap) ──
+        # A press-and-hold of _LONG_PRESS_MS unlocks "free drag mode"
+        # (Y axis unlocked, capsule renders semi-transparent so the
+        # user sees they've entered a different mode). On release the
+        # capsule animates to the nearest of the 4 screen edges
+        # (top / bottom / left / right) at the centre of the edge —
+        # never floats in the middle. This mirrors AssistiveTouch /
+        # Chat Heads "anchor to edge" semantics so the user's eye
+        # always knows where the capsule lives.
+        #
+        # The long-press timer races with the click-distance threshold:
+        # if the user moves the cursor past startDragDistance BEFORE
+        # the timer fires, we fall through to the PR1 horizontal-drag
+        # mode (Y locked) — fast small adjustments shouldn't have to
+        # wait 0.5 s. The timer is cancelled in that branch.
+        #
+        # _long_press_timer: single-shot QTimer started on mouse-down.
+        # _is_free_drag: True after _LONG_PRESS_MS expires AND the
+        #   user is still holding. Drives mouseMove (Y-unlock) and
+        #   mouseRelease (snap-to-edge).
+        # _snap_anim: held reference to the active QPropertyAnimation;
+        #   without this Python GCs the animation mid-flight and the
+        #   capsule jumps to the end position with no transition.
+        self._long_press_timer = QTimer(self)
+        self._long_press_timer.setSingleShot(True)
+        self._long_press_timer.setInterval(_LONG_PRESS_MS)
+        self._long_press_timer.timeout.connect(self._on_long_press)
+        self._is_free_drag: bool = False
+        self._snap_anim: "QPropertyAnimation | None" = None
 
         self._setup_window()
 
@@ -564,13 +610,17 @@ class CapsuleWindow(QWidget):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             # Capture drag origin but DON'T toggle yet — we don't
-            # know if this is a click or a drag until mouseRelease.
-            # toggle_expanded fires from mouseReleaseEvent if the
-            # cursor never moved past the system drag-distance
-            # threshold.
+            # know if this is a click, a horizontal drag, or a free
+            # drag until mouseRelease.
             self._drag_origin_global = event.globalPosition().toPoint()
             self._drag_origin_window = self.pos()
             self._is_dragging = False
+            self._is_free_drag = False
+            # Start the long-press race: if the user holds without
+            # moving for _LONG_PRESS_MS, we promote to free-drag.
+            # If they move past startDragDistance first, the timer
+            # is cancelled in mouseMoveEvent and we go horizontal.
+            self._long_press_timer.start()
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         # No left-button press recorded ⇒ ignore (e.g. mouse wandered
@@ -587,33 +637,155 @@ class CapsuleWindow(QWidget):
             if delta.manhattanLength() < QApplication.startDragDistance():
                 return
             self._is_dragging = True
-        # PR1: lock Y to the original top margin — only X moves.
-        # PR2 will allow Y to move too once the user enters free-
-        # drag mode via long-press.
-        new_x = self._clamp_x(
-            self._drag_origin_window.x() + delta.x(), self.width(),
-        )
-        self.move(new_x, self._drag_origin_window.y())
+            # User moved before the long-press fired ⇒ horizontal
+            # drag mode. Cancel the timer so it doesn't promote
+            # mid-drag (which would jarringly change Y axis lock
+            # behaviour).
+            if not self._is_free_drag:
+                self._long_press_timer.stop()
+        if self._is_free_drag:
+            # Free drag: both axes follow the cursor.
+            new_x = self._clamp_x(
+                self._drag_origin_window.x() + delta.x(), self.width(),
+            )
+            new_y = self._drag_origin_window.y() + delta.y()
+            self.move(new_x, new_y)
+        else:
+            # Horizontal drag (PR1 path): Y locked to original top.
+            new_x = self._clamp_x(
+                self._drag_origin_window.x() + delta.x(), self.width(),
+            )
+            self.move(new_x, self._drag_origin_window.y())
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         if event.button() != Qt.MouseButton.LeftButton:
             return
         was_dragging = self._is_dragging
+        was_free_drag = self._is_free_drag
         # Reset drag state BEFORE branching so a re-entrant signal
         # (e.g. toggle_expanded routes back here) sees a clean state.
         self._drag_origin_global = None
         self._drag_origin_window = None
         self._is_dragging = False
+        self._is_free_drag = False
+        # Always cancel the long-press timer on release — without
+        # this a quick press-release would still promote to free-
+        # drag _LONG_PRESS_MS later.
+        self._long_press_timer.stop()
         if not was_dragging:
             # Pure click — original behaviour.
             self._controller.toggle_expanded()
             return
-        # Drag completed — persist the new position so it survives
-        # restarts. Save errors are swallowed inside save_position
-        # (best-effort, never crashes the UI).
+        if was_free_drag:
+            # Restore opacity from the free-drag visual cue, then
+            # snap to the nearest screen edge with a spring animation.
+            # Position persistence happens after the animation finishes
+            # so we save the snapped target, not the release-point.
+            self.setWindowOpacity(1.0)
+            self._snap_to_nearest_edge()
+            return
+        # Horizontal drag completed — persist immediately (no animation).
         pos = self.pos()
         self._persisted_pos = (pos.x(), pos.y())
         _save_position(pos.x(), pos.y())
+
+    # ── Long-press → free drag promotion ────────────────────────────
+
+    def _on_long_press(self) -> None:
+        """Fired by ``_long_press_timer`` after _LONG_PRESS_MS of held-
+        still mouse-down. Promotes the active press into "free drag
+        mode" so subsequent mouseMove events are 2D rather than X-only,
+        and applies a visual cue (opacity drop) so the user knows the
+        mode flipped without releasing first.
+
+        No-op if the press was already released or already promoted to
+        a horizontal drag — both branches stop the timer to avoid
+        firing here in stale state."""
+        if self._drag_origin_global is None:
+            return
+        if self._is_dragging and not self._is_free_drag:
+            # Already committed to horizontal-drag — too late to
+            # promote (would feel like the rules changed mid-gesture).
+            return
+        self._is_free_drag = True
+        self._is_dragging = True  # locks out the click-on-release path
+        self.setWindowOpacity(_FREE_DRAG_OPACITY)
+
+    # ── Edge snap ───────────────────────────────────────────────────
+
+    def _snap_to_nearest_edge(self) -> None:
+        """Animate to the nearest of the 4 screen edges of the screen
+        the capsule currently lives on.
+
+        Center-of-capsule is compared against each edge; the smallest
+        distance wins. Anchor points are:
+          top    → centre's X, top + _TOP_MARGIN
+          bottom → centre's X, bottom - height - _TOP_MARGIN
+          left   → left + _TOP_MARGIN, current Y
+          right  → right - width - _TOP_MARGIN, current Y
+
+        Multi-monitor: ``QApplication.screenAt(self.pos())`` resolves
+        which screen the capsule is on, so dragging to a second
+        monitor and releasing snaps to THAT monitor's edges, not the
+        primary's. Falls back to the primary screen if pos() lands in
+        a desktop gap (rare on real hardware)."""
+        screen = QApplication.screenAt(self.pos())
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        geom = screen.geometry()
+        cx = self.x() + self.width() // 2
+        cy = self.y() + self.height() // 2
+        dist_top = cy - geom.top()
+        dist_bottom = geom.bottom() - cy
+        dist_left = cx - geom.left()
+        dist_right = geom.right() - cx
+        nearest = min(dist_top, dist_bottom, dist_left, dist_right)
+        if nearest == dist_top:
+            target = QPoint(self.x(), geom.top() + _TOP_MARGIN)
+        elif nearest == dist_bottom:
+            target = QPoint(
+                self.x(), geom.bottom() - self.height() - _TOP_MARGIN,
+            )
+        elif nearest == dist_left:
+            target = QPoint(geom.left() + _TOP_MARGIN, self.y())
+        else:
+            target = QPoint(
+                geom.right() - self.width() - _TOP_MARGIN, self.y(),
+            )
+        # Final clamp so the snap target itself is within bounds (an
+        # off-screen cy could otherwise pick a target right at the
+        # screen edge that bleeds onto the next monitor).
+        target.setX(self._clamp_x(target.x(), self.width()))
+        self._animate_to(target)
+
+    def _animate_to(self, target: QPoint) -> None:
+        """Spring-bounce the capsule from current pos to ``target``.
+
+        ``OutBack`` easing reproduces the Chat Heads / iOS spring
+        feel — overshoots slightly then settles. Held in
+        ``self._snap_anim`` so Python's GC doesn't reap the object
+        mid-flight (which would silently kill the animation and jump
+        to the end position with no transition).
+
+        Position persistence fires from the ``finished`` signal so
+        we save the actual landing point (not the release-point)."""
+        anim = QPropertyAnimation(self, b"pos", self)
+        anim.setDuration(_SNAP_DURATION_MS)
+        anim.setStartValue(self.pos())
+        anim.setEndValue(target)
+        anim.setEasingCurve(QEasingCurve.Type.OutBack)
+        anim.finished.connect(self._on_snap_finished)
+        self._snap_anim = anim
+        anim.start()
+
+    def _on_snap_finished(self) -> None:
+        """Persist the post-snap position so the next launch restores
+        the snapped (edge-anchored) coordinates rather than the user's
+        release point in the middle of the screen."""
+        pos = self.pos()
+        self._persisted_pos = (pos.x(), pos.y())
+        _save_position(pos.x(), pos.y())
+        self._snap_anim = None
 
     def _show_context_menu(self, global_pos: QPoint) -> None:
         menu = QMenu(self)
