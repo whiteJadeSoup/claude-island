@@ -767,6 +767,13 @@ class _ElidingLabel(QLabel):
     ``label.text()`` against a source-of-truth string (see
     `_update_row`) and tests that assert on label content working
     without surprises. The elision happens only at paint time.
+
+    Auto-tooltip: when the visible text gets elided, the tooltip is
+    automatically set to the full text (so hovering reveals what was
+    truncated). Cleared back to "" when no truncation. A custom
+    tooltip set via ``setToolTip(...)`` from the call site is
+    respected — we only touch the tooltip when its current value
+    matches what we last auto-set (tracked in ``_auto_tooltip``).
     """
 
     def __init__(self, *args, **kwargs):
@@ -775,6 +782,10 @@ class _ElidingLabel(QLabel):
         # whenever elision kicks in (which sets the *visible* shorter
         # form via super().setText).
         self._full_text: str = super().text() or ""
+        # The last tooltip value WE set via _sync_tooltip. Lets us
+        # detect "user has set a custom tooltip since" — if the
+        # current toolTip() differs from this, we leave it alone.
+        self._auto_tooltip: str = ""
 
     def setText(self, text: str) -> None:  # type: ignore[override]
         # Dedupe on the *full* text — _update_row calls setText every
@@ -810,11 +821,32 @@ class _ElidingLabel(QLabel):
             # assigns a real width.
             if super().text() != full:
                 super().setText(full)
+            self._sync_tooltip(elided=False)
             return
         metrics = QFontMetrics(self.font())
         elided = metrics.elidedText(full, _Qt.TextElideMode.ElideRight, w)
         if super().text() != elided:
             super().setText(elided)
+        self._sync_tooltip(elided=(elided != full))
+
+    def _sync_tooltip(self, *, elided: bool) -> None:
+        # Hover-reveal: when elided, surface the full text via tooltip
+        # so users can see what was truncated. When NOT elided, clear
+        # so the tooltip doesn't redundantly echo the visible string.
+        # Respects user-set tooltips: if the current toolTip() differs
+        # from what we last auto-set, the call site has installed its
+        # own (e.g. tokens model row tooltips listing every raw model
+        # id) — leave it alone.
+        desired = self._full_text if elided else ""
+        current = self.toolTip()
+        if current != self._auto_tooltip:
+            # User has overridden — don't touch. We'll never auto-set
+            # again on this widget unless the user clears their custom
+            # tooltip back to our last auto value.
+            return
+        if current != desired:
+            self.setToolTip(desired)
+            self._auto_tooltip = desired
 
 
 def mk_label(

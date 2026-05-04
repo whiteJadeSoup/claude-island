@@ -311,3 +311,77 @@ def test_eliding_label_is_invariant_under_long_text():
     # form) so callers comparing label.text() vs source-of-truth keep
     # working — see _update_row in expanded_window.py.
     assert lbl.text() == monster
+
+
+# ---------------------------------------------------------------------------
+# Auto-tooltip: hover-reveal of truncated text
+# ---------------------------------------------------------------------------
+
+
+def test_eliding_label_sets_tooltip_when_truncated(qtbot):
+    """When the rendered text gets elided, tooltip auto-populates with
+    the full (un-elided) string so users can hover to see what was
+    cut off. Verifies the hover-reveal UX promised by the docstring."""
+    from claude_island.ui.expanded_window import _ElidingLabel
+
+    long_name = (
+        "react-native-async-storage-with-very-deeply-nested-folder-names"
+    )
+    lbl = _ElidingLabel(long_name)
+    qtbot.addWidget(lbl)
+    lbl.resize(80, 20)  # narrow → forces elision
+    lbl.show()
+    qtbot.waitExposed(lbl)
+
+    # Visible text was elided.
+    from PySide6.QtWidgets import QLabel as _QL
+    visible = _QL.text(lbl)  # bypass our text() override → raw QLabel text
+    assert visible != long_name, (
+        f"Expected elided form, got the full string: {visible!r}. "
+        "Either elision didn't run, or width was wide enough to fit."
+    )
+    # Tooltip surfaces the full text.
+    assert lbl.toolTip() == long_name, (
+        f"Auto-tooltip not set. toolTip()={lbl.toolTip()!r}, "
+        f"expected {long_name!r}."
+    )
+
+
+def test_eliding_label_clears_tooltip_when_text_fits(qtbot):
+    """When the text fits at the allocated width, no tooltip — would
+    just redundantly echo the visible text and add hover noise."""
+    from claude_island.ui.expanded_window import _ElidingLabel
+
+    short = "ok"
+    lbl = _ElidingLabel(short)
+    qtbot.addWidget(lbl)
+    lbl.resize(200, 20)  # plenty of space
+    lbl.show()
+    qtbot.waitExposed(lbl)
+
+    assert lbl.toolTip() == "", (
+        f"Tooltip should be empty when text fits, got: {lbl.toolTip()!r}"
+    )
+
+
+def test_eliding_label_respects_user_set_tooltip(qtbot):
+    """Custom `setToolTip(...)` from the call site must not be
+    overridden by the auto-tooltip. Real call site that depends on
+    this: the popup tokens section sets the model row name's tooltip
+    to the full list of raw model ids (`'\\n'.join(r.full_models)`)
+    — a multi-line tooltip distinct from the displayed name."""
+    from claude_island.ui.expanded_window import _ElidingLabel
+
+    long_name = "claude-opus-4-7-with-long-suffix-from-some-experiment"
+    custom = "claude-opus-4-7\nclaude-opus-4-5"
+    lbl = _ElidingLabel(long_name)
+    qtbot.addWidget(lbl)
+    lbl.setToolTip(custom)  # user installs their own tooltip
+    lbl.resize(60, 20)  # narrow → would auto-elide
+    lbl.show()
+    qtbot.waitExposed(lbl)
+
+    assert lbl.toolTip() == custom, (
+        f"User-set tooltip was overridden. toolTip()={lbl.toolTip()!r}, "
+        f"expected user's custom value {custom!r}."
+    )
