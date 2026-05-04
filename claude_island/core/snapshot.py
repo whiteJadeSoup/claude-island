@@ -203,26 +203,14 @@ class WorldSnapshot:
             session_groups=(),
         )
 
-    def render_key(self) -> tuple:
-        """Subset of fields that drive UI rendering — excludes
-        ``fetched_at``.
-
-        Used as the ``key_mapper`` for ``distinct_until_changed`` in
-        the UI subscription pipe so the panel doesn't re-render every
-        2 s tick (each tick produces a new ``fetched_at`` even when
-        nothing else changed). Without this, ``distinct_until_changed``
-        would compare full ``__eq__`` which always differs by
-        ``fetched_at`` → defeats deduplication.
-
-        ``fetched_at`` stays on the snapshot for debug / telemetry —
-        we just don't let it influence whether the UI re-renders."""
-        return (
-            self.session_groups,
-            self.today_cost_usd,
-            self.quota,
-            self.available_providers,
-            self.selected_provider,
-        )
+    # ``render_key`` removed (F4): UI dedup is now per-surface — each
+    # surface declares what it cares about via its own ``compute(snap)``
+    # function, and ``distinct_until_changed`` is keyed on that
+    # projection. The previous global ``render_key`` over-coupled all
+    # surfaces to every SessionView field (including microsecond
+    # ``last_activity`` ticks), which silently defeated dedup during
+    # active sessions. See ``ui/capsule_window.compute`` /
+    # ``ui/expanded_window.compute`` for the per-surface declarations.
 
 
 class _WorldStore:

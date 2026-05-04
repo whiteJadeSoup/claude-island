@@ -114,6 +114,18 @@ def capsule(qtbot):
     qtbot.addWidget(cap)
     # Force into capsule mode (default is dot mode after construction).
     cap._is_dot = False
+    # F4 changed render's signature from render(snap) → render(data),
+    # with `data = capsule.compute(snap)`. To keep these tests' old
+    # ``capsule.render(snap)`` ergonomics, wrap render so a snap input
+    # is auto-routed through compute first. Production wires
+    # ``world.observable() | map(compute) | distinct | render`` —
+    # this fixture mimics that single-shot end-to-end.
+    _orig_render = cap.render
+    def _render_through_compute(arg):
+        if isinstance(arg, WorldSnapshot):
+            return _orig_render(cap.compute(arg))
+        return _orig_render(arg)
+    cap.render = _render_through_compute  # type: ignore[method-assign]
     return cap
 
 
@@ -222,7 +234,10 @@ class TestCapsuleRender:
 
     def test_render_caches_today_cost_for_paint(self, capsule):
         capsule.render(_snap(today_cost_usd=99.5))
-        assert capsule._cost_cache == 99.5
+        # F4: cost is stored as the formatted string (display
+        # precision) on _data.cost_str, not as a raw float — that's
+        # what the dedup key sees and what _compose_label_text reads.
+        assert capsule._data.cost_str == "$100"  # _fmt_money(99.5) rounds to "$100"
 
     def test_render_caches_quota_pct_for_paint(self, capsule):
         from claude_island.core.models import QuotaSnapshot
@@ -240,17 +255,22 @@ class TestCapsuleRender:
             fetched_at=datetime.now(timezone.utc),
         )
         capsule.render(snap)
-        assert capsule._quota_pct_cache == 72.5
+        # F4: quota stored as truncated int on _data.quota_pct,
+        # not the raw float — sub-percent wobble doesn't change the
+        # dedup key.
+        assert capsule._data.quota_pct == 72  # int(72.5)
 
     def test_render_with_no_quota_clears_cache(self, capsule):
         capsule.render(_snap())
-        assert capsule._quota_pct_cache is None
+        assert capsule._data.quota_pct is None
 
     def test_render_in_dot_mode_is_no_op_for_label(self, capsule):
         capsule._is_dot = True
         v = _view(is_running=True, name="x")
         capsule.render(_snap(sessions=(v,), today_cost_usd=10.0))
-        assert capsule._cost_cache == 10.0
+        # cost still propagates into _data even in dot mode (label
+        # update happens later when the user expands)
+        assert capsule._data.cost_str == "$10"
         assert capsule._is_dot is True
 
 
@@ -353,54 +373,107 @@ class TestExpandedRender:
         assert panel._rows[99] is before
 
 
-class TestDistinctUntilChangedDedup:
-    """Verifies the wiring-layer ``distinct_until_changed(key_mapper=
-    render_key)`` actually skips no-op snapshots."""
+class TestPerSurfaceDedup:
+    """F4: per-surface ``compute(snap)`` is the dedup key. Verifies
+    that microsecond ``last_activity`` ticks don't change a surface's
+    compute output (so dedup correctly skips), while real visible
+    changes do.
 
-    def test_two_renders_with_same_data_share_render_key(self):
-        v = _view(pid=1, name="alpha")
-        snap_a = WorldSnapshot(
-            session_groups=_sg(v), today_cost_usd=5.0, quota=None,
-            available_providers=("anthropic",), selected_provider="anthropic",
-            fetched_at=datetime.now(timezone.utc),
-        )
-        snap_b = WorldSnapshot(
-            session_groups=_sg(v), today_cost_usd=5.0, quota=None,
-            available_providers=("anthropic",), selected_provider="anthropic",
-            fetched_at=datetime.now(timezone.utc) + timedelta(seconds=10),
-        )
-        assert snap_a.render_key() == snap_b.render_key()
-        assert snap_a != snap_b
+    Capsule and expanded use slightly different pipeline shapes:
+      * capsule uses ``map(compute) → distinct → render(data)``.
+      * expanded uses ``distinct(key_mapper=compute) → render(snap)``.
+    Both end up calling render only when compute output changes."""
 
-    def test_distinct_until_changed_skips_renders_for_equal_render_key(self, qtbot):
+    def test_capsule_compute_skips_microsecond_jitter(self, capsule):
+        """Two snaps differing only in last_activity microseconds
+        produce equal CapsuleData → distinct dedupes."""
+        v_a = _view(pid=1, name="alpha", is_running=True)
+        # Same view but last_activity bumped by a few microseconds —
+        # below the _fmt_started "now" 5s bucket boundary.
+        from dataclasses import replace
+        v_b = replace(
+            v_a,
+            last_activity=v_a.last_activity + timedelta(microseconds=123),
+        )
+        snap_a = _snap(sessions=(v_a,), today_cost_usd=5.0)
+        snap_b = _snap(sessions=(v_b,), today_cost_usd=5.0)
+        assert capsule.compute(snap_a) == capsule.compute(snap_b)
+
+    def test_expanded_compute_skips_microsecond_jitter(self, qtbot):
+        """Same as above but for ExpandedWindow.compute."""
+        from dataclasses import replace
+
+        controller = IslandController()
+        capsule_w = QWidget(); capsule_w.show()
+        panel = ExpandedWindow(
+            capsule=capsule_w, controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+        )
+        qtbot.addWidget(panel); qtbot.addWidget(capsule_w)
+
+        v_a = _view(pid=1, name="alpha", is_running=True)
+        v_b = replace(
+            v_a,
+            last_activity=v_a.last_activity + timedelta(microseconds=789),
+        )
+        snap_a = _snap(sessions=(v_a,), today_cost_usd=5.0)
+        snap_b = _snap(sessions=(v_b,), today_cost_usd=5.0)
+        assert panel.compute(snap_a) == panel.compute(snap_b)
+
+    def test_capsule_compute_changes_when_running_set_changes(self, capsule):
+        """Compute output MUST change when the user-visible state
+        actually changed (running flip), so dedup re-renders."""
+        v_idle = _view(pid=1, name="alpha", is_running=False)
+        v_busy = _view(pid=1, name="alpha", is_running=True)
+        snap_a = _snap(sessions=(v_idle,))
+        snap_b = _snap(sessions=(v_busy,))
+        assert capsule.compute(snap_a) != capsule.compute(snap_b)
+
+    def test_capsule_compute_changes_when_cost_crosses_band(self, capsule):
+        """_fmt_money quantises into bands; compute output changes
+        only when the formatted string changes."""
+        snap_lo = _snap(today_cost_usd=9.99)
+        snap_hi = _snap(today_cost_usd=10.0)
+        # 9.99 → "$9.99", 10.0 → "$10" (different formatting bands)
+        assert capsule.compute(snap_lo) != capsule.compute(snap_hi)
+
+    def test_capsule_compute_unchanged_within_cost_band(self, capsule):
+        """Two cost values inside the same _fmt_money band produce
+        the same compute output → dedup skips."""
+        snap_a = _snap(today_cost_usd=12.0)
+        snap_b = _snap(today_cost_usd=12.4)
+        # Both in the < $1000 band, both round to "$12"
+        assert capsule.compute(snap_a) == capsule.compute(snap_b)
+
+    def test_pipeline_dedupes_capsule_when_compute_unchanged(self, qtbot, capsule):
+        """End-to-end: push two snaps that differ only in last_activity
+        microseconds through the wired pipeline; render must run once."""
         import reactivex.operators as ops
         from claude_island.core.snapshot import world
+        from dataclasses import replace as _replace
 
-        renders: list[WorldSnapshot] = []
+        renders: list = []
         sub = (
             world.observable()
-            .pipe(ops.distinct_until_changed(key_mapper=lambda s: s.render_key()))
+            .pipe(
+                ops.map(capsule.compute),
+                ops.distinct_until_changed(),
+            )
             .subscribe(on_next=renders.append)
         )
         try:
-            v = _view(pid=1)
-            snap_a = WorldSnapshot(
-                session_groups=_sg(v), today_cost_usd=5.0, quota=None,
-                available_providers=(), selected_provider=None,
-                fetched_at=datetime.now(timezone.utc),
-            )
-            snap_b = WorldSnapshot(
-                session_groups=_sg(v), today_cost_usd=5.0, quota=None,
-                available_providers=(), selected_provider=None,
-                fetched_at=datetime.now(timezone.utc) + timedelta(seconds=10),
+            v_a = _view(pid=1, name="alpha", is_running=True)
+            v_b = _replace(
+                v_a,
+                last_activity=v_a.last_activity + timedelta(microseconds=42),
             )
             baseline = len(renders)
-            world.push(snap_a)
-            world.push(snap_b)  # same render_key → must dedupe
+            world.push(_snap(sessions=(v_a,), today_cost_usd=5.0))
+            world.push(_snap(sessions=(v_b,), today_cost_usd=5.0))
+            # Same compute output → exactly ONE render past baseline.
             assert len(renders) == baseline + 1, (
-                f"distinct_until_changed failed to dedupe: "
-                f"got {len(renders) - baseline} renders for two snaps "
-                f"with identical render_key"
+                f"per-surface dedup failed: got {len(renders) - baseline} "
+                f"renders for two snaps with equal compute output"
             )
         finally:
             sub.dispose()

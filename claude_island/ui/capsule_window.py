@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from PySide6.QtCore import (
     QEasingCurve, QPoint, QPropertyAnimation, Qt, QTimer,
@@ -143,16 +143,36 @@ def _pos_visible_on_any_screen(x: int, y: int, w: int, h: int) -> bool:
     return False
 
 
-def _fmt_money(amount: float) -> str:
-    """Compact $ formatter — duplicated from expanded_window._fmt_money.
-    Keep in sync; extract to a shared util at the 3rd usage."""
-    if amount < 0.01:
-        return f"${amount:.3f}"
-    if amount < 10:
-        return f"${amount:.2f}"
-    if amount < 1000:
-        return f"${amount:.0f}"
-    return f"${amount / 1000:.1f}K"
+# Single source of truth lives in core/formatting.py — capsule and
+# expanded both alias the canonical impl so dedup and rendering stay
+# in lock-step (changing the bands changes both at once).
+from claude_island.core.formatting import fmt_money as _fmt_money
+
+
+class CapsuleData(NamedTuple):
+    """Pre-resolved view-model the capsule actually renders.
+
+    Output of ``CapsuleWindow.compute(snap)``. Used as both the
+    ``distinct_until_changed`` key (NamedTuple gets structural eq for
+    free) AND the ``render`` input — same value flows both places, so
+    dedup precision is automatically equal to render precision.
+
+    Field choice = exactly what the capsule's render code reads. Adding
+    a field here means "capsule actually displays this"; not adding it
+    means "capsule doesn't care, micro-changes don't trigger re-render".
+
+    Quantisation:
+      * ``cost_str`` is the formatted output (``"$54"`` etc), not the
+        raw float — micro-cost ticks within a price band don't change
+        the string and therefore don't change the dedup key.
+      * ``quota_pct`` is ``int`` (truncated), not float — sub-percent
+        wobble doesn't change the key.
+    """
+
+    flat_count: int                      # total session count
+    running_names: tuple[str, ...]       # names of running sessions (carousel feed)
+    cost_str: str                        # "" if cost <= 0, else _fmt_money(cost)
+    quota_pct: int | None                # None if no quota, else 0..100 truncated
 
 _STYLE_MENU = """
     QMenu {
@@ -197,14 +217,13 @@ class CapsuleWindow(QWidget):
         self._get_today_cost = get_today_cost
         self._get_session_details = get_session_details
         self._get_quota_snapshot = get_quota_snapshot
-        # Cost from the latest snapshot's today_cost_usd. Drives the
-        # pill text suffix and the quota-bar paint path.
-        self._cost_cache: float = 0.0
-        # Snapshot-driven session list. Populated by render(snap) and
-        # consumed by _compose_label_text + _refresh_active_state.
-        # Initialised empty so any path called before the first
-        # render() doesn't AttributeError.
-        self._snap_sessions: tuple[SessionView, ...] = ()
+        # Latest computed view-model. Populated by render(data); read
+        # by _compose_label_text, _refresh_active_state, _paint_quota_bar.
+        # Empty default so any path called before the first render
+        # doesn't AttributeError.
+        self._data: CapsuleData = CapsuleData(
+            flat_count=0, running_names=(), cost_str="", quota_pct=None,
+        )
         # Multi-running carousel: when ≥2 sessions are running, cycle
         # the pill text through their names every _ROTATE_INTERVAL_MS
         # so the user can see WHICH sessions are live (the count form
@@ -217,10 +236,11 @@ class CapsuleWindow(QWidget):
         self._rotation_timer = QTimer(self)
         self._rotation_timer.setInterval(_ROTATE_INTERVAL_MS)
         self._rotation_timer.timeout.connect(self._on_rotate_tick)
-        # Latest 5h % cached so paintEvent can render the bar without
-        # re-fetching. None ⇒ no snapshot yet (or below threshold);
-        # paint code skips the bar entirely.
-        self._quota_pct_cache: float | None = None
+        # NOTE: previously self._cost_cache (float) and
+        # self._quota_pct_cache (float | None) lived here as separate
+        # paint caches. They have been folded into self._data.cost_str
+        # and self._data.quota_pct (string + int, quantised to display
+        # precision) so dedup keys and paint reads share one source.
 
         # ── Drag state (PR1: horizontal drag along the top) ────────────
         # User can press-and-hold the pill, then drag it left/right to
@@ -423,47 +443,66 @@ class CapsuleWindow(QWidget):
         self.show()
 
     def _should_show_quota_bar(self) -> bool:
-        """True when the cached 5h % crossed the warning threshold.
-        Below the threshold the indicator is hidden — a green-only
-        "you're at 12 %" reading would be noise."""
-        if self._quota_pct_cache is None:
+        """True when the latest data's 5h % crossed the warning
+        threshold. Below the threshold the indicator is hidden —
+        a green-only "you're at 12 %" reading would be noise."""
+        if self._data.quota_pct is None:
             return False
-        return self._quota_pct_cache >= _QUOTA_WARN_THRESHOLD
+        return self._data.quota_pct >= _QUOTA_WARN_THRESHOLD
 
     # ------------------------------------------------------------------
     # Sole entry point — render(snap)
     # ------------------------------------------------------------------
 
-    def render(self, snap: WorldSnapshot) -> None:
-        """Render the capsule from a single ``WorldSnapshot``.
+    def compute(self, snap: WorldSnapshot) -> CapsuleData:
+        """Project a ``WorldSnapshot`` into the capsule's view-model.
 
-        Pure "draw what's in the snap" — every policy decision
-        (running detection, cost colouring, name resolution) was
-        already made by the Snapshotter when it composed the
-        SessionViews. This method only does widget mutation.
+        Reads ONLY the snapshot fields the capsule actually displays:
+        session count, names of running sessions, today cost, quota
+        percentage. Everything else (last_activity, is_high_cost,
+        latest_model, status_word, ...) is intentionally ignored —
+        when those fields change without affecting the four above,
+        ``distinct_until_changed`` on the returned tuple correctly
+        skips the no-op render.
+
+        Quantisation:
+          * cost: passes through ``_fmt_money`` so micro-ticks within
+            a price band don't change the dedup key.
+          * quota: truncated to ``int`` so sub-percent wobble doesn't
+            change the dedup key.
+
+        This is what makes F4's per-surface dedup work — the function
+        body itself declares the capsule's interface to the snapshot.
         """
+        flat = tuple(v for g in snap.session_groups for v in g.views)
+        running_names = tuple(v.name for v in flat if v.is_running)
+        cost_str = (
+            _fmt_money(snap.today_cost_usd) if snap.today_cost_usd > 0 else ""
+        )
+        quota_pct = (
+            int(snap.quota.five_hour_pct) if snap.quota is not None else None
+        )
+        return CapsuleData(
+            flat_count=len(flat),
+            running_names=running_names,
+            cost_str=cost_str,
+            quota_pct=quota_pct,
+        )
+
+    def render(self, data: CapsuleData) -> None:
+        """Render the capsule from a pre-computed ``CapsuleData``.
+
+        Pure widget mutation — no policy. Subscribes to the world
+        observable through ``ops.map(compute) → distinct_until_changed
+        → render``, so this is only called when the data tuple
+        actually changed (per F4)."""
         if self._hidden_by_user:
             return
 
-        # Update the caches the paint logic reads from.
-        # _paint_quota_bar reads _quota_pct_cache; _compose_label_text
-        # reads _cost_cache.
-        self._cost_cache = float(snap.today_cost_usd)
-        self._quota_pct_cache = (
-            float(snap.quota.five_hour_pct) if snap.quota is not None else None
-        )
-
-        # Cache the snapshot's session views so the pill text + active
-        # state derive from snap-resolved is_running / name fields.
-        # Flatten session_groups into a flat tuple for carousel / active-state.
-        flat: list[SessionView] = []
-        for g in snap.session_groups:
-            flat.extend(g.views)
-        self._snap_sessions: tuple[SessionView, ...] = tuple(flat)
-
+        self._data = data
         # Sync the multi-running carousel with the new running set.
         # Must happen before _apply_capsule so the label text and
-        # timer state reflect the same snapshot.
+        # timer state reflect the same data.
         self._update_rotation_state()
 
         if self._is_dot:
@@ -513,32 +552,25 @@ class CapsuleWindow(QWidget):
         self.show()
 
     def _compose_label_text(self) -> str:
-        """Compose pill text from the current snap + carousel state.
+        """Compose pill text from the current data + carousel state.
 
         Three modes:
-          * Exactly 1 running ⇒ show its name (no carousel; rotation
-            timer is stopped in render(snap)).
+          * Exactly 1 running ⇒ show its name (no carousel).
           * ≥2 running ⇒ show the carousel-current name. The rotation
-            timer is running and ticks every ``_ROTATE_INTERVAL_MS``
-            so the user sees each running session in turn instead of
-            losing all names behind a "N sessions" count.
+            timer ticks every ``_ROTATE_INTERVAL_MS``.
           * 0 running ⇒ "N sessions" count form. Carousel inactive.
 
-        Cost suffix appended when > 0 (so a fresh first launch reads
-        cleanly without a trailing ``$0``)."""
-        cost_suffix = ""
-        if self._cost_cache > 0:
-            cost_suffix = f"  {_fmt_money(self._cost_cache)}"
+        Cost suffix appended when present (compute already produced
+        empty string for cost <= 0, so no extra check needed here)."""
+        cost_suffix = f"  {self._data.cost_str}" if self._data.cost_str else ""
 
         if self._rotation_names:
             # ≥1 running session — render the carousel-current name.
-            # Index is bounds-checked here in case render(snap) shrunk
-            # the list between two timer ticks.
             idx = self._rotation_index % len(self._rotation_names)
             return f"{self._rotation_names[idx]}{cost_suffix}"
 
-        # 0 running — count form. Use total session count, not running.
-        count = len(self._snap_sessions)
+        # 0 running — count form. Use total session count.
+        count = self._data.flat_count
         noun = "session" if count == 1 else "sessions"
         return f"{count} {noun}{cost_suffix}"
 
@@ -554,16 +586,14 @@ class CapsuleWindow(QWidget):
 
     def _update_rotation_state(self) -> None:
         """Sync ``_rotation_names`` with the current running sessions
-        and start / stop the timer accordingly. Called at the end of
-        every render(snap) tick.
+        and start / stop the timer accordingly.
 
         Index reset rule: only reset to 0 when the *set* of running
-        names changes — not when the order changes (sort key is
-        stable across renders) and not when an unrelated snap field
-        flips. Without the reset rule, every snap tick (every JSONL
-        write, ~sub-second cadence under activity) would jerk the
-        carousel back to position 0 and make the pill text flash."""
-        new_names = [v.name for v in self._snap_sessions if v.is_running]
+        names changes. Without this, every render tick would jerk the
+        carousel back to position 0 and make the pill text flash.
+        The dedup pipeline already filters spurious re-renders, so
+        any render that reaches us is a real change worth reacting to."""
+        new_names = list(self._data.running_names)
         if new_names != self._rotation_names:
             self._rotation_names = new_names
             self._rotation_index = 0
@@ -576,10 +606,10 @@ class CapsuleWindow(QWidget):
                 self._rotation_timer.stop()
 
     def _refresh_active_state(self) -> None:
-        """Sync the equalizer-glyph state with whether any snapshotted
-        session is running. Idempotent — set_state is a no-op when
-        the target state matches."""
-        has_active = any(v.is_running for v in self._snap_sessions)
+        """Sync the equalizer-glyph state with whether any session is
+        running (per the latest data). Idempotent — set_state is a
+        no-op when the target state matches."""
+        has_active = bool(self._data.running_names)
         if has_active:
             self._dot_label.set_state(
                 _RowStatusGlyph.STATE_RUNNING,
@@ -607,11 +637,12 @@ class CapsuleWindow(QWidget):
         # gets a deep red wash; warning (≥ 70 %) gets amber. Below the
         # warn threshold (and in dot mode) we use the standard dark
         # grey so normal operation looks unobtrusive.
+        pct = self._data.quota_pct
         if self._is_dot:
             color = _DOT_COLOR
-        elif self._quota_pct_cache is not None and self._quota_pct_cache >= _QUOTA_CRITICAL_THRESHOLD:
+        elif pct is not None and pct >= _QUOTA_CRITICAL_THRESHOLD:
             color = _BG_COLOR_CRITICAL
-        elif self._quota_pct_cache is not None and self._quota_pct_cache >= _QUOTA_WARN_THRESHOLD:
+        elif pct is not None and pct >= _QUOTA_WARN_THRESHOLD:
             color = _BG_COLOR_WARN
         else:
             color = _BG_COLOR
@@ -629,7 +660,7 @@ class CapsuleWindow(QWidget):
 
     def _paint_quota_bar(self, painter: QPainter) -> None:
         """Draw the right-side mini quota progress + "78%" caption."""
-        pct = max(0.0, min(100.0, float(self._quota_pct_cache or 0)))
+        pct = max(0, min(100, self._data.quota_pct or 0))
         critical = pct >= _QUOTA_CRITICAL_THRESHOLD
 
         # Layout: [bar] gap [pct text]  flush right against _QUOTA_RIGHT_PAD.

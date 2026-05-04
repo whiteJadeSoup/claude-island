@@ -155,36 +155,10 @@ class TestWorldSnapshot:
         )
         assert snap == same_snap
 
-    def test_render_key_excludes_fetched_at(self):
-        v = _view()
-        ts1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        ts2 = datetime(2026, 1, 2, tzinfo=timezone.utc)
-        s1 = WorldSnapshot(
-            session_groups=_sg(v), today_cost_usd=1.0, quota=None,
-            available_providers=("a",), selected_provider="a",
-            fetched_at=ts1,
-        )
-        s2 = WorldSnapshot(
-            session_groups=_sg(v), today_cost_usd=1.0, quota=None,
-            available_providers=("a",), selected_provider="a",
-            fetched_at=ts2,
-        )
-        assert s1 != s2
-        assert s1.render_key() == s2.render_key()
-
-    def test_render_key_changes_when_sessions_change(self):
-        v1 = _view(cost_usd=1.0)
-        v2 = _view(cost_usd=2.0)
-        ts = datetime.now(timezone.utc)
-        s1 = WorldSnapshot(
-            session_groups=_sg(v1), today_cost_usd=1.0, quota=None,
-            available_providers=(), selected_provider=None, fetched_at=ts,
-        )
-        s2 = WorldSnapshot(
-            session_groups=_sg(v2), today_cost_usd=2.0, quota=None,
-            available_providers=(), selected_provider=None, fetched_at=ts,
-        )
-        assert s1.render_key() != s2.render_key()
+    # NOTE: ``render_key`` was removed from WorldSnapshot in F4. UI dedup
+    # is now per-surface — each surface declares its own ``compute(snap)``
+    # function and ``distinct_until_changed`` is keyed on that. Per-
+    # surface dedup behaviour is covered by tests/ui/test_render_snap.py.
 
     def test_session_order_is_significant(self):
         """session_groups tuples are order-sensitive — adapters return

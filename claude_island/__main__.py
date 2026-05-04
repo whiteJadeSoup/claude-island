@@ -411,9 +411,11 @@ jsonl_parser.activity_updated.subscribe(session_registry.update_activity)
 #                              ▼
 #                       world.push(snap)        ← all on Qt main thread
 #                              │
-#                              │ pipe(distinct_until_changed(render_key))
+#                              │ per-surface dedup (F4):
+#                              │   capsule  → map(compute) | distinct | render(data)
+#                              │   expanded → distinct(key_mapper=compute) | render(snap)
 #                              ▼
-#               capsule.render(snap), expanded.render(snap)
+#               capsule.render(data), expanded.render(snap)
 #
 # The legacy refresh_xxx slots above stay wired during Phase E/F so behaviour
 # can be visually compared. Phase G deletes the legacy slots, the QtBridge,
@@ -463,10 +465,10 @@ def _safe_render(target_name: str, render_fn):
     return _safe
 
 
-# UI subscription pipelines: distinct_until_changed against render_key
-# (excludes fetched_at) so periodic ticks producing identical data don't
-# trigger no-op re-renders. observe_on is NOT needed — world.push runs
-# on the Qt main thread (because WorldMarshaler.QueuedConnection
+# UI subscription pipelines: per-surface dedup (F4). Each surface has
+# its own ``compute(snap)`` declaring what it cares about; distinct
+# tracks exactly those reads. observe_on is NOT needed — world.push
+# runs on the Qt main thread (WorldMarshaler.QueuedConnection
 # guarantees that), so subscribers fire on the main thread by default.
 #
 # render() is wrapped in _safe_render so a render-time exception is
@@ -475,9 +477,34 @@ def _safe_render(target_name: str, render_fn):
 # UI permanently frozen. on_error is still wired as a backstop for
 # upstream pipeline failures (which terminate regardless), but render
 # bugs no longer reach it.
+# Per-surface dedup (F4):
+#
+# Each surface declares what it cares about via its own ``compute(snap)``
+# function — the function body itself is the dedup contract. compute
+# reads what it needs; dedup tracks exactly those reads; render is
+# only invoked when the resulting projection actually changed.
+#
+# Two flow shapes coexist by design:
+#
+# * capsule — data-flow: ``map(compute) → distinct → render(data)``.
+#   Capsule's data is small (4 scalars) and rendering is pure painting,
+#   so feeding ``data`` directly through is ergonomic and forces
+#   render to never read snap. Used by simple surfaces.
+#
+# * expanded — key-extractor: ``distinct_until_changed(key_mapper=compute)
+#   → render(snap)``. Expanded's row construction needs live SessionView
+#   instances (FOCUS dispatch, sibling lookups), so the snap must
+#   stay reachable. compute is the dedup key extractor; render is
+#   unchanged. Used by complex surfaces that need raw data.
+#
+# Both shapes give F4's core property: dedup precision == display
+# precision, because compute reads what render renders.
 _capsule_subscription = (
     world.observable()
-    .pipe(ops.distinct_until_changed(key_mapper=lambda s: s.render_key()))
+    .pipe(
+        ops.map(capsule.compute),
+        ops.distinct_until_changed(),
+    )
     .subscribe(
         on_next=_safe_render("capsule", capsule.render),
         on_error=lambda e: print(
@@ -488,7 +515,7 @@ _capsule_subscription = (
 )
 _expanded_subscription = (
     world.observable()
-    .pipe(ops.distinct_until_changed(key_mapper=lambda s: s.render_key()))
+    .pipe(ops.distinct_until_changed(key_mapper=expanded.compute))
     .subscribe(
         on_next=_safe_render("expanded", expanded.render),
         on_error=lambda e: print(

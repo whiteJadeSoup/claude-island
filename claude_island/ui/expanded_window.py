@@ -1506,31 +1506,39 @@ def _collapse_prompt(text: str) -> str:
     return first + ("…" if elided else "")
 
 
-def _fmt_started(dt: datetime | None) -> str:
-    """Compact relative-time string ("1h 45m ago") for the popup's
-    Created field. Dropped the "started " prefix — the field's own
-    label ("Created") already supplies that context, and the prefix
-    pushed the combined "datetime + relative" string past the value
-    column's width on common popup sizes, cropping " ago)".
+# Re-exported from core/formatting.py so this module's many call sites
+# (popup, row labels, summary card) keep using the local name without
+# churn. The canonical implementation lives in core/ because per-surface
+# compute selectors (F4 dedup) need it too.
+from claude_island.core.formatting import fmt_started as _fmt_started
 
-    For very fresh activity (under 5s) we render ``"now"`` rather than
-    ``"0s ago"`` / ``"3s ago"`` — those tiny numbers tick chaotically
-    on every Snapshotter rebuild for an actively-running session and
-    read as a bug. The pulse glyph + accent bar already convey "live
-    right now"; the text just needs to NOT contradict that."""
-    if dt is None:
-        return "—"
-    delta = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
-    s = int(delta.total_seconds())
-    if s < 5:
-        return "now"
-    if s < 60:
-        return f"{s}s ago"
-    if s < 3600:
-        return f"{s // 60}m ago"
-    if s < 86400:
-        return f"{s // 3600}h {(s % 3600) // 60}m ago"
-    return f"{s // 86400}d ago"
+
+def _view_render_signature(v: "SessionView") -> tuple:
+    """The per-view fields that drive dedup for ExpandedWindow.
+
+    Used by ``ExpandedWindow.compute`` (F4). Each field is either a
+    primitive whose change we want to react to (``is_running``,
+    ``latest_model``, ...), or a UI text string produced by the
+    same formatter the row painters use (``_fmt_started`` for
+    last_activity, ``_fmt_money`` for cost). Microsecond ticks
+    within a quantisation window produce the same string and
+    therefore the same tuple — dedup skips the no-op render.
+
+    Adding a field here means "the panel actually displays it";
+    not adding it means "micro-changes don't trigger re-render".
+    Free-standing function (not a SessionView method) so it stays
+    in the UI layer where the formatting decisions belong.
+    """
+    return (
+        v.pid,
+        v.name,
+        v.is_running,
+        v.is_high_cost,
+        v.latest_model,
+        v.status_word,
+        _fmt_started(v.last_activity),
+        _fmt_money(v.cost_usd),
+    )
 
 
 def _escape_html(text: str) -> str:
@@ -1564,21 +1572,8 @@ def _quota_color(pct: float, stale: bool) -> str:
     return _BAR_GREEN
 
 
-def _fmt_money(amount: float) -> str:
-    """Compact money formatting that switches precision by magnitude.
-
-    < $0.01   → "$0.001" (preserve some signal)
-    < $10     → "$1.23"
-    < $1000   → "$123"
-    otherwise → "$1.2K"
-    """
-    if amount < 0.01:
-        return f"${amount:.3f}"
-    if amount < 10:
-        return f"${amount:.2f}"
-    if amount < 1000:
-        return f"${amount:.0f}"
-    return f"${amount / 1000:.1f}K"
+# Same re-export pattern as _fmt_started above — canonical impl in core.
+from claude_island.core.formatting import fmt_money as _fmt_money
 
 
 
@@ -3177,6 +3172,39 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
     # Sole entry point — render(snap)
     # ------------------------------------------------------------------
+
+    def compute(self, snap: WorldSnapshot) -> tuple:
+        """Project a ``WorldSnapshot`` into the panel's dedup key.
+
+        Returns a tuple whose components match what the panel actually
+        displays. ``ops.distinct_until_changed(key_mapper=compute)``
+        in the wiring layer skips no-op renders by comparing these
+        tuples.
+
+        Why this surface keeps ``render(snap)`` instead of switching
+        to ``render(data)``: row construction needs the live
+        ``SessionView`` instances (to wire siblings, dispatch FOCUS
+        clicks, etc.), so the data flow has to carry the raw groups
+        through. We split responsibilities: ``compute`` describes
+        what the panel reads (drives dedup), ``render`` does widget
+        mutation (still reads ``snap`` directly).
+
+        Per-view fields are quantised through the same UI text
+        formatters the row code uses (``_fmt_started`` / ``_fmt_money``)
+        so dedup precision matches display precision automatically.
+        Microsecond ``last_activity`` ticks within a "5m ago" window
+        produce identical strings → identical tuple → render skipped.
+        """
+        return (
+            tuple(
+                (g.group_id, tuple(_view_render_signature(v) for v in g.views))
+                for g in snap.session_groups
+            ),
+            _fmt_money(snap.today_cost_usd),
+            snap.quota,
+            snap.available_providers,
+            snap.selected_provider,
+        )
 
     def render(self, snap: WorldSnapshot) -> None:
         """Render the panel from a single ``WorldSnapshot``.
