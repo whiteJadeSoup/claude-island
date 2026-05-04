@@ -21,10 +21,35 @@ A Dynamic Island-style floating capsule for Windows and macOS that surfaces acti
 
 ## Quickstart
 
+The project is managed with [uv](https://docs.astral.sh/uv/) — it's the recommended path because it pins exact versions via `uv.lock` and skips the manual venv-activate dance.
+
+Install uv first if you don't have it:
+
+```bash
+# Windows (PowerShell)
+irm https://astral.sh/uv/install.ps1 | iex
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then clone and run:
+
 ```bash
 git clone <this-repo> claude-island
 cd claude-island
 
+uv sync --all-extras          # creates .venv + installs from uv.lock
+uv run python -m claude_island
+```
+
+`uv sync` is idempotent — re-run it after `git pull` to pick up new dependencies. `uv run` automatically uses the project venv, so you never need to activate it manually.
+
+The capsule appears at the top-center of your primary monitor. Drag the capsule to reposition; the position persists across restarts.
+
+<details>
+<summary>Without uv (manual pip flow)</summary>
+
+```bash
 python -m venv .venv
 # Windows (PowerShell)
 .venv\Scripts\Activate.ps1
@@ -35,7 +60,8 @@ pip install -e ".[dev]"
 python -m claude_island
 ```
 
-The capsule appears at the top-center of your primary monitor. Drag the capsule to reposition; the position persists across restarts.
+This installs from `pyproject.toml` directly — versions are not pinned to `uv.lock`, so a transient dependency could drift over time.
+</details>
 
 ## Using the UI
 
@@ -67,13 +93,13 @@ ui  →  core  ←  platform
 
 ```bash
 # Run the full test suite
-pytest -q
+uv run pytest -q
 
 # Validate architecture layering after any import change
-lint-imports
+uv run lint-imports
 ```
 
-Both must be green before merging.
+Both must be green before merging. (Drop the `uv run` prefix if you activated the venv manually.)
 
 ## Design
 
