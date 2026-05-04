@@ -20,6 +20,9 @@ from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 
 
+from claude_island.core.safe_stderr import safe_stderr_write as _safe_stderr_write
+
+
 def _qt_message_filter(msg_type: QtMsgType, _ctx, message: str) -> None:
     """Filter Qt's stylesheet-noise warnings out of stderr.
 
@@ -30,16 +33,29 @@ def _qt_message_filter(msg_type: QtMsgType, _ctx, message: str) -> None:
     spams stderr enough to drown out real diagnostics. Suppress it
     while passing every other Qt log line through unchanged so we
     don't accidentally mute something useful.
+
+    QWindowsWindow::setGeometry warnings fire on multi-monitor /
+    high-DPI setups when a frameless popup's natural minimumSizeHint
+    is recomputed after first paint and ends up a few pixels taller
+    than what was originally requested. Cosmetic — the popup paints
+    correctly — but extremely noisy. Suppressed.
     """
     text = str(message) if message is not None else ""
     suppressed_substrings = (
         "QFont::setPointSize",
         "This plugin does not support raise()",  # WindowsWindow noise
+        # Frameless popups (SessionDetailPopup, HistoryDrawer) trigger
+        # this when Qt's predicted sizeHint underestimates the post-
+        # layout content height by a few pixels. The OS clamps up to
+        # the actual minimum, which is the correct behaviour, but Qt
+        # still logs it as an "unable to set geometry" warning. Visual
+        # result is identical to a successful set; suppress to stop
+        # the spam.
+        "QWindowsWindow::setGeometry: Unable to set geometry",
     )
     if any(s in text for s in suppressed_substrings):
         return
-    # Forward everything else to stderr so genuine warnings still surface.
-    print(text, file=sys.stderr)
+    _safe_stderr_write(text)
 
 
 qInstallMessageHandler(_qt_message_filter)
@@ -473,10 +489,9 @@ def _safe_render(target_name: str, render_fn):
         try:
             render_fn(snap)
         except Exception as exc:
-            print(
+            _safe_stderr_write(
                 f"[claude-island] {target_name}.render(snap) raised "
-                f"(stream preserved): {exc}",
-                file=sys.stderr,
+                f"(stream preserved): {exc}"
             )
     return _safe
 
@@ -523,9 +538,8 @@ _capsule_subscription = (
     )
     .subscribe(
         on_next=_safe_render("capsule", capsule.render),
-        on_error=lambda e: print(
-            f"[claude-island] capsule pipeline died (upstream error): {e}",
-            file=sys.stderr,
+        on_error=lambda e: _safe_stderr_write(
+            f"[claude-island] capsule pipeline died (upstream error): {e}"
         ),
     )
 )
@@ -534,9 +548,8 @@ _expanded_subscription = (
     .pipe(ops.distinct_until_changed(key_mapper=expanded.compute))
     .subscribe(
         on_next=_safe_render("expanded", expanded.render),
-        on_error=lambda e: print(
-            f"[claude-island] expanded pipeline died (upstream error): {e}",
-            file=sys.stderr,
+        on_error=lambda e: _safe_stderr_write(
+            f"[claude-island] expanded pipeline died (upstream error): {e}"
         ),
     )
 )
@@ -560,9 +573,8 @@ _history_subscription = (
     .pipe(ops.distinct_until_changed(key_mapper=HistoryDrawer.compute))
     .subscribe(
         on_next=_safe_render("history", history_drawer.render),
-        on_error=lambda e: print(
-            f"[claude-island] history pipeline died (upstream error): {e}",
-            file=sys.stderr,
+        on_error=lambda e: _safe_stderr_write(
+            f"[claude-island] history pipeline died (upstream error): {e}"
         ),
     )
 )
@@ -680,8 +692,7 @@ def _bootstrap_session_discovery() -> None:
         sessions = process_scanner.scan_fast()
         session_registry.update(sessions)
     except Exception as exc:
-        import sys as _sys
-        print(f"[claude-island] fast scan failed: {exc}", file=_sys.stderr)
+        _safe_stderr_write(f"[claude-island] fast scan failed: {exc}")
     # session_discovery.start() runs the first scan() synchronously
     # then arms a Timer for periodic ticks; both stay on this worker.
     session_discovery.start()
@@ -708,8 +719,7 @@ def _gc_session_names_tick() -> None:
         try:
             session_names_store.gc_session_names(jsonl_parser.known_session_uuids())
         except Exception as exc:
-            import sys as _sys
-            print(f"[claude-island] session_names gc failed: {exc}", file=_sys.stderr)
+            _safe_stderr_write(f"[claude-island] session_names gc failed: {exc}")
     _threading.Thread(target=_work, daemon=True).start()
 
 

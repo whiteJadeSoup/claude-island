@@ -5135,6 +5135,19 @@ class ExpandedWindow(QWidget):
             on_open_folder=_do_open_folder,
             on_strip_thinking=_do_strip_thinking,
         )
+        # Force a layout activation BEFORE move + show so the popup's
+        # sizeHint reflects the actual content height. Without this,
+        # Qt's first sizeHint underestimates by a few px (QLabel
+        # word-wrap heights aren't known until the label has its real
+        # width), Qt issues setGeometry with the underestimated size,
+        # then Windows clamps up to the real minimum and Qt logs the
+        # benign "Unable to set geometry" warning. Activating the
+        # layout up front lets sizeHint settle before show — no
+        # warning, identical visual outcome.
+        popup.ensurePolished()
+        if popup.layout() is not None:
+            popup.layout().activate()
+        popup.adjustSize()
         # Map the row-local right-click position to global screen
         # coordinates. ``btn.mapToGlobal`` does the right thing across
         # multi-monitor / DPI setups.
