@@ -202,6 +202,120 @@ def test_row_widget_preserved_across_renders(panel):
 
 
 # --------------------------------------------------------------------------
+# F2: card frame cache (_cards) — multi-view group QFrames are reused
+# across renders so the per-snap rebuild churn (new QFrame + parsed CSS
+# + Qt object polish) is paid only once per group_id, not per snap.
+# --------------------------------------------------------------------------
+
+def _multi_group(group_id: str, *sessions) -> "object":
+    """Build a multi-view SessionGroup from raw Sessions for tests
+    that exercise the _render_session_groups path directly.
+
+    The shim _render_sessions only ever builds singleton groups, so
+    we construct multi-view groups here explicitly. Each Session is
+    wrapped in a SessionView via _degraded_view (no resolved metadata
+    needed for cache-identity tests)."""
+    from claude_island.core.snapshot import (
+        SessionGroup as _SG,
+        _degraded_view as _dv,
+    )
+    from dataclasses import replace as _replace
+    from claude_island.core.capabilities import (
+        Capability as _Cap,
+        FocusGranularity as _FG,
+    )
+    views = tuple(
+        _replace(
+            _dv(s),
+            adapter_id="test",
+            focus_granularity=_FG.APP,
+            capabilities=frozenset({_Cap.FOCUS}),
+        )
+        for s in sessions
+    )
+    return _SG(
+        group_id=group_id, title_hint=None,
+        adapter_id="test", views=views,
+    )
+
+
+def test_card_reused_across_renders_with_same_group_id(panel):
+    """Same group_id × 2 renders must yield the same QFrame instance —
+    proves we skip the new QFrame() + setStyleSheet() rebuild path."""
+    g = _multi_group("g:1", _session(1, "/a"), _session(2, "/a"))
+    panel._render_session_groups((g,))
+    card_first = panel._cards["g:1"]
+
+    g2 = _multi_group("g:1", _session(1, "/a"), _session(2, "/a"))
+    panel._render_session_groups((g2,))
+    assert panel._cards["g:1"] is card_first
+
+
+def test_card_layout_repopulated_with_current_views(panel):
+    """A cached card whose view set changed must end up with the
+    right number of rows in its inner layout. Catches the bug where
+    we forget to clear the layout before re-adding rows."""
+    g = _multi_group("g:1", _session(1, "/a"), _session(2, "/a"))
+    panel._render_session_groups((g,))
+    card = panel._cards["g:1"]
+    assert card.layout().count() == 2
+
+    # Add a third session to the same group.
+    g2 = _multi_group("g:1",
+                      _session(1, "/a"), _session(2, "/a"), _session(3, "/a"))
+    panel._render_session_groups((g2,))
+    assert panel._cards["g:1"] is card
+    assert card.layout().count() == 3
+
+
+def test_card_evicted_when_group_id_disappears(panel):
+    """A group_id absent from the latest snap must be GC'd from
+    _cards. Mirrors _gc_rows discipline so the cache stays bounded."""
+    g = _multi_group("g:1", _session(1, "/a"), _session(2, "/a"))
+    panel._render_session_groups((g,))
+    assert "g:1" in panel._cards
+
+    panel._render_session_groups(())  # no groups at all
+    assert "g:1" not in panel._cards
+
+
+def test_single_view_group_does_not_create_card(panel):
+    """Single-view groups skip the card wrapper — they return the row
+    directly. _cards must stay empty for single-view-only renders."""
+    panel._render_sessions([_session(1, "/a")])  # shim builds singletons
+    assert panel._cards == {}
+
+
+def test_card_evicted_when_group_collapses_to_single_view(panel):
+    """Multi-view group at tick 1 → single-view at tick 2 (one pane
+    closed). The card from tick 1 must be GC'd because the new
+    rendering of that group_id (now 1 view) takes the row-only path
+    and never registers in _cards anyway."""
+    g = _multi_group("g:1", _session(1, "/a"), _session(2, "/a"))
+    panel._render_session_groups((g,))
+    assert "g:1" in panel._cards
+
+    g_single = _multi_group("g:1", _session(1, "/a"))  # 1 view = single
+    panel._render_session_groups((g_single,))
+    # Single-view group goes through the row-only path; the old card
+    # has no place in the new render and must be evicted.
+    assert "g:1" not in panel._cards
+
+
+def test_empty_groups_clears_card_cache(panel):
+    """Placeholder path (no groups) wipes both _rows and _cards so
+    the next non-empty render rebuilds from a clean slate."""
+    g = _multi_group("g:1", _session(1, "/a"), _session(2, "/a"))
+    panel._render_session_groups((g,))
+    assert panel._cards
+    assert panel._rows
+
+    panel._render_session_groups(())
+    assert panel._cards == {}
+    assert panel._rows == {}
+
+
+# --------------------------------------------------------------------------
 # USAGE region: session card + period card (U1-U7)
 # --------------------------------------------------------------------------
 

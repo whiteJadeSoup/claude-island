@@ -2751,6 +2751,14 @@ class ExpandedWindow(QWidget):
         # hovering. The placeholder widget (no sessions) is tracked separately
         # — its presence is mutually exclusive with any row.
         self._rows: dict[int, QPushButton] = {}
+        # Per-group_id card frame cache. Multi-view groups render as a
+        # bordered QFrame containing flat row buttons; without this
+        # cache every snap rebuilt the QFrame and re-parsed its
+        # stylesheet. Cache contains only multi-view groups —
+        # single-view groups return the row directly with no card
+        # wrapper. Eviction mirrors _gc_rows: any group_id absent
+        # from the current snap is dropped after each render.
+        self._cards: dict[str, QFrame] = {}
         self._placeholder: QLabel | None = None
         # Last session snapshot — populated by _render_sessions, read
         # by user-triggered re-renders (rename) so we don't have to
@@ -3000,6 +3008,7 @@ class ExpandedWindow(QWidget):
         self._hide_placeholder()
 
         needed_pids: set[int] = set()
+        needed_group_ids: set[str] = set()
         multi_idx = 0
         for group in groups:
             palette_idx = multi_idx if len(group.views) > 1 else None
@@ -3010,8 +3019,13 @@ class ExpandedWindow(QWidget):
                 multi_idx += 1
             for v in group.views:
                 needed_pids.add(v.pid)
+            # Only multi-view groups create a cached card; single-view
+            # groups return their row directly with no card wrapper.
+            if len(group.views) > 1:
+                needed_group_ids.add(group.group_id)
 
         self._gc_rows(needed_pids)
+        self._gc_cards(needed_group_ids)
 
         # Lock the scroll area's height to the actual content size,
         # capped at the visible-row maximum. Without this, the scroll
@@ -4534,27 +4548,57 @@ class ExpandedWindow(QWidget):
             row = self._get_or_create_row(views[0], views, in_card=False, card=None)
             row.setParent(None)
             return row
-        return self._make_multi_card(views, palette_idx=palette_idx or 0, title_hint=group.title_hint)
+        return self._get_or_create_card(group, views, palette_idx=palette_idx or 0)
 
-    def _make_multi_card(self, views: list["SessionView"], *, palette_idx: int = 0,
-                         title_hint: str | None = None) -> QFrame:
+    def _get_or_create_card(
+        self,
+        group: "SessionGroup",
+        views: list["SessionView"],
+        *,
+        palette_idx: int = 0,
+    ) -> QFrame:
         """Render a session group as a flat list bracketed by a 1 px
-        rounded outline (ghost-card pattern)."""
-        del palette_idx  # unused; outline colour is uniform now
-        card = QFrame()
-        card.setObjectName("group_card")
-        card._base_bg = _BG_GROUP
-        card.setStyleSheet(
-            "QFrame#group_card {"
-            f" background: transparent;"
-            f" border: 1px solid {_GROUP_OUTLINE_COLOR};"
-            f" border-radius: 10px;"
-            f" padding: {_GROUP_OUTLINE_PAD_PX}px;"
-            "}"
-        )
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
+        rounded outline (ghost-card pattern), reusing the QFrame
+        across snaps when the same ``group_id`` reappears.
+
+        Cache key is ``group.group_id`` (stable for one logical group
+        — same WT window + cwd, same iTerm2 (window, tab), etc).
+        On a hit we empty the inner layout (rows are detached, not
+        destroyed; they survive in ``self._rows``) and refill with
+        the current view set. setStyleSheet runs only on first
+        creation, which is the costly part — Qt parses the CSS and
+        polishes the frame on assignment."""
+        del palette_idx  # outline colour is uniform now; kept for caller API compat
+        card = self._cards.get(group.group_id)
+        if card is None:
+            card = QFrame()
+            card.setObjectName("group_card")
+            card._base_bg = _BG_GROUP
+            card.setStyleSheet(
+                "QFrame#group_card {"
+                f" background: transparent;"
+                f" border: 1px solid {_GROUP_OUTLINE_COLOR};"
+                f" border-radius: 10px;"
+                f" padding: {_GROUP_OUTLINE_PAD_PX}px;"
+                "}"
+            )
+            layout = QVBoxLayout(card)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(2)
+            self._cards[group.group_id] = card
+        else:
+            # Empty the inner layout. Children are detached (setParent
+            # None) so the cached row buttons in ``self._rows`` survive
+            # — only the layout slot is recycled. Without setParent
+            # before re-adding, Qt warns "QLayout: Attempting to add
+            # QLayoutItem ... twice".
+            inner = card.layout()
+            while inner.count():
+                item = inner.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.setParent(None)
+        layout = card.layout()
         for view in views:
             row = self._get_or_create_row(view, views, in_card=True, card=card)
             row.setParent(None)
@@ -4587,31 +4631,33 @@ class ExpandedWindow(QWidget):
 
     def _clear_session_layout(self) -> None:
         """Remove every top-level item from session_box. Cached row
-        buttons are detached (kept alive in self._rows for reuse);
-        cards and the placeholder are deleted."""
-        cached = set(self._rows.values())
+        buttons AND cached card frames are detached (kept alive in
+        self._rows / self._cards for reuse); the placeholder is
+        deleted (recreated on demand by _show_placeholder)."""
+        cached_rows = set(self._rows.values())
+        cached_cards = set(self._cards.values())
         while self._session_box.count():
             item = self._session_box.takeAt(0)
             widget = item.widget()
             if widget is None:
                 continue
-            if widget in cached:
+            if widget in cached_rows or widget in cached_cards:
                 widget.setParent(None)
                 continue
-            # Card: detach any cached rows inside before deleting it,
-            # so they survive for the next group composition.
-            for child in widget.findChildren(QPushButton):
-                if child in cached:
-                    child.setParent(None)
             if widget is self._placeholder:
                 self._placeholder = None
             widget.deleteLater()
 
     def _show_placeholder(self) -> None:
-        # Drop any cached rows: there are no sessions to back them.
+        # Drop any cached rows AND cards: there are no sessions to
+        # back either, and the next non-empty render will recreate
+        # whatever the new group set needs.
         for btn in self._rows.values():
             btn.deleteLater()
         self._rows.clear()
+        for card in self._cards.values():
+            card.deleteLater()
+        self._cards.clear()
         if self._placeholder is None:
             self._placeholder = QLabel("No active sessions")
             self._placeholder.setStyleSheet("color: #555; font-size: 12px;")
@@ -4621,6 +4667,25 @@ class ExpandedWindow(QWidget):
         if self._placeholder is not None:
             self._placeholder.deleteLater()
             self._placeholder = None
+
+    def _gc_cards(self, needed_group_ids: set[str]) -> None:
+        """Drop card frames whose group_id no longer appears in the
+        latest groups tuple. Mirrors _gc_rows for the per-group_id
+        QFrame cache.
+
+        Cached row buttons inside the card are detached BEFORE the
+        card is destroyed so they survive in self._rows for the next
+        render — exactly the same pattern _clear_session_layout uses.
+        Without this, deleteLater on the card would cascade-destroy
+        any HoverRow buttons still parented inside it."""
+        cached_rows = set(self._rows.values())
+        for gid in list(self._cards.keys()):
+            if gid not in needed_group_ids:
+                card = self._cards.pop(gid)
+                for child in card.findChildren(QPushButton):
+                    if child in cached_rows:
+                        child.setParent(None)
+                card.deleteLater()
 
     def _gc_rows(self, needed_pids: set[int]) -> None:
         """Drop rows whose pid is no longer present.
