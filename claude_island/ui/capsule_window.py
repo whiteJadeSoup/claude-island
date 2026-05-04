@@ -46,6 +46,18 @@ _SNAP_DURATION_MS = 200
 # making the pill so faint it's hard to track during the drag.
 _FREE_DRAG_OPACITY = 0.7
 
+# PR3 — edge-idle half-hide
+# When the capsule is docked at a non-top edge (bottom/left/right),
+# it shrinks to a thin strip and fades so the user's working area
+# stays uncluttered. Hover restores it. Mirrors AssistiveTouch idle
+# opacity (40%) tuned a bit brighter for desktop where the user's
+# eye is further from the screen.
+_IDLE_W = 60         # narrower than _DOT_LEFT_PAD + dot + label slot
+_IDLE_OPACITY = 0.6  # faint enough to disappear, visible enough to find
+# Edges that trigger half-hide. Top is always full-presence (it's
+# the home position).
+_IDLE_EDGES = ("bottom", "left", "right")
+
 _DOT_LEFT_PAD = 12  # px from pill's left edge to dot's left edge
 _DOT_LABEL_W = 14   # px reserved for the "●" glyph
 _TEXT_LEFT = _DOT_LEFT_PAD + _DOT_LABEL_W + 4  # 4px gap between dot and text
@@ -265,6 +277,20 @@ class CapsuleWindow(QWidget):
         self._is_free_drag: bool = False
         self._snap_anim: "QPropertyAnimation | None" = None
 
+        # ── Docked-edge idle state (PR3: hide-on-non-top-edge + hover) ──
+        # After a free-drag-snap to bottom/left/right the capsule
+        # half-hides (narrow + 0.6 opacity) so it stops competing
+        # with whatever's behind it. enterEvent restores full size
+        # (hover-out); leaveEvent collapses back to idle.
+        #
+        # _docked_edge: "top" / "bottom" / "left" / "right" / None.
+        #   None ⇒ home position, no idle behaviour.
+        # _is_idle: True when the half-hide is currently applied.
+        #   Drives _apply_capsule's geometry decision so a render(snap)
+        #   tick during idle doesn't accidentally restore full width.
+        self._docked_edge: str | None = None
+        self._is_idle: bool = False
+
         self._setup_window()
 
         # Status glyph — same widget the panel rows use, dropped into
@@ -425,10 +451,22 @@ class CapsuleWindow(QWidget):
           - set the label text via _compose_label_text
           - resize the pill (wider when the quota mini-bar is shown)
           - sync the equalizer-glyph running state
-        """
+
+        Idle exception: when the capsule is collapsed at a non-top
+        edge (PR3 idle state), skip the geometry reset so a render
+        tick during idle doesn't bounce the capsule back to full
+        width. Label / dot updates still happen — the user will see
+        them next time they hover-out."""
         self._is_dot = False
         self._label.setText(self._compose_label_text())
         showing_quota = self._should_show_quota_bar()
+        if self._is_idle:
+            # Idle layout is owned by _enter_idle; only refresh the
+            # active state (dot colour) and skip the geometry pass.
+            self._refresh_active_state()
+            self.update()
+            self.show()
+            return
         target_w = _CAPSULE_W_WITH_QUOTA if showing_quota else _CAPSULE_W
         self._center_top(target_w, _CAPSULE_H)
         self._dot_label.setGeometry(_DOT_LEFT_PAD, 0, _DOT_LABEL_W, _CAPSULE_H)
@@ -728,7 +766,12 @@ class CapsuleWindow(QWidget):
         which screen the capsule is on, so dragging to a second
         monitor and releasing snaps to THAT monitor's edges, not the
         primary's. Falls back to the primary screen if pos() lands in
-        a desktop gap (rare on real hardware)."""
+        a desktop gap (rare on real hardware).
+
+        Side effect: sets ``self._docked_edge`` to the chosen edge so
+        the post-animation hook (``_on_snap_finished``) knows whether
+        to collapse to idle (non-top edges) or stay full-presence
+        (top edge = home)."""
         screen = QApplication.screenAt(self.pos())
         if screen is None:
             screen = QApplication.primaryScreen()
@@ -742,16 +785,20 @@ class CapsuleWindow(QWidget):
         nearest = min(dist_top, dist_bottom, dist_left, dist_right)
         if nearest == dist_top:
             target = QPoint(self.x(), geom.top() + _TOP_MARGIN)
+            self._docked_edge = "top"
         elif nearest == dist_bottom:
             target = QPoint(
                 self.x(), geom.bottom() - self.height() - _TOP_MARGIN,
             )
+            self._docked_edge = "bottom"
         elif nearest == dist_left:
             target = QPoint(geom.left() + _TOP_MARGIN, self.y())
+            self._docked_edge = "left"
         else:
             target = QPoint(
                 geom.right() - self.width() - _TOP_MARGIN, self.y(),
             )
+            self._docked_edge = "right"
         # Final clamp so the snap target itself is within bounds (an
         # off-screen cy could otherwise pick a target right at the
         # screen edge that bleeds onto the next monitor).
@@ -781,15 +828,124 @@ class CapsuleWindow(QWidget):
     def _on_snap_finished(self) -> None:
         """Persist the post-snap position so the next launch restores
         the snapped (edge-anchored) coordinates rather than the user's
-        release point in the middle of the screen."""
+        release point in the middle of the screen.
+
+        If the snap target is a non-top edge, also collapse the
+        capsule to its idle half-hidden form so it stops competing
+        with the user's working area."""
         pos = self.pos()
         self._persisted_pos = (pos.x(), pos.y())
         _save_position(pos.x(), pos.y())
         self._snap_anim = None
+        if self._docked_edge in _IDLE_EDGES:
+            self._enter_idle()
+
+    # ── Edge idle (PR3) ─────────────────────────────────────────────
+
+    def _enter_idle(self) -> None:
+        """Collapse the capsule to its idle half-hidden form: thin
+        strip + reduced opacity. Hides the text label so just the
+        status glyph and pill outline remain visible.
+
+        No-op if already idle (idempotent — entered automatically on
+        snap-finish AND on every leaveEvent, so the guard prevents
+        double-shrink artefacts)."""
+        if self._is_idle or self._is_dot:
+            return
+        self._is_idle = True
+        # Width shrinks; height stays the same so the dot stays
+        # vertically centred and the docked-edge anchor is preserved.
+        # Position is NOT changed — _snap_to_nearest_edge already
+        # placed the capsule's full-width frame at the edge anchor;
+        # shrinking from the left edge keeps the visual anchor on
+        # whichever side the user docked at (left edge: shrinks
+        # rightwards, right edge: still anchored to right because
+        # we recompute x for that side).
+        new_x = self.x()
+        if self._docked_edge == "right":
+            # Right-edge dock: keep the right edge of the capsule
+            # anchored, so shrinking the width pulls the left edge
+            # rightwards (towards the visible edge).
+            new_x = self.x() + (self.width() - _IDLE_W)
+        self.setGeometry(new_x, self.y(), _IDLE_W, _CAPSULE_H)
+        self.setWindowOpacity(_IDLE_OPACITY)
+        self._label.hide()
+
+    def _exit_idle(self) -> None:
+        """Restore the capsule from idle to its full-width form on
+        hover. _apply_capsule decides the actual width based on
+        snapshot state (with/without quota mini-bar)."""
+        if not self._is_idle or self._is_dot:
+            return
+        self._is_idle = False
+        self.setWindowOpacity(1.0)
+        self._label.show()
+        # Re-run the layout pass so the capsule expands back to its
+        # snapshot-driven width. _apply_capsule reads _is_idle (False
+        # now) and picks the normal _CAPSULE_W / _CAPSULE_W_WITH_QUOTA.
+        # Adjust position so a right-edge expansion grows leftwards
+        # (keeps the visible edge anchored) instead of overflowing
+        # off-screen.
+        if self._docked_edge == "right":
+            target_w = _CAPSULE_W_WITH_QUOTA if self._should_show_quota_bar() else _CAPSULE_W
+            new_x = self.x() - (target_w - _IDLE_W)
+            self.move(new_x, self.y())
+        self._apply_capsule()
+
+    def enterEvent(self, event) -> None:  # type: ignore[override]
+        """Mouse entered the capsule's hit-area. If we're docked at a
+        non-top edge in idle form, expand back to full size so the
+        user can read the label. Top-edge docks have no idle state
+        to exit."""
+        if self._is_idle:
+            self._exit_idle()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        """Mouse left the capsule. If we're docked at a non-top edge
+        and not currently being dragged, collapse back to idle —
+        completes the AssistiveTouch-style "fade away when you're
+        not touching me" loop."""
+        if (
+            self._docked_edge in _IDLE_EDGES
+            and not self._is_idle
+            and self._drag_origin_global is None
+        ):
+            self._enter_idle()
+        super().leaveEvent(event)
+
+    def _go_home(self) -> None:
+        """Reset to the default top-centre position. Clears the
+        docked-edge state, the persisted position, and the idle
+        flag — capsule returns to the same place a fresh first-run
+        install would put it.
+
+        Triggered from the right-click menu's "Reset position"
+        item. Keeps the persisted file but with the centred
+        coordinates so the next launch also lands centred (rather
+        than restoring whatever weird corner the user dragged to
+        before resetting)."""
+        self._docked_edge = None
+        self._is_idle = False
+        self._persisted_pos = None
+        self.setWindowOpacity(1.0)
+        self._label.show()
+        # Re-apply the capsule layout: reads _persisted_pos (now
+        # None) and falls back to primary-screen-top-centre.
+        if self._is_dot:
+            self._apply_dot()
+        else:
+            self._apply_capsule()
 
     def _show_context_menu(self, global_pos: QPoint) -> None:
         menu = QMenu(self)
         menu.setStyleSheet(_STYLE_MENU)
+        # "Reset position" is only useful after the user has dragged
+        # the capsule away from the home (top-centre) position. The
+        # action is always shown for discoverability — clicking when
+        # already at home is a harmless re-application of the centred
+        # geometry.
+        menu.addAction("Reset position", self._go_home)
         menu.addAction("Hide until restart", self._hide_until_restart)
         menu.addSeparator()
         menu.addAction("Quit ClaudeIsland", QApplication.instance().quit)

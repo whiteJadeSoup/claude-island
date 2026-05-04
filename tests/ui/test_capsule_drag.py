@@ -368,6 +368,157 @@ class TestFreeDrag:
         assert data["y"] == cap.pos().y()
 
 
+# ── PR3: edge-idle half-hide + hover restore + reset to home ──────────
+
+class TestEdgeIdle:
+    """Idle half-hide kicks in when the capsule snaps to a non-top
+    edge. enterEvent restores; leaveEvent collapses; right-click
+    "Reset position" returns to home."""
+
+    def _force_apply_capsule(self, cap):
+        """Move the capsule out of dot mode so PR3 idle paths apply
+        (idle is a no-op while the capsule is in dot form)."""
+        cap._is_dot = False
+
+    def test_snap_to_top_edge_does_not_enter_idle(self, qtbot, tmp_position_file):
+        """Top edge is the home position — must NOT collapse to idle.
+        Verifies the _IDLE_EDGES filter excludes top."""
+        controller = IslandController()
+        cap = CapsuleWindow(controller)
+        qtbot.addWidget(cap)
+        self._force_apply_capsule(cap)
+        screen = QApplication.primaryScreen().geometry()
+
+        # Place near the top so snap picks "top".
+        cap.move(screen.left() + screen.width() // 2, screen.top() + 30)
+        cap._snap_to_nearest_edge()
+        if cap._snap_anim is not None:
+            cap._snap_anim.setCurrentTime(cap._snap_anim.duration())
+        cap._on_snap_finished()
+
+        assert cap._docked_edge == "top"
+        assert cap._is_idle is False
+
+    def test_snap_to_bottom_edge_enters_idle(self, qtbot, tmp_position_file):
+        controller = IslandController()
+        cap = CapsuleWindow(controller)
+        qtbot.addWidget(cap)
+        self._force_apply_capsule(cap)
+        screen = QApplication.primaryScreen().geometry()
+
+        # Place near bottom so snap picks "bottom".
+        cap.move(
+            screen.left() + screen.width() // 2,
+            screen.bottom() - cap.height() - 30,
+        )
+        cap._snap_to_nearest_edge()
+        if cap._snap_anim is not None:
+            cap._snap_anim.setCurrentTime(cap._snap_anim.duration())
+        cap._on_snap_finished()
+
+        assert cap._docked_edge == "bottom"
+        assert cap._is_idle is True
+        # Width collapsed to the idle strip.
+        from claude_island.ui.capsule_window import _IDLE_W, _IDLE_OPACITY
+        assert cap.width() == _IDLE_W
+        assert cap.windowOpacity() == pytest.approx(_IDLE_OPACITY, abs=0.01)
+
+    def test_enter_event_exits_idle(self, qtbot, tmp_position_file):
+        """Hovering over an idle capsule restores its full size and
+        opacity, mirroring AssistiveTouch hover-out."""
+        controller = IslandController()
+        cap = CapsuleWindow(controller)
+        qtbot.addWidget(cap)
+        self._force_apply_capsule(cap)
+        cap._docked_edge = "bottom"
+        cap._enter_idle()
+        assert cap._is_idle is True
+
+        # Synthesise an enterEvent.
+        from PySide6.QtGui import QEnterEvent
+        from PySide6.QtCore import QPointF
+        enter = QEnterEvent(QPointF(10, 10), QPointF(10, 10), QPointF(10, 10))
+        cap.enterEvent(enter)
+
+        assert cap._is_idle is False
+        assert cap.windowOpacity() == pytest.approx(1.0, abs=0.01)
+
+    def test_leave_event_re_enters_idle(self, qtbot, tmp_position_file):
+        """After hover-out the capsule fades back to idle on
+        leaveEvent — completes the AssistiveTouch hide loop."""
+        controller = IslandController()
+        cap = CapsuleWindow(controller)
+        qtbot.addWidget(cap)
+        self._force_apply_capsule(cap)
+        cap._docked_edge = "bottom"
+        cap._enter_idle()
+        cap._exit_idle()
+        assert cap._is_idle is False
+
+        from PySide6.QtCore import QEvent
+        leave = QEvent(QEvent.Type.Leave)
+        cap.leaveEvent(leave)
+
+        assert cap._is_idle is True
+
+    def test_leave_during_drag_does_not_enter_idle(self, qtbot, tmp_position_file):
+        """If the user is mid-drag, leaveEvent must NOT collapse to
+        idle (would visually conflict with the drag-tracking pill).
+        Drag origin not None ⇒ press is still active."""
+        controller = IslandController()
+        cap = CapsuleWindow(controller)
+        qtbot.addWidget(cap)
+        self._force_apply_capsule(cap)
+        cap._docked_edge = "bottom"
+        # Simulate active drag: drag_origin populated.
+        cap._drag_origin_global = QPoint(0, 0)
+        cap._drag_origin_window = QPoint(0, 0)
+
+        from PySide6.QtCore import QEvent
+        cap.leaveEvent(QEvent(QEvent.Type.Leave))
+
+        assert cap._is_idle is False
+
+    def test_reset_position_returns_to_home(self, qtbot, tmp_position_file):
+        """_go_home must clear docked_edge, persisted_pos, idle, and
+        re-centre. Used by the right-click "Reset position" menu."""
+        controller = IslandController()
+        cap = CapsuleWindow(controller)
+        qtbot.addWidget(cap)
+        self._force_apply_capsule(cap)
+        cap._docked_edge = "right"
+        cap._is_idle = True
+        cap._persisted_pos = (1234, 567)
+
+        cap._go_home()
+
+        assert cap._docked_edge is None
+        assert cap._is_idle is False
+        assert cap._persisted_pos is None
+        # Position is now centred on primary screen.
+        primary = QApplication.primaryScreen().geometry()
+        assert primary.contains(cap.pos())
+
+    def test_apply_capsule_in_idle_does_not_resize(self, qtbot, tmp_position_file):
+        """A render(snap) tick during idle must NOT bounce the capsule
+        back to full _CAPSULE_W. Catches the bug where _apply_capsule
+        unconditionally calls _center_top."""
+        from claude_island.ui.capsule_window import _IDLE_W
+        controller = IslandController()
+        cap = CapsuleWindow(controller)
+        qtbot.addWidget(cap)
+        self._force_apply_capsule(cap)
+        cap._docked_edge = "bottom"
+        cap._enter_idle()
+
+        # Trigger _apply_capsule (what render(snap) does).
+        cap._apply_capsule()
+
+        # Width must still be the idle strip size.
+        assert cap.width() == _IDLE_W
+        assert cap._is_idle is True
+
+
 def test_clamp_keeps_capsule_within_screen_union(capsule):
     """_clamp_x must never let the capsule's left edge slide past
     the leftmost screen edge or its right edge past the rightmost."""
