@@ -71,7 +71,10 @@ class _CopyableIdLabel(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        self._uuid_label = QLabel(shown)
+        # elide=False: wordWrap is set below for the long-form path,
+        # and the short-form (8-char UUID prefix) is well under panel
+        # width — eliding would conflict with both.
+        self._uuid_label = mk_label(shown, elide=False)
         self._uuid_label.setStyleSheet(
             "color: #e8e8e8; font-size: 11px; font-family: Consolas, monospace;"
         )
@@ -87,14 +90,14 @@ class _CopyableIdLabel(QFrame):
         # the hover-reveal container can show/hide it on enter/leave.
         self._glyph_label: QLabel | None = None
         if display_text is not None:
-            self._glyph_label = QLabel("⧉")
+            self._glyph_label = mk_label("⧉", elide=False)
             self._glyph_label.setStyleSheet("color: #6b7280; font-size: 11px;")
             self._glyph_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             layout.addWidget(self._glyph_label)
 
         layout.addStretch()
 
-        self._copied_label = QLabel("Copied")
+        self._copied_label = mk_label("Copied", elide=False)
         self._copied_label.setStyleSheet(
             "color: #4ade80; font-size: 11px; font-family: Consolas, monospace;"
         )
@@ -736,6 +739,128 @@ class _ElasticRichLabel(QLabel):
         from PySide6.QtCore import QSize
         h = super().minimumSizeHint().height()
         return QSize(0, h)
+
+
+# Plain-text alias — same minimumSizeHint=0 trick. Used for QLabels
+# whose content can be longer than _PANEL_W (project names, status
+# strings, spend amounts). Renames the intent so call sites read as
+# "I'm not rich text, I just might get long" instead of misleadingly
+# implying RichText-only use. Both names point at the same class.
+_ElasticLabel = _ElasticRichLabel
+
+
+class _ElidingLabel(QLabel):
+    """Plain-text QLabel that visually elides with ``…`` when its text
+    exceeds the allocated width, AND reports
+    ``minimumSizeHint().width() = 0`` so a long string can't push the
+    parent layout's minimum width past _PANEL_W.
+
+    Pairs the layout-stability trick of `_ElasticRichLabel` with the
+    visual elision users actually expect — default QLabel hard-clips
+    on overflow, which looks broken (text just gets cut at the widget
+    boundary mid-character). Use for labels in the main panel whose
+    content is user-supplied / variable length: session row name and
+    status fields, primarily.
+
+    Important: ``text()`` returns the *full* (un-elided) string, not
+    the visible elided form. This keeps callers that compare
+    ``label.text()`` against a source-of-truth string (see
+    `_update_row`) and tests that assert on label content working
+    without surprises. The elision happens only at paint time.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Source-of-truth text. Diverges from QLabel's internal text
+        # whenever elision kicks in (which sets the *visible* shorter
+        # form via super().setText).
+        self._full_text: str = super().text() or ""
+
+    def setText(self, text: str) -> None:  # type: ignore[override]
+        # Dedupe on the *full* text — _update_row calls setText every
+        # tick, and the visible (super().text()) form is the elided
+        # variant which won't match the new full string. Comparing
+        # against _full_text avoids re-eliding when nothing changed.
+        if text == self._full_text:
+            return
+        self._full_text = text or ""
+        self._apply_elision()
+
+    def text(self) -> str:  # type: ignore[override]
+        return self._full_text
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_elision()
+
+    def minimumSizeHint(self) -> "QSize":  # type: ignore[override]
+        from PySide6.QtCore import QSize
+        h = super().minimumSizeHint().height()
+        return QSize(0, h)
+
+    def _apply_elision(self) -> None:
+        from PySide6.QtCore import Qt as _Qt
+        from PySide6.QtGui import QFontMetrics
+        full = self._full_text
+        w = self.width()
+        if w <= 0:
+            # Pre-layout (constructor / before first show): no width
+            # yet, so leave QLabel's internal text as the full string
+            # and let the first resizeEvent re-elide once the layout
+            # assigns a real width.
+            if super().text() != full:
+                super().setText(full)
+            return
+        metrics = QFontMetrics(self.font())
+        elided = metrics.elidedText(full, _Qt.TextElideMode.ElideRight, w)
+        if super().text() != elided:
+            super().setText(elided)
+
+
+def mk_label(
+    text: str = "",
+    *,
+    elide: bool = True,
+    rich: bool = False,
+    object_name: str | None = None,
+    style: str | None = None,
+) -> QLabel:
+    """Factory for panel labels. Default ``elide=True`` returns an
+    `_ElidingLabel` so any new call site is safe-by-default against
+    the QWindowsWindow::setGeometry mintrack=N>panel-width bug class
+    (see `_ElidingLabel` docstring for the full mechanism).
+
+    Pass ``elide=False`` for fixed-string captions ("TODAY" / "SPEND"
+    / "QUOTA" etc.) that are guaranteed shorter than the panel — no
+    layout-stability concern there, and a plain QLabel is cheaper at
+    paint time.
+
+    Pass ``rich=True`` for HTML content (uses `_ElasticRichLabel`,
+    which neuters width-propagation but does NOT elide — eliding HTML
+    would lose `<span>` tags).
+
+    Two convenience kwargs (`object_name`, `style`) collapse the
+    common "construct + setObjectName + setStyleSheet" three-liner
+    into a single call so migrating bare ``QLabel(...)`` sites stays
+    a one-line edit.
+
+    Note: when both ``rich`` and ``elide`` are True, ``rich`` wins —
+    `elide` defaults to True so users writing ``mk_label(html, rich=True)``
+    shouldn't have to also write ``elide=False`` to silence an error.
+    Eliding HTML loses ``<span>`` tags, so RichText labels skip elision
+    by design."""
+    if rich:
+        lbl: QLabel = _ElasticRichLabel(text)
+    elif elide:
+        lbl = _ElidingLabel(text)
+    else:
+        lbl = QLabel(text)
+    if object_name is not None:
+        lbl.setObjectName(object_name)
+    if style is not None:
+        lbl.setStyleSheet(style)
+    return lbl
+
 
 # Cumulative-spend threshold past which a session's row dot flips to
 # the high-cost ⚡ marker. The user explicitly chose to keep this
@@ -1472,8 +1597,9 @@ class SessionDetailPopup(QFrame):
         # Backwards-compat alias kept until tests are updated; will be
         # the same widget as _repair_btn.
         self._repair_icon: QPushButton | None = None
-        # Status line shared by all footer actions.
-        self._repair_status: QLabel = QLabel("")
+        # Status line shared by all footer actions. elide=False because
+        # setWordWrap(True) below is the chosen overflow strategy.
+        self._repair_status: QLabel = mk_label("", elide=False)
         self._repair_status.setStyleSheet("color: #9ca3af; font-size: 11px;")
         self._repair_status.setWordWrap(True)
         self._repair_status.hide()
@@ -1526,6 +1652,20 @@ class SessionDetailPopup(QFrame):
             "}"
         )
         self.adjustSize()
+
+    # ------------------------------------------------------------------
+    # Size-hint clamp — defense in depth for setFixedWidth(_PANEL_W).
+    # Same rationale as ExpandedWindow.minimumSizeHint — see there.
+    # ------------------------------------------------------------------
+    def minimumSizeHint(self) -> "QSize":  # type: ignore[override]
+        from PySide6.QtCore import QSize
+        h = super().minimumSizeHint().height()
+        return QSize(_PANEL_W, h)
+
+    def sizeHint(self) -> "QSize":  # type: ignore[override]
+        from PySide6.QtCore import QSize
+        h = super().sizeHint().height()
+        return QSize(_PANEL_W, h)
 
     # ------------------------------------------------------------------
     # paintEvent — translucent rounded body matching the main panel.
@@ -1594,7 +1734,7 @@ class SessionDetailPopup(QFrame):
         # action icons.
         head = QHBoxLayout()
         head.setSpacing(6)
-        name = QLabel(title)
+        name = mk_label(title)
         name.setStyleSheet(_STYLE_NAME)
         head.addWidget(name, 1)
         # Hold a reference so the inline-rename swap (label → QLineEdit
@@ -1671,7 +1811,7 @@ class SessionDetailPopup(QFrame):
         if d and d.cc_version:
             sub_parts.append(f"v{d.cc_version}")
         if sub_parts:
-            sub = QLabel(" · ".join(sub_parts))
+            sub = mk_label(" · ".join(sub_parts))
             sub.setStyleSheet("color: #6b7280; font-size: 11px;")
             layout.addWidget(sub)
 
@@ -1679,7 +1819,12 @@ class SessionDetailPopup(QFrame):
         # differs from the displayed name (so we don't echo the same
         # string twice).
         if subtitle_ai:
-            ai = QLabel(subtitle_ai)
+            # elide=False: setWordWrap(True) below is the chosen
+            # overflow strategy. _ElidingLabel + wordWrap conflict —
+            # eliding forces single-line, which prevents the label
+            # from reporting the multi-line height it needs, shrinking
+            # the header section.
+            ai = mk_label(subtitle_ai, elide=False)
             ai.setStyleSheet("color: #9ca3af; font-size: 11px; font-style: italic;")
             ai.setWordWrap(True)
             layout.addWidget(ai)
@@ -1710,7 +1855,7 @@ class SessionDetailPopup(QFrame):
         id_h = QHBoxLayout(id_row)
         id_h.setContentsMargins(0, 0, 0, 0)
         id_h.setSpacing(8)
-        k = QLabel("ID")
+        k = mk_label("ID", elide=False)
         k.setStyleSheet("color: #6b7280; font-size: 11px;")
         k.setFixedWidth(54)
         k.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -1721,7 +1866,7 @@ class SessionDetailPopup(QFrame):
             id_h.addWidget(copyable, 1)
             id_row.register_reveal(copyable._glyph_label)
         else:
-            v = QLabel("—")
+            v = mk_label("—", elide=False)
             v.setStyleSheet("color: #e8e8e8; font-size: 12px;")
             id_h.addWidget(v, 1)
         layout.addWidget(id_row)
@@ -1733,7 +1878,7 @@ class SessionDetailPopup(QFrame):
         path_h = QHBoxLayout(path_row)
         path_h.setContentsMargins(0, 0, 0, 0)
         path_h.setSpacing(4)
-        pk = QLabel("Path")
+        pk = mk_label("Path", elide=False)
         pk.setStyleSheet("color: #6b7280; font-size: 11px;")
         pk.setFixedWidth(54)
         pk.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -1741,7 +1886,9 @@ class SessionDetailPopup(QFrame):
         path_h.addWidget(pk)
         # Path value is clickable to open folder (same as the ↗ button
         # revealed on hover — clicking the text should open, not copy).
-        pv = QLabel(str(self._fallback.project_path))
+        # elide=False: setWordWrap(True) below is the chosen overflow
+        # strategy for long paths (eliding would lose path tail info).
+        pv = mk_label(str(self._fallback.project_path), elide=False)
         pv.setStyleSheet("color: #e8e8e8; font-size: 12px;")
         pv.setWordWrap(True)
         pv.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -1788,7 +1935,7 @@ class SessionDetailPopup(QFrame):
 
         # Header: "TOKENS    $X · N turns"
         head = QHBoxLayout()
-        title_lbl = QLabel("TOKENS")
+        title_lbl = mk_label("TOKENS", elide=False)
         title_lbl.setStyleSheet(_STYLE_TITLE)
         head.addWidget(title_lbl)
         head.addStretch()
@@ -1800,14 +1947,14 @@ class SessionDetailPopup(QFrame):
                 )
             if d.sidechain_count:
                 extras.append(f"{d.sidechain_count} subagent")
-            tail = QLabel(" · ".join(extras))
+            tail = mk_label(" · ".join(extras))
             tail.setStyleSheet("color: #c9c9c9; font-size: 11px;")
             tail.setAlignment(Qt.AlignmentFlag.AlignRight)
             head.addWidget(tail)
         layout.addLayout(head)
 
         if not rows:
-            empty = QLabel(
+            empty = mk_label(
                 "No usage recorded yet." if d else "—"
             )
             empty.setStyleSheet(_STYLE_AGE)
@@ -1843,7 +1990,7 @@ class SessionDetailPopup(QFrame):
         top = QHBoxLayout()
         top.setSpacing(6)
 
-        name = QLabel(r.label)
+        name = mk_label(r.label)
         name.setStyleSheet("color: #e8e8e8; font-size: 12px;")
         name.setFixedWidth(60)
         name.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -1870,7 +2017,7 @@ class SessionDetailPopup(QFrame):
         row._bar_pct = (r.cost_usd / max_cost) if max_cost > 0 else 0.0
         top.addWidget(bar_track, 1)
 
-        cost = QLabel(_fmt_money(r.cost_usd))
+        cost = mk_label(_fmt_money(r.cost_usd), elide=False)
         cost.setStyleSheet("color: #e8e8e8; font-size: 12px;")
         cost.setFixedWidth(54)
         cost.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1889,7 +2036,8 @@ class SessionDetailPopup(QFrame):
         if r.cache_creation_tokens or r.cache_read_tokens:
             parts.append(f"cache w {_fmt_tokens(r.cache_creation_tokens)}")
             parts.append(f"cache r {_fmt_tokens(r.cache_read_tokens)}")
-        tokens = QLabel("  " + " · ".join(parts))
+        # elide=False: setWordWrap(True) below is the chosen strategy.
+        tokens = mk_label("  " + " · ".join(parts), elide=False)
         tokens.setStyleSheet(_STYLE_AGE)
         tokens.setWordWrap(True)
         # NO setSizePolicy(Expanding, …) — see _build_spend_model_row's
@@ -1916,7 +2064,7 @@ class SessionDetailPopup(QFrame):
         layout.setSpacing(4)
 
         head = QHBoxLayout()
-        title_lbl = QLabel("LAST PROMPT")
+        title_lbl = mk_label("LAST PROMPT", elide=False)
         title_lbl.setStyleSheet(_STYLE_TITLE)
         head.addWidget(title_lbl)
         head.addStretch()
@@ -1952,7 +2100,11 @@ class SessionDetailPopup(QFrame):
         #     full text lives in the QTextEdit shown when expanded.
         # Text is elided to popup-inner-width via QFontMetrics so a
         # long preview shows the head + "…" instead of being clipped.
-        self._prompt_body = QLabel()
+        # elide=False: this label has its own custom resize-time
+        # eliding via QFontMetrics (see _refresh_prompt_body), plus
+        # setSizePolicy(Ignored, ...) below — _ElidingLabel would
+        # double-elide and interfere with the custom logic.
+        self._prompt_body = mk_label("", elide=False)
         self._prompt_body.setStyleSheet("color: #c9c9c9; font-size: 12px;")
         self._prompt_body.setWordWrap(False)
         self._prompt_body.setSizePolicy(
@@ -2337,7 +2489,7 @@ class SessionDetailPopup(QFrame):
         return sep
 
     def _dot_separator(self) -> QLabel:
-        dot = QLabel("·")
+        dot = mk_label("·", elide=False)
         dot.setStyleSheet("color: #4a4a4a; font-size: 11px;")
         return dot
 
@@ -2348,12 +2500,14 @@ class SessionDetailPopup(QFrame):
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
-        k = QLabel(key)
+        # k: setFixedWidth(54) below caps width, elide=False is fine.
+        k = mk_label(key, elide=False)
         k.setStyleSheet("color: #6b7280; font-size: 11px;")
         k.setFixedWidth(54)
         k.setAlignment(Qt.AlignmentFlag.AlignTop)
         h.addWidget(k)
-        v = QLabel(value)
+        # v: setWordWrap(True) is the chosen overflow strategy.
+        v = mk_label(value, elide=False)
         v.setStyleSheet("color: #e8e8e8; font-size: 12px;")
         v.setWordWrap(True)
         h.addWidget(v, 1)
@@ -2456,6 +2610,18 @@ class _AddProviderDialog(QFrame):
         self._build_body(root)
         self.adjustSize()
 
+    # Size-hint clamp — defense in depth for setFixedWidth(self._DIALOG_W).
+    # Same rationale as ExpandedWindow.minimumSizeHint — see there.
+    def minimumSizeHint(self) -> "QSize":  # type: ignore[override]
+        from PySide6.QtCore import QSize
+        h = super().minimumSizeHint().height()
+        return QSize(self._DIALOG_W, h)
+
+    def sizeHint(self) -> "QSize":  # type: ignore[override]
+        from PySide6.QtCore import QSize
+        h = super().sizeHint().height()
+        return QSize(self._DIALOG_W, h)
+
     def paintEvent(self, event: object) -> None:  # type: ignore[override]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -2468,17 +2634,18 @@ class _AddProviderDialog(QFrame):
     # ------------------------------------------------------------------
 
     def _build_body(self, root: QVBoxLayout) -> None:
-        title = QLabel("Add provider")
+        title = mk_label("Add provider", elide=False)
         title.setStyleSheet("color: #e8e8e8; font-size: 13px; font-weight: 500;")
         root.addWidget(title)
 
         # Empty state: nothing left to add. Skip the radio + form
         # entirely and offer a single Close button.
         if not self._configurable:
-            msg = QLabel(
+            msg = mk_label(
                 "All available providers are already configured.\n\n"
                 "Edit ~/.claude-island/providers.json directly to update "
-                "tokens or add a custom provider."
+                "tokens or add a custom provider.",
+                elide=False,  # setWordWrap(True) below is the strategy
             )
             msg.setStyleSheet("color: #c9c9c9; font-size: 12px;")
             msg.setWordWrap(True)
@@ -2517,7 +2684,8 @@ class _AddProviderDialog(QFrame):
             root.addWidget(form)
 
         # Status slot for save-time error messages.
-        self._status = QLabel("")
+        # elide=False: setWordWrap(True) below is the strategy.
+        self._status = mk_label("", elide=False)
         self._status.setStyleSheet("color: #ef4444; font-size: 11px;")
         self._status.setWordWrap(True)
         self._status.hide()
@@ -2569,7 +2737,8 @@ class _AddProviderDialog(QFrame):
         # gives it breathing room against the radio row above.
         for key, val in cfg.items():
             if key.startswith("_") and isinstance(val, str):
-                help_lbl = QLabel(val)
+                # elide=False: setWordWrap(True) below is the strategy.
+                help_lbl = mk_label(val, elide=False)
                 help_lbl.setStyleSheet(
                     "color: #c9c9c9; font-size: 12px; "
                     "padding: 4px 0 2px 0;"
@@ -2597,7 +2766,8 @@ class _AddProviderDialog(QFrame):
                 continue
             row = QHBoxLayout()
             row.setSpacing(8)
-            label = QLabel(key)
+            # setFixedWidth(80) below caps width, elide=False is fine.
+            label = mk_label(key, elide=False)
             label.setStyleSheet("color: #6b7280; font-size: 11px;")
             label.setFixedWidth(80)
             row.addWidget(label)
@@ -2815,6 +2985,28 @@ class ExpandedWindow(QWidget):
         self.setFixedWidth(_PANEL_W)
         self.hide()
 
+    # ------------------------------------------------------------------
+    # Size-hint clamp — defense in depth for setFixedWidth(_PANEL_W).
+    # See module-level _ElidingLabel docstring for the full bug class.
+    # ------------------------------------------------------------------
+    # setFixedWidth is a *request* to the layout system, not a command:
+    # if a child widget's minimumSizeHint().width() exceeds _PANEL_W,
+    # the layout overrides setFixedWidth and the window grows. By
+    # clamping our own minimumSizeHint / sizeHint here, the window
+    # itself never reports more than _PANEL_W to Qt's layout solver
+    # or to the OS — the QWindowsWindow::setGeometry mintrack=N>320
+    # warning can no longer fire from this widget regardless of which
+    # child misbehaves. Belt-and-suspenders for mk_label() defaults.
+    def minimumSizeHint(self) -> "QSize":  # type: ignore[override]
+        from PySide6.QtCore import QSize
+        h = super().minimumSizeHint().height()
+        return QSize(_PANEL_W, h)
+
+    def sizeHint(self) -> "QSize":  # type: ignore[override]
+        from PySide6.QtCore import QSize
+        h = super().sizeHint().height()
+        return QSize(_PANEL_W, h)
+
     def _position(self) -> None:
         cap = self._capsule.frameGeometry()
         x = cap.center().x() - self.width() // 2
@@ -2851,7 +3043,7 @@ class ExpandedWindow(QWidget):
         # ── Sessions header (with count badge) ──────────────────────
         # Count badge makes overflow discoverable: when the list scrolls,
         # the user sees "· 14" and knows there's more below the fold.
-        self._sessions_title = QLabel("CLAUDE SESSIONS")
+        self._sessions_title = mk_label("CLAUDE SESSIONS", elide=False)
         self._sessions_title.setStyleSheet(_STYLE_TITLE)
         root.addWidget(self._sessions_title)
 
@@ -3149,7 +3341,7 @@ class ExpandedWindow(QWidget):
         # Top row: "TODAY" caption (left) + big $ amount (right).
         top = QHBoxLayout()
         top.setSpacing(8)
-        today_label = QLabel("TODAY")
+        today_label = mk_label("TODAY", elide=False)
         today_label.setStyleSheet(_STYLE_TITLE)
         today_label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
@@ -3158,8 +3350,11 @@ class ExpandedWindow(QWidget):
         top.addStretch()
 
         # Headline number — bumped 4 px over the SPEND card's amount so
-        # the visual hierarchy reads "summary > detail".
-        self._summary_amount = QLabel("—")
+        # the visual hierarchy reads "summary > detail". _ElasticLabel
+        # because at 24 px font a high-spend value (e.g. "$12,345.67")
+        # can otherwise propagate width up to the panel and trip the
+        # QWindowsWindow::setGeometry mintrack=480 warning.
+        self._summary_amount = _ElasticLabel("—")
         self._summary_amount.setStyleSheet(
             "color: #f5f5f5; font-size: 24px; font-weight: 600;"
         )
@@ -3200,7 +3395,8 @@ class ExpandedWindow(QWidget):
 
         # Bar caption ("78% of 5h limit"). Hidden when quota
         # snapshot is unavailable (matches the bar's hide).
-        self._summary_caption = QLabel("")
+        # "X% of 5h limit" — bounded short, elide=False is safe.
+        self._summary_caption = mk_label("", elide=False)
         self._summary_caption.setStyleSheet(_STYLE_USAGE_PCT)
         layout.addWidget(self._summary_caption)
 
@@ -3311,7 +3507,7 @@ class ExpandedWindow(QWidget):
         # Header row: SPEND label (left) + period dropdown (right)
         hdr = QHBoxLayout()
         hdr.setSpacing(8)
-        spend_label = QLabel("SPEND")
+        spend_label = mk_label("SPEND", elide=False)
         spend_label.setStyleSheet(_STYLE_TITLE)
         hdr.addWidget(spend_label)
         hdr.addStretch()
@@ -3341,7 +3537,10 @@ class ExpandedWindow(QWidget):
         # Headline $ + total token count, on one row.
         # ``$86.42 · 1.2M tokens`` — the dot separator visually couples
         # them as "two facets of the same window" (cost vs scale).
-        self._spend_amount = QLabel("—")
+        # _ElasticLabel: at 20 px font the combined money+tokens string
+        # can run past _PANEL_W and otherwise propagates the panel's
+        # effective minimum width past 320 (mintrack=480 warning).
+        self._spend_amount = _ElasticLabel("—")
         self._spend_amount.setStyleSheet(_STYLE_USAGE_AMOUNT)
         layout.addWidget(self._spend_amount)
 
@@ -3407,7 +3606,8 @@ class ExpandedWindow(QWidget):
         top = QHBoxLayout()
         top.setSpacing(6)
 
-        name_lbl = QLabel("")
+        # setFixedWidth(76) below caps width, elide=False is fine.
+        name_lbl = mk_label("", elide=False)
         name_lbl.setStyleSheet("color: #e8e8e8; font-size: 12px;")
         name_lbl.setFixedWidth(76)
         name_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -3429,7 +3629,7 @@ class ExpandedWindow(QWidget):
         bar_layout.addWidget(bar_fill)
         top.addWidget(bar_track, 1)
 
-        cost_lbl = QLabel("")
+        cost_lbl = mk_label("", elide=False)
         cost_lbl.setStyleSheet("color: #e8e8e8; font-size: 12px;")
         cost_lbl.setFixedWidth(62)
         cost_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -3444,7 +3644,7 @@ class ExpandedWindow(QWidget):
         # the trailing "ns". The unit column is unambiguous at the
         # row level (it's always tokens), and the headline above
         # ("$86 · 1.2M tokens") names the unit once for the whole card.
-        agg_lbl = QLabel("")
+        agg_lbl = mk_label("", elide=False)
         agg_lbl.setStyleSheet("color: #9ca3af; font-size: 11px;")
         agg_lbl.setFixedWidth(56)
         agg_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -3674,7 +3874,7 @@ class ExpandedWindow(QWidget):
         # set of equal-weight panes, not "some have titles, some
         # don't". The status dot is still hidden (color of the inline
         # 5h text already conveys live/closed window state).
-        section_title = QLabel("QUOTA")
+        section_title = mk_label("QUOTA", elide=False)
         section_title.setStyleSheet(_STYLE_TITLE)
         layout.addWidget(section_title)
 
@@ -3683,7 +3883,7 @@ class ExpandedWindow(QWidget):
         # info now lives in the colour of the inline 5h line below.
         quota_hdr = QHBoxLayout()
         quota_hdr.setSpacing(8)
-        self._quota_dot = QLabel("●")
+        self._quota_dot = mk_label("●", elide=False)
         self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
         self._quota_dot.hide()
 
@@ -3697,7 +3897,7 @@ class ExpandedWindow(QWidget):
         # Always-present hidden label so legacy tests that grep for
         # "QUOTA" text in the widget tree keep passing. Shown only in
         # the no-providers fallback branch.
-        self._quota_hdr = QLabel("QUOTA")
+        self._quota_hdr = mk_label("QUOTA", elide=False)
         self._build_provider_tab_strip()
         quota_hdr.addLayout(self._tab_strip_layout, 1)
 
@@ -3765,10 +3965,11 @@ class ExpandedWindow(QWidget):
         # Legacy attribute slots for tests that look these up by name.
         # Both still constructed but hidden — the visible status now
         # lives entirely on _quota_inline.
-        self._quota_5h_inline = QLabel("")
+        # Hidden legacy slot — elide=False is consistent with sibling.
+        self._quota_5h_inline = mk_label("", elide=False)
         self._quota_5h_inline.hide()
         layout.addWidget(self._quota_5h_inline)
-        self._quota_weekly_inline = QLabel("")
+        self._quota_weekly_inline = mk_label("", elide=False)
         self._quota_weekly_inline.hide()
         layout.addWidget(self._quota_weekly_inline)
 
@@ -3778,7 +3979,8 @@ class ExpandedWindow(QWidget):
         # "Weekly" labels with no values and no clue why). Wraps because
         # the tip references an environment variable / file path that
         # can be longer than the card width.
-        self._quota_unavailable = QLabel("")
+        # elide=False: setWordWrap(True) below is the strategy.
+        self._quota_unavailable = mk_label("", elide=False)
         self._quota_unavailable.setStyleSheet(
             "color: #9ca3af; font-size: 11px; padding: 4px 0 0 0;"
         )
@@ -3906,7 +4108,8 @@ class ExpandedWindow(QWidget):
         # Top line: label + bar + pct
         top = QHBoxLayout()
         top.setSpacing(8)
-        lbl = QLabel(label)
+        # setFixedWidth(42) below caps width, elide=False is fine.
+        lbl = mk_label(label, elide=False)
         lbl.setStyleSheet("color: #9ca3af; font-size: 11px;")
         lbl.setFixedWidth(42)
         top.addWidget(lbl)
@@ -3918,7 +4121,8 @@ class ExpandedWindow(QWidget):
         bar.setStyleSheet(_PROGRESS_BAR_TPL.format(color=_BAR_GREEN))
         bar.hide()
         top.addWidget(bar, 1)
-        pct = QLabel("")
+        # setFixedWidth(86) below caps width, elide=False is fine.
+        pct = mk_label("", elide=False)
         pct.setStyleSheet(_STYLE_USAGE_PCT_BIG)
         pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         pct.setFixedWidth(86)
@@ -3927,7 +4131,8 @@ class ExpandedWindow(QWidget):
 
         # Bottom line: reset countdown, indented under the bar so it
         # reads "this is metadata about the bar above"
-        reset = QLabel("")
+        # "resets in Xh Ym" — bounded short, elide=False is safe.
+        reset = mk_label("", elide=False)
         reset.setStyleSheet(_STYLE_USAGE_RESET)
         reset.setContentsMargins(50, 0, 0, 0)
         v.addWidget(reset)
@@ -4315,15 +4520,28 @@ class ExpandedWindow(QWidget):
         btn._status_glyph = status_glyph
         top.addWidget(status_glyph)
 
-        name_label = QLabel()
+        # _ElidingLabel: project names / AI titles are user-supplied
+        # text. Two reasons we need the eliding variant here:
+        #   1. minimumSizeHint=0 stops a long name from propagating
+        #      its full width up the layout chain to ExpandedWindow,
+        #      which would override setFixedWidth(_PANEL_W=320) and
+        #      produce the QWindowsWindow::setGeometry mintrack=480
+        #      warning. setSizePolicy(Expanding, …) alone won't do
+        #      it — see _ElasticRichLabel docstring.
+        #   2. Visual elision (`…`) at paint time so an overflowing
+        #      name reads cleanly instead of getting hard-clipped
+        #      mid-character at the row boundary.
+        name_label = _ElidingLabel()
         name_label.setObjectName("name_label")
         name_label.setStyleSheet(_STYLE_NAME)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         top.addWidget(name_label, 1)
 
-        # Right-side meta slot. Shows cumulative session cost.
-        meta_label = QLabel()
+        # Right-side meta slot. Shows cumulative session cost ("$XX.XX").
+        # elide=False: cost strings are bounded short, eliding right-
+        # aligned money would be visually broken ("$1,2…").
+        meta_label = mk_label("", elide=False)
         meta_label.setObjectName("meta_label")
         meta_label.setStyleSheet(_STYLE_COST_DEFAULT)
         meta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -4339,13 +4557,21 @@ class ExpandedWindow(QWidget):
         bottom.setContentsMargins(20, 0, 0, 0)  # 12 (dot width) + 8 (spacing)
         bottom.setSpacing(6)
 
-        model_chip = QLabel()
+        # Model chip text is short ("Sonnet" / "Opus" / "Haiku" / etc.);
+        # elide=False is safe and avoids spurious eliding overhead.
+        model_chip = mk_label("", elide=False)
         model_chip.setObjectName("model_chip")
         model_chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         model_chip.setStyleSheet(_STYLE_MODEL_CHIP.format(color=_MODEL_COLOR_FALLBACK))
         bottom.addWidget(model_chip)
 
-        status_label = QLabel()
+        # _ElidingLabel: status text composes "active <relative> ·
+        # v<version>" — usually short, but long version strings or a
+        # localised relative-time phrase can exceed the row width on
+        # narrow allocations. Same dual rationale as name_label:
+        # neuter width-propagation + elide on overflow rather than
+        # hard-clip.
+        status_label = _ElidingLabel()
         status_label.setObjectName("status_label")
         status_label.setStyleSheet(_STYLE_STATUS)
         status_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -4659,7 +4885,7 @@ class ExpandedWindow(QWidget):
             card.deleteLater()
         self._cards.clear()
         if self._placeholder is None:
-            self._placeholder = QLabel("No active sessions")
+            self._placeholder = mk_label("No active sessions", elide=False)
             self._placeholder.setStyleSheet("color: #555; font-size: 12px;")
         self._session_box.addWidget(self._placeholder)
 
