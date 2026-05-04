@@ -22,8 +22,16 @@ import collections
 import logging
 import time
 
+from pathlib import Path
+
 from claude_island.core.app_backend import AppBackend
-from claude_island.core.capabilities import CAPABILITY_SCOPE, Capability, Scope
+from claude_island.core.capabilities import (
+    CAPABILITY_SCOPE,
+    Capability,
+    LauncherSpawnError,
+    Scope,
+    SpawnResult,
+)
 from claude_island.core.os_backend import OsBackend
 from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals.protocols import TerminalAdapter
@@ -166,6 +174,68 @@ class TerminalDispatcher:
         if not ok:
             log.info("dispatch: %s.%s returned False", type(target).__name__, cap.value)
         return ok
+
+    # ── View-less control flow (LAUNCH) ─────────────────────────────────
+
+    def adapters_with(
+        self, cap: Capability,
+    ) -> tuple[tuple[str, TerminalAdapter], ...]:
+        """List ``(name, adapter)`` pairs that implement ``cap``.
+
+        Sorted by adapter ``_priority`` desc (same order as the chain
+        used by ``group_sessions``). Degraded adapters are skipped.
+
+        Used by view-less capabilities (currently only LAUNCH) where
+        the caller has no SessionView to drive ``view.adapter_id``
+        routing — typically the HistoryDrawer asking "which terminals
+        can spawn ``claude --resume``?" before letting the user (or
+        v1: the highest-priority adapter) pick one.
+
+        Returns empty tuple when no adapter advertises the capability
+        (e.g. macOS Linux box where neither WindowsTerminal nor iTerm2
+        is present, only generic adapters which don't implement LAUNCH)."""
+        return tuple(
+            (st.adapter.name, st.adapter)
+            for st in self._chain
+            if not st.is_degraded()
+            and cap in type(st.adapter).capabilities
+        )
+
+    def launch(
+        self,
+        adapter_name: str,
+        *,
+        cwd: Path,
+        command: tuple[str, ...],
+    ) -> SpawnResult:
+        """View-less LAUNCH dispatch.
+
+        Caller flow:
+          1. ``cands = dispatcher.adapters_with(Capability.LAUNCH)``
+          2. ``name, _ = cands[0]``    # or user-picked
+          3. ``result = dispatcher.launch(name, cwd=..., command=...)``
+          4. ``launch_intent.add(LaunchIntent(...result.terminal_pid...))``
+
+        Raises ``LauncherSpawnError`` if (a) ``adapter_name`` is unknown,
+        (b) the adapter doesn't implement LAUNCH, or (c) the underlying
+        spawn raises. Caller should toast and *not* update the
+        LaunchIntentRegistry on failure.
+
+        Why not via :meth:`dispatch`? ``dispatch(view, cap)`` returns
+        bool (FOCUS / RENAME contract); LAUNCH has no view + needs to
+        return SpawnResult. Forcing it through would either break the
+        bool contract or wrap with out-of-band state passing — both
+        worse than a 5-line dedicated method."""
+        adapter = self._terminals.get(adapter_name)
+        if adapter is None:
+            raise LauncherSpawnError(
+                f"unknown terminal adapter: {adapter_name!r}"
+            )
+        if Capability.LAUNCH not in type(adapter).capabilities:
+            raise LauncherSpawnError(
+                f"adapter {adapter_name!r} does not implement LAUNCH"
+            )
+        return adapter.launch(cwd=cwd, command=command)
 
     # ── Internal ────────────────────────────────────────────────────────
 

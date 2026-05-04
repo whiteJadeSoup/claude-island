@@ -3090,12 +3090,42 @@ class ExpandedWindow(QWidget):
         self._summary_card = self._build_summary_card()
         root.addWidget(self._summary_card)
 
-        # ── Sessions header (with count badge) ──────────────────────
+        # ── Sessions header (with count badge + history chip) ───────
         # Count badge makes overflow discoverable: when the list scrolls,
         # the user sees "· 14" and knows there's more below the fold.
+        # The 🗂 chip on the right surfaces dormant sessions (offline
+        # sessions on disk with no live process) — click opens the
+        # HistoryDrawer. Hidden when there are zero dormant sessions.
         self._sessions_title = mk_label("CLAUDE SESSIONS", elide=False)
         self._sessions_title.setStyleSheet(_STYLE_TITLE)
-        root.addWidget(self._sessions_title)
+        self._history_chip = QPushButton("🗂 0")
+        self._history_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._history_chip.setStyleSheet(
+            "QPushButton {"
+            "  background: rgba(255,255,255,0.06);"
+            "  color: #cfcfcf;"
+            "  border: 1px solid rgba(255,255,255,0.1);"
+            "  border-radius: 4px;"
+            "  padding: 2px 6px;"
+            "  font-size: 10px;"
+            "}"
+            "QPushButton:hover {"
+            "  background: rgba(255,255,255,0.12);"
+            "  color: #ffffff;"
+            "}"
+        )
+        self._history_chip.setFlat(True)
+        self._history_chip.setVisible(False)
+        # Toggle slot — wired from __main__.py via set_history_toggle().
+        self._history_toggle: Callable[[], None] | None = None
+        self._history_chip.clicked.connect(self._on_history_chip_clicked)
+        sessions_header = QHBoxLayout()
+        sessions_header.setContentsMargins(0, 0, 0, 0)
+        sessions_header.setSpacing(6)
+        sessions_header.addWidget(self._sessions_title)
+        sessions_header.addStretch(1)
+        sessions_header.addWidget(self._history_chip)
+        root.addLayout(sessions_header)
 
         # ── Sessions scroll area ────────────────────────────────────
         # QScrollArea bounds the panel height regardless of session
@@ -3215,6 +3245,33 @@ class ExpandedWindow(QWidget):
         self._latest_snap = snap
         self._render_session_groups(snap.session_groups)
         self._render_cards()
+        # Update history chip from dormant + launching counts (resume-offline
+        # feature). Hide entirely when zero — keeps the header clean for
+        # users who never closed terminals while island was running.
+        self.update_history_count(
+            len(snap.dormant_sessions) + len(snap.launching_sessions)
+        )
+
+    # ── History chip integration ────────────────────────────────────────
+
+    def set_history_toggle(self, toggle: Callable[[], None]) -> None:
+        """Wire the History chip click → HistoryDrawer.toggle. Called
+        once at boot from __main__.py after the drawer is constructed.
+        Kept as a setter (not a ctor arg) because ExpandedWindow already
+        has a long ctor and history is an optional/late-bound feature."""
+        self._history_toggle = toggle
+
+    def update_history_count(self, n: int) -> None:
+        """Refresh the chip's "🗂 N" label. Hides the chip when n == 0."""
+        if n <= 0:
+            self._history_chip.setVisible(False)
+            return
+        self._history_chip.setText(f"\U0001f5c2 {n}")
+        self._history_chip.setVisible(True)
+
+    def _on_history_chip_clicked(self) -> None:
+        if self._history_toggle is not None:
+            self._history_toggle()
 
     # ------------------------------------------------------------------
     # Internal render helpers (called by render(snap))
@@ -3272,6 +3329,9 @@ class ExpandedWindow(QWidget):
             self._sessions_title.setText(f"CLAUDE SESSIONS · {total_views}")
         else:
             self._sessions_title.setText("CLAUDE SESSIONS")
+        # History chip count is updated separately via update_history_count;
+        # render() in __main__'s subscription wires the count from
+        # snap.dormant_sessions, not from session_groups.
 
         if not groups:
             self._show_placeholder()

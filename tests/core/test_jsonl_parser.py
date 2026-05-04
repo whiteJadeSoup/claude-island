@@ -406,3 +406,106 @@ def test_earliest_timestamp_becomes_started_at(env):
     meta = parser.get_session_metadata(jsonl.stem)
     assert meta.get("started_at") is not None
     assert meta["started_at"] == ts_old  # earliest, not latest
+
+
+# --------------------------------------------------------------------------
+# Phase 1 (resume-offline): last_activity / cwd / permission_mode capture
+# --------------------------------------------------------------------------
+
+def test_latest_timestamp_becomes_last_activity(env):
+    """get_session_metadata returns the LATEST timestamp as 'last_activity',
+    so DormantSessionSource can sort offline sessions by recency without
+    re-stat'ing each .jsonl file."""
+    reg, parser, jsonl = env
+
+    ts_old = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    ts_mid = datetime(2026, 1, 1, 14, 0, 0, tzinfo=timezone.utc)
+    ts_new = datetime(2026, 1, 1, 16, 0, 0, tzinfo=timezone.utc)
+    # Write rows out-of-order to ensure tracking is by max(), not last-row.
+    jsonl.write_bytes(
+        _line_with_ts(ts_mid.isoformat(), input_tokens=10) + b"\n"
+        + _line_with_ts(ts_new.isoformat(), input_tokens=20) + b"\n"
+        + _line_with_ts(ts_old.isoformat(), input_tokens=30) + b"\n"
+    )
+
+    parser.parse_file(jsonl)
+
+    meta = parser.get_session_metadata(jsonl.stem)
+    assert meta.get("last_activity") == ts_new  # latest, not last-written
+
+
+def test_last_activity_advances_across_incremental_parses(env):
+    """When a transcript grows (later append), last_activity must advance.
+    Important for 'session became active again' transitions in the UI."""
+    reg, parser, jsonl = env
+
+    ts_first = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    jsonl.write_bytes(_line_with_ts(ts_first.isoformat()))
+    parser.parse_file(jsonl)
+    assert parser.get_session_metadata(jsonl.stem)["last_activity"] == ts_first
+
+    ts_later = datetime(2026, 1, 1, 18, 0, 0, tzinfo=timezone.utc)
+    with open(jsonl, "ab") as f:
+        f.write(_line_with_ts(ts_later.isoformat()))
+    parser.parse_file(jsonl)
+    assert parser.get_session_metadata(jsonl.stem)["last_activity"] == ts_later
+
+
+def test_cwd_captured_from_first_row(env):
+    """get_session_metadata returns 'cwd' from the first row carrying it.
+    DormantSessionSource needs cwd to pass to TerminalLauncher.spawn()."""
+    reg, parser, jsonl = env
+    rows = [
+        b'{"type":"user","timestamp":"2026-01-01T12:00:00Z",'
+        b'"cwd":"D:\\\\projects\\\\foo",'
+        b'"sessionId":"session-uuid",'
+        b'"message":{"role":"user","content":"hi"}}\n',
+        # A later row with a different cwd (shouldn't happen in practice
+        # but verifies first-wins semantics).
+        b'{"type":"user","timestamp":"2026-01-01T13:00:00Z",'
+        b'"cwd":"D:\\\\projects\\\\bar",'
+        b'"sessionId":"session-uuid",'
+        b'"message":{"role":"user","content":"hi2"}}\n',
+    ]
+    jsonl.write_bytes(b"".join(rows))
+    parser.parse_file(jsonl)
+
+    meta = parser.get_session_metadata(jsonl.stem)
+    assert meta.get("cwd") == "D:\\projects\\foo"  # first wins
+
+
+def test_permission_mode_captured_from_inline_field(env):
+    """permissionMode rides on regular user/assistant rows; latest-wins so
+    the value reflects what the user had set when they last interacted."""
+    reg, parser, jsonl = env
+    rows = [
+        b'{"type":"user","timestamp":"2026-01-01T12:00:00Z",'
+        b'"permissionMode":"default","sessionId":"session-uuid",'
+        b'"message":{"role":"user","content":"a"}}\n',
+        b'{"type":"user","timestamp":"2026-01-01T13:00:00Z",'
+        b'"permissionMode":"bypassPermissions","sessionId":"session-uuid",'
+        b'"message":{"role":"user","content":"b"}}\n',
+    ]
+    jsonl.write_bytes(b"".join(rows))
+    parser.parse_file(jsonl)
+
+    meta = parser.get_session_metadata(jsonl.stem)
+    assert meta.get("permission_mode") == "bypassPermissions"  # latest wins
+
+
+def test_permission_mode_captured_from_dedicated_flip_row(env):
+    """Claude Code writes a dedicated {type:'permission-mode'} row when the
+    user toggles modes mid-session (Shift+Tab). Must be picked up too."""
+    reg, parser, jsonl = env
+    rows = [
+        b'{"type":"user","timestamp":"2026-01-01T12:00:00Z",'
+        b'"permissionMode":"default","sessionId":"session-uuid",'
+        b'"message":{"role":"user","content":"a"}}\n',
+        b'{"type":"permission-mode","permissionMode":"plan",'
+        b'"sessionId":"session-uuid"}\n',
+    ]
+    jsonl.write_bytes(b"".join(rows))
+    parser.parse_file(jsonl)
+
+    meta = parser.get_session_metadata(jsonl.stem)
+    assert meta.get("permission_mode") == "plan"

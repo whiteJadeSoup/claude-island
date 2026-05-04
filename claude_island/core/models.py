@@ -299,3 +299,31 @@ class SessionUsage:
     by_model: tuple[ModelTotals, ...]
     total_cost_usd: float
     quota: QuotaSnapshot | None
+
+
+@dataclass(frozen=True)
+class DormantSession:
+    """An offline (no live process) Claude Code session, recovered from
+    the JSONL transcript on disk.
+
+    Built by :class:`DormantSessionSource` from
+    :meth:`JsonlParser.get_session_metadata` plus
+    :meth:`UsageRegistry.get_session_summary`. Filtered out from a
+    snapshot's ``dormant_sessions`` if the same uuid appears as a live
+    or launching session — see ``Snapshotter._build_snapshot`` reconcile.
+
+    The HistoryDrawer UI renders these one row per session, and the
+    Resume button triggers a TerminalAdapter LAUNCH that re-spawns
+    ``claude --resume <session_uuid>`` in this ``cwd`` carrying the
+    permission-mode-derived flags.
+    """
+    session_uuid: str
+    cwd: Path
+    name: str | None             # ai_title or None — UI falls back to last_prompt[:30]
+    last_prompt: str | None      # raw last user message, used as title fallback
+    last_activity: datetime      # tz-aware UTC; sort key in the History drawer
+    started_at: datetime | None  # earliest timestamp from the transcript
+    permission_mode: str | None  # 'default' / 'acceptEdits' / 'plan' / 'bypassPermissions'
+    git_branch: str | None
+    cost_usd: float
+    turn_count: int

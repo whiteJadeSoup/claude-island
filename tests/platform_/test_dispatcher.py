@@ -216,3 +216,146 @@ class TestCapabilityRouting:
         for cap in Capability:
             assert cap in CAPABILITY_SCOPE, f"{cap} missing scope"
             assert CAPABILITY_SCOPE[cap] in Scope
+
+
+# ── Phase 4 (resume-offline): adapters_with + launch ─────────────────────
+
+class _FakeLaunchAdapter(_CapabilityProvider):
+    """Adapter that advertises LAUNCH; records the spawn call."""
+    name = "fake-launcher"
+    _priority = 100
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def can_handle(self, session): return False  # not used in launch path
+    def group(self, views): return []
+
+    @capability(Capability.LAUNCH)
+    def launch(self, *, cwd, command):
+        from claude_island.core.capabilities import SpawnResult
+        from datetime import datetime, timezone
+        self.calls.append({"cwd": cwd, "command": command})
+        return SpawnResult(
+            terminal_name=self.name,
+            terminal_pid=4242,
+            started_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+
+
+class _FakeNoLaunchAdapter(_CapabilityProvider):
+    """Like FakeTerminalAdapter — has FOCUS but NOT LAUNCH."""
+    name = "fake-no-launch"
+    _priority = 50
+
+    def can_handle(self, session): return False
+    def group(self, views): return []
+
+    @capability(Capability.FOCUS)
+    def focus(self, view): return True
+
+
+class TestAdaptersWith:
+    def test_returns_only_adapters_with_capability(self):
+        ad_launch = _FakeLaunchAdapter()
+        ad_no = _FakeNoLaunchAdapter()
+        disp = TerminalDispatcher(
+            terminals={ad_launch.name: ad_launch, ad_no.name: ad_no},
+            os_backend=StubOs(), app_backend=StubApp(),
+        )
+        result = disp.adapters_with(Capability.LAUNCH)
+        assert [name for name, _ in result] == ["fake-launcher"]
+
+    def test_returns_empty_when_no_adapter_has_cap(self):
+        ad_no = _FakeNoLaunchAdapter()
+        disp = TerminalDispatcher(
+            terminals={ad_no.name: ad_no},
+            os_backend=StubOs(), app_backend=StubApp(),
+        )
+        assert disp.adapters_with(Capability.LAUNCH) == ()
+
+    def test_skips_degraded_adapters(self):
+        ad = _FakeLaunchAdapter()
+        disp = TerminalDispatcher(
+            terminals={ad.name: ad},
+            os_backend=StubOs(), app_backend=StubApp(),
+        )
+        # Force degradation
+        st = disp._chain[0]
+        for _ in range(3):
+            st.note_failure()
+        assert disp.adapters_with(Capability.LAUNCH) == ()
+
+    def test_sorted_by_priority_descending(self):
+        ad_high = _FakeLaunchAdapter()
+        ad_high.name = "high"
+        ad_high._priority = 200
+        ad_low = _FakeLaunchAdapter()
+        ad_low.name = "low"
+        ad_low._priority = 1
+        disp = TerminalDispatcher(
+            terminals={ad_high.name: ad_high, ad_low.name: ad_low},
+            os_backend=StubOs(), app_backend=StubApp(),
+        )
+        result = disp.adapters_with(Capability.LAUNCH)
+        assert [name for name, _ in result] == ["high", "low"]
+
+
+class TestDispatcherLaunch:
+    def test_launch_forwards_to_adapter(self):
+        ad = _FakeLaunchAdapter()
+        disp = TerminalDispatcher(
+            terminals={ad.name: ad},
+            os_backend=StubOs(), app_backend=StubApp(),
+        )
+        result = disp.launch(
+            "fake-launcher",
+            cwd=Path("D:/projects/a"),
+            command=("claude", "--resume", "u1"),
+        )
+        assert result.terminal_pid == 4242
+        assert result.terminal_name == "fake-launcher"
+        assert ad.calls[0] == {
+            "cwd": Path("D:/projects/a"),
+            "command": ("claude", "--resume", "u1"),
+        }
+
+    def test_launch_unknown_adapter_raises(self):
+        from claude_island.core.capabilities import LauncherSpawnError
+        disp = TerminalDispatcher(
+            terminals={}, os_backend=StubOs(), app_backend=StubApp(),
+        )
+        with pytest.raises(LauncherSpawnError, match="unknown"):
+            disp.launch("nope", cwd=Path("/x"), command=("y",))
+
+    def test_launch_adapter_without_cap_raises(self):
+        from claude_island.core.capabilities import LauncherSpawnError
+        ad = _FakeNoLaunchAdapter()
+        disp = TerminalDispatcher(
+            terminals={ad.name: ad},
+            os_backend=StubOs(), app_backend=StubApp(),
+        )
+        with pytest.raises(LauncherSpawnError, match="does not implement LAUNCH"):
+            disp.launch(ad.name, cwd=Path("/x"), command=("y",))
+
+    def test_launch_propagates_adapter_exception(self):
+        """If adapter.launch() itself raises LauncherSpawnError (e.g.
+        wt.exe not installed), the dispatcher passes it through."""
+        from claude_island.core.capabilities import LauncherSpawnError
+
+        class _BoomAdapter(_CapabilityProvider):
+            name = "boom"
+            _priority = 1
+            def can_handle(self, s): return False
+            def group(self, v): return []
+            @capability(Capability.LAUNCH)
+            def launch(self, *, cwd, command):
+                raise LauncherSpawnError("wt.exe not found")
+
+        ad = _BoomAdapter()
+        disp = TerminalDispatcher(
+            terminals={ad.name: ad},
+            os_backend=StubOs(), app_backend=StubApp(),
+        )
+        with pytest.raises(LauncherSpawnError, match="wt.exe not found"):
+            disp.launch(ad.name, cwd=Path("/x"), command=("y",))

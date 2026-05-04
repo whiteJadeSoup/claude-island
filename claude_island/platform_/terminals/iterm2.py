@@ -48,12 +48,20 @@ Failure modes
 """
 from __future__ import annotations
 
+import shlex
 import subprocess
 from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import ClassVar
 
 from claude_island.core.capabilities import (
-    Capability, FocusGranularity, _CapabilityProvider, capability,
+    Capability,
+    FocusGranularity,
+    LauncherSpawnError,
+    SpawnResult,
+    _CapabilityProvider,
+    capability,
 )
 from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView
@@ -253,6 +261,48 @@ class ITerm2Adapter(_CapabilityProvider):
         if not tty:
             return False
         return _focus_by_tty(tty)
+
+    # ── LAUNCH ───────────────────────────────────────────────────────────
+
+    @capability(Capability.LAUNCH)
+    def launch(self, *, cwd: Path, command: tuple[str, ...]) -> SpawnResult:
+        """Spawn a new iTerm2 window in ``cwd`` running ``command``.
+
+        Used by HistoryDrawer's Resume click — same contract as the
+        Windows adapter: takes raw cwd + command (no SessionView).
+        AppleScript creates a new window with the default profile,
+        then writes ``cd <cwd> && <command>`` into the new session.
+
+        ``terminal_pid`` we report is the osascript pid (NOT iTerm2's —
+        iTerm2 is a long-lived application; the spawn doesn't create
+        a new app process). It's still a useful diagnostic anchor for
+        the "couldn't detect new session" toast on timeout."""
+        cmd_str = "cd " + shlex.quote(str(cwd)) + " && " + " ".join(
+            shlex.quote(a) for a in command
+        )
+        # AppleScript uses double-quoted strings; escape backslashes
+        # and double quotes in the user's command before interpolation.
+        cmd_escaped = _escape_applescript_string(cmd_str)
+        script = (
+            'tell application "iTerm"\n'
+            '  activate\n'
+            '  create window with default profile\n'
+            '  tell current session of current window\n'
+            f'    write text "{cmd_escaped}"\n'
+            '  end tell\n'
+            'end tell\n'
+        )
+        try:
+            proc = subprocess.Popen(
+                ["osascript", "-e", script], close_fds=True,
+            )
+        except (OSError, FileNotFoundError) as e:
+            raise LauncherSpawnError(f"osascript spawn failed: {e}") from e
+        return SpawnResult(
+            terminal_name=self.name,
+            terminal_pid=proc.pid,
+            started_at=datetime.now(timezone.utc),
+        )
 
     # ── internal: osascript enumeration ─────────────────────────────────
 

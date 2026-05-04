@@ -378,3 +378,54 @@ class TestFocus:
             # Quote and backslash are escaped in the embedded literal
             assert '\\"' in script
             assert "\\\\" in script
+
+
+# ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────
+
+class TestITerm2Launch:
+    """Verify @capability(LAUNCH) launch on ITerm2Adapter.
+
+    Mocks subprocess.Popen so osascript never actually runs."""
+
+    def test_launch_advertised_in_capabilities(self):
+        assert Capability.LAUNCH in ITerm2Adapter.capabilities
+
+    def test_launch_constructs_applescript_with_quoted_command(self):
+        from claude_island.core.capabilities import SpawnResult
+        adapter = ITerm2Adapter()
+        # PurePosixPath so the test asserts a Unix-style cwd regardless of
+        # the host running the suite (the production target is macOS).
+        from pathlib import PurePosixPath
+        cwd = PurePosixPath("/Users/me/proj with space")
+        with mock.patch(
+            "claude_island.platform_.terminals.iterm2.subprocess.Popen",
+        ) as mock_popen:
+            mock_popen.return_value.pid = 7777
+            result = adapter.launch(
+                cwd=cwd,
+                command=("claude", "--resume", "u1", "--dangerously-skip-permissions"),
+            )
+
+        assert isinstance(result, SpawnResult)
+        assert result.terminal_pid == 7777
+        assert result.terminal_name == adapter.name
+
+        argv = mock_popen.call_args[0][0]
+        assert argv[0] == "osascript"
+        assert argv[1] == "-e"
+        script = argv[2]
+        assert "tell application \"iTerm\"" in script
+        assert "create window with default profile" in script
+        # cwd with space should be shell-quoted (shlex.quote uses single quotes)
+        assert "'/Users/me/proj with space'" in script
+        assert "--dangerously-skip-permissions" in script
+
+    def test_launch_wraps_oserror(self):
+        from claude_island.core.capabilities import LauncherSpawnError
+        adapter = ITerm2Adapter()
+        with mock.patch(
+            "claude_island.platform_.terminals.iterm2.subprocess.Popen",
+            side_effect=FileNotFoundError("osascript missing"),
+        ):
+            with pytest.raises(LauncherSpawnError, match="osascript missing"):
+                adapter.launch(cwd=Path("/x"), command=("claude",))

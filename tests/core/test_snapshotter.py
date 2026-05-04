@@ -641,3 +641,169 @@ class TestEndToEndPublishToRender:
                 )
         finally:
             snap.stop()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 (resume-offline): 3-source reconcile (live + dormant + intent)
+# ---------------------------------------------------------------------------
+
+class _FakeDormantSource:
+    def __init__(self, sessions):
+        self._sessions = list(sessions)
+
+    @property
+    def sessions(self):
+        return list(self._sessions)
+
+
+class _FakeLaunchIntent:
+    """Records reconcile arguments + lets tests pre-load intents."""
+
+    def __init__(self, intents=None):
+        self._intents = list(intents or [])
+        self.last_reconcile_args = None
+
+    def reconcile(self, *, live_uuids, now):
+        self.last_reconcile_args = {"live_uuids": set(live_uuids), "now": now}
+        # Simulate the real registry's "drop on upgrade" rule so the
+        # snapshot test mirrors production semantics.
+        self._intents = [i for i in self._intents if i.session_uuid not in live_uuids]
+
+    def snapshot(self):
+        return tuple(self._intents)
+
+
+def _dormant(uuid: str, last_activity: datetime | None = None):
+    from claude_island.core.models import DormantSession
+    return DormantSession(
+        session_uuid=uuid,
+        cwd=Path("/tmp/proj"),
+        name=None,
+        last_prompt=None,
+        last_activity=last_activity or datetime.now(timezone.utc),
+        started_at=None,
+        permission_mode=None,
+        git_branch=None,
+        cost_usd=0.0,
+        turn_count=0,
+    )
+
+
+def _intent(uuid: str):
+    from claude_island.core.launch_intent import LaunchIntent
+    return LaunchIntent(
+        session_uuid=uuid,
+        cwd=Path("/tmp/proj"),
+        flags=(),
+        terminal_name="windows-terminal",
+        terminal_pid=1234,
+        requested_at=datetime.now(timezone.utc),
+    )
+
+
+def _make_snapshotter_with_offline(
+    *,
+    live_sessions=None,
+    dormant_sessions=None,
+    intents=None,
+):
+    """Same as _make_snapshotter but wires dormant_source + launch_intent."""
+    received: list[WorldSnapshot] = []
+    snap = Snapshotter(
+        session_source=FakeSessionSource(live_sessions or []),
+        state_reader=FakeStateReader(),
+        metadata_provider=FakeMetadataProvider(),
+        usage_registry=FakeUsageRegistry(),
+        names_store=FakeNamesStore(),
+        get_quota=lambda: None,
+        get_available_providers=lambda: [],
+        get_selected_provider=lambda: None,
+        publish=received.append,
+        dormant_source=_FakeDormantSource(dormant_sessions or []),
+        launch_intent=_FakeLaunchIntent(intents or []),
+        debounce_window_s=0.05,
+        throttle_first_window_s=0.0,
+    )
+    return snap, received
+
+
+class TestSnapshotterReconcile:
+    """The 3-source merge inside _build_snapshot."""
+
+    def test_dormant_only_no_live_no_intent(self):
+        d = _dormant("u-dorm")
+        snap, _ = _make_snapshotter_with_offline(dormant_sessions=[d])
+        result = snap.build_now()
+        assert {x.session_uuid for x in result.dormant_sessions} == {"u-dorm"}
+        assert result.launching_sessions == ()
+
+    def test_live_uuid_filtered_out_of_dormant(self):
+        """A session that's both 'live' (process scanner saw it) and
+        'dormant' (transcript on disk) appears only in live — never in
+        the dormant tuple."""
+        live_session = _session(pid=1, cwd="/tmp/p", uuid="u-overlap")
+        # State reader returning the same uuid binds it onto the SessionView.
+        state_reader = FakeStateReader(table={1: {"sessionId": "u-overlap"}})
+        d = _dormant("u-overlap")
+        received: list[WorldSnapshot] = []
+        snap = Snapshotter(
+            session_source=FakeSessionSource([live_session]),
+            state_reader=state_reader,
+            metadata_provider=FakeMetadataProvider(),
+            usage_registry=FakeUsageRegistry(),
+            names_store=FakeNamesStore(),
+            get_quota=lambda: None,
+            get_available_providers=lambda: [],
+            get_selected_provider=lambda: None,
+            publish=received.append,
+            dormant_source=_FakeDormantSource([d]),
+            launch_intent=_FakeLaunchIntent([]),
+        )
+        result = snap.build_now()
+        assert result.dormant_sessions == ()  # filtered out
+        live_uuids = {v.session_uuid for g in result.session_groups for v in g.views}
+        assert "u-overlap" in live_uuids
+
+    def test_launching_uuid_filtered_out_of_dormant(self):
+        """An intent in flight should suppress the dormant entry — UI
+        renders it in the launching section instead."""
+        d = _dormant("u-launching")
+        i = _intent("u-launching")
+        snap, _ = _make_snapshotter_with_offline(
+            dormant_sessions=[d], intents=[i],
+        )
+        result = snap.build_now()
+        assert result.dormant_sessions == ()  # suppressed by intent
+        assert {x.session_uuid for x in result.launching_sessions} == {"u-launching"}
+
+    def test_intent_dropped_when_uuid_appears_live(self):
+        """The "upgrade" path: live_uuids includes the intent uuid →
+        FakeLaunchIntent drops it during reconcile → not in launching."""
+        live_session = _session(pid=1, cwd="/tmp/p", uuid="u-live")
+        state_reader = FakeStateReader(table={1: {"sessionId": "u-live"}})
+        i = _intent("u-live")
+        received: list[WorldSnapshot] = []
+        snap = Snapshotter(
+            session_source=FakeSessionSource([live_session]),
+            state_reader=state_reader,
+            metadata_provider=FakeMetadataProvider(),
+            usage_registry=FakeUsageRegistry(),
+            names_store=FakeNamesStore(),
+            get_quota=lambda: None,
+            get_available_providers=lambda: [],
+            get_selected_provider=lambda: None,
+            publish=received.append,
+            dormant_source=_FakeDormantSource([]),
+            launch_intent=_FakeLaunchIntent([i]),
+        )
+        result = snap.build_now()
+        # FakeLaunchIntent.reconcile drops the intent when uuid in live_uuids.
+        assert result.launching_sessions == ()
+
+    def test_no_dormant_source_yields_empty_tuple(self):
+        """When the resume-offline feature is disabled (production not
+        wired yet), dormant_sessions / launching_sessions stay ()."""
+        snap, _ = _make_snapshotter()
+        result = snap.build_now()
+        assert result.dormant_sessions == ()
+        assert result.launching_sessions == ()

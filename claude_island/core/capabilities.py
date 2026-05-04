@@ -34,6 +34,8 @@ overhead of capability discovery is zero after import.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import ClassVar
 
@@ -70,6 +72,9 @@ class Capability(StrEnum):
     COPY_PATH = "copy_path"           # OS clipboard: cwd as text
     RENAME = "rename"                 # rewrite session_names.json (kwargs: new_name=str)
     RESET_THINKING = "reset_thinking" # strip 'thinking' blocks from JSONL transcript
+    LAUNCH = "launch"                 # spawn 'claude --resume <uuid> [flags]' in cwd.
+                                      # VIEW-LESS — invoked via TerminalDispatcher.launch
+                                      # (not dispatch()), kwargs: cwd=Path, command=tuple[str,...]
 
 
 CAPABILITY_SCOPE: dict[Capability, Scope] = {
@@ -78,7 +83,35 @@ CAPABILITY_SCOPE: dict[Capability, Scope] = {
     Capability.COPY_PATH:      Scope.OS,
     Capability.RENAME:         Scope.APP,
     Capability.RESET_THINKING: Scope.APP,
+    Capability.LAUNCH:         Scope.TERMINAL,  # declarative grouping; not consumed by dispatch()
 }
+
+
+# ── LAUNCH-specific contract types ────────────────────────────────────────
+#
+# These live next to Capability.LAUNCH because they are part of its
+# contract: every adapter implementing @capability(Capability.LAUNCH)
+# returns SpawnResult on success and raises LauncherSpawnError on
+# failure. Defined in core/ so all three layers (core, platform_, ui)
+# can import them — particularly the UI layer which needs the exception
+# type to catch in the Resume click handler.
+
+@dataclass(frozen=True)
+class SpawnResult:
+    """LAUNCH success metadata. ``terminal_pid`` is the spawned host
+    process pid (wt.exe on Windows, osascript on macOS), NOT the final
+    claude.exe pid — that one will be discovered later by ProcessScanner.
+    The HistoryDrawer's "couldn't detect new session after 30s" toast
+    surfaces ``terminal_pid`` so the user can find the right window."""
+    terminal_name: str       # adapter name, e.g. 'windows-terminal'
+    terminal_pid: int
+    started_at: datetime     # tz-aware UTC
+
+
+class LauncherSpawnError(RuntimeError):
+    """LAUNCH adapter failed (process spawn raised, command not found,
+    etc.). UI catches this and shows a toast; LaunchIntentRegistry is
+    NOT updated — the user can immediately try Resume again."""
 
 
 class FocusGranularity(StrEnum):

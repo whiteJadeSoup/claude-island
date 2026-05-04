@@ -16,10 +16,21 @@ This file absorbs the logic previously spread across:
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import ClassVar
 
-from claude_island.core.capabilities import Capability, FocusGranularity, _CapabilityProvider, capability
+from claude_island.core.capabilities import (
+    Capability,
+    FocusGranularity,
+    LauncherSpawnError,
+    SpawnResult,
+    _CapabilityProvider,
+    capability,
+)
 from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView, _normalize_project_path
 from claude_island.platform_.terminals import adapter
@@ -225,6 +236,46 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         WT window without switching tabs (the regression originally
         fixed in commit 7daa451)."""
         return _activate_windows(view.session.pid, list(siblings))
+
+    # ── LAUNCH ───────────────────────────────────────────────────────────
+
+    @capability(Capability.LAUNCH)
+    def launch(self, *, cwd: Path, command: tuple[str, ...]) -> SpawnResult:
+        """Spawn a new wt.exe window in ``cwd`` running ``command``.
+
+        Used by HistoryDrawer's Resume click handler — the dormant
+        session has no live SessionView (that's the whole point), so
+        unlike FOCUS this method takes raw cwd + command rather than
+        a view.
+
+        wt.exe argv: ``-d <cwd>`` sets initial directory, ``--`` ends
+        wt's own option parsing, then the command runs in the new tab.
+        Using DETACHED_PROCESS so the new window is independent of
+        claude-island — closing the island doesn't kill the resumed
+        claude session, and vice versa.
+
+        Raises LauncherSpawnError if wt.exe isn't installed (Windows 10
+        without the Store-shipped Terminal app) or if the spawn itself
+        fails. Caller (HistoryDrawer) catches and toasts."""
+        if shutil.which("wt.exe") is None:
+            raise LauncherSpawnError(
+                "Windows Terminal (wt.exe) not found. Install from the "
+                "Microsoft Store: https://aka.ms/terminal"
+            )
+        argv = ["wt.exe", "-d", str(cwd), "--", *command]
+        try:
+            proc = subprocess.Popen(
+                argv,
+                creationflags=subprocess.DETACHED_PROCESS,
+                close_fds=True,
+            )
+        except (OSError, FileNotFoundError) as e:
+            raise LauncherSpawnError(f"wt.exe spawn failed: {e}") from e
+        return SpawnResult(
+            terminal_name=self.name,
+            terminal_pid=proc.pid,
+            started_at=datetime.now(timezone.utc),
+        )
 
 
 # ---------------------------------------------------------------------------

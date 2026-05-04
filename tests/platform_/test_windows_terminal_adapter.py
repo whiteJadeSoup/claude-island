@@ -246,3 +246,73 @@ class TestCacheGC:
         adapter.group([_view(1234)])  # pid back
 
         assert patched.get_console_info.call_count == 2
+
+
+# ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────
+
+class TestWindowsTerminalLaunch:
+    """Verify the @capability(LAUNCH) launch method on WindowsTerminalAdapter.
+
+    All tests mock subprocess.Popen so wt.exe never actually spawns —
+    keeps the suite cross-platform and CI-friendly."""
+
+    def test_launch_advertised_in_capabilities(self):
+        """The @capability decorator + _CapabilityProvider mixin should
+        add LAUNCH to the class-level capabilities frozenset."""
+        from claude_island.core.capabilities import Capability
+        assert Capability.LAUNCH in WindowsTerminalAdapter.capabilities
+
+    def test_launch_calls_wt_exe_with_correct_argv(self):
+        from claude_island.core.capabilities import SpawnResult
+        adapter = WindowsTerminalAdapter()
+
+        with mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.shutil.which",
+            return_value="C:\\Windows\\System32\\wt.exe",
+        ), mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.subprocess.Popen",
+        ) as mock_popen:
+            mock_popen.return_value.pid = 9999
+
+            result = adapter.launch(
+                cwd=Path("D:/proj with space/foo"),
+                command=("claude", "--resume", "u1", "--dangerously-skip-permissions"),
+            )
+
+        assert isinstance(result, SpawnResult)
+        assert result.terminal_pid == 9999
+        assert result.terminal_name == adapter.name
+
+        # Argv must be wt.exe -d <cwd> -- claude --resume <uuid> [flags]
+        call_args = mock_popen.call_args
+        argv = call_args[0][0]
+        assert argv[0] == "wt.exe"
+        assert argv[1] == "-d"
+        assert argv[2] == "D:\\proj with space\\foo"  # str(Path) on Windows-style
+        assert argv[3] == "--"
+        assert argv[4:] == [
+            "claude", "--resume", "u1", "--dangerously-skip-permissions",
+        ]
+
+    def test_launch_raises_when_wt_exe_missing(self):
+        from claude_island.core.capabilities import LauncherSpawnError
+        adapter = WindowsTerminalAdapter()
+        with mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.shutil.which",
+            return_value=None,
+        ):
+            with pytest.raises(LauncherSpawnError, match="not found"):
+                adapter.launch(cwd=Path("D:/x"), command=("claude",))
+
+    def test_launch_wraps_oserror_as_launcher_spawn_error(self):
+        from claude_island.core.capabilities import LauncherSpawnError
+        adapter = WindowsTerminalAdapter()
+        with mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.shutil.which",
+            return_value="C:/wt.exe",
+        ), mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.subprocess.Popen",
+            side_effect=OSError("permission denied"),
+        ):
+            with pytest.raises(LauncherSpawnError, match="permission denied"):
+                adapter.launch(cwd=Path("D:/x"), command=("claude",))

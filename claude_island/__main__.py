@@ -424,6 +424,20 @@ jsonl_parser.activity_updated.subscribe(session_registry.update_activity)
 
 _world_marshaler = WorldMarshaler()  # pin reference: QObject lifetime
 
+# ── resume-offline (Phase 5) sources ─────────────────────────────────────
+# DormantSessionSource is a thin view over JsonlParser._session_meta +
+# UsageRegistry — it doesn't open files of its own, so construction is
+# essentially free. LaunchIntentRegistry is similarly lightweight.
+# Both are passed into Snapshotter so reconcile can run; they're kept
+# in module scope so HistoryDrawer can also write to launch_intent.
+from claude_island.core.dormant_source import DormantSessionSource
+from claude_island.core.launch_intent import LaunchIntentRegistry
+
+dormant_source = DormantSessionSource(
+    jsonl_parser=jsonl_parser, usage_registry=usage_registry,
+)
+launch_intent = LaunchIntentRegistry()
+
 snapshotter = Snapshotter(
     session_source=session_registry,
     state_reader=session_state_reader,
@@ -437,6 +451,8 @@ snapshotter = Snapshotter(
     ),
     publish=_world_marshaler.snap_ready.emit,
     group_sessions=_dispatcher.group_sessions,
+    dormant_source=dormant_source,
+    launch_intent=launch_intent,
     debounce_window_s=0.1,
     throttle_first_window_s=0.2,
 )
@@ -524,6 +540,41 @@ _expanded_subscription = (
         ),
     )
 )
+
+# ── HistoryDrawer (resume-offline) ─────────────────────────────────────
+# Uses _dispatcher (already constructed at line 120 area) for the LAUNCH
+# adapter lookup, launch_intent for the optimistic UI transition, and
+# snapshotter.wake to trigger an immediate re-render after Resume click.
+from claude_island.ui.history_drawer import HistoryDrawer
+
+history_drawer = HistoryDrawer(
+    expanded=expanded,
+    dispatcher=_dispatcher,
+    launch_intent=launch_intent,
+    on_wake=snapshotter.wake,
+)
+expanded.set_history_toggle(history_drawer.toggle)
+
+_history_subscription = (
+    world.observable()
+    .pipe(ops.distinct_until_changed(key_mapper=HistoryDrawer.compute))
+    .subscribe(
+        on_next=_safe_render("history", history_drawer.render),
+        on_error=lambda e: print(
+            f"[claude-island] history pipeline died (upstream error): {e}",
+            file=sys.stderr,
+        ),
+    )
+)
+
+# Ctrl+H toggles the drawer. Parented on `expanded` so the shortcut
+# context follows the panel; the WindowShortcut hint means Qt fires it
+# whenever any of expanded's child widgets has focus (typical case).
+# macOS users may want Ctrl+Shift+H to avoid Cmd+H "hide app" mapping;
+# that's listed in the plan's Open Decisions and can be revisited.
+from PySide6.QtGui import QKeySequence as _QKeySeq, QShortcut as _QShortcut
+_history_shortcut = _QShortcut(_QKeySeq("Ctrl+H"), expanded, history_drawer.toggle)
+_history_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
 
 # Wake hooks: every legacy event source also pokes the snapshotter so a
 # JSONL write / process scan triggers a snap rebuild within the debounce

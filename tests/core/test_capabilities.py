@@ -29,10 +29,33 @@ class TestCapabilityEnum:
         assert CAPABILITY_SCOPE[Capability.RENAME] == Scope.APP
         assert CAPABILITY_SCOPE[Capability.RESET_THINKING] == Scope.APP
 
+    def test_launch_is_terminal_scope(self):
+        """LAUNCH is declarative-grouped under TERMINAL even though it's
+        invoked via dispatcher.launch() (not dispatch())."""
+        assert CAPABILITY_SCOPE[Capability.LAUNCH] == Scope.TERMINAL
+
     def test_focus_granularity_values(self):
         assert FocusGranularity.PANE == "pane"
         assert FocusGranularity.TAB == "tab"
         assert FocusGranularity.APP == "app"
+
+
+# ── LAUNCH contract types ─────────────────────────────────────────────
+
+class TestLaunchTypes:
+    def test_spawn_result_importable_and_frozen(self):
+        from datetime import datetime, timezone
+        from claude_island.core.capabilities import SpawnResult
+        sr = SpawnResult(
+            terminal_name="x", terminal_pid=1,
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        with pytest.raises(Exception):
+            sr.terminal_pid = 999  # frozen dataclass
+
+    def test_launcher_spawn_error_is_runtime_error(self):
+        from claude_island.core.capabilities import LauncherSpawnError
+        assert issubclass(LauncherSpawnError, RuntimeError)
 
 
 # ── @capability decorator ──────────────────────────────────────────────

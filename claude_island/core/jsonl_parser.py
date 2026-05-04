@@ -222,10 +222,11 @@ class JsonlParser:
         batch: list[UsageRecord] = []
         last_activity: datetime | None = None
         meta = self._session_meta.setdefault(session_uuid, {})
-        # Track the earliest timestamp so the detail popup can show the
-        # session start time even when ~/.claude/sessions/<pid>.json is
-        # absent (MiniMax sessions don't write that file).
+        # earliest_ts → started_at (first user prompt time)
+        # latest_ts   → last_activity (used by DormantSessionSource to sort
+        #               offline sessions by recency without re-stat'ing files)
         earliest_ts: datetime | None = None
+        latest_ts: datetime | None = None
 
         for raw_line in complete_lines:
             raw_line = raw_line.strip()
@@ -248,6 +249,12 @@ class JsonlParser:
                 p = entry.get("lastPrompt")
                 if isinstance(p, str) and p.strip():
                     meta["last_prompt"] = p.strip()
+            elif row_type == "permission-mode":
+                # Dedicated permission-mode flip row written by Claude Code
+                # when the user toggles modes mid-session (Shift+Tab).
+                pm = entry.get("permissionMode")
+                if isinstance(pm, str) and pm:
+                    meta["permission_mode"] = pm
             # Branch + version live on most rows; latest-wins is fine
             # since they don't change within one session except for
             # the rare git-checkout-mid-session case (then the latest
@@ -258,6 +265,22 @@ class JsonlParser:
             ver = entry.get("version")
             if isinstance(ver, str) and ver:
                 meta["version"] = ver
+            # cwd appears on every non-meta row; first-wins (cwd doesn't
+            # change within a session — it was the process's working dir
+            # when claude was launched). Storing it lets DormantSessionSource
+            # answer "where do I cd to before claude --resume <uuid>?"
+            # without re-decoding the hashed parent dir name.
+            if "cwd" not in meta:
+                cwd_v = entry.get("cwd")
+                if isinstance(cwd_v, str) and cwd_v:
+                    meta["cwd"] = cwd_v
+            # permissionMode also rides on regular user/assistant rows,
+            # not just dedicated permission-mode flip rows. Latest-wins so
+            # the value reflects what the user had set when they last
+            # interacted — that's the mode we want to restore on resume.
+            pm_inline = entry.get("permissionMode")
+            if isinstance(pm_inline, str) and pm_inline:
+                meta["permission_mode"] = pm_inline
             # turn / sidechain counts live in UsageRegistry — there
             # they're computed from unique message.id, dedupping the
             # N-rows-per-response duplication we already handle there.
@@ -265,11 +288,16 @@ class JsonlParser:
             ts = _parse_ts(entry)
             usage, model = _extract_usage(entry)
 
-            # Track the earliest timestamp across all entries in this file.
-            # The first entry of a transcript is always a "type": "user" row
-            # with the session start time, so min(timestamps) ≈ session start.
-            if ts is not None and (earliest_ts is None or ts < earliest_ts):
-                earliest_ts = ts
+            # Track earliest + latest timestamp across every row (not just
+            # rows with usage). The first row is a "type": "user" prompt
+            # which carries the session start time; the last row is whatever
+            # Claude wrote last (could be a system or summary row, not
+            # necessarily an assistant turn).
+            if ts is not None:
+                if earliest_ts is None or ts < earliest_ts:
+                    earliest_ts = ts
+                if latest_ts is None or ts > latest_ts:
+                    latest_ts = ts
 
             if usage and ts:
                 # Pull the API ``message.id`` for dedup. Claude Code
@@ -294,14 +322,20 @@ class JsonlParser:
                 if last_activity is None or ts > last_activity:
                     last_activity = ts
 
-        # Persist the earliest timestamp so the detail popup can show
-        # "Created" even when ~/.claude/sessions/<pid>.json is absent
-        # (MiniMax sessions don't write that file). latest-wins for other
-        # fields; earliest-wins for started_at.
+        # Persist earliest_ts → started_at (earliest-wins; the detail
+        # popup uses this when ~/.claude/sessions/<pid>.json is absent).
         if earliest_ts is not None:
-            existing = meta.get("started_at")
-            if existing is None or earliest_ts < existing:
+            existing_start = meta.get("started_at")
+            if existing_start is None or earliest_ts < existing_start:
                 meta["started_at"] = earliest_ts
+        # Persist latest_ts → last_activity (latest-wins; DormantSessionSource
+        # uses this for "sort offline sessions by recency"; cheaper than
+        # re-stat'ing each .jsonl + handles transcripts that were appended
+        # to since the last parse without re-shipping all contents).
+        if latest_ts is not None:
+            existing_last = meta.get("last_activity")
+            if existing_last is None or latest_ts > existing_last:
+                meta["last_activity"] = latest_ts
 
         # Advance offset and emit records. Order is important: advance
         # offset BEFORE the registry call so a watchdog event firing

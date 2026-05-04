@@ -48,7 +48,8 @@ from reactivex.scheduler import EventLoopScheduler
 from reactivex.subject import BehaviorSubject, Subject
 
 from .capabilities import Capability, FocusGranularity
-from .models import QuotaSnapshot, Session
+from .launch_intent import LaunchIntent
+from .models import DormantSession, QuotaSnapshot, Session
 
 log = logging.getLogger(__name__)
 
@@ -188,6 +189,18 @@ class WorldSnapshot:
     # Each group renders as one card; inner views are the rows.
     # Empty tuple = no sessions known yet (boot / empty machine).
     session_groups: tuple["SessionGroup", ...]
+    # Offline sessions (have a JSONL transcript on disk but no live process).
+    # Built from JsonlParser._session_meta + UsageRegistry by
+    # DormantSessionSource. Snapshotter reconciles: any uuid that's also
+    # live or launching is filtered out here. UI renders these in the
+    # HistoryDrawer; never in the main capsule/expanded panel.
+    dormant_sessions: tuple[DormantSession, ...] = ()
+    # Sessions the user just hit Resume on; we've spawned a terminal but
+    # ProcessScanner hasn't yet detected the new claude.exe. Lives at most
+    # ttl seconds (default 30) inside LaunchIntentRegistry; reconcile
+    # discards on upgrade-to-live or on timeout. UI renders these as
+    # disabled rows with a ⏳ Launching… affordance.
+    launching_sessions: tuple[LaunchIntent, ...] = ()
 
     @classmethod
     def empty(cls) -> "WorldSnapshot":
@@ -201,6 +214,8 @@ class WorldSnapshot:
             selected_provider=None,
             fetched_at=datetime.fromtimestamp(0, tz=timezone.utc),
             session_groups=(),
+            dormant_sessions=(),
+            launching_sessions=(),
         )
 
     # ``render_key`` removed (F4): UI dedup is now per-surface — each
@@ -319,6 +334,22 @@ class _NamesStoreProto(Protocol):
 # platform layer, which routes through the adapter chain.
 class _GroupSessionsProto(Protocol):
     def __call__(self, views: list["SessionView"]) -> list["SessionGroup"]: ...
+
+
+class _DormantSourceProto(Protocol):
+    """Protocol for anything that lists offline-from-disk sessions.
+    Production: claude_island.core.dormant_source.DormantSessionSource."""
+    @property
+    def sessions(self) -> list[DormantSession]: ...
+
+
+class _LaunchIntentProto(Protocol):
+    """Protocol for the LaunchIntentRegistry. Snapshotter uses two methods:
+    reconcile() to prune upgraded/timed-out intents, snapshot() to read
+    what's left for the WorldSnapshot.launching_sessions field."""
+
+    def reconcile(self, *, live_uuids: set[str], now: datetime) -> None: ...
+    def snapshot(self) -> tuple[LaunchIntent, ...]: ...
 
 
 def _default_group_sessions(views: list["SessionView"]) -> list["SessionGroup"]:
@@ -575,6 +606,12 @@ class Snapshotter:
         get_selected_provider: Callable[[], str | None],
         publish: Callable[[WorldSnapshot], None],
         group_sessions: _GroupSessionsProto = _default_group_sessions,
+        # New keyword-only deps for the resume-offline feature. Both
+        # default to None so existing tests / boot paths that don't use
+        # the History drawer still work — when None, dormant_sessions
+        # and launching_sessions in the published snapshot stay empty.
+        dormant_source: "_DormantSourceProto | None" = None,
+        launch_intent: "_LaunchIntentProto | None" = None,
         debounce_window_s: float = 0.1,
         throttle_first_window_s: float = 0.2,
     ) -> None:
@@ -602,6 +639,10 @@ class Snapshotter:
         # from __main__.py to get real adapter-driven grouping +
         # capability merging.
         self._group_sessions = group_sessions
+        # Optional resume-offline sources. None = feature disabled
+        # (snapshot's dormant_sessions / launching_sessions stay empty).
+        self._dormant_source = dormant_source
+        self._launch_intent = launch_intent
         self._debounce_window_s = debounce_window_s
         self._throttle_first_window_s = throttle_first_window_s
 
@@ -776,13 +817,51 @@ class Snapshotter:
             log.debug("get_selected_provider() raised", exc_info=True)
             selected = None
 
+        # ── 3-source reconcile (resume-offline) ─────────────────────────
+        # live_uuids drives both LaunchIntent expiration and dormant filtering.
+        # Iterating groups (already grouped) saves us a redundant pass over
+        # the flat views list — same data, different shape.
+        live_uuids: set[str] = set()
+        for g in groups:
+            for v in g.views:
+                if v.session_uuid:
+                    live_uuids.add(v.session_uuid)
+
+        now_utc = datetime.now(timezone.utc)
+        if self._launch_intent is not None:
+            try:
+                self._launch_intent.reconcile(live_uuids=live_uuids, now=now_utc)
+                launching = self._launch_intent.snapshot()
+            except Exception:
+                log.exception("launch_intent reconcile/snapshot raised")
+                launching = ()
+        else:
+            launching = ()
+
+        if self._dormant_source is not None:
+            try:
+                all_dormant = list(self._dormant_source.sessions)
+            except Exception:
+                log.exception("dormant_source.sessions raised; treating as empty")
+                all_dormant = []
+            launching_uuids = {i.session_uuid for i in launching}
+            dormant = tuple(
+                d for d in all_dormant
+                if d.session_uuid not in live_uuids
+                and d.session_uuid not in launching_uuids
+            )
+        else:
+            dormant = ()
+
         return WorldSnapshot(
             today_cost_usd=today_cost,
             quota=quota,
             available_providers=available,
             selected_provider=selected,
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=now_utc,
             session_groups=tuple(groups),
+            dormant_sessions=dormant,
+            launching_sessions=launching,
         )
 
     def _safe_list_sessions(self) -> list[Session]:
