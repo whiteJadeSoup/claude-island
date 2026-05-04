@@ -254,6 +254,17 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         claude-island — closing the island doesn't kill the resumed
         claude session, and vice versa.
 
+        ``cmd.exe /k`` wrapper — *required*, not a convenience: WT
+        spawns the new tab's process via ``CreateProcessW``, which
+        does NOT walk PATHEXT to find ``.cmd`` / ``.bat`` extensions.
+        npm-installed ``claude`` is actually ``claude.cmd`` on disk;
+        without the wrapper WT raises ``ERROR_FILE_NOT_FOUND``
+        (0x80070002) the moment the user clicks Resume. cmd.exe DOES
+        walk PATHEXT, so the lookup succeeds. ``/k`` keeps the window
+        alive after claude exits so the user can read any error
+        message — ``/c`` would close it instantly on failure and
+        hide all diagnostic output.
+
         Raises LauncherSpawnError if wt.exe isn't installed (Windows 10
         without the Store-shipped Terminal app) or if the spawn itself
         fails. Caller (RecentsDrawer) catches and toasts."""
@@ -262,7 +273,7 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 "Windows Terminal (wt.exe) not found. Install from the "
                 "Microsoft Store: https://aka.ms/terminal"
             )
-        argv = ["wt.exe", "-d", str(cwd), "--", *command]
+        argv = ["wt.exe", "-d", str(cwd), "--", "cmd.exe", "/k", *command]
         try:
             proc = subprocess.Popen(
                 argv,

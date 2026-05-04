@@ -283,16 +283,41 @@ class TestWindowsTerminalLaunch:
         assert result.terminal_pid == 9999
         assert result.terminal_name == adapter.name
 
-        # Argv must be wt.exe -d <cwd> -- claude --resume <uuid> [flags]
+        # Argv must be wt.exe -d <cwd> -- cmd.exe /k claude --resume <uuid> [flags]
+        # cmd.exe wrapper is REQUIRED, not a convenience: WT spawns the
+        # new tab via CreateProcessW which doesn't walk PATHEXT, so the
+        # bare "claude" (which is "claude.cmd" on npm installs) raises
+        # ERROR_FILE_NOT_FOUND (0x80070002) the moment Resume is clicked.
+        # cmd.exe walks PATHEXT and resolves it.
         call_args = mock_popen.call_args
         argv = call_args[0][0]
         assert argv[0] == "wt.exe"
         assert argv[1] == "-d"
         assert argv[2] == "D:\\proj with space\\foo"  # str(Path) on Windows-style
         assert argv[3] == "--"
-        assert argv[4:] == [
+        assert argv[4] == "cmd.exe"
+        assert argv[5] == "/k"
+        assert argv[6:] == [
             "claude", "--resume", "u1", "--dangerously-skip-permissions",
         ]
+
+    def test_launch_uses_slash_k_not_slash_c(self):
+        """``/k`` (keep window) is intentional — claude crashing must
+        leave the error visible. ``/c`` would close the window the
+        instant claude exits and hide the diagnostic. Pinned so a
+        future "cleanup" PR doesn't silently flip it back to ``/c``."""
+        adapter = WindowsTerminalAdapter()
+        with mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.shutil.which",
+            return_value="C:\\Windows\\System32\\wt.exe",
+        ), mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.subprocess.Popen",
+        ) as mock_popen:
+            mock_popen.return_value.pid = 1
+            adapter.launch(cwd=Path("D:/x"), command=("claude",))
+        argv = mock_popen.call_args[0][0]
+        assert "/k" in argv
+        assert "/c" not in argv
 
     def test_launch_raises_when_wt_exe_missing(self):
         from claude_island.core.capabilities import LauncherSpawnError
