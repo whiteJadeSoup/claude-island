@@ -6,8 +6,10 @@ Lifecycle:
   whenever a new ``WorldSnapshot`` is published.
 * Initially hidden. Becomes visible when the user clicks the 🗂 N chip
   on ExpandedWindow's SESSIONS header, or hits Ctrl+H.
-* Stays positioned snug to ExpandedWindow's right edge — re-positioned
-  in :meth:`_position` whenever the parent moves or this window opens.
+* Position is anchored to ExpandedWindow's right edge by default. If
+  the right anchor would land off-screen (multi-monitor edge / panel
+  on rightmost screen), falls back to the left anchor; if still off-
+  screen, centers on the screen containing the panel.
 
 Render contract:
 * ``compute(snap) → key tuple`` — what we care about; piped through
@@ -26,6 +28,19 @@ Resume click flow (the heart of the feature):
   ``snapshotter.wake()`` so the next snapshot moves the row from
   *dormant* → *launching*.
 * Spawn failure → toast, do NOT touch the registry.
+
+Visual design:
+* Imports the canonical style tokens from ``expanded_window`` so the
+  drawer reads as the same product surface as the main panel — same
+  panel BG (#121212 @ 94 % via paintEvent), same row BG/hover
+  (#1e1e1e / #2a2a2a), same title typography, same row height (52
+  px), same two-line row anatomy as the live-session rows.
+* Resume affordance is hover-revealed: a compact ``▶`` icon button
+  appears in the row's bottom-right corner only when the user is
+  pointing at the row. Right-click and full-row click both also
+  trigger Resume so the small button isn't load-bearing for
+  discoverability — it's a visual confirmation of an intent the row
+  already invites.
 """
 from __future__ import annotations
 
@@ -33,9 +48,17 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable
 
-from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
+from PySide6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -52,15 +75,41 @@ from claude_island.core.launch_intent import LaunchIntent, LaunchIntentRegistry
 from claude_island.core.models import DormantSession
 from claude_island.core.snapshot import WorldSnapshot
 
+# Import canonical visual tokens from expanded_window so this drawer
+# never drifts visually from the main panel. Cross-file in same UI layer
+# is fine; the alternative (duplicating values) is a guaranteed source
+# of style drift over time.
+from claude_island.ui.expanded_window import (
+    _BG_HOVER_SINGLE,
+    _BG_PRESSED,
+    _BG_SINGLE,
+    _GROUP_OUTLINE_COLOR,
+    _ROW_HEIGHT,
+    _ROW_PAD_H,
+    _STYLE_AGE,
+    _STYLE_COST_DEFAULT,
+    _STYLE_COST_HIGH,
+    _STYLE_NAME,
+    _STYLE_STATUS,
+    _STYLE_TITLE,
+    _ElidingLabel,
+    _fmt_money,
+)
+
 log = logging.getLogger(__name__)
 
 
-# Layout constants — kept here (not in a global config) because they only
-# tune this window. Adjust if the user reports it being cramped or wide.
-_DRAWER_WIDTH = 460
-_DRAWER_GAP = 8           # px between expanded panel right edge and drawer
-_ROW_HEIGHT_HINT = 64     # tall enough for 3 lines of body text
-_ROW_GAP = 6
+# Layout constants specific to this surface — kept here (not in a
+# global config) because they only tune this window. Adjust if user
+# reports it being cramped or wide.
+_DRAWER_WIDTH = 360         # close to _PANEL_W=320 but slightly wider for
+                            # the 2nd line that carries cwd+uuid+time
+_DRAWER_GAP = 6             # px gap between expanded right edge and drawer;
+                            # matches _GAP from expanded_window
+_ROW_GAP = 4                # px between consecutive rows; tighter than
+                            # main panel's _GROUP_GAP=8 because there's no
+                            # group concept here, just a flat list
+_HIGH_COST_USD = 50.0       # mirrors HIGH_COST_USD_THRESHOLD from core
 
 
 def _flags_for_mode(mode: str | None) -> tuple[str, ...]:
@@ -75,7 +124,7 @@ def _flags_for_mode(mode: str | None) -> tuple[str, ...]:
 
 
 def _relative_time(then: datetime, *, now: datetime | None = None) -> str:
-    """Compact ago-string for the row's L3 metadata. Same conventions as
+    """Compact ago-string for the row's L2 metadata. Same conventions as
     the rest of the UI — minute-grained for <1h, then hours, then days."""
     now = now or datetime.now(timezone.utc)
     delta = now - then
@@ -94,6 +143,17 @@ def _relative_time(then: datetime, *, now: datetime | None = None) -> str:
     return then.strftime("%Y-%m-%d")
 
 
+def _shorten_cwd(cwd_str: str, max_len: int = 40) -> str:
+    """Mid-path elision so both the parent dir and the leaf survive.
+    Uses ``…`` (single char) rather than ``...`` to match the rest of
+    the panel's elision style produced by ``_ElidingLabel``."""
+    if len(cwd_str) <= max_len:
+        return cwd_str
+    keep_tail = max_len // 2 + 3
+    keep_head = max_len - keep_tail - 1
+    return cwd_str[:keep_head] + "…" + cwd_str[-keep_tail:]
+
+
 class _DispatcherProto:
     """Duck-typed view of TerminalDispatcher used here. UI doesn't import
     the platform_ class directly (import-linter forbids it); __main__
@@ -102,54 +162,41 @@ class _DispatcherProto:
     def launch(self, adapter_name, *, cwd, command): ...  # noqa: D401
 
 
-class _ResumeButton(QPushButton):
-    """The ▶ Resume button — visual + hover tooltip carrying the full
-    command preview so the user sees what's about to run."""
-
-    def __init__(
-        self,
-        *,
-        cwd: str,
-        command_preview: str,
-        launcher_name: str,
-        on_click: Callable[[], None],
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__("▶ Resume", parent)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet(
-            "QPushButton {"
-            "  background: #2563eb;"
-            "  color: #ffffff;"
-            "  border: none;"
-            "  border-radius: 6px;"
-            "  padding: 6px 12px;"
-            "  font-size: 12px;"
-            "}"
-            "QPushButton:hover { background: #1d4ed8; }"
-            "QPushButton:pressed { background: #1e40af; }"
-            "QPushButton:disabled { background: #475569; color: #94a3b8; }"
-        )
-        # Tooltip is the trust handshake: shows the user exactly the
-        # cwd we'll cd to, the cli we'll run, and the launcher we'll use.
-        self.setToolTip(
-            f"Resume in new terminal\n"
-            f"──────────\n"
-            f"cwd:\n  {cwd}\n\n"
-            f"command:\n  {command_preview}\n\n"
-            f"launcher: {launcher_name}"
-        )
-        self.clicked.connect(on_click)
+# Resume button stylesheet — uses the same muted grey-on-dark palette as
+# the main panel's header icon buttons, NOT a primary-coloured CTA. The
+# affordance is "subtle action available on hover", not "look at me".
+_STYLE_RESUME_BTN = f"""
+    QPushButton {{
+        color: #c9c9c9;
+        background: {_BG_HOVER_SINGLE};
+        border: 1px solid {_GROUP_OUTLINE_COLOR};
+        border-radius: 6px;
+        padding: 2px 8px;
+        font-size: 11px;
+    }}
+    QPushButton:hover {{
+        color: #ffffff;
+        background: {_BG_PRESSED};
+        border-color: #6b7280;
+    }}
+    QPushButton:disabled {{
+        color: #6b7280;
+        background: {_BG_SINGLE};
+        border-color: {_GROUP_OUTLINE_COLOR};
+    }}
+"""
 
 
-class _DormantRow(QFrame):
-    """One offline-session row in the drawer.
+class _DormantRow(QPushButton):
+    """One offline-session row — a click-target QPushButton mirroring
+    the main panel's HoverRow anatomy: 52 px tall, two-line layout,
+    same colour palette.
 
-    Three-line layout:
-      L1: name (custom > ai_title > 'Untitled' fallback) + 🛡 if bypass
-      L2: cwd (greyed, ElidingLabel-like) — inline string elision
-      L3: $cost · relative time · uuid prefix · [▶ Resume]
-    """
+      Line 1: name (left)                           $cost (right)
+      Line 2: cwd · time · uuid8       [▶ Resume]  (button hover-only)
+
+    Click anywhere → Resume. Right-click reserved for future actions
+    (copy uuid / open transcript) — currently no-op."""
 
     def __init__(
         self,
@@ -168,77 +215,125 @@ class _DormantRow(QFrame):
         self._on_wake = on_wake
         self._on_toast = on_toast
 
-        self.setStyleSheet(
-            "QFrame {"
-            "  background: rgba(255,255,255,0.04);"
-            "  border: 1px solid rgba(255,255,255,0.08);"
-            "  border-radius: 8px;"
-            "}"
-            "QFrame:hover { background: rgba(255,255,255,0.07); }"
-        )
-        self.setMinimumHeight(_ROW_HEIGHT_HINT)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(_ROW_HEIGHT)
+        self.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {_BG_SINGLE};
+                border: none;
+                border-radius: 8px;
+                text-align: left;
+                padding: 0;
+            }}
+            QPushButton:hover {{ background: {_BG_HOVER_SINGLE}; }}
+            QPushButton:pressed {{ background: {_BG_PRESSED}; }}
+            """
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.clicked.connect(self._on_resume)
+        self.installEventFilter(self)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(2)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(_ROW_PAD_H, 6, _ROW_PAD_H, 6)
+        outer.setSpacing(2)
 
-        # L1 — name + bypass shield
-        name = self._row_name()
+        # ── L1: name + bypass shield + $cost ─────────────────────────
         l1 = QHBoxLayout()
         l1.setContentsMargins(0, 0, 0, 0)
-        l1.setSpacing(4)
-        name_lbl = QLabel(name)
-        name_lbl.setStyleSheet("color: #e8e8e8; font-size: 13px; font-weight: 600;")
-        l1.addWidget(name_lbl)
-        l1.addStretch(1)
-        if dormant.permission_mode == "bypassPermissions":
-            shield = QLabel("\U0001f6e1")  # 🛡
-            shield.setToolTip("This session ran with --dangerously-skip-permissions")
-            shield.setStyleSheet("color: #f59e0b; font-size: 12px;")
-            l1.addWidget(shield)
-        layout.addLayout(l1)
+        l1.setSpacing(6)
 
-        # L2 — cwd (greyed monospace)
-        cwd_str = str(dormant.cwd)
-        # Light client-side elision: truncate long paths in the middle so
-        # both the parent dir and the leaf are visible.
-        if len(cwd_str) > 56:
-            cwd_str = cwd_str[:24] + " … " + cwd_str[-28:]
-        cwd_lbl = QLabel(cwd_str)
-        cwd_lbl.setStyleSheet(
-            "color: #8a8a8a; font-size: 10px; font-family: Consolas, monospace;"
+        name_lbl = _ElidingLabel(self._row_name())
+        name_lbl.setStyleSheet(_STYLE_NAME)
+        name_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        name_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
         )
-        layout.addWidget(cwd_lbl)
+        l1.addWidget(name_lbl, 1)
 
-        # L3 — $cost · time · uuid prefix · [Resume]
-        l3 = QHBoxLayout()
-        l3.setContentsMargins(0, 0, 0, 0)
-        l3.setSpacing(8)
+        if dormant.permission_mode == "bypassPermissions":
+            shield = QLabel("\U0001f6e1")
+            shield.setToolTip(
+                "This session ran with --dangerously-skip-permissions"
+            )
+            shield.setStyleSheet("color: #f59e0b; font-size: 11px;")
+            shield.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            l1.addWidget(shield)
 
+        cost_lbl = QLabel(_fmt_money(dormant.cost_usd))
+        cost_lbl.setStyleSheet(
+            _STYLE_COST_HIGH if dormant.cost_usd >= _HIGH_COST_USD
+            else _STYLE_COST_DEFAULT
+        )
+        cost_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        cost_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        l1.addWidget(cost_lbl)
+        outer.addLayout(l1)
+
+        # ── L2: cwd · time · uuid8       [Resume] ────────────────────
+        l2 = QHBoxLayout()
+        l2.setContentsMargins(0, 0, 0, 0)
+        l2.setSpacing(6)
+
+        # cwd · time · uuid8 — stuffed into a single eliding label so
+        # the line collapses gracefully under width pressure.
+        cwd_short = _shorten_cwd(str(dormant.cwd))
         meta_text = (
-            f"${dormant.cost_usd:.2f} · "
+            f"{cwd_short} · "
             f"{_relative_time(dormant.last_activity)} · "
             f"{dormant.session_uuid[:8]}"
         )
-        meta_lbl = QLabel(meta_text)
-        meta_lbl.setStyleSheet("color: #9aa0a6; font-size: 11px;")
-        meta_lbl.setToolTip(f"Full uuid: {dormant.session_uuid}")
-        l3.addWidget(meta_lbl)
-        l3.addStretch(1)
+        meta_lbl = _ElidingLabel(meta_text)
+        meta_lbl.setStyleSheet(_STYLE_AGE)
+        meta_lbl.setToolTip(f"{dormant.cwd}\nFull uuid: {dormant.session_uuid}")
+        meta_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        meta_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
+        )
+        l2.addWidget(meta_lbl, 1)
 
+        # Resume affordance — hidden until the row is hovered; on
+        # mouse leave it goes back into hiding so idle rows have a
+        # clean two-line look. Click handler routes to _on_resume.
         flags = _flags_for_mode(dormant.permission_mode)
         command_preview = "claude --resume " + dormant.session_uuid
         if flags:
             command_preview += " " + " ".join(flags)
-        self._resume_button = _ResumeButton(
-            cwd=str(dormant.cwd),
-            command_preview=command_preview,
-            launcher_name=self._launcher_name_hint(),
-            on_click=self._on_resume,
+        self._resume_button = QPushButton("▶ Resume")  # ▶
+        self._resume_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._resume_button.setStyleSheet(_STYLE_RESUME_BTN)
+        self._resume_button.setVisible(False)
+        self._resume_button.setToolTip(
+            f"Resume in new terminal\n"
+            f"──────────\n"
+            f"cwd:\n  {dormant.cwd}\n\n"
+            f"command:\n  {command_preview}\n\n"
+            f"launcher: {self._launcher_name_hint()}"
         )
-        l3.addWidget(self._resume_button)
-        layout.addLayout(l3)
+        self._resume_button.clicked.connect(self._on_resume)
+        l2.addWidget(self._resume_button)
+        outer.addLayout(l2)
+
+    # ── hover state — show/hide the resume button ─────────────────────
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        # We use eventFilter rather than enterEvent/leaveEvent so the
+        # base QPushButton's own hover painting is not disturbed.
+        if watched is self:
+            if event.type() == QEvent.Type.HoverEnter:
+                self._resume_button.setVisible(True)
+            elif event.type() == QEvent.Type.HoverLeave:
+                # Don't hide while the button itself is the hover target
+                # — Qt toggles HoverEnter on child first, then HoverLeave
+                # on parent, which would flicker the button. The button
+                # remaining a child of self means hovering over the
+                # button keeps the row's :hover state too, so this works
+                # in practice.
+                self._resume_button.setVisible(False)
+        return super().eventFilter(watched, event)
 
     # ── internal ───────────────────────────────────────────────────────
 
@@ -248,17 +343,10 @@ class _DormantRow(QFrame):
             return d.name.strip()
         if d.last_prompt and d.last_prompt.strip():
             preview = d.last_prompt.strip().splitlines()[0]
-            return (preview[:30] + "…") if len(preview) > 30 else preview
+            return (preview[:40] + "…") if len(preview) > 40 else preview
         return "Untitled session"
 
     def _launcher_name_hint(self) -> str:
-        """First available launcher name, or '(none)' if dispatcher
-        has no LAUNCH-capable adapter. Cached per-row so the tooltip
-        rendered at construction time matches what we'd actually use
-        when the button is clicked. If the chain changes between
-        construction and click (extremely rare in practice — adapters
-        register at import time, never after) the click handler does a
-        fresh lookup anyway, so the worst case is a stale tooltip."""
         try:
             cands = self._dispatcher.adapters_with(Capability.LAUNCH)
         except Exception:
@@ -299,17 +387,18 @@ class _DormantRow(QFrame):
             terminal_pid=result.terminal_pid,
             requested_at=result.started_at,
         ))
-        # Optimistic UI: disable button immediately so a frantic
-        # double-click doesn't spawn two terminals while we wait for
-        # the next snapshot to render.
+        # Optimistic UI: disable button so a frantic double-click can't
+        # spawn two terminals while we wait for the next snapshot.
         self._resume_button.setEnabled(False)
         self._resume_button.setText("⏳ Launching…")
+        self.setEnabled(False)
         self._on_wake()
 
 
 class _LaunchingRow(QFrame):
-    """A row that's mid-launch — shown while we wait for ProcessScanner
-    to detect the new claude.exe (or for the LaunchIntent to time out)."""
+    """A row that's mid-launch — waiting for ProcessScanner to detect
+    the new claude.exe. Same 52 px row geometry as _DormantRow but with
+    a subtle running-accent BG so it visually reads "in flight"."""
 
     def __init__(
         self,
@@ -318,34 +407,45 @@ class _LaunchingRow(QFrame):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setStyleSheet(
-            "QFrame {"
-            "  background: rgba(37,99,235,0.10);"
-            "  border: 1px solid rgba(37,99,235,0.35);"
-            "  border-radius: 8px;"
-            "}"
-        )
-        self.setMinimumHeight(48)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(2)
-
-        title = QLabel(
-            f"⏳ Launching {intent.session_uuid[:8]}…"
+        self.setFixedHeight(_ROW_HEIGHT)
+        self.setStyleSheet(
+            f"""
+            QFrame {{
+                background: {_BG_SINGLE};
+                border: 1px solid {_GROUP_OUTLINE_COLOR};
+                border-radius: 8px;
+            }}
+            """
         )
-        title.setStyleSheet("color: #e8e8e8; font-size: 12px; font-weight: 600;")
-        layout.addWidget(title)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(_ROW_PAD_H, 6, _ROW_PAD_H, 6)
+        outer.setSpacing(2)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(6)
+        title = QLabel(f"⏳ Launching {intent.session_uuid[:8]}…")
+        title.setStyleSheet(_STYLE_NAME)
+        title_row.addWidget(title, 1)
+        outer.addLayout(title_row)
 
         sub = QLabel(
-            f"{intent.terminal_name} pid {intent.terminal_pid} · {intent.cwd}"
+            f"{intent.terminal_name} pid {intent.terminal_pid} · "
+            f"{_shorten_cwd(str(intent.cwd))}"
         )
-        sub.setStyleSheet("color: #9aa0a6; font-size: 10px;")
-        layout.addWidget(sub)
+        sub.setStyleSheet(_STYLE_STATUS)
+        outer.addWidget(sub)
 
 
 class HistoryDrawer(QWidget):
-    """Top-level frameless window snapped to ExpandedWindow's right edge."""
+    """Top-level frameless window snapped to ExpandedWindow's edge.
+
+    Visually a sibling of the main panel: same paint-event-drawn body,
+    same row palette, same title typography. The user's mental model
+    is "one product surface with two columns" — never "main app + a
+    separate widget panel"."""
 
     def __init__(
         self,
@@ -355,21 +455,15 @@ class HistoryDrawer(QWidget):
         launch_intent: LaunchIntentRegistry,
         on_wake: Callable[[], None],
     ) -> None:
-        # parent=None so this is a separate top-level window with its own
-        # taskbar absence (Tool flag).
         super().__init__(None)
         self._expanded = expanded
         self._dispatcher = dispatcher
         self._launch_intent = launch_intent
         self._on_wake = on_wake
-        # Track previously-seen launching uuids so we can detect transitions
-        # back to dormant (i.e. timed-out launches) and surface a toast.
         self._prev_launching: set[str] = set()
-        # Free-text filter; updated by the search box at top.
         self._search_query: str = ""
 
-        # Same flag combo as ExpandedWindow (frameless, top-most, tool window
-        # so it doesn't appear in the taskbar / Cmd+Tab).
+        # Same flag combo as ExpandedWindow / SessionDetailPopup.
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -389,22 +483,19 @@ class HistoryDrawer(QWidget):
     @staticmethod
     def compute(snap: WorldSnapshot):
         """``distinct_until_changed`` key projection. Just the bits the
-        drawer cares about — avoids re-rendering on unrelated snapshot
-        churn (e.g. quota tick)."""
+        drawer cares about."""
         return (
-            tuple((d.session_uuid, d.last_activity, d.cost_usd) for d in snap.dormant_sessions),
-            tuple((i.session_uuid, i.terminal_pid) for i in snap.launching_sessions),
+            tuple((d.session_uuid, d.last_activity, d.cost_usd)
+                  for d in snap.dormant_sessions),
+            tuple((i.session_uuid, i.terminal_pid)
+                  for i in snap.launching_sessions),
         )
 
     def render(self, snap: WorldSnapshot) -> None:
-        """Rebuild the row list. Cheap at the user's scale (≤200 dormant
-        sessions on a long-time-user machine; rebuild ≈ ms)."""
         self._render_rows(snap)
-        # Detect launching → gone-without-becoming-live transitions and
-        # toast them. Comparing prev vs current launching uuids is
-        # enough — if the uuid disappeared from launching, reconcile
-        # either upgraded it (ok, don't toast) or expired it (toast).
-        # We can tell which by checking live_uuids in the snap.
+        # Detect launching → gone-without-becoming-live (timeout) and
+        # toast the user — better than letting them wonder why the
+        # row reappeared as dormant.
         live_uuids = {
             v.session_uuid for g in snap.session_groups for v in g.views
             if v.session_uuid
@@ -412,11 +503,7 @@ class HistoryDrawer(QWidget):
         cur = {i.session_uuid: i for i in snap.launching_sessions}
         for uuid in self._prev_launching - cur.keys():
             if uuid in live_uuids:
-                continue  # upgraded — silent success
-            # Find the intent we lost so we can include terminal info.
-            # We don't have it any more (intent was discarded by reconcile),
-            # so the toast is generic. Acceptable — the user knows which
-            # one they just clicked.
+                continue
             self._show_toast(
                 f"Couldn't detect new claude session for {uuid[:8]}. "
                 "Check the new terminal window."
@@ -424,7 +511,6 @@ class HistoryDrawer(QWidget):
         self._prev_launching = set(cur.keys())
 
     def toggle(self) -> None:
-        """Show if hidden, hide if visible. Wired to Ctrl+H + chip click."""
         if self.isVisible():
             self.hide()
         else:
@@ -435,64 +521,62 @@ class HistoryDrawer(QWidget):
     # ── UI build ───────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        # Single rounded card containing search + scroll.
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-
-        card = QFrame(self)
-        card.setStyleSheet(
-            "QFrame {"
-            "  background: #1e1f22;"
-            "  border: 1px solid rgba(255,255,255,0.08);"
-            "  border-radius: 12px;"
-            "}"
-        )
-        outer.addWidget(card)
-
-        body = QVBoxLayout(card)
+        # No outer frame — the body is painted directly via paintEvent
+        # to mirror ExpandedWindow exactly.
+        body = QVBoxLayout(self)
         body.setContentsMargins(14, 14, 14, 14)
         body.setSpacing(8)
 
-        # Header
+        # ── Header (matches main panel section title typography) ────
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         title = QLabel("HISTORY")
-        title.setStyleSheet("color: #cfcfcf; font-size: 11px; font-weight: 600; letter-spacing: 1.5px;")
+        title.setStyleSheet(_STYLE_TITLE)
         header.addWidget(title)
         header.addStretch(1)
         self._count_label = QLabel("")
-        self._count_label.setStyleSheet("color: #9aa0a6; font-size: 11px;")
+        self._count_label.setStyleSheet(_STYLE_AGE)
         header.addWidget(self._count_label)
         body.addLayout(header)
 
-        # Search input
+        # ── Search ──────────────────────────────────────────────────
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search title / cwd / uuid")
         self._search.setStyleSheet(
-            "QLineEdit {"
-            "  background: rgba(255,255,255,0.05);"
-            "  color: #e8e8e8;"
-            "  border: 1px solid rgba(255,255,255,0.08);"
-            "  border-radius: 6px;"
-            "  padding: 5px 8px;"
-            "  font-size: 11px;"
-            "}"
-            "QLineEdit:focus { border: 1px solid #2563eb; }"
+            f"""
+            QLineEdit {{
+                background: {_BG_SINGLE};
+                color: #e8e8e8;
+                border: 1px solid {_GROUP_OUTLINE_COLOR};
+                border-radius: 6px;
+                padding: 5px 8px;
+                font-size: 11px;
+            }}
+            QLineEdit:focus {{ border-color: #6b7280; }}
+            """
         )
         self._search.textChanged.connect(self._on_search_changed)
         body.addWidget(self._search)
 
-        # Scroll area for rows
-        self._scroll = QScrollArea(card)
+        # ── Scroll area for rows ────────────────────────────────────
+        self._scroll = QScrollArea(self)
         self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Same scroll-bar styling as expanded panel's session scroll.
         self._scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
-            "QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }"
-            "QScrollBar::handle:vertical { background: #3a3a3a; border-radius: 3px; min-height: 20px; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollBar:vertical { background: transparent; width: 6px; "
+            "  margin: 0; }"
+            "QScrollBar::handle:vertical { background: #3a3a3a; "
+            "  border-radius: 3px; min-height: 20px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical "
+            "  { height: 0; }"
         )
         self._rows_container = QWidget()
         self._rows_container.setStyleSheet("background: transparent;")
@@ -503,17 +587,19 @@ class HistoryDrawer(QWidget):
         self._scroll.setWidget(self._rows_container)
         body.addWidget(self._scroll)
 
-        # Toast bar (hidden by default; appears at the bottom when needed)
+        # ── Toast (hidden at rest) ──────────────────────────────────
         self._toast = QLabel("")
         self._toast.setStyleSheet(
-            "QLabel {"
-            "  background: rgba(220, 38, 38, 0.18);"
-            "  color: #fecaca;"
-            "  border: 1px solid rgba(220, 38, 38, 0.4);"
-            "  border-radius: 6px;"
-            "  padding: 6px 10px;"
-            "  font-size: 11px;"
-            "}"
+            f"""
+            QLabel {{
+                background: {_BG_SINGLE};
+                color: #fecaca;
+                border: 1px solid #b91c1c;
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 11px;
+            }}
+            """
         )
         self._toast.setWordWrap(True)
         self._toast.setVisible(False)
@@ -521,6 +607,17 @@ class HistoryDrawer(QWidget):
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(lambda: self._toast.setVisible(False))
+
+    # ── paintEvent — match ExpandedWindow body ─────────────────────
+
+    def paintEvent(self, event: object) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, self.width(), self.height(), 16, 16)
+        # Same ink as ExpandedWindow.paintEvent — keeps the two
+        # surfaces visually indistinguishable when sat side by side.
+        painter.fillPath(path, QColor(18, 18, 18, 240))
 
     # ── render / reposition ────────────────────────────────────────────
 
@@ -536,16 +633,16 @@ class HistoryDrawer(QWidget):
         launching = snap.launching_sessions
         dormant_all = snap.dormant_sessions
         dormant = self._apply_filter(dormant_all)
-        # Newest first — matches "find what I was just working on" intent.
+        # Newest first — matches "find what I was just working on".
         dormant_sorted = sorted(
             dormant, key=lambda d: d.last_activity, reverse=True,
         )
         self._count_label.setText(
-            f"{len(dormant_all)} sessions"
+            f"{len(dormant_all)}"
             + (f" · {len(launching)} launching" if launching else "")
         )
 
-        # Launching rows first (they're the user's active intent).
+        # Launching rows first (active intents the user just kicked off).
         for intent in launching:
             self._rows_box.insertWidget(
                 self._rows_box.count() - 1,
@@ -554,7 +651,7 @@ class HistoryDrawer(QWidget):
 
         if not dormant_sorted and not launching:
             empty = QLabel("No history yet.\nOffline sessions will appear here.")
-            empty.setStyleSheet("color: #6b7280; font-size: 11px; padding: 20px;")
+            empty.setStyleSheet(_STYLE_AGE + " padding: 20px;")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._rows_box.insertWidget(self._rows_box.count() - 1, empty)
             return
@@ -588,10 +685,6 @@ class HistoryDrawer(QWidget):
 
     def _on_search_changed(self, text: str) -> None:
         self._search_query = text
-        # Re-render with the latest snapshot if we have one — search
-        # filtering is purely client-side, no need to wake snapshotter.
-        # We don't keep the snap around, so re-trigger a wake which will
-        # publish + we'll re-render via the subscription. Cheap.
         self._on_wake()
 
     def _show_toast(self, msg: str) -> None:
@@ -599,19 +692,69 @@ class HistoryDrawer(QWidget):
         self._toast.setVisible(True)
         self._toast_timer.start(6000)
 
-    def _reposition(self) -> None:
-        """Snap the drawer to expanded panel's right edge.
+    # ── positioning (multi-monitor aware) ─────────────────────────
 
-        Uses the panel's frameGeometry so the position math accounts for
-        its window border (currently 0 — frameless — but resilient to
-        future changes)."""
+    def _reposition(self) -> None:
+        """Anchor the drawer next to the expanded panel.
+
+        Strategy (in order):
+          1. Right of expanded — preferred ("fly-out" feel).
+          2. If the right anchor would push the drawer past the
+             screen's right edge, dock to the LEFT instead.
+          3. If neither side fits (panel taking the whole screen
+             width somehow), center the drawer over the panel's
+             screen — it'll overlap, but the user can still see it.
+        """
         try:
             geo = self._expanded.frameGeometry()
         except Exception:
             return
-        x = geo.right() + _DRAWER_GAP
-        y = geo.top()
+
+        # The screen the EXPANDED panel is on (handles multi-monitor).
+        screen = self._screen_for_geometry(geo)
+        screen_geo = screen.availableGeometry() if screen else None
+
         height = max(geo.height(), 300)
-        self.setMinimumHeight(0)  # allow shrinking
+        # Capped at the host screen's available height so the drawer
+        # never grows below the taskbar.
+        if screen_geo is not None:
+            height = min(height, screen_geo.height())
+
+        right_x = geo.right() + _DRAWER_GAP
+        left_x = geo.left() - _DRAWER_GAP - _DRAWER_WIDTH
+        y = geo.top()
+
+        chosen_x = right_x
+        if screen_geo is not None:
+            fits_right = right_x + _DRAWER_WIDTH <= screen_geo.right() + 1
+            fits_left = left_x >= screen_geo.left() - 1
+            if not fits_right and fits_left:
+                chosen_x = left_x
+            elif not fits_right and not fits_left:
+                # Centre over the expanded screen — last-resort.
+                chosen_x = screen_geo.x() + (
+                    (screen_geo.width() - _DRAWER_WIDTH) // 2
+                )
+            # Clamp y so the drawer doesn't run off the bottom edge.
+            if y + height > screen_geo.bottom():
+                y = max(screen_geo.top(), screen_geo.bottom() - height)
+            if y < screen_geo.top():
+                y = screen_geo.top()
+
+        self.setMinimumHeight(0)
         self.resize(_DRAWER_WIDTH, height)
-        self.move(QPoint(x, y))
+        self.move(QPoint(chosen_x, y))
+
+    @staticmethod
+    def _screen_for_geometry(geo) -> object | None:
+        """Find the QScreen whose geometry contains the centre of
+        ``geo``. Falls back to the primary screen if none matches —
+        better an offset drawer than a crash."""
+        try:
+            centre = geo.center()
+            for s in QGuiApplication.screens():
+                if s.geometry().contains(centre):
+                    return s
+            return QGuiApplication.primaryScreen()
+        except Exception:
+            return None
