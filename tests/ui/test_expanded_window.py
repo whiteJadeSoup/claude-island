@@ -1016,6 +1016,105 @@ def test_repair_button_handles_unwired_callback(qtbot):
     assert "not wired" in popup._repair_status.text()
 
 
+# ── Transcript row ────────────────────────────────────────────────────
+
+def test_transcript_row_shows_full_jsonl_path(qtbot):
+    """The Transcript row in the meta section displays the full
+    ``~/.claude/projects/<hash>/<uuid>.jsonl`` path computed from the
+    session's cwd + effective uuid. Pinned because the path is what the
+    user clicks on; eliding or shortening it would hide which file
+    they're about to open."""
+    from claude_island.ui.expanded_window import (
+        SessionDetailPopup, _transcript_path_for_display,
+    )
+    from PySide6.QtWidgets import QLabel as _QL
+
+    s = _session(1, "D:/proj/foo")
+    uuid = "abc12345-6789-0000-0000-000000000000"
+    details = _make_full_details(s, effective_uuid=uuid)
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+
+    expected = str(_transcript_path_for_display(s.project_path, uuid))
+    # Find the QLabel holding the transcript path. Filter to labels
+    # that look like .jsonl paths so the assertion isn't fooled by an
+    # unrelated label that happens to match a substring.
+    matches = [
+        lbl for lbl in popup.findChildren(_QL)
+        if lbl.text() == expected
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one label showing the transcript path, "
+        f"got {[lbl.text() for lbl in matches]}"
+    )
+
+
+def test_transcript_row_suppressed_when_uuid_missing(qtbot):
+    """No effective uuid → no Transcript row at all. The displayed
+    path would be ``<project>/.jsonl`` (an obviously broken file) and
+    clicking it would always fail; suppressing the row avoids leading
+    the user to a dead action."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+    from PySide6.QtWidgets import QLabel as _QL
+
+    s = _session(1, "D:/proj/foo")
+    details = _make_full_details(s, effective_uuid="")
+    popup = SessionDetailPopup(details, s)
+    qtbot.addWidget(popup)
+
+    # No label should carry the "Transcript" key text.
+    keys = [lbl.text() for lbl in popup.findChildren(_QL) if lbl.text() == "Transcript"]
+    assert keys == []
+
+
+def test_transcript_open_calls_callback_on_success(qtbot):
+    """Click → on_open_transcript fires → status shows success."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+
+    s = _session(1, "D:/proj/foo")
+    details = _make_full_details(s, effective_uuid="abc12345-6789-0000-0000-000000000000")
+
+    calls: list[bool] = []
+    def on_open():
+        calls.append(True)
+        return True
+
+    popup = SessionDetailPopup(details, s, on_open_transcript=on_open)
+    qtbot.addWidget(popup)
+    popup._on_open_transcript()
+
+    assert calls == [True]
+    assert "Opened" in popup._repair_status.text()
+
+
+def test_transcript_open_shows_error_on_callback_failure(qtbot):
+    """Callback returns False (file missing, OS launcher failed) →
+    popup surfaces a failure message rather than silent no-op."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+
+    s = _session(1, "D:/proj/foo")
+    details = _make_full_details(s, effective_uuid="abc12345-6789-0000-0000-000000000000")
+    popup = SessionDetailPopup(details, s, on_open_transcript=lambda: False)
+    qtbot.addWidget(popup)
+    popup._on_open_transcript()
+
+    assert "Failed" in popup._repair_status.text()
+
+
+def test_transcript_open_handles_unwired_callback(qtbot):
+    """No on_open_transcript wired → click surfaces "not wired" instead
+    of silently no-oping."""
+    from claude_island.ui.expanded_window import SessionDetailPopup
+
+    s = _session(1, "D:/proj/foo")
+    details = _make_full_details(s, effective_uuid="abc12345-6789-0000-0000-000000000000")
+    popup = SessionDetailPopup(details, s)  # on_open_transcript=None
+    qtbot.addWidget(popup)
+    popup._on_open_transcript()
+
+    assert "not wired" in popup._repair_status.text()
+
+
 # ============================================================================
 # Detail popup: Dense Inspector redesign — aggregation, hiding rules, footer
 # ============================================================================

@@ -17,9 +17,11 @@ Failure modes:
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import ClassVar
 
 from claude_island.core.capabilities import Capability, _CapabilityProvider, capability
+from claude_island.core.models import project_hash
 from claude_island.core.snapshot import SessionView
 
 _TIMEOUT_S = 3.0
@@ -44,6 +46,23 @@ class MacOsBackend(_CapabilityProvider):
         except (OSError, subprocess.TimeoutExpired):
             return False
 
+    @capability(Capability.REVEAL_TRANSCRIPT)
+    def reveal_transcript(self, view: SessionView) -> bool:
+        # `open <file>` launches the user's default app for the
+        # extension. Without -R the file is opened (not just selected),
+        # which is what "view this transcript" means.
+        path = _transcript_path(view)
+        if path is None or not path.exists():
+            return False
+        try:
+            result = subprocess.run(
+                ["open", str(path)],
+                check=False, timeout=_TIMEOUT_S,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
     @capability(Capability.COPY_PATH)
     def copy_path(self, view: SessionView) -> bool:
         # pbcopy reads UTF-8 by default in modern macOS locales.
@@ -57,3 +76,11 @@ class MacOsBackend(_CapabilityProvider):
             return result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False
+
+
+def _transcript_path(view: SessionView) -> Path | None:
+    """``~/.claude/projects/<hash>/<uuid>.jsonl`` for this view, or
+    None when the session uuid hasn't been resolved yet."""
+    if not view.session_uuid:
+        return None
+    return Path.home() / ".claude" / "projects" / project_hash(view.project_path) / f"{view.session_uuid}.jsonl"

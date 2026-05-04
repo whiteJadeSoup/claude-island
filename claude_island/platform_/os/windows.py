@@ -15,10 +15,13 @@ into False; UI sees a no-op rather than a crash.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+from pathlib import Path
 from typing import ClassVar
 
 from claude_island.core.capabilities import Capability, _CapabilityProvider, capability
+from claude_island.core.models import project_hash
 from claude_island.core.snapshot import SessionView
 
 _TIMEOUT_S = 3.0
@@ -48,6 +51,25 @@ class WindowsOsBackend(_CapabilityProvider):
         except (OSError, subprocess.TimeoutExpired):
             return False
 
+    @capability(Capability.REVEAL_TRANSCRIPT)
+    def reveal_transcript(self, view: SessionView) -> bool:
+        # Open the session's .jsonl with whatever Windows associates
+        # to the extension (typically Notepad / VS Code / a custom
+        # JSON viewer). os.startfile is the Win32-native launcher —
+        # it spawns ShellExecute under the hood, so file associations
+        # work the same as a double-click in Explorer.
+        # Returns False if the uuid isn't resolved yet (transcript not
+        # written) or if the file genuinely doesn't exist on disk;
+        # the popup surfaces the failure as a "❌ Failed" toast.
+        path = _transcript_path(view)
+        if path is None or not path.exists():
+            return False
+        try:
+            os.startfile(str(path))  # type: ignore[attr-defined]  # Windows-only
+            return True
+        except OSError:
+            return False
+
     @capability(Capability.COPY_PATH)
     def copy_path(self, view: SessionView) -> bool:
         # clip.exe relies on a UTF-16-LE BOM (\xff\xfe) to recognise
@@ -64,3 +86,12 @@ class WindowsOsBackend(_CapabilityProvider):
             return result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False
+
+
+def _transcript_path(view: SessionView) -> Path | None:
+    """``~/.claude/projects/<hash>/<uuid>.jsonl`` for this view, or
+    None when the session uuid hasn't been resolved yet (a fresh
+    process scan that hasn't merged transcript info)."""
+    if not view.session_uuid:
+        return None
+    return Path.home() / ".claude" / "projects" / project_hash(view.project_path) / f"{view.session_uuid}.jsonl"

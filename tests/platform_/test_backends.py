@@ -168,6 +168,77 @@ class TestOsBackendRevealCwd:
             assert "C:\\Users\\test\\foo" in run.call_args[0][0][1]
 
 
+class TestOsBackendRevealTranscript:
+    """`reveal_transcript` opens ``~/.claude/projects/<hash>/<uuid>.jsonl``
+    with the user's default app — Notepad/VSCode on Windows, the Finder-
+    associated app on macOS. Mock both the OS launcher and the file's
+    existence so the tests stay hermetic."""
+
+    def _view(self, project_path: Path, uuid: str) -> SessionView:
+        s = Session(pid=1, project_path=project_path, session_uuid=uuid,
+                    last_activity=datetime(2026,5,1,12,0,tzinfo=timezone.utc))
+        return replace_view_with_caps(_degraded_view(s), {Capability.REVEAL_TRANSCRIPT})
+
+    def test_macos_opens_jsonl_with_open(self, tmp_path):
+        from claude_island.platform_.os.macos import MacOsBackend, _transcript_path
+        v = self._view(Path("/Users/test/foo"), "abc-123")
+        expected = _transcript_path(v)
+        backend = MacOsBackend()
+        # Make the path "exist" by patching Path.exists — avoids creating
+        # a file under the user's real ~/.claude on the test runner.
+        with mock.patch.object(Path, "exists", return_value=True), \
+             mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)) as run:
+            assert backend.reveal_transcript(v) is True
+            assert run.call_args[0][0] == ["open", str(expected)]
+
+    def test_macos_returns_false_when_file_missing(self):
+        from claude_island.platform_.os.macos import MacOsBackend
+        v = self._view(Path("/Users/test/foo"), "abc-123")
+        backend = MacOsBackend()
+        with mock.patch.object(Path, "exists", return_value=False), \
+             mock.patch("subprocess.run") as run:
+            assert backend.reveal_transcript(v) is False
+            run.assert_not_called()
+
+    def test_macos_returns_false_when_uuid_empty(self):
+        from claude_island.platform_.os.macos import MacOsBackend
+        v = self._view(Path("/Users/test/foo"), "")
+        backend = MacOsBackend()
+        with mock.patch("subprocess.run") as run:
+            assert backend.reveal_transcript(v) is False
+            run.assert_not_called()
+
+    def test_windows_opens_jsonl_via_startfile(self):
+        # os.startfile is Windows-only — patch on the windows module so
+        # the test runs cross-platform (POSIX runners don't have it).
+        from claude_island.platform_.os import windows as win_mod
+        from claude_island.platform_.os.windows import WindowsOsBackend, _transcript_path
+        v = self._view(Path("C:/projects/foo"), "abc-123")
+        expected = _transcript_path(v)
+        backend = WindowsOsBackend()
+        startfile = mock.Mock()
+        with mock.patch.object(Path, "exists", return_value=True), \
+             mock.patch.object(win_mod.os, "startfile", startfile, create=True):
+            assert backend.reveal_transcript(v) is True
+            startfile.assert_called_once_with(str(expected))
+
+    def test_windows_returns_false_when_uuid_empty(self):
+        from claude_island.platform_.os.windows import WindowsOsBackend
+        v = self._view(Path("C:/projects/foo"), "")
+        backend = WindowsOsBackend()
+        assert backend.reveal_transcript(v) is False
+
+    def test_windows_returns_false_when_startfile_raises(self):
+        from claude_island.platform_.os import windows as win_mod
+        from claude_island.platform_.os.windows import WindowsOsBackend
+        v = self._view(Path("C:/projects/foo"), "abc-123")
+        backend = WindowsOsBackend()
+        with mock.patch.object(Path, "exists", return_value=True), \
+             mock.patch.object(win_mod.os, "startfile",
+                               side_effect=OSError("no app"), create=True):
+            assert backend.reveal_transcript(v) is False
+
+
 class TestOsBackendCopyPath:
     """Pin the encoding contracts for clipboard writes — pbcopy reads
     UTF-8, clip.exe needs a UTF-16 BOM. Mock subprocess so the test

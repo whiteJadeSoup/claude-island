@@ -1479,6 +1479,16 @@ def _short_uuid(uuid: str) -> str:
     return uuid[:8]
 
 
+def _transcript_path_for_display(project_path: Path, session_uuid: str) -> Path:
+    """``~/.claude/projects/<hash>/<uuid>.jsonl`` for the popup's
+    Transcript row. Single source of truth for the path the user sees;
+    the OS backend recomputes the same path when actually opening the
+    file. Two computations stay in sync because both call
+    ``core.models.project_hash`` on the same cwd."""
+    from claude_island.core.models import project_hash as _ph
+    return Path.home() / ".claude" / "projects" / _ph(project_path) / f"{session_uuid}.jsonl"
+
+
 # Per-model bar palette. Shared between the SPEND card (top-3 by cost
 # with "others" in gray) and the detail popup's TOKENS section so the
 # same model gets the same colour treatment in both places.
@@ -1604,6 +1614,7 @@ class SessionDetailPopup(QFrame):
         *,
         on_rename: "Callable[[str, str], bool] | None" = None,
         on_open_folder: "Callable[[], bool] | None" = None,
+        on_open_transcript: "Callable[[], bool] | None" = None,
         on_strip_thinking: "Callable[[], bool] | None" = None,
     ) -> None:
         super().__init__(parent)
@@ -1626,6 +1637,7 @@ class SessionDetailPopup(QFrame):
         # is also a Qt slot below).
         self._on_rename = on_rename
         self._on_open_folder_cb = on_open_folder
+        self._on_open_transcript_cb = on_open_transcript
         self._on_strip_thinking_cb = on_strip_thinking
         # Inline rename state — only populated while the user is editing.
         self._name_label: QLabel | None = None
@@ -1956,6 +1968,42 @@ class SessionDetailPopup(QFrame):
         path_row.register_reveal(open_link)
         layout.addWidget(path_row)
 
+        # Transcript row — displays the .jsonl path and opens it with
+        # the user's default app for the extension. Suppressed when no
+        # session uuid is resolved (file path would be ill-formed —
+        # ``<project_dir>/.jsonl`` — and clicking would no-op anyway).
+        if sess_uuid:
+            transcript_path = _transcript_path_for_display(
+                self._fallback.project_path, sess_uuid,
+            )
+            tr_row = _HoverRevealRow()
+            tr_h = QHBoxLayout(tr_row)
+            tr_h.setContentsMargins(0, 0, 0, 0)
+            tr_h.setSpacing(4)
+            tk = mk_label("Transcript", elide=False)
+            tk.setStyleSheet("color: #6b7280; font-size: 11px;")
+            tk.setFixedWidth(54)
+            tk.setAlignment(Qt.AlignmentFlag.AlignTop)
+            tk.setToolTip("Session transcript file (.jsonl)")
+            tr_h.addWidget(tk)
+            tv = mk_label(str(transcript_path), elide=False)
+            tv.setStyleSheet("color: #e8e8e8; font-size: 12px;")
+            tv.setWordWrap(True)
+            tv.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            tv.setCursor(Qt.CursorShape.PointingHandCursor)
+            tv.setToolTip("Open transcript in default app")
+            tv.mousePressEvent = lambda _: self._on_open_transcript()
+            tr_h.addWidget(tv, 1)
+            tr_open = QPushButton("↗")
+            tr_open.setStyleSheet(_STYLE_TEXT_LINK)
+            tr_open.setCursor(Qt.CursorShape.PointingHandCursor)
+            tr_open.setToolTip("Open transcript in default app")
+            tr_open.setFixedWidth(16)
+            tr_open.clicked.connect(self._on_open_transcript)
+            tr_h.addWidget(tr_open)
+            tr_row.register_reveal(tr_open)
+            layout.addWidget(tr_row)
+
         if d and d.git_branch and d.git_branch.upper() != "HEAD":
             layout.addWidget(self._kv_row("Branch", d.git_branch))
         if d and d.started_at is not None:
@@ -2223,6 +2271,15 @@ class SessionDetailPopup(QFrame):
             self._show_status(f"✓ Opened {path}", color="#9ca3af")
         else:
             self._show_status(f"❌ Failed to open {path}", color="#ef4444")
+
+    def _on_open_transcript(self) -> None:
+        if self._on_open_transcript_cb is None:
+            self._show_status("Open-transcript action is not wired", color="#ef4444")
+            return
+        if self._on_open_transcript_cb():
+            self._show_status("✓ Opened transcript", color="#9ca3af")
+        else:
+            self._show_status("❌ Failed to open transcript", color="#ef4444")
 
     # ------------------------------------------------------------------
     # Inline session rename
@@ -5177,6 +5234,9 @@ class ExpandedWindow(QWidget):
         def _do_open_folder() -> bool:
             return bool(self._dispatch(view, Capability.REVEAL_CWD))
 
+        def _do_open_transcript() -> bool:
+            return bool(self._dispatch(view, Capability.REVEAL_TRANSCRIPT))
+
         def _do_strip_thinking() -> bool:
             return bool(self._dispatch(view, Capability.RESET_THINKING))
 
@@ -5184,6 +5244,7 @@ class ExpandedWindow(QWidget):
             details, view.session, parent=self,
             on_rename=_do_rename,
             on_open_folder=_do_open_folder,
+            on_open_transcript=_do_open_transcript,
             on_strip_thinking=_do_strip_thinking,
         )
         # Force a layout activation BEFORE move + show so the popup's

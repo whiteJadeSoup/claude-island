@@ -69,6 +69,7 @@ class Capability(StrEnum):
     """
     FOCUS = "focus"                   # bring the session's pane/tab/window to front
     REVEAL_CWD = "reveal_cwd"         # OS file manager: open the cwd
+    REVEAL_TRANSCRIPT = "reveal_transcript"  # open the session's .jsonl in the default app
     COPY_PATH = "copy_path"           # OS clipboard: cwd as text
     RENAME = "rename"                 # rewrite session_names.json (kwargs: new_name=str)
     RESET_THINKING = "reset_thinking" # strip 'thinking' blocks from JSONL transcript
@@ -78,12 +79,13 @@ class Capability(StrEnum):
 
 
 CAPABILITY_SCOPE: dict[Capability, Scope] = {
-    Capability.FOCUS:          Scope.TERMINAL,
-    Capability.REVEAL_CWD:     Scope.OS,
-    Capability.COPY_PATH:      Scope.OS,
-    Capability.RENAME:         Scope.APP,
-    Capability.RESET_THINKING: Scope.APP,
-    Capability.LAUNCH:         Scope.TERMINAL,  # declarative grouping; not consumed by dispatch()
+    Capability.FOCUS:             Scope.TERMINAL,
+    Capability.REVEAL_CWD:        Scope.OS,
+    Capability.REVEAL_TRANSCRIPT: Scope.OS,
+    Capability.COPY_PATH:         Scope.OS,
+    Capability.RENAME:            Scope.APP,
+    Capability.RESET_THINKING:    Scope.APP,
+    Capability.LAUNCH:            Scope.TERMINAL,  # declarative grouping; not consumed by dispatch()
 }
 
 
