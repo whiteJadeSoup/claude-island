@@ -83,6 +83,29 @@ def parse_started_at(raw: object) -> datetime | None:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
 
+def invalidate_cache(pid: int) -> None:
+    """Drop the cached state entry for a single ``pid``.
+
+    Called by the sessions/ watchdog (wired in ``__main__.py``) when
+    ``~/.claude/sessions/<pid>.json`` is modified or created — Claude
+    Code writes this file on every state flip (idle → busy → idle),
+    so an event-driven invalidation makes the next read return the
+    fresh "busy" / "waiting" / "idle" instead of a TTL-stale "idle"
+    that would keep the row marked as not-running for up to
+    ``_TTL_SECONDS`` more.
+
+    Single-pid granularity by design — never touches other pids'
+    cached entries. A flip on one session must not pay the cost of
+    re-reading every other session's state file on the next
+    snapshotter wake; just ``pop(pid, None)`` and let the rest
+    stay warm.
+
+    Idempotent on a missing key. Thread-safe via the same module
+    lock that guards ``read_session_state``."""
+    with _cache_lock:
+        _cache.pop(pid, None)
+
+
 def reset_cache_for_tests() -> None:
     """Drop the cache. Tests use this between cases so a stale entry
     from one test doesn't leak into the next."""

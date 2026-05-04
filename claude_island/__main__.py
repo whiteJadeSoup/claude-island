@@ -524,6 +524,45 @@ _world_marshaler.snap_ready.emit(snapshotter.build_now())
 _CLAUDE_PROJECTS.mkdir(parents=True, exist_ok=True)
 
 file_watcher.watch(_CLAUDE_PROJECTS, jsonl_parser.parse_file)
+
+# Sessions/<pid>.json status-file watcher. Claude Code writes this
+# file on every state flip (idle → busy → idle); without monitoring
+# it we only learn about a flip when the next jsonl line is written
+# — which can lag the flip by several seconds during the model's
+# "thinking" window before the first token streams. By the time the
+# jsonl event arrives the user has already seen the prompt sit
+# unchanged for ~5 s in the island.
+#
+# Wire-up: same FileWatcher instance, second watch() call. The
+# callback is intentionally tiny (parse pid from filename, drop
+# that pid's session_state cache entry, kick the snapshotter); all
+# heavier work happens on the snapshotter's worker thread, off the
+# watchdog thread.
+_CLAUDE_SESSIONS = Path.home() / ".claude" / "sessions"
+_CLAUDE_SESSIONS.mkdir(parents=True, exist_ok=True)
+
+
+def _on_session_state_file_changed(path: Path) -> None:
+    """sessions/<pid>.json written/modified → invalidate just that
+    pid's cache entry and wake the snapshotter so the new status
+    shows up within the next debounce window (~150 ms total).
+
+    Single-pid granularity: ``invalidate_cache(pid)`` only touches
+    the one entry — we don't blow away the whole cache so other
+    sessions' state stays warm and the next snapshot doesn't pay
+    N disk reads it would have skipped."""
+    try:
+        pid = int(path.stem)
+    except ValueError:
+        # Filename wasn't <pid>.json (e.g. a temp / lock file). Ignore.
+        return
+    session_state_reader.invalidate_cache(pid)
+    snapshotter.wake()
+
+
+file_watcher.watch(
+    _CLAUDE_SESSIONS, _on_session_state_file_changed, suffix=".json",
+)
 file_watcher.start()
 
 # Backfill runs in a thread pool started immediately after jsonl_parser

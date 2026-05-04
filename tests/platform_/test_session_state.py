@@ -54,6 +54,65 @@ def test_malformed_json_returns_none(tmp_path):
     assert session_state.read_session_state(555, sessions_dir=tmp_path) is None
 
 
+class TestInvalidateCache:
+    """Single-pid cache invalidation: drives the sessions/ watchdog
+    fix for slow status-change propagation. Wiring layer
+    (__main__.py) calls invalidate_cache(pid) when sessions/<pid>.json
+    is modified so the next read bypasses TTL and picks up the
+    fresh status word.
+
+    The granularity invariant is critical — invalidation must NEVER
+    leak into other pids' cache entries. Mass-clearing the cache on
+    every status flip would force a redundant disk read for every
+    other session on the next snapshot tick (10+ sessions during
+    active development).
+    """
+
+    def test_invalidate_drops_only_target_pid(self, tmp_path):
+        # Seed cache for two pids.
+        _write_state(tmp_path, 1234, {"status": "busy"})
+        _write_state(tmp_path, 5678, {"status": "idle"})
+        session_state.read_session_state(1234, sessions_dir=tmp_path)
+        session_state.read_session_state(5678, sessions_dir=tmp_path)
+        # Both should be in cache now.
+        assert 1234 in session_state._cache
+        assert 5678 in session_state._cache
+
+        session_state.invalidate_cache(1234)
+
+        # 1234 evicted; 5678 untouched. Single-pid granularity.
+        assert 1234 not in session_state._cache
+        assert 5678 in session_state._cache
+
+    def test_invalidate_unknown_pid_is_noop(self, tmp_path):
+        """Invalidating a pid that was never cached must not raise —
+        the watchdog can fire for a pid we haven't read yet (e.g.
+        first-write of a brand-new sessions/<pid>.json)."""
+        # Seed an unrelated pid first so we can confirm it survives.
+        _write_state(tmp_path, 1234, {"status": "idle"})
+        session_state.read_session_state(1234, sessions_dir=tmp_path)
+
+        session_state.invalidate_cache(99999)  # never cached
+
+        assert 1234 in session_state._cache  # untouched
+
+    def test_invalidate_then_read_picks_up_fresh_value(self, tmp_path):
+        """End-to-end of the bug fix: write idle → read → write busy →
+        invalidate → read again must return busy (not the cached idle
+        that the TTL would otherwise hold)."""
+        _write_state(tmp_path, 1234, {"status": "idle"})
+        first = session_state.read_session_state(1234, sessions_dir=tmp_path)
+        assert first["status"] == "idle"
+
+        # Disk update — without invalidate the next read returns the
+        # cached "idle" until TTL expires.
+        _write_state(tmp_path, 1234, {"status": "busy"})
+        session_state.invalidate_cache(1234)
+
+        second = session_state.read_session_state(1234, sessions_dir=tmp_path)
+        assert second["status"] == "busy"
+
+
 def test_within_ttl_returns_cached_value(tmp_path):
     """A second read for the same pid within the TTL must NOT touch
     the disk. We prove that by mutating the file after the first
