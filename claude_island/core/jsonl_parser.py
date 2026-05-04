@@ -18,6 +18,80 @@ from .usage_registry import UsageRegistry
 _FRACTIONAL_OVERFLOW = re.compile(r"(\.\d{6})\d+")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Subagent path classification — purely structural, no file I/O.
+#
+# Claude Code's storage convention (sessionStorage.ts):
+#
+#   <projects_dir>/<slug>/<sessionId>.jsonl                   ← main session
+#   <projects_dir>/<slug>/<sessionId>/                        ← session-derived dir
+#       └ subagents/agent-<aid>.jsonl                         ← subagent
+#       └ subagents/workflows/<runId>/agent-<aid>.jsonl       ← workflow subagent
+#       └ subagents/agent-<aid>.meta.json                     ← sidecar (.meta, ignored)
+#       └ remote-agents/remote-agent-<tid>.meta.json          ← remote (.meta, ignored)
+#
+# Two helpers below are the single source of truth for "is this a
+# subagent transcript?" and "what's its parent session?". The parent
+# uuid is always the second segment (parts[1]) — both for direct
+# subagents (parts ≥ 4) and workflow subagents (parts ≥ 6) — because
+# the <sessionId> directory anchors everything below it.
+# ─────────────────────────────────────────────────────────────────────
+
+def _project_slug(file_path: Path, projects_dir: Path) -> str | None:
+    """Return the top-level slug (Claude Code's project hash) for a
+    transcript, regardless of how deeply it's nested.
+
+    Returns None if ``file_path`` isn't under ``projects_dir`` — in
+    that case the parser bails out rather than guess. rglob shouldn't
+    produce such files in practice, but a misconfigured projects_dir
+    or a symlink leak would, and silent misattribution of cost is
+    worse than a no-op."""
+    try:
+        rel = file_path.relative_to(projects_dir)
+    except ValueError:
+        return None
+    parts = rel.parts
+    if not parts:
+        return None
+    return parts[0]
+
+
+def _subagent_parent_uuid(file_path: Path, projects_dir: Path) -> str | None:
+    """Parent session uuid if ``file_path`` is a subagent transcript;
+    None if it's a main session (or anything else we don't recognise).
+
+    Detection is path-only: the third segment (parts[2]) must be the
+    literal ``subagents`` — the directory Claude Code uses to anchor
+    every subagent file regardless of workflow nesting depth. The
+    second segment (parts[1]) is then the parent ``<sessionId>``."""
+    try:
+        rel = file_path.relative_to(projects_dir)
+    except ValueError:
+        return None
+    parts = rel.parts
+    # main session: <slug>/<uuid>.jsonl  →  len 2
+    # subagent:     <slug>/<sid>/subagents/agent-<aid>.jsonl  →  len ≥ 4
+    if len(parts) >= 4 and parts[2] == "subagents":
+        return parts[1]
+    return None
+
+
+def _is_main_session_file(file_path: Path, projects_dir: Path) -> bool:
+    """True iff ``file_path`` is a main-session transcript (the kind
+    addressable as a session in HISTORY).
+
+    Equivalent to ``_subagent_parent_uuid(...) is None`` AND
+    ``len(rel.parts) == 2``. The double-check rejects any future
+    `<slug>/<sid>/foo.jsonl` placement that isn't a subagent but
+    also isn't a top-level session — e.g. an experimental Claude Code
+    feature dumping derived data alongside subagents/."""
+    try:
+        rel = file_path.relative_to(projects_dir)
+    except ValueError:
+        return False
+    return len(rel.parts) == 2
+
+
 class JsonlParser:
     """Incrementally parses Claude Code JSONL session files.
 
@@ -101,9 +175,19 @@ class JsonlParser:
         touched). Cheap — same scan ``backfill_all`` already does.
         Errors during enumeration return an empty set so the caller
         skips its mutation, which is the safe default for a gc.
+
+        Subagent transcripts (``<sid>/subagents/agent-*.jsonl`` and
+        their ``workflows/<runId>/`` children) are filtered — they are
+        not addressable as standalone sessions. Without this filter
+        every subagent shows up in HISTORY as a broken pseudo-session
+        and any cleanup keyed on the returned set would mis-classify
+        ``agent-<aid>`` as a "live" uuid.
         """
         try:
-            return {p.stem for p in self._projects_dir.rglob("*.jsonl")}
+            return {
+                p.stem for p in self._projects_dir.rglob("*.jsonl")
+                if _is_main_session_file(p, self._projects_dir)
+            }
         except OSError:
             return set()
 
@@ -131,6 +215,11 @@ class JsonlParser:
         Intended to run once at startup in a background thread. Checks
         the stop event between files so shutdown doesn't have to wait
         for the entire history to finish.
+
+        Both main-session and subagent transcripts are parsed — subagent
+        cost has to flow through ``_parse_incremental`` so it gets
+        recorded against the parent session. The "is this a subagent?"
+        decision happens inside the parser, not here at enumeration.
         """
         for jsonl_file in self._projects_dir.rglob("*.jsonl"):
             if self._stop_event.is_set():
@@ -204,9 +293,29 @@ class JsonlParser:
         if not chunk:
             return
 
-        # session_uuid = filename stem; project_path = parent dir name
-        session_uuid = file_path.stem
-        project_path = file_path.parent.name  # hashed project id
+        # Path-level identity. For a main session the layout is
+        #   <projects_dir>/<slug>/<sessionId>.jsonl
+        # so file.stem is the uuid and file.parent.name is the slug.
+        # For a subagent it's
+        #   <projects_dir>/<slug>/<parent-sid>/subagents/[workflows/<runId>/]agent-<aid>.jsonl
+        # — we route its cost/activity to the parent's uuid so it rolls
+        # up into the parent session's totals (and the sidechain count).
+        # ``project_path`` is always the top-level slug regardless of
+        # nesting depth; without this fix subagents would emit activity
+        # under "subagents" / "<runId>" and SessionRegistry's per-project
+        # join would drop the bump on the floor.
+        parent_uuid = _subagent_parent_uuid(file_path, self._projects_dir)
+        is_subagent = parent_uuid is not None
+        slug = _project_slug(file_path, self._projects_dir)
+        if slug is None:
+            # File outside our projects_dir — defensive, rglob shouldn't
+            # produce these, but a misconfigured projects_dir could.
+            return
+        if is_subagent:
+            session_uuid = parent_uuid          # type: ignore[assignment]
+        else:
+            session_uuid = file_path.stem
+        project_path = slug
 
         # Tail-follow pattern: only commit offsets at fully-terminated
         # line boundaries. If the chunk ends mid-line (writer is
@@ -221,7 +330,16 @@ class JsonlParser:
 
         batch: list[UsageRecord] = []
         last_activity: datetime | None = None
-        meta = self._session_meta.setdefault(session_uuid, {})
+        # Subagents get a throwaway local meta — any ai-title / git-branch
+        # / cwd written by a subagent's transcript MUST NOT pollute the
+        # parent's _session_meta entry. The parent owns its own metadata.
+        # Using a discardable dict (rather than `if meta is not None`
+        # guards on every write below) keeps the existing parse loop
+        # untouched — writes just don't survive past this function.
+        if is_subagent:
+            meta: dict = {}
+        else:
+            meta = self._session_meta.setdefault(session_uuid, {})
         # earliest_ts → started_at (first user prompt time)
         # latest_ts   → last_activity (used by DormantSessionSource to sort
         #               offline sessions by recency without re-stat'ing files)
@@ -317,7 +435,13 @@ class JsonlParser:
                     cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
                     cache_read_tokens=usage.get("cache_read_input_tokens", 0),
                     message_id=message_id if isinstance(message_id, str) else None,
-                    is_sidechain=bool(entry.get("isSidechain")),
+                    # Any record sourced from a subagent file is, by
+                    # definition, a sidechain of the parent session —
+                    # forced True regardless of the row's own isSidechain
+                    # flag (which Claude Code may or may not stamp on
+                    # rows inside agent-*.jsonl). This keeps the parent's
+                    # sidechain_count accurate when the popup renders.
+                    is_sidechain=is_subagent or bool(entry.get("isSidechain")),
                 ))
                 if last_activity is None or ts > last_activity:
                     last_activity = ts
