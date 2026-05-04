@@ -809,6 +809,29 @@ class _ElidingLabel(QLabel):
         h = super().minimumSizeHint().height()
         return QSize(0, h)
 
+    def sizeHint(self) -> "QSize":  # type: ignore[override]
+        # Always report sizeHint based on the FULL text, NOT the
+        # currently-displayed (possibly elided) form. Without this
+        # override, QLabel.sizeHint reads its internal text — which
+        # `_apply_elision` has already replaced with the shorter
+        # elided string. Result: layout queries sizeHint, gets the
+        # shrunken value, allocates less width, resizeEvent triggers
+        # another elision pass, sizeHint shrinks further, ... a
+        # feedback loop that collapses the label to ~9 chars (e.g.
+        # "active now" → "active n…" → "active …" → "act…").
+        # Reporting full-text width breaks the loop: layout always
+        # *prefers* to give us full width; if there isn't enough,
+        # we elide gracefully — but next layout pass still asks for
+        # full width, so the allocation doesn't keep shrinking.
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QFontMetrics
+        if not self._full_text:
+            return super().sizeHint()
+        metrics = QFontMetrics(self.font())
+        w = metrics.horizontalAdvance(self._full_text)
+        h = super().sizeHint().height()
+        return QSize(w, h)
+
     def _apply_elision(self) -> None:
         from PySide6.QtCore import Qt as _Qt
         from PySide6.QtGui import QFontMetrics
@@ -4603,12 +4626,29 @@ class ExpandedWindow(QWidget):
         # narrow allocations. Same dual rationale as name_label:
         # neuter width-propagation + elide on overflow rather than
         # hard-clip.
+        #
+        # stretch=1 is load-bearing here. Without it, the bottom-row
+        # layout is `[chip + status + addStretch()]` with all three
+        # at default sizePolicy. When available width drops below
+        # `chip.sizeHint + status.sizeHint`, Qt picks the most
+        # compressible widget — status (because _ElidingLabel reports
+        # minimumSize=0) — and squeezes it preferentially, eliding
+        # text well before chip ever yields a pixel. Result: rows
+        # whose status would comfortably fit displayed as "active
+        # 8d a…" while chip stayed at its full sizeHint, even with
+        # plenty of slack on the right (caught by user feedback;
+        # see test_status_label_keeps_full_width_in_card).
+        # stretch=1 on status (and dropping the trailing
+        # addStretch) flips the priority: status absorbs both the
+        # surplus AND deficit. Surplus → status renders wider but
+        # text stays left-aligned (visually identical to before).
+        # Deficit → status still elides first, which is the correct
+        # behaviour ("active …" is more graceful than "Opu…").
         status_label = _ElidingLabel()
         status_label.setObjectName("status_label")
         status_label.setStyleSheet(_STYLE_STATUS)
         status_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        bottom.addWidget(status_label)
-        bottom.addStretch()
+        bottom.addWidget(status_label, 1)
 
         outer.addLayout(bottom)
 

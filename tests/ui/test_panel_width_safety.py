@@ -364,6 +364,125 @@ def test_eliding_label_clears_tooltip_when_text_fits(qtbot):
     )
 
 
+def test_eliding_label_sizehint_stays_at_full_text_width(qtbot):
+    """Regression guard: `_ElidingLabel.sizeHint().width()` must
+    always reflect the FULL text width, even after the label has been
+    resized narrower and elided. If sizeHint reports the (shrunken)
+    elided form's width, layout queries it on the next pass, allocates
+    less, the label re-elides at the smaller width, sizeHint shrinks
+    again — a feedback loop that was observed collapsing 'active now'
+    to 'active n…' (and worse) in standalone session rows."""
+    from claude_island.ui.expanded_window import _ElidingLabel
+    from PySide6.QtGui import QFontMetrics
+
+    text = "active now"
+    lbl = _ElidingLabel(text)
+    qtbot.addWidget(lbl)
+
+    fm = QFontMetrics(lbl.font())
+    full_w = fm.horizontalAdvance(text)
+
+    # Resize narrower than the full text — forces elision.
+    lbl.resize(40, 20)
+    lbl.show()
+    qtbot.waitExposed(lbl)
+
+    # The visible (super) text is now the elided form …
+    from PySide6.QtWidgets import QLabel as _QL
+    assert _QL.text(lbl) != text, "elision should have kicked in"
+
+    # … but sizeHint must still ask for full-text width, otherwise
+    # the layout's next allocation pass will use the shrunken value
+    # and the elision feeds back on itself.
+    assert lbl.sizeHint().width() == full_w, (
+        f"sizeHint().width() = {lbl.sizeHint().width()}, "
+        f"expected {full_w} (full-text width). After eliding, "
+        "QLabel.sizeHint reads the now-shrunken internal text — "
+        "the override must report the FULL text width to keep the "
+        "layout from collapsing the label further on each pass."
+    )
+
+
+def test_session_row_status_label_absorbs_remaining_width(qtbot):
+    """Regression: status_label in the bottom row of a session row
+    must absorb leftover horizontal space (stretch=1), so it never
+    gets squeezed below its sizeHint when the chip stays at its own
+    sizeHint. Without stretch=1, Qt's deficit-shrinking heuristic
+    picks the most-compressible widget — status (_ElidingLabel,
+    minimumSize=0) — and elides it preferentially even when the row
+    has plenty of slack on the right. User-reported as 'active 8d a…'
+    with visible space remaining."""
+    from claude_island.core.models import Session, UsageTotals, SessionDetails
+    from claude_island.ui.controller import IslandController
+    from claude_island.ui.expanded_window import ExpandedWindow
+    from PySide6.QtWidgets import QLabel
+
+    capsule = QWidget(); capsule.show()
+    qtbot.addWidget(capsule)
+
+    def get_details(session):
+        return SessionDetails(
+            session=session, name="build-mini-cc", ai_title=None,
+            git_branch=None, last_prompt=None,
+            started_at=datetime.now(timezone.utc) - timedelta(days=8),
+            status="idle", cc_version="2.1.123",
+            cost_usd=4.66, turn_count=5, sidechain_count=0,
+            latest_model="claude-opus-4-7",
+        )
+
+    panel = ExpandedWindow(
+        capsule=capsule,
+        controller=IslandController(),
+        get_usage_totals=lambda period: UsageTotals(period=period),
+        get_session_details=get_details,
+    )
+    qtbot.addWidget(panel)
+
+    s = Session(
+        pid=99, project_path=Path("/tmp/build-mini-cc"),
+        session_uuid="",
+        last_activity=datetime.now(timezone.utc) - timedelta(days=8),
+    )
+    panel._render_sessions([s])
+    panel.show()
+    qtbot.waitExposed(panel)
+
+    btn = panel._rows[99]
+    status = btn.findChild(QLabel, "status_label")
+
+    # Structural assertion: the bottom row's LAST layout item must be
+    # status_label itself (added with stretch=1), NOT a trailing
+    # QSpacerItem from `addStretch()`. The deficit-shrink bug
+    # (status truncated as 'active 8d a…') manifests when status has
+    # default stretch=0 and competes with chip for space; Qt picks
+    # status to squeeze because it's the only widget with
+    # minimumSize=0 (`_ElidingLabel`). Putting stretch on status
+    # itself flips the priority — surplus AND deficit hit status,
+    # never chip. Verifying the *structure* (status is the stretch
+    # slot) catches a regression even in offscreen tests where the
+    # offscreen font metrics don't reproduce the deficit case.
+    bottom = btn.layout().itemAt(1)
+    bottom_layout = bottom.layout() if hasattr(bottom, "layout") else None
+    assert bottom_layout is not None, "bottom row layout missing"
+
+    last_item = bottom_layout.itemAt(bottom_layout.count() - 1)
+    assert last_item.widget() is status, (
+        f"Bottom row's last item is {last_item}, expected status_label. "
+        "If a trailing addStretch() / spacer slot is back, status no "
+        "longer has stretch priority and will get squeezed first when "
+        "the row width is tight (the 'active 8d a…' truncation)."
+    )
+
+    # Defense in depth: also assert the layout uses no spacer items.
+    from PySide6.QtWidgets import QSpacerItem
+    for i in range(bottom_layout.count()):
+        item = bottom_layout.itemAt(i)
+        assert not isinstance(item, QSpacerItem), (
+            f"bottom_layout item {i} is a QSpacerItem — addStretch() "
+            "got reintroduced; status_label must own the stretch."
+        )
+
+
 def test_eliding_label_respects_user_set_tooltip(qtbot):
     """Custom `setToolTip(...)` from the call site must not be
     overridden by the auto-tooltip. Real call site that depends on
