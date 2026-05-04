@@ -64,6 +64,16 @@ _DOT_LEFT_PAD = 12  # px from pill's left edge to dot's left edge
 _DOT_LABEL_W = 14   # px reserved for the "●" glyph
 _TEXT_LEFT = _DOT_LEFT_PAD + _DOT_LABEL_W + 4  # 4px gap between dot and text
 
+# Cost is rendered in its own fixed right-side slot so a long session
+# name can never push it off the pill (the bug we're fixing). 56 px
+# fits "$999.99" — three digits + decimals + symbol — at the body
+# weight + size used by _STYLE_LABEL with a few px of slack. The slot
+# is only allocated when cost > 0; days with no spend give the space
+# back to the name region. 8 px gap keeps the two regions visually
+# distinct without wasting width.
+_COST_SLOT_W = 56
+_NAME_COST_GAP = 8
+
 # Mini quota progress bar dimensions. 56 px is roughly the same density
 # as the iOS battery widget — recognisable as a progress indicator
 # without competing with the text for attention.
@@ -100,6 +110,12 @@ _ACTIVE_THRESHOLD_SECONDS = 30
 # Capsule no longer owns a QPropertyAnimation directly.)
 
 _STYLE_LABEL = f"color: white; font-size: 12px; font-family: {UI_FONT_STACK};"
+# Cost label uses a slightly muted colour so the eye lands on the
+# session name first; the cost is glanceable secondary info. Same
+# size + weight as the name so the two regions read as one component.
+_STYLE_COST = (
+    f"color: #d4d4d4; font-size: 12px; font-family: {UI_FONT_STACK};"
+)
 # Active = green equalizer bars; idle = static grey dot. Same colour
 # mapping the panel rows use, just rendered through _RowStatusGlyph
 # instead of a styled QLabel.
@@ -324,9 +340,23 @@ class CapsuleWindow(QWidget):
         # pulse — same visual story, more obvious indicator.
         self._dot_label = _RowStatusGlyph(self)
 
+        # Three-region layout (see _apply_capsule): [dot] [name] [cost].
+        # ``_label`` holds the elided session name (left-aligned in its
+        # slot); ``_cost_label`` holds the cost string in a fixed
+        # right-side slot (right-aligned). Splitting cost into its own
+        # widget guarantees a long name can never push the cost off
+        # the pill — the failure mode the previous single-label layout
+        # had with names like "Sync current remote master branch".
         self._label = QLabel("", self)
-        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+        )
         self._label.setStyleSheet(_STYLE_LABEL)
+        self._cost_label = QLabel("", self)
+        self._cost_label.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+        )
+        self._cost_label.setStyleSheet(_STYLE_COST)
 
         # is_breathing is the legacy attribute name for "is the
         # equalizer currently animating" — kept so existing tests /
@@ -442,6 +472,7 @@ class CapsuleWindow(QWidget):
         self._is_dot = True
         self._center_top(_DOT_W, _DOT_H)
         self._label.hide()
+        self._cost_label.hide()
         self._dot_label.hide()
         # Glyph state goes IDLE while in dot mode — equalizer animation
         # would be wasted CPU on an invisible widget.
@@ -525,9 +556,21 @@ class CapsuleWindow(QWidget):
         """Lay out + show the capsule pill for the current snapshot.
 
         Three jobs:
-          - set the label text via _compose_label_text
+          - lay out three regions: [dot] [name (elided)] [cost (slot)]
           - resize the pill (wider when the quota mini-bar is shown)
           - sync the equalizer-glyph running state
+
+        Layout algebra (no quota):
+
+            ┌──────────────────────────────────────────────────────┐
+            │ [dot] [        name (elided middle)        ] [cost ] │
+            └──────────────────────────────────────────────────────┘
+              12px        flex                    8px gap   56px
+
+        When ``cost_str`` is empty, the cost slot collapses and its
+        space is donated back to the name region. When the quota
+        mini-bar is showing, an extra trailing slot is reserved on
+        the right of cost for the bar + percent caption.
 
         Idle exception: when the capsule is collapsed at a non-top
         edge (PR3 idle state), skip the geometry reset so a render
@@ -535,64 +578,159 @@ class CapsuleWindow(QWidget):
         width. Label / dot updates still happen — the user will see
         them next time they hover-out."""
         self._is_dot = False
-        self._label.setText(self._compose_label_text())
         showing_quota = self._should_show_quota_bar()
+        cost_text = self._compose_cost_for_label()
+        self._cost_label.setText(cost_text)
+
         if self._is_idle:
             # Idle layout is owned by _enter_idle; only refresh the
             # active state (dot colour) and skip the geometry pass.
+            # Tooltip + name still want to be in sync for when the
+            # user hovers out and the pill expands.
+            self._label.setText(self._compose_name_for_label(width_px=0))
             self._refresh_active_state()
             self.update()
             self.show()
             return
+
         target_w = _CAPSULE_W_WITH_QUOTA if showing_quota else _CAPSULE_W
         self._center_top(target_w, _CAPSULE_H)
         self._dot_label.setGeometry(_DOT_LEFT_PAD, 0, _DOT_LABEL_W, _CAPSULE_H)
-        right_pad = (
-            (_QUOTA_RIGHT_PAD + _QUOTA_BAR_W + 36)  # 36 px for "78%"
-            if showing_quota
-            else _DOT_LEFT_PAD + _DOT_LABEL_W      # symmetric blank
+
+        quota_slot_w = (
+            _QUOTA_RIGHT_PAD + _QUOTA_BAR_W + 36 if showing_quota else 0
         )
-        self._label.setGeometry(
-            _TEXT_LEFT, 0, target_w - _TEXT_LEFT - right_pad, _CAPSULE_H,
+        # Right-edge anchor for the cost slot. Without quota, leave a
+        # symmetric ``_DOT_LEFT_PAD`` so the pill looks balanced; with
+        # quota, the bar + caption already occupy that space.
+        right_edge_pad = _DOT_LEFT_PAD if not showing_quota else 0
+        cost_slot_w = _COST_SLOT_W if cost_text else 0
+        cost_slot_x = target_w - quota_slot_w - right_edge_pad - cost_slot_w
+        self._cost_label.setGeometry(
+            cost_slot_x, 0, cost_slot_w, _CAPSULE_H,
         )
+
+        # Name region runs from text-left up to the cost slot, with
+        # an 8 px gap so the two reads as separate columns. When the
+        # cost slot is collapsed (cost == 0) the name takes the full
+        # width back.
+        name_right = cost_slot_x - (_NAME_COST_GAP if cost_slot_w else 0)
+        name_w = max(0, name_right - _TEXT_LEFT)
+        self._label.setGeometry(_TEXT_LEFT, 0, name_w, _CAPSULE_H)
+        # Elide the name AGAINST the actual region width — QLabel's
+        # built-in eliding is only end-elide and we want middle so
+        # both prefix ("Sync ...") and suffix ("master branch") of
+        # commit-message-style names stay recognisable.
+        self._label.setText(self._compose_name_for_label(width_px=name_w))
+
         self._dot_label.show()
         self._label.show()
+        if cost_text:
+            self._cost_label.show()
+        else:
+            self._cost_label.hide()
         self._refresh_active_state()
+        self.setToolTip(self._compose_tooltip())
         self.update()
         self.show()
 
-    def _compose_label_text(self) -> str:
-        """Compose pill text from the current data + carousel state.
+    def _compose_name_for_label(self, *, width_px: int) -> str:
+        """Compose the name-region text for the current snapshot,
+        elided to fit ``width_px`` using ``Qt.ElideMiddle``.
 
-        Three modes:
-          * Exactly 1 running ⇒ show its name (no carousel).
-          * ≥2 running ⇒ show the carousel-current name. The rotation
-            timer ticks every ``_ROTATE_INTERVAL_MS``.
-          * 0 running ⇒ "N sessions" count form. Carousel inactive.
+        Three modes (same as before; only the cost suffix moved out):
+          * 0 running ⇒ "N sessions" count form. Always fits, never
+            elided in practice; passing ``width_px=0`` skips the elide
+            pass entirely (used by the idle path that doesn't have
+            a meaningful render width yet).
+          * 1 running ⇒ that session's name.
+          * ≥2 running ⇒ the carousel-current name.
 
-        Cost suffix appended when present (compute already produced
-        empty string for cost <= 0, so no extra check needed here)."""
-        cost_suffix = f"  {self._data.cost_str}" if self._data.cost_str else ""
-
+        Middle-elide preserves both the head and tail of long names.
+        For commit-message-style strings the head carries the verb
+        ("Sync ...") and the tail carries the object ("... master
+        branch") — both are useful identifiers; an end-elide would
+        drop the tail entirely and leave the user with a generic
+        prefix. ``QFontMetrics.elidedText`` returns the original
+        string unchanged when it already fits, so short names pay
+        no overhead and tests asserting full names in 1-running
+        scenarios keep passing."""
         if self._rotation_names:
-            # ≥1 running session — render the carousel-current name.
             idx = self._rotation_index % len(self._rotation_names)
-            return f"{self._rotation_names[idx]}{cost_suffix}"
+            full = self._rotation_names[idx]
+        else:
+            count = self._data.flat_count
+            noun = "session" if count == 1 else "sessions"
+            full = f"{count} {noun}"
+        if width_px <= 0:
+            return full
+        from PySide6.QtGui import QFontMetrics
+        fm = QFontMetrics(self._label.font())
+        return fm.elidedText(full, Qt.TextElideMode.ElideMiddle, width_px)
 
-        # 0 running — count form. Use total session count.
-        count = self._data.flat_count
-        noun = "session" if count == 1 else "sessions"
-        return f"{count} {noun}{cost_suffix}"
+    def _compose_cost_for_label(self) -> str:
+        """Cost slot text — empty string suppresses the slot entirely
+        in _apply_capsule. ``compute()`` already returns "" when
+        today's cost is ≤ 0, so no additional check is needed."""
+        return self._data.cost_str
+
+    def _compose_tooltip(self) -> str:
+        """Multi-line tooltip with the FULL session name(s) + cost.
+
+        This is the "tooltip on truncation" pattern the macOS
+        NSStatusItem docs and PatternFly / Carbon UX guides
+        independently recommend: when space forces ellipsis, give
+        users a hover-revealed channel to recover the dropped info.
+
+        Carousel users also benefit — the full list of running
+        sessions appears at once instead of waiting for the rotation
+        to land on each name.
+
+        Tooltip body:
+          * 0 running: ``"N sessions  ·  $X.YZ today"`` (identical
+            to the visible label since both fit)
+          * 1 running: ``"<full name>\\n$X.YZ today"`` (full name
+            unredacted by elide)
+          * ≥2 running: ``"Running:\\n  • <name1>\\n  • <name2>...\\n
+            $X.YZ today"`` (all names listed)
+        """
+        cost_line = (
+            f"{self._data.cost_str} today" if self._data.cost_str else ""
+        )
+        names = self._data.running_names
+        if not names:
+            count = self._data.flat_count
+            noun = "session" if count == 1 else "sessions"
+            return (
+                f"{count} {noun}\n{cost_line}" if cost_line
+                else f"{count} {noun}"
+            )
+        if len(names) == 1:
+            return f"{names[0]}\n{cost_line}" if cost_line else names[0]
+        joined = "\n".join(f"  • {n}" for n in names)
+        body = f"Running:\n{joined}"
+        return f"{body}\n{cost_line}" if cost_line else body
 
     def _on_rotate_tick(self) -> None:
         """Carousel timer hook: advance to the next running name and
         repaint the label. No-op when the rotation list isn't worth
-        rotating (length ≤ 1)."""
+        rotating (length ≤ 1).
+
+        Re-elides against the current name region width — the cost
+        slot stays put across rotations, so re-running the elide pass
+        is the only thing that needs to happen."""
         if len(self._rotation_names) <= 1:
             return
         self._rotation_index = (self._rotation_index + 1) % len(self._rotation_names)
         if not self._is_dot:
-            self._label.setText(self._compose_label_text())
+            self._label.setText(
+                self._compose_name_for_label(width_px=self._label.width()),
+            )
+            # Tooltip lists ALL names so its content doesn't change
+            # across carousel rotations — but if the user hovered
+            # away and back, refreshing here keeps the visible name
+            # and the tooltip's first-listed name visually aligned.
+            self.setToolTip(self._compose_tooltip())
 
     def _update_rotation_state(self) -> None:
         """Sync ``_rotation_names`` with the current running sessions
@@ -945,6 +1083,7 @@ class CapsuleWindow(QWidget):
         self.setGeometry(new_x, self.y(), _IDLE_W, _CAPSULE_H)
         self.setWindowOpacity(_IDLE_OPACITY)
         self._label.hide()
+        self._cost_label.hide()
 
     def _exit_idle(self) -> None:
         """Restore the capsule from idle to its full-width form on
@@ -955,6 +1094,9 @@ class CapsuleWindow(QWidget):
         self._is_idle = False
         self.setWindowOpacity(1.0)
         self._label.show()
+        # _apply_capsule below decides cost_label visibility based on
+        # whether the snapshot's cost is non-zero, so don't unilaterally
+        # show it here — let the layout pass be authoritative.
         # Re-run the layout pass so the capsule expands back to its
         # snapshot-driven width. _apply_capsule reads _is_idle (False
         # now) and picks the normal _CAPSULE_W / _CAPSULE_W_WITH_QUOTA.
@@ -1005,6 +1147,7 @@ class CapsuleWindow(QWidget):
         self._persisted_pos = None
         self.setWindowOpacity(1.0)
         self._label.show()
+        # cost_label visibility decided by _apply_capsule below.
         # Re-apply the capsule layout: reads _persisted_pos (now
         # None) and falls back to primary-screen-top-centre.
         if self._is_dot:
