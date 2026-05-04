@@ -44,7 +44,7 @@ def _qt_message_filter(msg_type: QtMsgType, _ctx, message: str) -> None:
     suppressed_substrings = (
         "QFont::setPointSize",
         "This plugin does not support raise()",  # WindowsWindow noise
-        # Frameless popups (SessionDetailPopup, HistoryDrawer) trigger
+        # Frameless popups (SessionDetailPopup, RecentsDrawer) trigger
         # this when Qt's predicted sizeHint underestimates the post-
         # layout content height by a few pixels. The OS clamps up to
         # the actual minimum, which is the correct behaviour, but Qt
@@ -373,6 +373,39 @@ capsule = CapsuleWindow(
     # provider so a tab click in the panel propagates to the pill.
     get_quota_snapshot=_get_quota_snapshot,
 )
+# Provider-settings hooks: wrap the platform_.providers module-level
+# functions and inject them so the UI layer never imports platform code
+# (import-linter contract). _list_configurable_providers normalises the
+# (name, default_config) shape so the UI can stay free of `cls.default_config`
+# discovery logic.
+def _list_configurable_providers() -> list[tuple[str, dict]]:
+    from claude_island.platform_.providers import all_providers
+    out: list[tuple[str, dict]] = []
+    for name, cls in all_providers().items():
+        cfg_fn = getattr(cls, "default_config", None)
+        if cfg_fn is None:
+            continue
+        try:
+            cfg = cfg_fn()
+        except Exception:
+            cfg = None
+        if isinstance(cfg, dict):
+            out.append((name, cfg))
+    return out
+
+
+def _save_provider_settings(name: str, fields: dict) -> None:
+    from claude_island.platform_.providers import set_provider_settings
+    set_provider_settings(name, fields)
+
+
+def _delete_provider_settings(name: str) -> None:
+    from claude_island.platform_.providers import (
+        delete_provider_settings as _del,
+    )
+    _del(name)
+
+
 expanded = ExpandedWindow(
     capsule=capsule,
     controller=controller,
@@ -390,6 +423,9 @@ expanded = ExpandedWindow(
     # OS → os_backend, APP → app_backend. UI calls this for every
     # user-triggered action and never imports platform code itself.
     dispatch=_dispatcher.dispatch,
+    list_configurable_providers=_list_configurable_providers,
+    save_provider_settings=_save_provider_settings,
+    delete_provider_settings=_delete_provider_settings,
 )
 
 # ---------------------------------------------------------------------------
@@ -445,7 +481,7 @@ _world_marshaler = WorldMarshaler()  # pin reference: QObject lifetime
 # UsageRegistry — it doesn't open files of its own, so construction is
 # essentially free. LaunchIntentRegistry is similarly lightweight.
 # Both are passed into Snapshotter so reconcile can run; they're kept
-# in module scope so HistoryDrawer can also write to launch_intent.
+# in module scope so RecentsDrawer can also write to launch_intent.
 from claude_island.core.dormant_source import DormantSessionSource
 from claude_island.core.launch_intent import LaunchIntentRegistry
 
@@ -554,27 +590,27 @@ _expanded_subscription = (
     )
 )
 
-# ── HistoryDrawer (resume-offline) ─────────────────────────────────────
+# ── RecentsDrawer (resume-offline) ─────────────────────────────────────
 # Uses _dispatcher (already constructed at line 120 area) for the LAUNCH
 # adapter lookup, launch_intent for the optimistic UI transition, and
 # snapshotter.wake to trigger an immediate re-render after Resume click.
-from claude_island.ui.history_drawer import HistoryDrawer
+from claude_island.ui.recents_drawer import RecentsDrawer
 
-history_drawer = HistoryDrawer(
+recents_drawer = RecentsDrawer(
     expanded=expanded,
     dispatcher=_dispatcher,
     launch_intent=launch_intent,
     on_wake=snapshotter.wake,
 )
-expanded.set_history_toggle(history_drawer.toggle)
+expanded.set_recents_toggle(recents_drawer.toggle)
 
-_history_subscription = (
+_recents_subscription = (
     world.observable()
-    .pipe(ops.distinct_until_changed(key_mapper=HistoryDrawer.compute))
+    .pipe(ops.distinct_until_changed(key_mapper=RecentsDrawer.compute))
     .subscribe(
-        on_next=_safe_render("history", history_drawer.render),
+        on_next=_safe_render("recents", recents_drawer.render),
         on_error=lambda e: _safe_stderr_write(
-            f"[claude-island] history pipeline died (upstream error): {e}"
+            f"[claude-island] recents pipeline died (upstream error): {e}"
         ),
     )
 )
@@ -585,8 +621,8 @@ _history_subscription = (
 # macOS users may want Ctrl+Shift+H to avoid Cmd+H "hide app" mapping;
 # that's listed in the plan's Open Decisions and can be revisited.
 from PySide6.QtGui import QKeySequence as _QKeySeq, QShortcut as _QShortcut
-_history_shortcut = _QShortcut(_QKeySeq("Ctrl+H"), expanded, history_drawer.toggle)
-_history_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+_recents_shortcut = _QShortcut(_QKeySeq("Ctrl+H"), expanded, recents_drawer.toggle)
+_recents_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
 
 # Wake hooks: every legacy event source also pokes the snapshotter so a
 # JSONL write / process scan triggers a snap rebuild within the debounce

@@ -243,7 +243,7 @@ class WindowsTerminalAdapter(_CapabilityProvider):
     def launch(self, *, cwd: Path, command: tuple[str, ...]) -> SpawnResult:
         """Spawn a new wt.exe window in ``cwd`` running ``command``.
 
-        Used by HistoryDrawer's Resume click handler — the dormant
+        Used by RecentsDrawer's Resume click handler — the dormant
         session has no live SessionView (that's the whole point), so
         unlike FOCUS this method takes raw cwd + command rather than
         a view.
@@ -256,7 +256,7 @@ class WindowsTerminalAdapter(_CapabilityProvider):
 
         Raises LauncherSpawnError if wt.exe isn't installed (Windows 10
         without the Store-shipped Terminal app) or if the spawn itself
-        fails. Caller (HistoryDrawer) catches and toasts."""
+        fails. Caller (RecentsDrawer) catches and toasts."""
         if shutil.which("wt.exe") is None:
             raise LauncherSpawnError(
                 "Windows Terminal (wt.exe) not found. Install from the "

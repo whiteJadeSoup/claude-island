@@ -103,7 +103,7 @@ class SpawnResult:
     """LAUNCH success metadata. ``terminal_pid`` is the spawned host
     process pid (wt.exe on Windows, osascript on macOS), NOT the final
     claude.exe pid — that one will be discovered later by ProcessScanner.
-    The HistoryDrawer's "couldn't detect new session after 30s" toast
+    The RecentsDrawer's "couldn't detect new session after 30s" toast
     surfaces ``terminal_pid`` so the user can find the right window."""
     terminal_name: str       # adapter name, e.g. 'windows-terminal'
     terminal_pid: int

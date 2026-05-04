@@ -1863,7 +1863,10 @@ class TestAddProviderDialog:
 # ============================================================================
 
 def _panel_with_providers(qtbot, available: list[str], selected: str | None = None,
-                          on_provider_config_changed=None):
+                          on_provider_config_changed=None,
+                          list_configurable_providers=None,
+                          save_provider_settings=None,
+                          delete_provider_settings=None):
     capsule = QWidget()
     capsule.show()
     panel = ExpandedWindow(
@@ -1872,11 +1875,24 @@ def _panel_with_providers(qtbot, available: list[str], selected: str | None = No
         get_usage_totals=lambda period: UsageTotals(period=period),
         available_providers=available,
         selected_provider=selected or (available[0] if available else None),
-        on_provider_config_changed=on_provider_config_changed
+        on_provider_config_changed=on_provider_config_changed,
+        list_configurable_providers=list_configurable_providers,
+        save_provider_settings=save_provider_settings,
+        delete_provider_settings=delete_provider_settings,
     )
     qtbot.addWidget(panel)
     qtbot.addWidget(capsule)
     return panel
+
+
+# Realistic configurable-provider list used by tests that exercise the +
+# button. Mirrors what __main__.py builds from platform_.providers but is
+# hard-coded here so tests don't depend on the platform module.
+_DEFAULT_CONFIGURABLE = [
+    ("zhipu", {"auth_token": "", "base_url": "https://api.z.ai"}),
+    ("minimax", {"auth_token": "", "base_url": "https://api.minimax.chat"}),
+    ("deepseek", {"auth_token": "", "base_url": "https://api.deepseek.com"}),
+]
 
 
 class TestSetAvailableProviders:
@@ -1921,7 +1937,8 @@ class TestPlusButtonVisibility:
         called: list = []
         panel = _panel_with_providers(
             qtbot, ["anthropic"],
-            on_provider_config_changed=lambda: called.append(1)
+            on_provider_config_changed=lambda: called.append(1),
+            list_configurable_providers=lambda: list(_DEFAULT_CONFIGURABLE),
         )
         # The + button is held on the panel as _add_provider_btn.
         assert panel._add_provider_btn is not None
@@ -1934,31 +1951,29 @@ class TestPlusButtonVisibility:
         assert getattr(panel, "_add_provider_btn", None) is None
 
     def test_plus_hidden_when_all_configured(self, qtbot):
-        # All three providers in available → nothing left to add → no +.
+        # All providers in available → nothing left to add → no +.
         panel = _panel_with_providers(
-            qtbot, ["anthropic", "minimax", "zhipu"], "anthropic",
-            on_provider_config_changed=lambda: None
+            qtbot, ["anthropic", "minimax", "zhipu", "deepseek"], "anthropic",
+            on_provider_config_changed=lambda: None,
+            list_configurable_providers=lambda: list(_DEFAULT_CONFIGURABLE),
         )
         assert getattr(panel, "_add_provider_btn", None) is None
 
-    def test_dialog_save_persists_then_triggers_callback(self, qtbot, monkeypatch):
+    def test_dialog_save_persists_then_triggers_callback(self, qtbot):
         # End-to-end through the panel: filling the form and clicking
-        # Save calls set_provider_settings AND invokes the
+        # Save calls the injected save_provider_settings AND invokes the
         # on_provider_config_changed callback exactly once.
         #
-        # Patch the SOURCE symbol (claude_island.platform_.providers
-        # .set_provider_settings) rather than expanded_window's namespace
-        # because _on_dialog_save uses a function-local lazy import.
+        # Inject fake callbacks instead of monkeypatching platform_ —
+        # the panel takes its persistence layer via DI (import-linter
+        # contract: ui must not import platform).
         writes: list[tuple[str, dict]] = []
         refreshes: list = []
-        monkeypatch.setattr(
-            "claude_island.platform_.providers.set_provider_settings",
-            lambda name, fields: writes.append((name, fields))
-        )
 
         panel = _panel_with_providers(
             qtbot, ["anthropic"],
-            on_provider_config_changed=lambda: refreshes.append(1)
+            on_provider_config_changed=lambda: refreshes.append(1),
+            save_provider_settings=lambda name, fields: writes.append((name, fields)),
         )
         # Drive the save handler directly with realistic args.
         panel._on_dialog_save("zhipu", {"auth_token": "k", "base_url": "https://api.z.ai"})
@@ -1998,20 +2013,17 @@ class TestProviderTabContextMenu:
         mm_btn = panel._provider_btns["minimax"]
         assert mm_btn.contextMenuPolicy() != Qt.ContextMenuPolicy.CustomContextMenu
 
-    def test_delete_invokes_platform_helper_and_callback(self, qtbot, monkeypatch):
+    def test_delete_invokes_platform_helper_and_callback(self, qtbot):
         """Driving _on_delete_provider_clicked directly: it must call
-        delete_provider_settings(name) AND fire the rebuild callback
-        exactly once. Patch the SOURCE symbol because the handler uses
-        a function-local lazy import."""
+        the injected delete_provider_settings(name) AND fire the rebuild
+        callback exactly once. Injected via DI rather than monkeypatch
+        (UI doesn't import platform layer)."""
         deletes: list[str] = []
         refreshes: list = []
-        monkeypatch.setattr(
-            "claude_island.platform_.providers.delete_provider_settings",
-            lambda name: deletes.append(name)
-        )
         panel = _panel_with_providers(
             qtbot, ["anthropic", "minimax"], "anthropic",
-            on_provider_config_changed=lambda: refreshes.append(1)
+            on_provider_config_changed=lambda: refreshes.append(1),
+            delete_provider_settings=lambda name: deletes.append(name),
         )
         panel._on_delete_provider_clicked("minimax")
         assert deletes == ["minimax"]

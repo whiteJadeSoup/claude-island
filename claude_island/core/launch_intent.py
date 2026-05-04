@@ -44,7 +44,7 @@ from pathlib import Path
 class LaunchIntent:
     """One pending Resume request waiting for ProcessScanner to confirm.
 
-    Carries the metadata the HistoryDrawer needs to render a launching
+    Carries the metadata the RecentsDrawer needs to render a launching
     row (terminal_name + terminal_pid for the diagnostic toast on
     timeout) and the raw flags the user effectively passed to ``claude``
     (so future telemetry / debugging can see what got run).
@@ -61,7 +61,7 @@ class LaunchIntentRegistry:
     """Thread-safe short-lived store of pending Resume intents.
 
     Used by ``Snapshotter._build_snapshot``'s reconcile pass and by
-    HistoryDrawer's Resume click handler. No subscribers / signals —
+    RecentsDrawer's Resume click handler. No subscribers / signals —
     callers explicitly trigger ``snapshotter.wake()`` after ``add()``;
     Snapshotter calls ``reconcile()`` + ``snapshot()`` during build.
     """

@@ -268,7 +268,7 @@ class ITerm2Adapter(_CapabilityProvider):
     def launch(self, *, cwd: Path, command: tuple[str, ...]) -> SpawnResult:
         """Spawn a new iTerm2 window in ``cwd`` running ``command``.
 
-        Used by HistoryDrawer's Resume click — same contract as the
+        Used by RecentsDrawer's Resume click — same contract as the
         Windows adapter: takes raw cwd + command (no SessionView).
         AppleScript creates a new window with the default profile,
         then writes ``cd <cwd> && <command>`` into the new session.

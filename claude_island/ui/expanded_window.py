@@ -1648,7 +1648,7 @@ class SessionDetailPopup(QFrame):
         # popup stays compact until the user opts in.
         self._prompt_expanded: bool = False
         self._prompt_body: QLabel | None = None
-        self._prompt_toggle: QPushButton | None = None
+        self._prompt_toggle: "CollapsibleLinkButton | None" = None
 
         # Footer action buttons — assigned in _build_footer; some are
         # None when the corresponding action isn't available (e.g.
@@ -2171,9 +2171,17 @@ class SessionDetailPopup(QFrame):
         # rendered width to compare against (QFontMetrics before show()
         # under-reports for CJK by ~40%, so any pre-show heuristic is
         # unreliable). The toggle just waits for the truth.
-        self._prompt_toggle = QPushButton("[展开]")
-        self._prompt_toggle.setStyleSheet(_STYLE_TEXT_LINK)
-        self._prompt_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Shared collapsible-link control — same widget will be used by
+        # RecentsDrawer's preview pane. Lives in ui/_collapsible.py so
+        # both surfaces stay visually identical.
+        from claude_island.ui.collapsible import CollapsibleLinkButton
+        self._prompt_toggle = CollapsibleLinkButton()
+        # We don't connect to the new ``state_changed`` signal because
+        # the existing ``_on_toggle_prompt`` handler internally flips
+        # ``self._prompt_expanded`` (a popup-level flag that drives more
+        # than just the label) — keeping it on ``clicked`` preserves
+        # exact behaviour without churning the rest of the prompt
+        # section.
         self._prompt_toggle.clicked.connect(self._on_toggle_prompt)
         self._prompt_toggle.hide()
         head.addWidget(self._prompt_toggle)
@@ -2443,13 +2451,13 @@ class SessionDetailPopup(QFrame):
             self._prompt_full_view.setPlainText(full)
             self._prompt_full_view.show()
             self._prompt_body.hide()
-            self._prompt_toggle.setText("[收起]")
+            self._prompt_toggle.set_expanded(True)
         else:
             if self._prompt_full_view is not None:
                 self._prompt_full_view.hide()
             self._set_collapsed_prompt_text()  # re-elide in case width changed
             self._prompt_body.show()
-            self._prompt_toggle.setText("[展开]")
+            self._prompt_toggle.set_expanded(False)
         # Re-fit popup height to the new body.
         self.adjustSize()
 
@@ -2964,6 +2972,12 @@ class ExpandedWindow(QWidget):
         get_quota_snapshot: Callable[[], "QuotaSnapshot | None"] | None = None,
         on_provider_config_changed: Callable[[], None] | None = None,
         dispatch: "Callable[..., bool] | None" = None,
+        # Provider settings hooks — injected so the UI never imports
+        # platform_.providers directly (import-linter contract: ui must
+        # not depend on platform). All three are None-able for tests.
+        list_configurable_providers: "Callable[[], list[tuple[str, dict]]] | None" = None,
+        save_provider_settings: "Callable[[str, dict], None] | None" = None,
+        delete_provider_settings: "Callable[[str], None] | None" = None,
     ) -> None:
         super().__init__()
         self._capsule = capsule
@@ -3019,6 +3033,15 @@ class ExpandedWindow(QWidget):
         # updated provider list back via :meth:`set_available_providers`.
         # None → the + button is hidden (no-restart add isn't wired).
         self._on_provider_config_changed = on_provider_config_changed
+        # Three provider-settings callbacks injected by the wiring layer
+        # so this widget never touches platform_.providers directly.
+        # When None (test setup), the corresponding feature degrades:
+        # - list_configurable: empty list → + button stays hidden
+        # - save_provider_settings: dialog Save becomes a no-op
+        # - delete_provider_settings: context-menu Delete becomes a no-op
+        self._list_configurable_providers = list_configurable_providers
+        self._save_provider_settings = save_provider_settings
+        self._delete_provider_settings = delete_provider_settings
         self._provider_btns: dict[str, QPushButton] = {}
         # Hold a reference to the active add-provider dialog so Qt's
         # GC doesn't tear it down before the user can interact with it.
@@ -3147,17 +3170,17 @@ class ExpandedWindow(QWidget):
         self._summary_card = self._build_summary_card()
         root.addWidget(self._summary_card)
 
-        # ── Sessions header (with count badge + history chip) ───────
+        # ── Sessions header (with count badge + recents chip) ───────
         # Count badge makes overflow discoverable: when the list scrolls,
         # the user sees "· 14" and knows there's more below the fold.
-        # The 🗂 chip on the right surfaces dormant sessions (offline
+        # The chip on the right surfaces dormant sessions (offline
         # sessions on disk with no live process) — click opens the
-        # HistoryDrawer. Hidden when there are zero dormant sessions.
+        # RecentsDrawer. Hidden when there are zero dormant sessions.
         self._sessions_title = mk_label("CLAUDE SESSIONS", elide=False)
         self._sessions_title.setStyleSheet(_STYLE_TITLE)
-        self._history_chip = QPushButton("🗂 0")
-        self._history_chip.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._history_chip.setStyleSheet(
+        self._recents_chip = QPushButton("Recents · 0")
+        self._recents_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._recents_chip.setStyleSheet(
             "QPushButton {"
             "  background: rgba(255,255,255,0.06);"
             "  color: #cfcfcf;"
@@ -3171,17 +3194,17 @@ class ExpandedWindow(QWidget):
             "  color: #ffffff;"
             "}"
         )
-        self._history_chip.setFlat(True)
-        self._history_chip.setVisible(False)
-        # Toggle slot — wired from __main__.py via set_history_toggle().
-        self._history_toggle: Callable[[], None] | None = None
-        self._history_chip.clicked.connect(self._on_history_chip_clicked)
+        self._recents_chip.setFlat(True)
+        self._recents_chip.setVisible(False)
+        # Toggle slot — wired from __main__.py via set_recents_toggle().
+        self._recents_toggle: Callable[[], None] | None = None
+        self._recents_chip.clicked.connect(self._on_recents_chip_clicked)
         sessions_header = QHBoxLayout()
         sessions_header.setContentsMargins(0, 0, 0, 0)
         sessions_header.setSpacing(6)
         sessions_header.addWidget(self._sessions_title)
         sessions_header.addStretch(1)
-        sessions_header.addWidget(self._history_chip)
+        sessions_header.addWidget(self._recents_chip)
         root.addLayout(sessions_header)
 
         # ── Sessions scroll area ────────────────────────────────────
@@ -3326,30 +3349,34 @@ class ExpandedWindow(QWidget):
         # Update history chip from dormant + launching counts (resume-offline
         # feature). Hide entirely when zero — keeps the header clean for
         # users who never closed terminals while island was running.
-        self.update_history_count(
+        self.update_recents_count(
             len(snap.dormant_sessions) + len(snap.launching_sessions)
         )
 
     # ── History chip integration ────────────────────────────────────────
 
-    def set_history_toggle(self, toggle: Callable[[], None]) -> None:
-        """Wire the History chip click → HistoryDrawer.toggle. Called
+    def set_recents_toggle(self, toggle: Callable[[], None]) -> None:
+        """Wire the Recents chip click → RecentsDrawer.toggle. Called
         once at boot from __main__.py after the drawer is constructed.
         Kept as a setter (not a ctor arg) because ExpandedWindow already
-        has a long ctor and history is an optional/late-bound feature."""
-        self._history_toggle = toggle
+        has a long ctor and recents is an optional/late-bound feature."""
+        self._recents_toggle = toggle
 
-    def update_history_count(self, n: int) -> None:
-        """Refresh the chip's "🗂 N" label. Hides the chip when n == 0."""
+    def update_recents_count(self, n: int) -> None:
+        """Refresh the chip's "Recents · N" label. Hides when n == 0.
+
+        Plain text (no emoji) so the chip reads as a sibling label to
+        the all-caps "CLAUDE SESSIONS · 7" title on the left — not as a
+        cute icon button."""
         if n <= 0:
-            self._history_chip.setVisible(False)
+            self._recents_chip.setVisible(False)
             return
-        self._history_chip.setText(f"\U0001f5c2 {n}")
-        self._history_chip.setVisible(True)
+        self._recents_chip.setText(f"Recents · {n}")
+        self._recents_chip.setVisible(True)
 
-    def _on_history_chip_clicked(self) -> None:
-        if self._history_toggle is not None:
-            self._history_toggle()
+    def _on_recents_chip_clicked(self) -> None:
+        if self._recents_toggle is not None:
+            self._recents_toggle()
 
     # ------------------------------------------------------------------
     # Internal render helpers (called by render(snap))
@@ -3437,7 +3464,7 @@ class ExpandedWindow(QWidget):
             self._sessions_title.setText(f"CLAUDE SESSIONS · {total_views}")
         else:
             self._sessions_title.setText("CLAUDE SESSIONS")
-        # History chip count is updated separately via update_history_count;
+        # History chip count is updated separately via update_recents_count;
         # render() in __main__'s subscription wires the count from
         # snap.dormant_sessions, not from session_groups.
 
@@ -4608,22 +4635,24 @@ class ExpandedWindow(QWidget):
         """List of (name, default_config_dict) for providers that
         expose ``default_config()`` and aren't already in
         ``_available_providers``. Drives both the + button visibility
-        and the dialog's choice list."""
-        from claude_island.platform_.providers import all_providers
-        out: list[tuple[str, dict]] = []
-        for name, cls in all_providers().items():
-            if name in self._available_providers:
-                continue
-            cfg_fn = getattr(cls, "default_config", None)
-            if cfg_fn is None:
-                continue
-            try:
-                cfg = cfg_fn()
-            except Exception:
-                cfg = None
-            if isinstance(cfg, dict):
-                out.append((name, cfg))
-        return out
+        and the dialog's choice list.
+
+        Source of truth lives in platform_/providers; the wiring layer
+        passes us a callable so this widget never imports platform code
+        (import-linter contract). When the callback is None (tests), the
+        list is empty and the + button stays hidden — matches the legacy
+        "single-provider users see no add UI" behaviour.
+        """
+        if self._list_configurable_providers is None:
+            return []
+        try:
+            full = self._list_configurable_providers()
+        except Exception:
+            return []
+        return [
+            (name, cfg) for (name, cfg) in full
+            if name not in self._available_providers
+        ]
 
     def _on_add_provider_clicked(self) -> None:
         """Open the add-provider dialog adjacent to the + button."""
@@ -4648,8 +4677,8 @@ class ExpandedWindow(QWidget):
         """Dialog Save callback — persist credentials, then ask the
         wiring layer to re-detect providers and push the new list back
         via :meth:`set_available_providers`."""
-        from claude_island.platform_.providers import set_provider_settings
-        set_provider_settings(name, fields)
+        if self._save_provider_settings is not None:
+            self._save_provider_settings(name, fields)
         if self._on_provider_config_changed is not None:
             try:
                 self._on_provider_config_changed()
@@ -4685,8 +4714,8 @@ class ExpandedWindow(QWidget):
         doesn't re-check — keeping the guard in one place avoids the
         "is anthropic deletable?" rule drifting out of sync between
         the wiring and the action."""
-        from claude_island.platform_.providers import delete_provider_settings
-        delete_provider_settings(name)
+        if self._delete_provider_settings is not None:
+            self._delete_provider_settings(name)
         if self._on_provider_config_changed is not None:
             try:
                 self._on_provider_config_changed()

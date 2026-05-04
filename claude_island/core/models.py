@@ -312,7 +312,7 @@ class DormantSession:
     snapshot's ``dormant_sessions`` if the same uuid appears as a live
     or launching session — see ``Snapshotter._build_snapshot`` reconcile.
 
-    The HistoryDrawer UI renders these one row per session, and the
+    The RecentsDrawer UI renders these one row per session, and the
     Resume button triggers a TerminalAdapter LAUNCH that re-spawns
     ``claude --resume <session_uuid>`` in this ``cwd`` carrying the
     permission-mode-derived flags.

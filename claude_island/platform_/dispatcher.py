@@ -187,7 +187,7 @@ class TerminalDispatcher:
 
         Used by view-less capabilities (currently only LAUNCH) where
         the caller has no SessionView to drive ``view.adapter_id``
-        routing — typically the HistoryDrawer asking "which terminals
+        routing — typically the RecentsDrawer asking "which terminals
         can spawn ``claude --resume``?" before letting the user (or
         v1: the highest-priority adapter) pick one.
 

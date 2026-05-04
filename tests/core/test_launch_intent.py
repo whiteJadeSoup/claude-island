@@ -102,7 +102,7 @@ def test_discard_is_idempotent():
 
 
 def test_snapshot_orders_by_requested_at_desc():
-    """Newest intents first so HistoryDrawer can render them with
+    """Newest intents first so RecentsDrawer can render them with
     minimal layout reshuffling as new ones arrive."""
     reg = LaunchIntentRegistry()
     reg.add(_intent("old", ts=datetime(2026, 1, 1, 10, tzinfo=timezone.utc)))

@@ -8,7 +8,7 @@ Why this test exists:
 * The Qt message handler, the render-error wrapper, and a few startup
   exception paths all route through this — a crash there would leave
   Qt in an undefined state on the next emit (silent diagnostic loss).
-* The HistoryDrawer feature added widget labels with emoji (🗂 ⏳ 🛡)
+* The RecentsDrawer feature added widget labels with emoji (🗂 ⏳ 🛡)
   that increase the surface area for Qt internals to log strings
   containing those characters.
 

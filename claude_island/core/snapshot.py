@@ -193,7 +193,7 @@ class WorldSnapshot:
     # Built from JsonlParser._session_meta + UsageRegistry by
     # DormantSessionSource. Snapshotter reconciles: any uuid that's also
     # live or launching is filtered out here. UI renders these in the
-    # HistoryDrawer; never in the main capsule/expanded panel.
+    # RecentsDrawer; never in the main capsule/expanded panel.
     dormant_sessions: tuple[DormantSession, ...] = ()
     # Sessions the user just hit Resume on; we've spawned a terminal but
     # ProcessScanner hasn't yet detected the new claude.exe. Lives at most
