@@ -3,6 +3,9 @@ specific terminal adapter (iTerm2, Kitty, etc. — future files).
 
 Always groups as singletons. FOCUS raises the host app to the front
 via a simple osascript call — "frontmost of process whose unix id is X".
+LAUNCH spawns Terminal.app via ``osascript "tell application Terminal
+to do script ..."`` so RecentsDrawer's Resume works for users who
+aren't on iTerm2 (which has its own LAUNCH on iTerm2Adapter).
 
 This is the only adapter shipped for macOS in PR1 (iterm2/kitty/
 terminal-app adapters come in follow-up PRs when mac hardware testing
@@ -10,16 +13,21 @@ is available).
 """
 from __future__ import annotations
 
+import shlex
 import subprocess
 from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import ClassVar
 
 from claude_island.core.capabilities import (
-    Capability, FocusGranularity, _CapabilityProvider, capability,
+    Capability, FocusGranularity, LauncherSpawnError, SpawnResult,
+    _CapabilityProvider, capability,
 )
 from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
+from claude_island.platform_.terminals.iterm2 import _escape_applescript_string
 from claude_island.platform_.terminals.protocols import TerminalAdapter
 
 _TIMEOUT_S = 3.0
@@ -82,3 +90,47 @@ class GenericMacAdapter(_CapabilityProvider):
             return result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False
+
+    @capability(Capability.LAUNCH)
+    def launch(self, *, cwd: Path, command: tuple[str, ...]) -> SpawnResult:
+        """Spawn Terminal.app and run ``command`` in ``cwd``.
+
+        Used by RecentsDrawer's Resume for macOS users who aren't on
+        iTerm2 (iTerm2Adapter has its own LAUNCH). Terminal.app is
+        present on every Mac — no install dependency.
+
+        AppleScript path:
+          ``tell application "Terminal" to do script "cd ... && claude ..."``
+
+        ``do script`` opens a new window when Terminal isn't already
+        the frontmost app, otherwise reuses the front window — Apple's
+        default behaviour, the user can then Cmd-T for a new tab if
+        they want a fresh window. ``activate`` brings Terminal to the
+        front so the new shell is visible.
+
+        Reports ``terminal_pid`` = the osascript pid (NOT Terminal.app's,
+        which is a long-lived process). Same pattern as iTerm2Adapter.
+
+        Raises ``LauncherSpawnError`` if osascript itself fails to
+        spawn (PATH stripped, user has it disabled). Caller toasts."""
+        cmd_str = "cd " + shlex.quote(str(cwd)) + " && " + " ".join(
+            shlex.quote(a) for a in command
+        )
+        cmd_escaped = _escape_applescript_string(cmd_str)
+        script = (
+            'tell application "Terminal"\n'
+            '  activate\n'
+            f'  do script "{cmd_escaped}"\n'
+            'end tell\n'
+        )
+        try:
+            proc = subprocess.Popen(
+                ["osascript", "-e", script], close_fds=True,
+            )
+        except (OSError, FileNotFoundError) as e:
+            raise LauncherSpawnError(f"osascript spawn failed: {e}") from e
+        return SpawnResult(
+            terminal_name=self.name,
+            terminal_pid=proc.pid,
+            started_at=datetime.now(timezone.utc),
+        )

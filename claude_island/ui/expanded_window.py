@@ -1503,19 +1503,6 @@ _MODEL_BAR_PALETTE = (
 _MODEL_BAR_OTHERS = "#6b7280"
 
 
-def _collapse_prompt(text: str) -> str:
-    """One-line preview of a prompt: take the first newline-terminated
-    line, then truncate to 80 chars, appending ``…`` if any content was
-    elided. Used by the detail popup's collapsed LAST PROMPT view."""
-    if not text:
-        return ""
-    first = text.split("\n", 1)[0]
-    elided = (first != text) or len(first) > 80
-    if len(first) > 80:
-        first = first[:79]
-    return first + ("…" if elided else "")
-
-
 # Re-exported from core/formatting.py so this module's many call sites
 # (popup, row labels, summary card) keep using the local name without
 # churn. The canonical implementation lives in core/ because per-surface
@@ -1643,12 +1630,11 @@ class SessionDetailPopup(QFrame):
         self._name_label: QLabel | None = None
         self._name_edit: "QLineEdit | None" = None
         self._edit_btn: QPushButton | None = None
-        # Prompt collapse state — toggled by the [展开] / [收起] link
-        # in the LAST PROMPT section header. Default collapsed so the
-        # popup stays compact until the user opts in.
-        self._prompt_expanded: bool = False
-        self._prompt_body: QLabel | None = None
-        self._prompt_toggle: "CollapsibleLinkButton | None" = None
+        # LAST PROMPT section — built lazily in _build_prompt_section
+        # via the shared LastPromptSection widget. The widget owns its
+        # own collapse state; the popup just keeps a handle so showEvent
+        # can call refit() once the widget tree is realised.
+        self._prompt_section: "LastPromptSection | None" = None
 
         # Footer action buttons — assigned in _build_footer; some are
         # None when the corresponding action isn't available (e.g.
@@ -2146,114 +2132,25 @@ class SessionDetailPopup(QFrame):
         return row
 
     def _build_prompt_section(self) -> QWidget | None:
-        """LAST PROMPT — collapsed by default to a one-line preview;
-        ``[展开]`` toggles to full text inside a height-capped scrollable
-        text view. Returns None when no prompt is recorded so the
-        divider above it can be skipped too."""
+        """LAST PROMPT — delegates to the shared LastPromptSection widget
+        so SessionDetailPopup and RecentsDrawer's preview pane stay
+        visually identical. Returns None when no prompt is recorded
+        so the caller can skip the divider above it too."""
         d = self._details
         if not d or not d.last_prompt:
             return None
-        full = d.last_prompt
-
-        wrap = QWidget()
-        wrap.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        layout = QVBoxLayout(wrap)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-
-        head = QHBoxLayout()
-        title_lbl = mk_label("LAST PROMPT", elide=False)
-        title_lbl.setStyleSheet(_STYLE_TITLE)
-        head.addWidget(title_lbl)
-        head.addStretch()
-        # Always create the toggle but hide it initially. Visibility is
-        # decided in _set_collapsed_prompt_text once we have a real
-        # rendered width to compare against (QFontMetrics before show()
-        # under-reports for CJK by ~40%, so any pre-show heuristic is
-        # unreliable). The toggle just waits for the truth.
-        # Shared collapsible-link control — same widget will be used by
-        # RecentsDrawer's preview pane. Lives in ui/_collapsible.py so
-        # both surfaces stay visually identical.
-        from claude_island.ui.collapsible import CollapsibleLinkButton
-        self._prompt_toggle = CollapsibleLinkButton()
-        # We don't connect to the new ``state_changed`` signal because
-        # the existing ``_on_toggle_prompt`` handler internally flips
-        # ``self._prompt_expanded`` (a popup-level flag that drives more
-        # than just the label) — keeping it on ``clicked`` preserves
-        # exact behaviour without churning the rest of the prompt
-        # section.
-        self._prompt_toggle.clicked.connect(self._on_toggle_prompt)
-        self._prompt_toggle.hide()
-        head.addWidget(self._prompt_toggle)
-        layout.addLayout(head)
-
-        # Collapsed preview uses a QLabel — single line, no scroll needed.
-        # Expanded view swaps in a read-only QTextEdit (see _on_toggle):
-        #   - WrapAnywhere wraps API keys / URLs / no-space tokens, which
-        #     QLabel.wordWrap=True silently fails to do (it only breaks
-        #     at whitespace).
-        #   - Capped maxHeight + ScrollBarAsNeeded keeps the popup from
-        #     growing past the screen on huge prompts.
-        #   - Read-only + selectable → user can copy parts of the prompt.
-        # Collapsed preview: single-line QLabel.
-        # IMPORTANT: word-wrap is OFF here because:
-        #   - long URLs / API keys lack whitespace, and QLabel(wrap=True)
-        #     reports minimumSizeHint = "longest unbreakable run" wide.
-        #     Multiple long runs stack and push popup width past 320,
-        #     producing the QWindowsWindow::setGeometry mintrack=480
-        #     warning.
-        #   - Single-line preview is the design intent anyway; the
-        #     full text lives in the QTextEdit shown when expanded.
-        # Text is elided to popup-inner-width via QFontMetrics so a
-        # long preview shows the head + "…" instead of being clipped.
-        # elide=False: this label has its own custom resize-time
-        # eliding via QFontMetrics (see _refresh_prompt_body), plus
-        # setSizePolicy(Ignored, ...) below — _ElidingLabel would
-        # double-elide and interfere with the custom logic.
-        self._prompt_body = mk_label("", elide=False)
-        self._prompt_body.setStyleSheet("color: #c9c9c9; font-size: 12px;")
-        self._prompt_body.setWordWrap(False)
-        self._prompt_body.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        # Stash the raw collapsed string so showEvent / resizeEvent can
-        # re-elide if the widget width changes.
-        self._prompt_body._collapsed_text = _collapse_prompt(full)
-        self._set_collapsed_prompt_text()
-        # Holds the QTextEdit when expanded. Built lazily on first
-        # toggle so the collapsed-only common case stays cheap.
-        self._prompt_full_view: QTextEdit | None = None
-        self._prompt_layout = layout
-        layout.addWidget(self._prompt_body)
-
-        return wrap
-
-    def _set_collapsed_prompt_text(self) -> None:
-        """Render the collapsed preview elided to fit popup-inner-width
-        and update the [展开] toggle visibility based on whether elide
-        actually trimmed anything (or the prompt is multi-line).
-
-        Recomputed on every show / toggle-collapse so the ellipsis
-        tracks any width changes and the toggle never desyncs from
-        the actual content state."""
-        if self._prompt_body is None:
-            return
-        raw = getattr(self._prompt_body, "_collapsed_text", "")
-        from PySide6.QtGui import QFontMetrics
-        fm = QFontMetrics(self._prompt_body.font())
+        from claude_island.ui.last_prompt_section import LastPromptSection
         # Inner width = popup width minus root margins (14 left + 14 right)
         # minus a small safety pad so the ellipsis doesn't touch the edge.
-        available = max(40, _PANEL_W - 28 - 4)
-        elided = fm.elidedText(raw, Qt.TextElideMode.ElideRight, available)
-        self._prompt_body.setText(elided)
-
-        # Toggle visibility: show iff the user can't see the full prompt
-        # in the collapsed state — either elide trimmed content or there's
-        # additional content past the first line.
-        full = self._details.last_prompt if self._details else ""
-        truncated = (elided != raw) or ("\n" in full)
-        if self._prompt_toggle is not None and not self._prompt_expanded:
-            self._prompt_toggle.setVisible(truncated)
+        section = LastPromptSection(
+            d.last_prompt,
+            available_width=max(40, _PANEL_W - 28 - 4),
+        )
+        # Re-fit popup geometry whenever the section grows / shrinks so
+        # the popup doesn't clip the expanded QTextEdit.
+        section.expansion_changed.connect(lambda _expanded: self.adjustSize())
+        self._prompt_section = section
+        return section
 
 
     # ------------------------------------------------------------------
@@ -2423,102 +2320,6 @@ class SessionDetailPopup(QFrame):
             return True
         return super().eventFilter(obj, event)
 
-    def _on_toggle_prompt(self) -> None:
-        """Swap between the collapsed QLabel preview and an expanded
-        scrollable QTextEdit so:
-          - long unbroken tokens (API keys, URLs) wrap properly
-            (QLabel only wraps at whitespace; QTextEdit can wrap anywhere)
-          - the popup can't grow beyond a sensible max height
-          - the user can select + copy parts of the full prompt
-        """
-        if self._prompt_body is None or self._prompt_toggle is None:
-            return
-        d = self._details
-        if not d or not d.last_prompt:
-            return
-        self._prompt_expanded = not self._prompt_expanded
-
-        if self._prompt_expanded:
-            full = d.last_prompt
-            # Hard ceiling so a 100k-char paste can't exhaust memory or
-            # overwhelm Qt's text engine. A very long prompt this far
-            # off the norm is more diagnostic than display anyway.
-            if len(full) > 2000:
-                full = full[:1997] + "…"
-            if self._prompt_full_view is None:
-                self._prompt_full_view = self._build_full_prompt_view()
-                self._prompt_layout.addWidget(self._prompt_full_view)
-            self._prompt_full_view.setPlainText(full)
-            self._prompt_full_view.show()
-            self._prompt_body.hide()
-            self._prompt_toggle.set_expanded(True)
-        else:
-            if self._prompt_full_view is not None:
-                self._prompt_full_view.hide()
-            self._set_collapsed_prompt_text()  # re-elide in case width changed
-            self._prompt_body.show()
-            self._prompt_toggle.set_expanded(False)
-        # Re-fit popup height to the new body.
-        self.adjustSize()
-
-    def _build_full_prompt_view(self) -> QTextEdit:
-        """Read-only QTextEdit configured for the expanded LAST PROMPT
-        view. Critical settings:
-
-        * ``LineWrapMode.WidgetWidth`` — wrap to widget bounds rather
-          than letting content drive the size. Without this the
-          textedit's sizeHint follows the longest unbroken token (e.g.
-          a long URL or API key) and pushes the whole popup wider than
-          ``_PANEL_W``, which triggers Qt's ``setGeometry`` warning.
-        * ``setMinimumWidth(0)`` + ``Ignored`` h-policy — explicitly
-          let the parent layout decide the width, overriding the
-          default minimumSizeHint that QTextEdit computes from content.
-        * Transparent background + no frame — the textedit reads as
-          part of the prompt section, not a sub-pane.
-        """
-        from PySide6.QtGui import QTextOption
-        view = QTextEdit()
-        view.setReadOnly(True)
-        view.setFrameStyle(QFrame.Shape.NoFrame)
-        view.setWordWrapMode(QTextOption.WrapMode.WrapAnywhere)
-        view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        view.setMinimumWidth(0)
-        view.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        # Use a fixed height (not just maximumHeight) so QTextEdit's
-        # sizeHint matches its actual on-screen height. With only
-        # maximumHeight the sizeHint stays large (default content-driven
-        # ~400px), popup.adjustSize() over-allocates, and the surplus
-        # gets vertically distributed to header / meta — visible as
-        # the gap between subtitle and ID row.
-        # ~10 lines at 12px / 1.4 lh ≈ 168 → round up to 180.
-        view.setFixedHeight(180)
-        view.setStyleSheet(
-            "QTextEdit {"
-            "    color: #d4d4d4;"
-            "    background: transparent;"
-            "    border: none;"
-            "    padding: 0;"
-            "    font-size: 12px;"
-            "}"
-            "QTextEdit QScrollBar:vertical {"
-            "    background: transparent;"
-            "    width: 6px;"
-            "    margin: 2px;"
-            "}"
-            "QTextEdit QScrollBar::handle:vertical {"
-            "    background: #3a3a3a;"
-            "    border-radius: 3px;"
-            "    min-height: 20px;"
-            "}"
-            "QTextEdit QScrollBar::add-line:vertical,"
-            "QTextEdit QScrollBar::sub-line:vertical {"
-            "    height: 0;"
-            "}"
-        )
-        return view
-
     def _on_strip_thinking(self) -> None:
         """Delegate to the injected callback (which routes through the
         dispatcher → AppBackend.reset_thinking).
@@ -2573,10 +2374,13 @@ class SessionDetailPopup(QFrame):
         super().showEvent(event)
         self._update_bar_widths()
         # Re-compute prompt elide + toggle visibility now that the
-        # widget tree is realised — pre-show QFontMetrics underreports
-        # CJK glyph width and would skip the toggle for prompts that
-        # actually do get elided once rendered.
-        self._set_collapsed_prompt_text()
+        # widget tree is realised — pre-show QFontMetrics under-reports
+        # CJK glyph widths and would skip the toggle for prompts that
+        # do need eliding once rendered. The section's own showEvent
+        # also calls refit, but a forwarded call here keeps the order
+        # consistent with the bar-width refresh above.
+        if self._prompt_section is not None:
+            self._prompt_section.refit()
 
     def _update_bar_widths(self) -> None:
         # Walk the popup's QFrames and update any that carry the

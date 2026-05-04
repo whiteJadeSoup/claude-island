@@ -1225,31 +1225,33 @@ def test_detail_popup_prompt_collapsed_by_default(qtbot):
     qtbot.addWidget(popup)
 
     # Default: collapsed → first line + "…" so the user knows more
-    # content exists beneath.
-    assert popup._prompt_expanded is False
-    assert popup._prompt_body is not None
-    assert popup._prompt_body.text() == "first line of prompt…"
-    assert popup._prompt_toggle is not None
-    assert popup._prompt_toggle.text() == "[展开]"
+    # content exists beneath. The popup delegates to a shared
+    # LastPromptSection widget — its internals are addressed via
+    # popup._prompt_section.
+    section = popup._prompt_section
+    assert section is not None
+    assert section.is_expanded() is False
+    assert section._body.text() == "first line of prompt…"
+    assert section._toggle.text() == "[展开]"
 
     # Toggle → expanded: collapsed QLabel hides, expanded QTextEdit
     # appears with the full body. Toggle text flips to "[收起]".
-    popup._on_toggle_prompt()
-    assert popup._prompt_expanded is True
-    assert popup._prompt_full_view is not None
-    assert popup._prompt_body.isHidden()
-    assert not popup._prompt_full_view.isHidden()
-    full_text = popup._prompt_full_view.toPlainText()
+    section._on_toggle()
+    assert section.is_expanded() is True
+    assert section._full_view is not None
+    assert section._body.isHidden()
+    assert not section._full_view.isHidden()
+    full_text = section._full_view.toPlainText()
     assert "first line of prompt" in full_text
     assert "x" * 100 in full_text  # original tail present
-    assert popup._prompt_toggle.text() == "[收起]"
+    assert section._toggle.text() == "[收起]"
 
     # Toggle back → collapsed: full view hidden, label visible again.
-    popup._on_toggle_prompt()
-    assert popup._prompt_expanded is False
-    assert popup._prompt_full_view.isHidden()
-    assert not popup._prompt_body.isHidden()
-    assert popup._prompt_toggle.text() == "[展开]"
+    section._on_toggle()
+    assert section.is_expanded() is False
+    assert section._full_view.isHidden()
+    assert not section._body.isHidden()
+    assert section._toggle.text() == "[展开]"
 
 
 def test_detail_popup_short_prompt_no_toggle(qtbot):
@@ -1265,9 +1267,10 @@ def test_detail_popup_short_prompt_no_toggle(qtbot):
     popup = SessionDetailPopup(details, s)
     qtbot.addWidget(popup)
     popup.show()
-    assert popup._prompt_toggle is not None
-    assert not popup._prompt_toggle.isVisible()
-    assert popup._prompt_body.text() == "quick question"
+    section = popup._prompt_section
+    assert section is not None
+    assert not section._toggle.isVisible()
+    assert section._body.text() == "quick question"
 
 
 def test_detail_popup_cjk_long_prompt_shows_toggle(qtbot):
@@ -1282,13 +1285,14 @@ def test_detail_popup_cjk_long_prompt_shows_toggle(qtbot):
     popup = SessionDetailPopup(details, s)
     qtbot.addWidget(popup)
     popup.show()
-    assert popup._prompt_toggle is not None
-    assert popup._prompt_toggle.isVisible(), (
+    section = popup._prompt_section
+    assert section is not None
+    assert section._toggle.isVisible(), (
         "toggle should be visible because the CJK prompt is wider "
         "than the popup-inner-width and was elided"
     )
     # The displayed text should include the elide marker.
-    assert "…" in popup._prompt_body.text()
+    assert "…" in section._body.text()
 
 
 def test_detail_popup_header_action_icons(qtbot):
@@ -1404,7 +1408,7 @@ def test_detail_popup_header_layout_stable_when_prompt_toggles(qtbot):
 
     root = popup.layout()
     geom_before = root.itemAt(0).widget().geometry()
-    popup._on_toggle_prompt()
+    popup._prompt_section._on_toggle()
     geom_after = root.itemAt(0).widget().geometry()
     # Allow 2px tolerance for font-baseline rounding; the original bug
     # stretched header by 30+ px so this still catches it definitively.

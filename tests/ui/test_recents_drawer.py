@@ -594,12 +594,16 @@ class TestPromptCollapse:
         long_p = self._long_prompt()
         d.render(_empty_snap(dormant=[_dormant("u1", last_prompt=long_p)]))
         d._select_uuid("u1")
-        d._on_prompt_toggle(True)
+        # The LAST PROMPT section is now a shared LastPromptSection
+        # widget. Toggle via its own _on_toggle (which emits the
+        # signal the drawer handles). Drawer-level _prompt_expanded
+        # is updated via the signal so re-renders preserve state.
+        from claude_island.ui.last_prompt_section import LastPromptSection
+        sections = d._preview_container.findChildren(LastPromptSection)
+        assert len(sections) == 1
+        sections[0]._on_toggle()
+        assert sections[0].is_expanded() is True
         assert d._prompt_expanded is True
-        # Re-render happened; new toggle button is in [收起] state
-        from claude_island.ui.collapsible import CollapsibleLinkButton
-        toggles = d._preview_container.findChildren(CollapsibleLinkButton)
-        assert any(t.text() == "[收起]" for t in toggles)
 
     def test_C3_changing_selection_resets_expanded(self, drawer):
         d, *_ = drawer
@@ -609,7 +613,8 @@ class TestPromptCollapse:
             _dormant("u2", last_prompt=long_p),
         ]))
         d._select_uuid("u1")
-        d._on_prompt_toggle(True)
+        from claude_island.ui.last_prompt_section import LastPromptSection
+        d._preview_container.findChildren(LastPromptSection)[0]._on_toggle()
         assert d._prompt_expanded is True
         d._select_uuid("u2")
         assert d._prompt_expanded is False  # reset on selection change
@@ -620,10 +625,84 @@ class TestPromptCollapse:
             _dormant("u1", last_prompt="short"),
         ]))
         d._select_uuid("u1")
-        from claude_island.ui.collapsible import CollapsibleLinkButton
-        toggles = d._preview_container.findChildren(CollapsibleLinkButton)
-        # No toggle button rendered for short prompt.
-        assert len(toggles) == 0
+        # LastPromptSection's toggle is hidden when the content fits.
+        from claude_island.ui.last_prompt_section import LastPromptSection
+        sections = d._preview_container.findChildren(LastPromptSection)
+        assert len(sections) == 1
+        assert not sections[0]._toggle.isVisible()
+
+
+# ── Slimmed preview action row (Open + Copy buttons removed) ───────────
+
+class TestPreviewActionRow:
+    """The Open / Copy buttons used to live next to Resume in the
+    action row. They've been replaced by hover-reveal affordances on
+    the cwd row (↗) and the uuid row (⧉) — same pattern as
+    SessionDetailPopup. Resume is now the only button in the action
+    row, full width."""
+
+    def _drawer(self, qtbot):
+        # Reuse the same dispatcher fake the rest of this file uses;
+        # TerminalDispatcher needs real backend capability sets which
+        # plain mock.Mock() doesn't supply.
+        from PySide6.QtWidgets import QWidget
+        parent = QWidget()
+        qtbot.addWidget(parent)
+        d = RecentsDrawer(
+            expanded=parent,
+            dispatcher=_FakeDispatcher(),
+            launch_intent=LaunchIntentRegistry(),
+            on_wake=lambda: None,
+        )
+        qtbot.addWidget(d)
+        return d
+
+    def test_no_open_button_in_preview(self, qtbot):
+        d = self._drawer(qtbot)
+        d.render(_empty_snap(dormant=[_dormant("u1")]))
+        d._select_uuid("u1")
+        from PySide6.QtWidgets import QPushButton
+        # Old code put "📂 Open" in the action row. New code uses the
+        # ↗ glyph on the cwd row; tooltip text is the affordance.
+        btns_with_open_text = [
+            b for b in d._preview_container.findChildren(QPushButton)
+            if "📂 Open" in b.text()
+        ]
+        assert btns_with_open_text == []
+
+    def test_no_clipboard_emoji_button_in_preview(self, qtbot):
+        d = self._drawer(qtbot)
+        d.render(_empty_snap(dormant=[_dormant("u1")]))
+        d._select_uuid("u1")
+        from PySide6.QtWidgets import QPushButton
+        # Old code had a 📋 button next to the uuid; new code uses ⧉
+        # via the hover-reveal pattern instead. Pin the removal so a
+        # future revert doesn't sneak the truncated 📋 affordance back.
+        btns_with_clipboard = [
+            b for b in d._preview_container.findChildren(QPushButton)
+            if b.text() == "📋"
+        ]
+        assert btns_with_clipboard == []
+
+    def test_resume_button_still_present(self, qtbot):
+        d = self._drawer(qtbot)
+        d.render(_empty_snap(dormant=[_dormant("u1")]))
+        d._select_uuid("u1")
+        from PySide6.QtWidgets import QPushButton
+        resume = d._preview_container.findChild(QPushButton, "preview_resume_btn")
+        assert resume is not None
+        assert "Resume" in resume.text()
+
+    def test_cwd_row_uses_hover_reveal(self, qtbot):
+        """The cwd row should be a _HoverRevealRow so the ↗ open glyph
+        only shows on hover — matches SessionDetailPopup's Path row."""
+        d = self._drawer(qtbot)
+        d.render(_empty_snap(dormant=[_dormant("u1")]))
+        d._select_uuid("u1")
+        from claude_island.ui.expanded_window import _HoverRevealRow
+        rows = d._preview_container.findChildren(_HoverRevealRow)
+        # Two hover rows expected: cwd row + uuid row.
+        assert len(rows) == 2
 
 
 # ── Rename compatibility (R1-R3) ────────────────────────────────────────

@@ -82,10 +82,13 @@ from claude_island.ui.expanded_window import (
     _STYLE_COST_DEFAULT,
     _STYLE_COST_HIGH,
     _STYLE_NAME,
+    _STYLE_TEXT_LINK,
     _STYLE_TITLE,
     _ElidingLabel,
     _fmt_money,
+    _HoverRevealRow,
 )
+from claude_island.ui.last_prompt_section import LastPromptSection
 from claude_island.ui.recents_filter import filter_by_query, sort_by_recency
 
 log = logging.getLogger(__name__)
@@ -100,14 +103,14 @@ _RECENT_ROW_HEIGHT = 32       # compact — main panel uses 52 for two-line rows
 _ROW_GAP = 2
 _HIGH_COST_USD = 50.0
 _TITLE_COLLAPSE_AT = 60
-_PROMPT_COLLAPSE_AT = 200
+# LAST PROMPT collapsing now lives in LastPromptSection (shared with
+# SessionDetailPopup) — no per-surface threshold here.
 
 _ACCENT_COLOR = QColor("#9ca3af")  # selected row left-side accent
 
 # Visual tokens specific to this surface (not reused from expanded_window
 # because they only apply here — duplicating ~6 lines is cheaper than
 # polluting the main panel's stylesheet vocabulary).
-_STYLE_SECTION_LABEL = "color: #6b7280; font-size: 10px; letter-spacing: 0.5px;"
 _STYLE_PREVIEW_BODY = "color: #c9c9c9; font-size: 12px;"
 _STYLE_PREVIEW_TITLE = "color: #ffffff; font-size: 14px; font-weight: 500;"
 _STYLE_UUID = "color: #6b7280; font-size: 10px;"
@@ -133,30 +136,6 @@ _STYLE_PRIMARY_BTN = f"""
         color: #6b7280; background: {_BG_SINGLE};
         border-color: {_GROUP_OUTLINE_COLOR};
     }}
-"""
-_STYLE_SECONDARY_BTN = f"""
-    QPushButton {{
-        color: #c9c9c9;
-        background: {_BG_SINGLE};
-        border: 1px solid {_GROUP_OUTLINE_COLOR};
-        border-radius: 6px;
-        padding: 6px 0;
-        font-size: 11px;
-    }}
-    QPushButton:hover {{
-        color: #ffffff;
-        background: {_BG_HOVER_SINGLE};
-        border-color: #6b7280;
-    }}
-"""
-_STYLE_COPY_BTN = f"""
-    QPushButton {{
-        background: {_BG_SINGLE};
-        border: 1px solid {_GROUP_OUTLINE_COLOR};
-        border-radius: 4px;
-        padding: 2px 6px;
-    }}
-    QPushButton:hover {{ background: {_BG_HOVER_SINGLE}; }}
 """
 
 
@@ -746,11 +725,30 @@ class RecentsDrawer(QWidget):
         self._preview_box.addWidget(self._mk_divider())
 
         # ── meta block ───────────────────────────────────────────────
+        # The cwd row is hover-reveal: ↗ glyph appears on hover, the
+        # path text itself is also clickable so a near-cursor click
+        # works without aiming. Same affordance shape as the
+        # SessionDetailPopup Path row — two surfaces, one pattern.
+        cwd_row = _HoverRevealRow()
+        cwd_h = QHBoxLayout(cwd_row)
+        cwd_h.setContentsMargins(0, 0, 0, 0)
+        cwd_h.setSpacing(4)
         cwd_lbl = QLabel(f"📁  {_shorten_cwd(str(d.cwd))}")
         cwd_lbl.setStyleSheet(_STYLE_PREVIEW_BODY)
-        cwd_lbl.setToolTip(str(d.cwd))
+        cwd_lbl.setToolTip(f"{d.cwd}\nClick to open · Ctrl+O")
         cwd_lbl.setWordWrap(True)
-        self._preview_box.addWidget(cwd_lbl)
+        cwd_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        cwd_lbl.mousePressEvent = lambda _: self._open_folder_current()
+        cwd_h.addWidget(cwd_lbl, 1)
+        cwd_open = QPushButton("↗")
+        cwd_open.setStyleSheet(_STYLE_TEXT_LINK)
+        cwd_open.setCursor(Qt.CursorShape.PointingHandCursor)
+        cwd_open.setToolTip("Open folder · Ctrl+O")
+        cwd_open.setFixedWidth(16)
+        cwd_open.clicked.connect(self._open_folder_current)
+        cwd_h.addWidget(cwd_open)
+        cwd_row.register_reveal(cwd_open)
+        self._preview_box.addWidget(cwd_row)
 
         branch = d.git_branch or "—"
         bt_lbl = QLabel(f"🌿  {branch}  ·  {_relative_time(d.last_activity)}")
@@ -773,53 +771,50 @@ class RecentsDrawer(QWidget):
             chip_holder.setLayout(chip_row)
             self._preview_box.addWidget(chip_holder)
 
-        # ── last_prompt (collapsible) ────────────────────────────────
+        # ── last_prompt — shared widget with SessionDetailPopup ─────
         if d.last_prompt:
             self._preview_box.addWidget(self._mk_divider())
-            section_lbl = QLabel("LAST PROMPT")
-            section_lbl.setStyleSheet(_STYLE_SECTION_LABEL)
-            self._preview_box.addWidget(section_lbl)
+            # Preview column inner width = drawer full width minus list
+            # column minus a safety pad for the scrollbar + margins.
+            inner_w = max(40, _DRAWER_WIDTH_FULL - _LIST_COL_WIDTH - 30)
+            section = LastPromptSection(
+                d.last_prompt, available_width=inner_w,
+            )
+            # Restore expansion across re-renders (selection unchanged
+            # but a snapshot tick fired): the drawer-level
+            # _prompt_expanded flag captures the user's last choice;
+            # _select_uuid resets it on selection change.
+            if self._prompt_expanded:
+                section._on_toggle()
+            section.expansion_changed.connect(self._on_prompt_section_toggled)
+            self._preview_box.addWidget(section)
 
-            full = d.last_prompt
-            if self._prompt_expanded or len(full) <= _PROMPT_COLLAPSE_AT:
-                display = full
-            else:
-                display = full[:_PROMPT_COLLAPSE_AT] + "…"
-            prompt_lbl = QLabel(display)
-            prompt_lbl.setStyleSheet(_STYLE_PREVIEW_BODY)
-            prompt_lbl.setWordWrap(True)
-            self._preview_box.addWidget(prompt_lbl)
-            if len(full) > _PROMPT_COLLAPSE_AT:
-                p = CollapsibleLinkButton()
-                p.set_expanded(self._prompt_expanded)
-                p.state_changed.connect(self._on_prompt_toggle)
-                self._preview_box.addWidget(p)
-
-        # ── uuid + copy ──────────────────────────────────────────────
+        # ── uuid (click to copy) ────────────────────────────────────
+        # Same hover-reveal pattern as the cwd row above.
         self._preview_box.addWidget(self._mk_divider())
-        uuid_row = QHBoxLayout()
-        uuid_row.setContentsMargins(0, 0, 0, 0)
+        uuid_row = _HoverRevealRow()
+        uuid_h = QHBoxLayout(uuid_row)
+        uuid_h.setContentsMargins(0, 0, 0, 0)
+        uuid_h.setSpacing(4)
         uuid_lbl = QLabel(d.session_uuid)
         uuid_lbl.setStyleSheet(_STYLE_UUID)
-        uuid_lbl.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        uuid_row.addWidget(uuid_lbl, 1)
-        copy_btn = QPushButton("📋")
-        copy_btn.setStyleSheet(_STYLE_COPY_BTN)
-        copy_btn.setToolTip("Copy uuid (Ctrl+C)")
-        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        copy_btn.clicked.connect(self._copy_uuid_current)
-        uuid_row.addWidget(copy_btn)
-        uuid_holder = QWidget()
-        uuid_holder.setLayout(uuid_row)
-        self._preview_box.addWidget(uuid_holder)
+        uuid_lbl.setToolTip("Click to copy · Ctrl+C")
+        uuid_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        uuid_lbl.mousePressEvent = lambda _: self._copy_uuid_current()
+        uuid_h.addWidget(uuid_lbl, 1)
+        uuid_copy = QPushButton("⧉")
+        uuid_copy.setStyleSheet(_STYLE_TEXT_LINK)
+        uuid_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        uuid_copy.setToolTip("Copy session ID · Ctrl+C")
+        uuid_copy.setFixedWidth(16)
+        uuid_copy.clicked.connect(self._copy_uuid_current)
+        uuid_h.addWidget(uuid_copy)
+        uuid_row.register_reveal(uuid_copy)
+        self._preview_box.addWidget(uuid_row)
 
-        # ── actions ──────────────────────────────────────────────────
-        actions = QHBoxLayout()
-        actions.setContentsMargins(0, 0, 0, 0)
-        actions.setSpacing(6)
-        # Captured separately so tests can find them via objectName.
+        # ── action: Resume only ─────────────────────────────────────
+        # Open / Copy buttons removed — those affordances now live on
+        # the rows above (hover ↗ / ⧉). Resume gets full width.
         resume_btn = QPushButton("▶ Resume")
         resume_btn.setObjectName("preview_resume_btn")
         resume_btn.setStyleSheet(_STYLE_PRIMARY_BTN)
@@ -830,19 +825,7 @@ class RecentsDrawer(QWidget):
         resume_btn.clicked.connect(
             lambda _checked=False, uuid=d.session_uuid: self._on_resume(uuid)
         )
-        actions.addWidget(resume_btn, 1)
-
-        open_btn = QPushButton("📂 Open")
-        open_btn.setObjectName("preview_open_btn")
-        open_btn.setStyleSheet(_STYLE_SECONDARY_BTN)
-        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_btn.setToolTip("Open folder (Ctrl+O)")
-        open_btn.clicked.connect(self._open_folder_current)
-        actions.addWidget(open_btn, 1)
-
-        actions_holder = QWidget()
-        actions_holder.setLayout(actions)
-        self._preview_box.addWidget(actions_holder)
+        self._preview_box.addWidget(resume_btn)
         self._preview_box.addStretch(1)
 
     def _mk_divider(self) -> QFrame:
@@ -851,10 +834,13 @@ class RecentsDrawer(QWidget):
         f.setStyleSheet("background: #2a2a2a; max-height: 1px;")
         return f
 
-    def _on_prompt_toggle(self, expanded: bool) -> None:
+    def _on_prompt_section_toggled(self, expanded: bool) -> None:
+        """LastPromptSection emits this when the user toggles. We just
+        record the new state so the next ``_render_preview`` (e.g.
+        triggered by a snapshot tick) restores the user's choice
+        instead of collapsing back to default. No re-render here —
+        the section already updated its own content in-place."""
         self._prompt_expanded = expanded
-        if self._last_snap is not None:
-            self._render_preview(self._last_snap)
 
     def _on_title_toggle(self, expanded: bool) -> None:
         self._title_expanded = expanded
