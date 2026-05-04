@@ -67,6 +67,15 @@ class DormantSessionSource:
     def sessions(self) -> list[DormantSession]:
         out: list[DormantSession] = []
         for uuid in self._parser.known_session_uuids():
+            # Subagent sessions (filename stem starts with "agent-") are not
+            # independently resumable — they're child conversations spawned
+            # by the Agent tool inside a parent session.  Their rows carry
+            # isSidechain=true and an agentId field, but the simplest
+            # discriminator is the UUID prefix Claude Code uses for their
+            # JSONL filenames.  Skipping them here keeps the History drawer
+            # free of duplicates that share the same cwd as the parent.
+            if uuid.startswith("agent-"):
+                continue
             try:
                 meta = self._parser.get_session_metadata(uuid)
             except Exception:

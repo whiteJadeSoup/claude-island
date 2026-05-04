@@ -119,3 +119,26 @@ def test_meta_provider_failure_skips_uuid():
     sessions = src.sessions
     assert len(sessions) == 1
     assert sessions[0].session_uuid == "good"
+
+
+def test_excludes_subagent_sessions():
+    """Agent tool spawns child sessions whose UUIDs start with "agent-".
+    These are not independently resumable and would duplicate the parent
+    session's cwd in the History drawer — filter them out."""
+    parser = _FakeParser({
+        "normal-uuid-1234": {
+            "cwd": "D:/projects/a",
+            "last_activity": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        },
+        "agent-a0036c4c57719dd43": {
+            "cwd": "D:/projects/a",  # same cwd as parent
+            "last_activity": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        },
+        "agent-acompact-0340f62e4527adf0": {
+            "cwd": "D:/projects/a",
+            "last_activity": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        },
+    })
+    src = DormantSessionSource(jsonl_parser=parser, usage_registry=_FakeUsage({}))
+    sessions = src.sessions
+    assert [s.session_uuid for s in sessions] == ["normal-uuid-1234"]
