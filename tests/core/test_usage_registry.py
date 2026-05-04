@@ -138,6 +138,142 @@ def test_record_single_wraps_record_many(registry):
 
 
 # --------------------------------------------------------------------------
+# F3: per-uuid inverted index (_by_uuid)
+#
+# These tests pin down the invariant that the inverted index stays in
+# strict 1:1 correspondence with _records (after dedup), and that the
+# per-session query methods now read from the index rather than scanning
+# the full list. Existing tests above already cover the user-visible
+# behaviour of those queries — these tests guard the implementation
+# detail so a future refactor that breaks the index is caught early.
+# --------------------------------------------------------------------------
+
+
+def _assert_index_invariant(reg: UsageRegistry) -> None:
+    """The fundamental invariant after every record_many call:
+    everything that landed in _records also landed in _by_uuid (and
+    nothing else did). Counts must match exactly — drift either way
+    is a bug we need to catch immediately."""
+    indexed = sum(len(v) for v in reg._by_uuid.values())
+    assert indexed == len(reg._records), (
+        f"_by_uuid drifted from _records: indexed={indexed}, "
+        f"records={len(reg._records)}"
+    )
+
+
+def test_by_uuid_index_invariant_after_record_many(registry):
+    """One batch with mixed uuids → index must mirror _records exactly."""
+    registry.record_many([
+        _record(session_uuid="A"), _record(session_uuid="A"),
+        _record(session_uuid="B"),
+    ])
+    _assert_index_invariant(registry)
+    assert len(registry._by_uuid["A"]) == 2
+    assert len(registry._by_uuid["B"]) == 1
+
+
+def test_by_uuid_index_skips_dedup_dropped_records(registry):
+    """A record dropped by message_id dedup must NOT enter the index —
+    otherwise per-session queries would re-introduce the double-count
+    that dedup exists to prevent."""
+    base = _record(session_uuid="A", model="claude-opus-4-7")
+    rec = UsageRecord(**{**base.__dict__, "message_id": "msg_dup"})
+    registry.record_many([rec, rec, rec])  # two duplicates of one id
+    _assert_index_invariant(registry)
+    assert len(registry._by_uuid["A"]) == 1
+
+
+def test_by_uuid_index_persists_dedup_across_batches(registry):
+    """Same dedup discipline across separate record_many calls — the
+    second batch's duplicate must be filtered from BOTH _records AND
+    _by_uuid."""
+    base = _record(session_uuid="A")
+    rec = UsageRecord(**{**base.__dict__, "message_id": "msg_xxx"})
+    registry.record_many([rec])
+    registry.record_many([rec])
+    _assert_index_invariant(registry)
+    assert len(registry._by_uuid["A"]) == 1
+
+
+def test_by_uuid_index_records_without_message_id_are_indexed(registry):
+    """Records with message_id=None bypass dedup (legacy transcript
+    rows). They must still enter the index so per-session queries
+    see them — otherwise legacy sessions would silently report $0."""
+    legacy = [_record(session_uuid="L") for _ in range(3)]  # mid=None
+    registry.record_many(legacy)
+    _assert_index_invariant(registry)
+    assert len(registry._by_uuid["L"]) == 3
+
+
+def test_by_uuid_index_accumulates_across_record_many_calls(registry):
+    """Multiple record_many calls for the same uuid append to the same
+    bucket; the index never resets between batches."""
+    registry.record_many([_record(session_uuid="A")])
+    registry.record_many([_record(session_uuid="A"), _record(session_uuid="A")])
+    _assert_index_invariant(registry)
+    assert len(registry._by_uuid["A"]) == 3
+
+
+def test_session_summary_unaffected_by_other_sessions_records(registry):
+    """Inject 100 records under session B; querying A must traverse
+    only A's bucket. We can't directly observe traversal cost in a
+    unit test, but a behavioural proxy is: A's result equals what it
+    would be if B's records didn't exist at all."""
+    a_record = _record(session_uuid="A", input_tokens=1000, output_tokens=500)
+    b_records = [
+        _record(session_uuid="B", input_tokens=10_000, output_tokens=5_000)
+        for _ in range(100)
+    ]
+    registry.record_many([a_record] + b_records)
+    cost_a, turns_a, _ = registry.get_session_summary("A")
+    assert turns_a == 1
+    # Sonnet rates: 1000 in × $3/Mtok + 500 out × $15/Mtok = $0.0105
+    assert cost_a == pytest.approx(1000 / 1_000_000 * 3 + 500 / 1_000_000 * 15)
+
+
+def test_get_latest_model_unaffected_by_other_sessions(registry):
+    """latest_model for session A must not be perturbed by session B's
+    records, even if B's records are newer."""
+    older = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
+    newer = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    registry.record_many([
+        _record(session_uuid="A", model="claude-opus-4-7", when=older),
+        _record(session_uuid="B", model="claude-sonnet-4-5", when=newer),
+    ])
+    # B's record is newer, but A's latest must still be opus.
+    assert "opus" in registry.get_latest_model("A").lower()
+    assert "sonnet" in registry.get_latest_model("B").lower()
+
+
+def test_unknown_uuid_returns_empty_without_keyerror(registry):
+    """Querying a uuid that has never been recorded must return empty
+    results, not raise KeyError. This is the boot-time path: UI may
+    query before any JSONL has been parsed."""
+    registry.record_many([_record(session_uuid="A")])
+    assert registry.get_session_summary("UNKNOWN") == (0.0, 0, 0)
+    assert registry.get_session_per_model("UNKNOWN") == ()
+    assert registry.get_latest_model("UNKNOWN") is None
+
+
+def test_by_uuid_does_not_scan_full_records(registry, monkeypatch):
+    """Behavioural proof that per-session queries read the inverted
+    index, not _records: replace _records with a sentinel that would
+    raise on iteration; queries should still succeed because they
+    don't touch _records anymore."""
+    registry.record_many([_record(session_uuid="A")])
+
+    class _Explode:
+        def __iter__(self):
+            raise AssertionError("query touched _records instead of _by_uuid")
+
+    monkeypatch.setattr(registry, "_records", _Explode())
+    # All three per-uuid queries must complete without touching _records.
+    registry.get_session_summary("A")
+    registry.get_session_per_model("A")
+    registry.get_latest_model("A")
+
+
+# --------------------------------------------------------------------------
 # T1-T2: get_totals over rolling periods
 # --------------------------------------------------------------------------
 

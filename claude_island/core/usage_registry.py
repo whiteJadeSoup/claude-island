@@ -183,6 +183,22 @@ class UsageRegistry:
         # ``usage`` payload. Without this set, a response with 5 blocks
         # is counted 5×. Records whose message_id is None bypass dedup.
         self._seen_message_ids: set[str] = set()
+        # Per-uuid inverted index. Built incrementally inside
+        # ``record_many`` (post-dedup) so per-session queries
+        # (``get_session_summary`` / ``get_session_per_model`` /
+        # ``get_latest_model``) read O(N_uuid) instead of O(N_records).
+        # Holds *references* to the same UsageRecord objects in
+        # ``_records`` — no value copy, just a second list of
+        # references; memory cost ≈ 8 bytes × records.
+        #
+        # INVARIANT: ``sum(len(v) for v in _by_uuid.values()) ==
+        # len(_records)`` after any record_many call. Enforced by
+        # ``test_by_uuid_index_invariant_after_record_many`` and a
+        # private ``_assert_index_invariant`` helper used by tests.
+        # Append-only: uuids are stable for the lifetime of a session
+        # (set when the JSONL file is created, never renamed), so we
+        # never need to move/remove entries — purely additive.
+        self._by_uuid: dict[str, list[UsageRecord]] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -209,11 +225,17 @@ class UsageRegistry:
                 mid = r.message_id
                 if mid is None:
                     kept.append(r)
+                    self._by_uuid.setdefault(r.session_uuid, []).append(r)
                     continue
                 if mid in self._seen_message_ids:
                     continue
                 self._seen_message_ids.add(mid)
                 kept.append(r)
+                # Index AFTER dedup decision so duplicates don't double-
+                # count in per-session queries either. Critical: this
+                # line and the kept.append above must stay paired —
+                # whatever lands in _records MUST also land in _by_uuid.
+                self._by_uuid.setdefault(r.session_uuid, []).append(r)
             if not kept:
                 return
             self._records.extend(kept)
@@ -289,9 +311,9 @@ class UsageRegistry:
         turns = 0
         sides = 0
         with self._lock:
-            for r in self._records:
-                if r.session_uuid != session_uuid:
-                    continue
+            # Read from the per-uuid inverted index so we touch only
+            # this session's records, not the full _records list.
+            for r in self._by_uuid.get(session_uuid, ()):
                 p = _resolve_pricing(r.model)
                 cost += (
                     r.input_tokens / 1_000_000 * p.input_per_mtok
@@ -315,7 +337,10 @@ class UsageRegistry:
         records exist for that uuid.
         """
         with self._lock:
-            rs = [r for r in self._records if r.session_uuid == session_uuid]
+            # Snapshot a list copy so the caller can iterate without
+            # holding the lock; reading from the inverted index gives
+            # us O(N_uuid) instead of scanning the full _records list.
+            rs = list(self._by_uuid.get(session_uuid, ()))
         return _aggregate_by_model(rs)
 
     def get_latest_model(self, session_uuid: str) -> str | None:
@@ -329,9 +354,9 @@ class UsageRegistry:
         with self._lock:
             best_ts = None
             best_model = None
-            for r in self._records:
-                if r.session_uuid != session_uuid:
-                    continue
+            # Inverted-index read — only this session's records, not
+            # the whole list.
+            for r in self._by_uuid.get(session_uuid, ()):
                 # Skip synthetic records — /compact summaries etc
                 # would bias the chip toward "<synthetic>".
                 if (r.model or "").startswith("<"):
