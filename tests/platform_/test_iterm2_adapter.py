@@ -379,6 +379,32 @@ class TestFocus:
             assert '\\"' in script
             assert "\\\\" in script
 
+    def test_focus_script_selects_window_for_multi_window_case(self, adapter):
+        """Regression: when iTerm2 has multiple windows, ``activate``
+        alone raises the app but leaves whichever window iTerm2 had
+        frontmost in its own z-order on top — so the target pane stays
+        hidden behind another window. ``select w`` is required to
+        promote the target's containing window inside iTerm2."""
+        v = _view(pid=10)
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty("/dev/ttys001")),
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="ok\n")) as run,
+        ):
+            adapter.focus(v)
+            script = run.call_args[0][0][2]
+            # All three selects must be present, in the expected order:
+            # session → tab → window → activate.
+            assert "select s" in script
+            assert "select t" in script
+            assert "select w" in script
+            i_s = script.index("select s")
+            i_t = script.index("select t")
+            i_w = script.index("select w")
+            i_a = script.index("activate")
+            assert i_s < i_t < i_w < i_a
+
 
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────
 
