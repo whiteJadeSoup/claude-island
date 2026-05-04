@@ -420,6 +420,145 @@ class TestPerSurfaceDedup:
         snap_b = _snap(sessions=(v_b,), today_cost_usd=5.0)
         assert panel.compute(snap_a) == panel.compute(snap_b)
 
+    def test_expanded_compute_stable_across_quota_refetches(self, qtbot):
+        """Regression: QuotaSnapshot's fetched_at field updates every
+        ~5 min on each /api/oauth/usage poll, even when no displayed
+        percentage actually changed. If compute() includes the raw
+        QuotaSnapshot, every quota refresh causes a spurious panel
+        re-render → user-visible 1-frame flash. This was the root
+        cause of the "panel sometimes flashes" bug."""
+        from claude_island.core.models import QuotaSnapshot
+
+        controller = IslandController()
+        capsule_w = QWidget(); capsule_w.show()
+        panel = ExpandedWindow(
+            capsule=capsule_w, controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+        )
+        qtbot.addWidget(panel); qtbot.addWidget(capsule_w)
+
+        base = datetime(2026, 5, 1, 12, tzinfo=timezone.utc)
+
+        def _quota(fetched: datetime) -> QuotaSnapshot:
+            return QuotaSnapshot(
+                five_hour_pct=42.0,
+                five_hour_resets_at=base + timedelta(hours=5),
+                seven_day_pct=18.0,
+                seven_day_resets_at=base + timedelta(days=7),
+                fetched_at=fetched, is_stale=False, provider="anthropic",
+            )
+
+        v = _view(pid=1, name="alpha")
+        snap_a = WorldSnapshot(
+            session_groups=_sg(v), today_cost_usd=5.0,
+            quota=_quota(base), available_providers=("anthropic",),
+            selected_provider="anthropic", fetched_at=base,
+            dormant_sessions=(), launching_sessions=(),
+        )
+        snap_b = WorldSnapshot(
+            session_groups=_sg(v), today_cost_usd=5.0,
+            quota=_quota(base + timedelta(minutes=5)),  # only fetched_at differs
+            available_providers=("anthropic",),
+            selected_provider="anthropic", fetched_at=base + timedelta(minutes=5),
+            dormant_sessions=(), launching_sessions=(),
+        )
+        assert panel.compute(snap_a) == panel.compute(snap_b)
+
+    def test_expanded_compute_catches_real_quota_change(self, qtbot):
+        """Counterpart to the quota-refetch test: a real percentage
+        change MUST flow through dedup so the bar updates."""
+        from claude_island.core.models import QuotaSnapshot
+
+        controller = IslandController()
+        capsule_w = QWidget(); capsule_w.show()
+        panel = ExpandedWindow(
+            capsule=capsule_w, controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+        )
+        qtbot.addWidget(panel); qtbot.addWidget(capsule_w)
+
+        base = datetime(2026, 5, 1, 12, tzinfo=timezone.utc)
+        snap_a = WorldSnapshot(
+            session_groups=(), today_cost_usd=5.0,
+            quota=QuotaSnapshot(
+                five_hour_pct=42.0, five_hour_resets_at=base,
+                seven_day_pct=18.0, seven_day_resets_at=base,
+                fetched_at=base, is_stale=False, provider="anthropic",
+            ),
+            available_providers=("anthropic",), selected_provider="anthropic",
+            fetched_at=base, dormant_sessions=(), launching_sessions=(),
+        )
+        snap_b = WorldSnapshot(
+            session_groups=(), today_cost_usd=5.0,
+            quota=QuotaSnapshot(
+                five_hour_pct=43.0,  # 42 → 43, real change
+                five_hour_resets_at=base,
+                seven_day_pct=18.0, seven_day_resets_at=base,
+                fetched_at=base, is_stale=False, provider="anthropic",
+            ),
+            available_providers=("anthropic",), selected_provider="anthropic",
+            fetched_at=base, dormant_sessions=(), launching_sessions=(),
+        )
+        assert panel.compute(snap_a) != panel.compute(snap_b)
+
+    def test_expanded_compute_catches_dormant_count_change(self, qtbot):
+        """The history chip ("🗂 N") would silently go stale if dormant
+        count changes weren't part of the dedup key."""
+        controller = IslandController()
+        capsule_w = QWidget(); capsule_w.show()
+        panel = ExpandedWindow(
+            capsule=capsule_w, controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+        )
+        qtbot.addWidget(panel); qtbot.addWidget(capsule_w)
+
+        base = datetime(2026, 5, 1, 12, tzinfo=timezone.utc)
+
+        def make(dormant_count):
+            return WorldSnapshot(
+                session_groups=(), today_cost_usd=0.0, quota=None,
+                available_providers=(), selected_provider=None,
+                fetched_at=base,
+                dormant_sessions=("u",) * dormant_count,
+                launching_sessions=(),
+            )
+        assert panel.compute(make(3)) != panel.compute(make(4))
+
+    def test_expanded_render_skips_layout_rebuild_on_identical_structure(self, qtbot):
+        """When two consecutive renders have identical group structure
+        (same group_ids in order, same view pids in each group), the
+        in-place fast-path should be taken — no _clear_session_layout
+        call, no widget detach/re-attach cycle. This eliminates the
+        1-frame flash even when render IS legitimately called (e.g. a
+        cost-band crossing forces a render)."""
+        from dataclasses import replace
+        from unittest.mock import patch
+
+        controller = IslandController()
+        capsule_w = QWidget(); capsule_w.show()
+        panel = ExpandedWindow(
+            capsule=capsule_w, controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+        )
+        qtbot.addWidget(panel); qtbot.addWidget(capsule_w)
+
+        v = _view(pid=1, name="alpha", cost_usd=5.0)
+        snap_a = _snap(sessions=(v,), today_cost_usd=5.0)
+        v2 = replace(v, cost_usd=12.0)  # cost change but same structure
+        snap_b = _snap(sessions=(v2,), today_cost_usd=12.0)
+
+        # Prime: first render builds the layout
+        panel.render(snap_a)
+
+        # Second render should NOT call _clear_session_layout (the
+        # source of the visual flash).
+        with patch.object(panel, "_clear_session_layout") as mock_clear:
+            panel.render(snap_b)
+            assert mock_clear.call_count == 0, (
+                "expected fast path: identical group structure should "
+                "skip _clear_session_layout (the flash culprit)"
+            )
+
     def test_capsule_compute_changes_when_running_set_changes(self, capsule):
         """Compute output MUST change when the user-visible state
         actually changed (running flip), so dedup re-renders."""

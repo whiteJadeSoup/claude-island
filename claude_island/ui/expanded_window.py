@@ -3224,16 +3224,37 @@ class ExpandedWindow(QWidget):
         so dedup precision matches display precision automatically.
         Microsecond ``last_activity`` ticks within a "5m ago" window
         produce identical strings → identical tuple → render skipped.
+
+        IMPORTANT: do NOT include the raw ``snap.quota`` dataclass —
+        ``QuotaSnapshot.fetched_at`` updates on every quota refresh
+        (~every 5 min) without changing any displayed value, which
+        would make dedup miss → spurious re-render → visible panel
+        flash. Project to only the fields actually painted: 5h pct +
+        reset time, 7d pct + reset time, stale flag, provider tag.
         """
+        if snap.quota is None:
+            quota_key: tuple = ()
+        else:
+            q = snap.quota
+            quota_key = (
+                q.five_hour_pct, q.five_hour_resets_at,
+                q.seven_day_pct, q.seven_day_resets_at,
+                q.is_stale, q.provider,
+            )
         return (
             tuple(
                 (g.group_id, tuple(_view_render_signature(v) for v in g.views))
                 for g in snap.session_groups
             ),
             _fmt_money(snap.today_cost_usd),
-            snap.quota,
+            quota_key,
             snap.available_providers,
             snap.selected_provider,
+            # History chip count — without these in the key, a new
+            # dormant transcript wouldn't refresh the "🗂 N" badge until
+            # something else triggered a render.
+            len(snap.dormant_sessions),
+            len(snap.launching_sessions),
         )
 
     def render(self, snap: WorldSnapshot) -> None:
@@ -3320,10 +3341,40 @@ class ExpandedWindow(QWidget):
         live entirely in the adapter — UI just presents them.
 
         Row widgets are cached by pid to preserve hover/pressed state
-        across ticks. Cards are rebuilt every refresh."""
+        across ticks. Cards are rebuilt every refresh.
+
+        Fast path: when the group structure (group_ids in order, view
+        pids in order within each group) is identical to the previous
+        render, skip the layout teardown + rebuild entirely — only
+        update each row's content in place via ``_update_row``. This
+        prevents the brief 1-frame visual flash caused by detaching
+        every widget from the layout and re-attaching them, which the
+        user sees as "the panel suddenly flashed". The structural
+        signature is computed once and cached in ``_last_struct_sig``."""
         total_views = sum(len(g.views) for g in groups)
         self._latest_sessions = list(range(total_views))  # sentinel
 
+        # Fast path: identical group structure → in-place row updates only.
+        new_struct_sig = tuple(
+            (g.group_id, tuple(v.pid for v in g.views)) for g in groups
+        )
+        prev_sig = getattr(self, "_last_struct_sig", None)
+        if (
+            new_struct_sig == prev_sig
+            and groups
+            and self._session_box.count() > 0
+        ):
+            for group in groups:
+                for view in group.views:
+                    btn = self._rows.get(view.pid)
+                    if btn is not None:
+                        self._update_row(btn, view)
+            # Title text + count rebuild remains safe (a setText() that
+            # ends up identical is a no-op for Qt).
+            self._sessions_title.setText(f"CLAUDE SESSIONS · {total_views}")
+            return
+
+        self._last_struct_sig = new_struct_sig
         self._clear_session_layout()
         if total_views:
             self._sessions_title.setText(f"CLAUDE SESSIONS · {total_views}")
