@@ -365,6 +365,34 @@ class CapsuleWindow(QWidget):
         rightmost = max(s.geometry().right() for s in screens)
         return max(leftmost, min(rightmost - w + 1, x))
 
+    def _top_y_for_x(self, centre_x: int) -> int:
+        """Return the appropriate top-margin Y for a capsule whose
+        horizontal centre lands at ``centre_x``.
+
+        Iterates connected screens and returns ``geom.top() +
+        _TOP_MARGIN`` of the first screen whose horizontal range
+        contains ``centre_x``. Used by horizontal drag so that
+        dragging from one monitor to another lands the capsule on
+        THAT monitor's actual top edge.
+
+        Why this matters: without this lookup, a horizontal drag
+        keeps Y locked to the drag-origin's Y (= the source screen's
+        top + _TOP_MARGIN). On a multi-monitor setup where the
+        target screen has a different ``geom.top()`` (different
+        height, vertical alignment in display arrangement), the
+        capsule floats either above or below the target screen's
+        top — visibly broken.
+
+        Falls back to the primary screen if ``centre_x`` lands in a
+        desktop gap (mismatched-height monitors arranged so part of
+        their X union is one-screen-only). The fallback keeps the
+        capsule visible rather than letting it drift off-screen."""
+        for screen in QApplication.screens():
+            g = screen.geometry()
+            if g.left() <= centre_x <= g.right():
+                return g.top() + _TOP_MARGIN
+        return QApplication.primaryScreen().geometry().top() + _TOP_MARGIN
+
     # ------------------------------------------------------------------
     # State handlers
     # ------------------------------------------------------------------
@@ -689,11 +717,17 @@ class CapsuleWindow(QWidget):
             new_y = self._drag_origin_window.y() + delta.y()
             self.move(new_x, new_y)
         else:
-            # Horizontal drag (PR1 path): Y locked to original top.
+            # Horizontal drag (PR1 path): Y tracks each screen's top.
+            # Crossing into a different monitor whose geom.top() isn't
+            # equal to the drag-origin's screen recomputes Y so the
+            # capsule lands on THAT monitor's top edge — without this,
+            # the capsule floats mid-air on a taller / vertically-
+            # offset secondary display.
             new_x = self._clamp_x(
                 self._drag_origin_window.x() + delta.x(), self.width(),
             )
-            self.move(new_x, self._drag_origin_window.y())
+            new_y = self._top_y_for_x(new_x + self.width() // 2)
+            self.move(new_x, new_y)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         if event.button() != Qt.MouseButton.LeftButton:

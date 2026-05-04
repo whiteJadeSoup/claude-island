@@ -519,6 +519,102 @@ class TestEdgeIdle:
         assert cap._is_idle is True
 
 
+# ── Multi-screen Y tracking (heterogeneous-height monitors) ───────────
+
+class _FakeScreen:
+    """Stand-in for QScreen that returns a fixed geometry. Used to
+    simulate a multi-monitor layout in unit tests without needing
+    real hardware. Only ``geometry()`` is exercised by the helpers
+    we test — we keep the surface intentionally tiny."""
+    def __init__(self, x: int, y: int, w: int, h: int):
+        from PySide6.QtCore import QRect
+        self._geom = QRect(x, y, w, h)
+
+    def geometry(self):
+        return self._geom
+
+
+@pytest.fixture
+def two_screens(monkeypatch):
+    """Patch QApplication.screens / primaryScreen to return two
+    monitors of different heights and different ``top()`` values:
+
+      A: 1920×1080 with top=0  (typical laptop)
+      B: 3840×2160 with top=-540, immediately to the right of A
+         (taller external monitor, vertically aligned to A's centre).
+
+    Yields the (A, B) pair."""
+    a = _FakeScreen(0, 0, 1920, 1080)
+    b = _FakeScreen(1920, -540, 3840, 2160)
+    monkeypatch.setattr(QApplication, "screens", lambda: [a, b])
+    monkeypatch.setattr(QApplication, "primaryScreen", lambda: a)
+    yield a, b
+
+
+def test_top_y_for_x_picks_each_screens_top(capsule, two_screens):
+    """The helper must return each screen's actual top + _TOP_MARGIN
+    based on which screen the centre_x lands on. This is the core
+    of the multi-monitor drag fix."""
+    from claude_island.ui.capsule_window import _TOP_MARGIN
+    a, b = two_screens
+    # X inside screen A → A's top + margin.
+    assert capsule._top_y_for_x(500) == 0 + _TOP_MARGIN
+    # X inside screen B → B's top + margin (NOT A's).
+    assert capsule._top_y_for_x(2500) == -540 + _TOP_MARGIN
+
+
+def test_top_y_for_x_falls_back_to_primary_in_desktop_gap(
+    capsule, monkeypatch,
+):
+    """If centre_x lands in a desktop gap (mismatched-height monitors
+    arranged so part of the X union is one-screen-only), the helper
+    falls back to primary's top — keeps the capsule visible."""
+    from claude_island.ui.capsule_window import _TOP_MARGIN
+    primary = _FakeScreen(0, 0, 1920, 1080)
+    monkeypatch.setattr(QApplication, "screens", lambda: [primary])
+    monkeypatch.setattr(QApplication, "primaryScreen", lambda: primary)
+
+    # X way outside the only screen's range.
+    assert capsule._top_y_for_x(99999) == 0 + _TOP_MARGIN
+
+
+def test_horizontal_drag_to_taller_screen_lands_on_its_top(
+    capsule, two_screens, tmp_position_file,
+):
+    """Bug repro: previously horizontal drag locked Y at the origin
+    screen's top (Y=8). Dragging from screen A (top=0) to screen B
+    (top=-540) left the capsule at Y=8 — visible mid-air on B,
+    540 px below B's actual top edge.
+
+    Fix: each mouseMoveEvent recomputes Y for whichever screen the
+    centre lands on. Drag from A to B must end with Y = -540 + 8.
+    """
+    from claude_island.ui.capsule_window import _TOP_MARGIN
+
+    # Place the capsule on screen A first so the press / origin
+    # come from there.
+    capsule.move(500, _TOP_MARGIN)  # X=500, well inside A
+    initial_pos = capsule.pos()
+
+    # Drag the capsule far enough right that its centre lands inside
+    # screen B (B starts at x=1920). Origin x=500, capsule width
+    # ~200, centre starts at ~600. Push centre to 2500 (well into B)
+    # by moving cursor by +1900.
+    drag_dx = 1900
+    origin = QPoint(initial_pos.x() + 50, initial_pos.y() + 10)
+    _press(capsule, global_pos=origin)
+    _move(capsule, global_pos=origin + QPoint(drag_dx, 0))
+    _release(capsule, global_pos=origin + QPoint(drag_dx, 0))
+
+    # Capsule landed on screen B (centre x in B's range) and Y is
+    # now B's top + margin, NOT A's top + margin.
+    centre_x = capsule.x() + capsule.width() // 2
+    assert centre_x >= 1920, f"capsule didn't reach screen B (centre_x={centre_x})"
+    assert capsule.y() == -540 + _TOP_MARGIN, (
+        f"capsule should track screen B's top edge, got y={capsule.y()}"
+    )
+
+
 def test_clamp_keeps_capsule_within_screen_union(capsule):
     """_clamp_x must never let the capsule's left edge slide past
     the leftmost screen edge or its right edge past the rightmost."""
