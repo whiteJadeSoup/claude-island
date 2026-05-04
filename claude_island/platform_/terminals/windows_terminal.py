@@ -41,6 +41,31 @@ class WindowsTerminalAdapter(_CapabilityProvider):
     name: ClassVar[str] = ""  # set by @adapter
     _priority: int = 0
 
+    def __init__(self) -> None:
+        super().__init__()
+        # pid → conpty_hwnd. Caches *only* the stable half of the
+        # resolution chain — the conPTY hwnd is allocated by the OS
+        # at process start and freed when the pid dies, so it cannot
+        # change for the lifetime of pid. Crucially we do NOT cache
+        # wt_hwnd: the user can drag a tab to another WT window
+        # ("Move tab to another window" / tear-off-tab), which keeps
+        # the conPTY but moves it under a different host. Re-running
+        # walk_to_visible_host every group() is cheap (~0.5 ms × N,
+        # in-process Win32 GetWindow walk, no AttachConsole) and
+        # keeps grouping correct after a tab move with zero TTL.
+        #
+        # Negative results (orphan / race) are NOT cached — a brief
+        # race between process_scanner accepting a pid and our group()
+        # call finding its conPTY would otherwise permanently hide the
+        # session until process_scanner re-emits. Re-probing each tick
+        # costs one extra AttachConsole per orphan, and orphans are
+        # already filtered upstream in process_scanner, so this is
+        # rarely exercised.
+        #
+        # Single-threaded access: group() only runs on the snapshotter's
+        # worker thread (reactivex EventLoopScheduler), so no lock.
+        self._conpty_cache: dict[int, int] = {}
+
     # ── can_handle ──────────────────────────────────────────────────────
 
     def can_handle(self, session: Session) -> bool:
@@ -105,14 +130,36 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # whose AttachConsole fails are dropped (no console = orphan).
         # ``wt_hwnd`` is None when we couldn't resolve to a WT window —
         # treated as ungroupable below.
+        #
+        # Cache discipline: conpty_hwnd is read from / written to
+        # self._conpty_cache so we skip the AttachConsole syscall
+        # (~3 ms, holds a process-global lock) on every wake after the
+        # first. wt_hwnd is *always* recomputed via walk_to_visible_host
+        # because the user can drag a tab to a different WT window at
+        # any time — see __init__ docstring for the trade-off.
+        # GC: drop entries for pids that left views (process exited or
+        # was reassigned to a different adapter). Done before the loop
+        # so the cache stays bounded by the live session count.
+        alive_pids = {v.session.pid for v in views}
+        if self._conpty_cache:
+            self._conpty_cache = {
+                p: h for p, h in self._conpty_cache.items() if p in alive_pids
+            }
+
         kept: list[tuple[int | None, SessionView]] = []
         for v in views:
-            info = win32_console.get_console_info(v.session.pid)
-            if info is None:
-                continue
-            conpty_hwnd, _title = info
+            pid = v.session.pid
+            conpty_hwnd = self._conpty_cache.get(pid)
+            if conpty_hwnd is None:
+                info = win32_console.get_console_info(pid)
+                if info is None:
+                    continue
+                conpty_hwnd = info[0]
+                if not conpty_hwnd:
+                    continue
+                self._conpty_cache[pid] = conpty_hwnd
             wt_hwnd: int | None = None
-            if win32gui is not None and conpty_hwnd:
+            if win32gui is not None:
                 wt_hwnd = window_activator.walk_to_visible_host(
                     conpty_hwnd, win32gui,
                 )
