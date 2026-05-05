@@ -21,21 +21,42 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 
 from claude_island.core.models import Session, UsageTotals
+from claude_island.core.snapshot import HIGH_COST_USD_THRESHOLD, SessionView
 from claude_island.ui.controller import IslandController
 from claude_island.ui.expanded_window import ExpandedWindow
 
 
 def _session(
     pid: int, cwd: str, ago_minutes: int = 0,
-    window_handle: int | None = None,  # accepted but ignored — was the WT HWND;
-                                       # adapter-internal now (PR2)
+    window_handle: int | None = None,  # accepted but ignored
 ) -> Session:
-    del window_handle  # signature kept for back-compat with old grouping tests
+    del window_handle
     return Session(
         pid=pid,
         project_path=Path(cwd),
         session_uuid="",
         last_activity=datetime.now(timezone.utc) - timedelta(minutes=ago_minutes),
+    )
+
+
+def _session_view(s: Session) -> SessionView:
+    """Wrap a Session in a SessionView for popup tests. The popup's
+    contract is on SessionView (compose_session_view's output); tests
+    that only need the basic identity fields go through this thin
+    adapter rather than rebuilding all of compose's state plumbing."""
+    return SessionView(
+        pid=s.pid,
+        name=s.project_path.name or "test",
+        project_path=s.project_path,
+        project_basename=s.project_path.name or "test",
+        last_activity=s.last_activity,
+        is_running=False,
+        cost_usd=0.0,
+        is_high_cost=False,
+        latest_model=None,
+        status_word=None,
+        session=s,
+        session_uuid=s.session_uuid,
     )
 
 
@@ -661,7 +682,7 @@ def test_detail_popup_renders_all_sections(qtbot):
     s = _session(1, "/some/path/foo")
     details = _make_full_details(s)
 
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
 
     # Walk all child labels and concatenate their text — easiest way
@@ -698,7 +719,7 @@ def test_detail_popup_skips_prompt_card_when_empty(qtbot):
     from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/a")
     details = _make_full_details(s, last_prompt=None)
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     from PySide6.QtWidgets import QLabel as _QL
     text = " | ".join(l.text() for l in popup.findChildren(_QL) if l.text())
@@ -711,7 +732,7 @@ def test_detail_popup_uses_main_panel_style_tokens(qtbot):
     so check that the standard separator colour is in use."""
     from claude_island.ui.expanded_window import SessionDetailPopup, _STYLE_SEP
     s = _session(1, "/a")
-    popup = SessionDetailPopup(_make_full_details(s), s)
+    popup = SessionDetailPopup(_make_full_details(s), _session_view(s))
     qtbot.addWidget(popup)
     from PySide6.QtWidgets import QFrame as _QF
     frames = popup.findChildren(_QF)
@@ -759,7 +780,7 @@ def test_detail_popup_uuid_short_display_full_copy(qtbot):
     full_uuid = "abc12345-6789-0000-0000-000000000000"
     details = _make_full_details(s, effective_uuid=full_uuid)
 
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     popup.show()   # required before event delivery
 
@@ -932,7 +953,7 @@ def test_repair_icon_renders_when_session_has_uuid(qtbot):
     from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/some/path/foo")
     details = _make_full_details(s)
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
 
     assert popup._repair_icon is not None
@@ -949,7 +970,7 @@ def test_repair_icon_hidden_when_no_uuid(qtbot):
     from PySide6.QtWidgets import QLabel as _QL
     s = _session(1, "/p")
     details = _make_full_details(s, effective_uuid="")
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
 
     # No repair icon when there's no UUID
@@ -974,7 +995,7 @@ def test_repair_button_calls_callback_and_disables_self_on_success(qtbot):
         callback_calls.append(True)
         return True   # success
 
-    popup = SessionDetailPopup(details, s, on_strip_thinking=on_strip)
+    popup = SessionDetailPopup(details, _session_view(s), on_strip_thinking=on_strip)
     qtbot.addWidget(popup)
     popup._on_strip_thinking()
 
@@ -993,7 +1014,7 @@ def test_repair_button_shows_error_on_callback_failure(qtbot):
     s = _session(1, "C:/X")
     details = _make_full_details(s, effective_uuid="abc12345-6789-0000-0000-000000000000")
 
-    popup = SessionDetailPopup(details, s, on_strip_thinking=lambda: False)
+    popup = SessionDetailPopup(details, _session_view(s), on_strip_thinking=lambda: False)
     qtbot.addWidget(popup)
     popup._on_strip_thinking()
 
@@ -1009,7 +1030,7 @@ def test_repair_button_handles_unwired_callback(qtbot):
 
     s = _session(1, "C:/X")
     details = _make_full_details(s, effective_uuid="abc12345-6789-0000-0000-000000000000")
-    popup = SessionDetailPopup(details, s)  # on_strip_thinking=None
+    popup = SessionDetailPopup(details, _session_view(s))  # on_strip_thinking=None
     qtbot.addWidget(popup)
     popup._on_strip_thinking()
 
@@ -1032,7 +1053,7 @@ def test_transcript_row_shows_full_jsonl_path(qtbot):
     s = _session(1, "D:/proj/foo")
     uuid = "abc12345-6789-0000-0000-000000000000"
     details = _make_full_details(s, effective_uuid=uuid)
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
 
     expected = str(_transcript_path_for_display(s.project_path, uuid))
@@ -1059,7 +1080,7 @@ def test_transcript_row_suppressed_when_uuid_missing(qtbot):
 
     s = _session(1, "D:/proj/foo")
     details = _make_full_details(s, effective_uuid="")
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
 
     # No label should carry the "Transcript" key text.
@@ -1079,7 +1100,7 @@ def test_transcript_open_calls_callback_on_success(qtbot):
         calls.append(True)
         return True
 
-    popup = SessionDetailPopup(details, s, on_open_transcript=on_open)
+    popup = SessionDetailPopup(details, _session_view(s), on_open_transcript=on_open)
     qtbot.addWidget(popup)
     popup._on_open_transcript()
 
@@ -1094,7 +1115,7 @@ def test_transcript_open_shows_error_on_callback_failure(qtbot):
 
     s = _session(1, "D:/proj/foo")
     details = _make_full_details(s, effective_uuid="abc12345-6789-0000-0000-000000000000")
-    popup = SessionDetailPopup(details, s, on_open_transcript=lambda: False)
+    popup = SessionDetailPopup(details, _session_view(s), on_open_transcript=lambda: False)
     qtbot.addWidget(popup)
     popup._on_open_transcript()
 
@@ -1108,7 +1129,7 @@ def test_transcript_open_handles_unwired_callback(qtbot):
 
     s = _session(1, "D:/proj/foo")
     details = _make_full_details(s, effective_uuid="abc12345-6789-0000-0000-000000000000")
-    popup = SessionDetailPopup(details, s)  # on_open_transcript=None
+    popup = SessionDetailPopup(details, _session_view(s))  # on_open_transcript=None
     qtbot.addWidget(popup)
     popup._on_open_transcript()
 
@@ -1172,7 +1193,7 @@ def test_detail_popup_dedupes_models_in_render(qtbot):
         _MT(model="claude-opus-4-6", input_tokens=200, output_tokens=300,
             cache_creation_tokens=30, cache_read_tokens=40, cost_usd=64.0)
     ))
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     # Count "Opus" labels — must be exactly 1 (the merged row).
     opus_labels = [
@@ -1194,7 +1215,7 @@ def test_detail_popup_hides_synthetic_zero_cost_row(qtbot):
         _MT(model="claude-sonnet-4-6", input_tokens=100, output_tokens=200,
             cache_creation_tokens=0, cache_read_tokens=0, cost_usd=1.0)
     ))
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     text = " | ".join(l.text() for l in popup.findChildren(_QL) if l.text())
     assert "<synthetic>" not in text
@@ -1208,7 +1229,7 @@ def test_detail_popup_hides_branch_when_head(qtbot):
     from PySide6.QtWidgets import QLabel as _QL
     s = _session(1, "/x")
     details = _make_full_details(s, git_branch="HEAD")
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     keys = [l.text() for l in popup.findChildren(_QL) if l.text() == "Branch"]
     assert keys == []
@@ -1221,7 +1242,7 @@ def test_detail_popup_prompt_collapsed_by_default(qtbot):
     s = _session(1, "/x")
     long_prompt = "first line of prompt\n" + ("x" * 200)
     details = _make_full_details(s, last_prompt=long_prompt)
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
 
     # Default: collapsed → first line + "…" so the user knows more
@@ -1264,7 +1285,7 @@ def test_detail_popup_short_prompt_no_toggle(qtbot):
     from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/x")
     details = _make_full_details(s, last_prompt="quick question")
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     popup.show()
     section = popup._prompt_section
@@ -1282,7 +1303,7 @@ def test_detail_popup_cjk_long_prompt_shows_toggle(qtbot):
     # User's real prompt from screenshot — 53 chars but ~439px wide.
     long_cjk = "我已经merge了 checkout到master pull最新代码，然后把改动同步到~/.claude下"
     details = _make_full_details(s, last_prompt=long_cjk)
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     popup.show()
     section = popup._prompt_section
@@ -1303,7 +1324,7 @@ def test_detail_popup_header_action_icons(qtbot):
     from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/x")
     details = _make_full_details(s)
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     assert popup._copy_id_btn is not None
     assert popup._copy_id_btn.text() == "⧉"
@@ -1322,7 +1343,7 @@ def test_detail_popup_no_actions_when_no_uuid(qtbot):
     from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/x")
     details = _make_full_details(s, effective_uuid="")
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     assert popup._copy_id_btn is None
     assert popup._repair_btn is None
@@ -1339,7 +1360,7 @@ def test_detail_popup_status_pill_never_renders(qtbot):
     s = _session(1, "/x")
     for state in ("idle", "waiting", "busy"):
         details = _make_full_details(s, status=state)
-        popup = SessionDetailPopup(details, s)
+        popup = SessionDetailPopup(details, _session_view(s))
         qtbot.addWidget(popup)
         text = " | ".join(l.text() for l in popup.findChildren(_QL) if l.text())
         assert state not in text, f"status '{state}' should not render"
@@ -1353,7 +1374,7 @@ def test_detail_popup_copy_id_action_writes_clipboard(qtbot):
     s = _session(1, "/x")
     full_uuid = "deadbeef-0000-0000-0000-000000000000"
     details = _make_full_details(s, effective_uuid=full_uuid)
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     popup._on_copy_id()
     assert QApplication.clipboard().text() == full_uuid
@@ -1372,7 +1393,7 @@ def test_detail_popup_path_click_invokes_open_folder_callback(qtbot):
 
     called: list[bool] = []
     popup = SessionDetailPopup(
-        details, s, on_open_folder=lambda: (called.append(True) or True),
+        details, _session_view(s), on_open_folder=lambda: (called.append(True) or True),
     )
     qtbot.addWidget(popup)
     popup.show()
@@ -1402,7 +1423,7 @@ def test_detail_popup_header_layout_stable_when_prompt_toggles(qtbot):
     long_prompt = "first line\n" + ("x" * 500)
     s = _session(1, "/x")
     details = _make_full_details(s, last_prompt=long_prompt)
-    popup = SessionDetailPopup(details, s)
+    popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
     popup.show()
 
@@ -1430,7 +1451,7 @@ def test_detail_popup_open_folder_invokes_callback(qtbot):
 
     called: list[bool] = []
     popup = SessionDetailPopup(
-        details, s, on_open_folder=lambda: (called.append(True) or True),
+        details, _session_view(s), on_open_folder=lambda: (called.append(True) or True),
     )
     qtbot.addWidget(popup)
 
@@ -1445,7 +1466,7 @@ def test_detail_popup_open_folder_unwired_shows_error(qtbot):
     from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/test/proj")
     details = _make_full_details(s)
-    popup = SessionDetailPopup(details, s)  # no on_open_folder
+    popup = SessionDetailPopup(details, _session_view(s))  # no on_open_folder
     qtbot.addWidget(popup)
     popup._on_open_folder()
     assert "not wired" in popup._repair_status.text()
@@ -1469,7 +1490,7 @@ class TestDetailPopupRename:
         # commit the rename. Old contract returned None (truthy ≠ True);
         # new dispatch contract uses bool.
         popup = SessionDetailPopup(
-            details, s,
+            details, _session_view(s),
             on_rename=(lambda u, n: renames.append((u, n)) or True) if with_rename else None
         )
         qtbot.addWidget(popup)
@@ -1554,7 +1575,7 @@ class TestDetailPopupRename:
         details = _make_full_details(s, effective_uuid="uuid-1")
         def boom(u, n):
             raise RuntimeError("disk full")
-        popup = SessionDetailPopup(details, s, on_rename=boom)
+        popup = SessionDetailPopup(details, _session_view(s), on_rename=boom)
         qtbot.addWidget(popup)
         popup._enter_rename_mode()
         popup._name_edit.setText("anything")
@@ -1595,7 +1616,7 @@ class TestDetailPopupSubtitle:
             ai_title="Learn Python and TypeScript basics",
             original_name="cc-learning"
         )
-        popup = SessionDetailPopup(details, s)
+        popup = SessionDetailPopup(details, _session_view(s))
         qtbot.addWidget(popup)
         assert self._label_with_text(
             popup, "Learn Python and TypeScript basics"
@@ -1613,7 +1634,7 @@ class TestDetailPopupSubtitle:
             ai_title=None,
             original_name="claude md prompt"
         )
-        popup = SessionDetailPopup(details, s)
+        popup = SessionDetailPopup(details, _session_view(s))
         qtbot.addWidget(popup)
         assert self._label_with_text(popup, "claude md prompt") is not None
 
@@ -1629,7 +1650,7 @@ class TestDetailPopupSubtitle:
             ai_title=None,
             original_name="cc-learning"
         )
-        popup = SessionDetailPopup(details, s)
+        popup = SessionDetailPopup(details, _session_view(s))
         qtbot.addWidget(popup)
         assert self._count_labels(popup, "cc-learning") == 1
 
@@ -1644,7 +1665,7 @@ class TestDetailPopupSubtitle:
             ai_title=None,
             original_name=None
         )
-        popup = SessionDetailPopup(details, s)
+        popup = SessionDetailPopup(details, _session_view(s))
         qtbot.addWidget(popup)
         # No phantom italic line of any kind.
         assert self._count_labels(popup, "proj-name") == 1
@@ -1659,7 +1680,7 @@ class TestDetailPopupSubtitle:
             ai_title="The AI Generated Title",
             original_name="The Original Name"
         )
-        popup = SessionDetailPopup(details, s)
+        popup = SessionDetailPopup(details, _session_view(s))
         qtbot.addWidget(popup)
         assert self._label_with_text(
             popup, "The AI Generated Title"
@@ -1678,7 +1699,7 @@ class TestDetailPopupSubtitle:
             ai_title="Refactor",
             original_name="cc-learning"
         )
-        popup = SessionDetailPopup(details, s)
+        popup = SessionDetailPopup(details, _session_view(s))
         qtbot.addWidget(popup)
         # Title appears once; "cc-learning" appears as the italic
         # subtitle (fall-through after ai_title echoed).
@@ -1696,7 +1717,7 @@ class TestDetailPopupSubtitle:
             ai_title="Same",
             original_name="Same"
         )
-        popup = SessionDetailPopup(details, s)
+        popup = SessionDetailPopup(details, _session_view(s))
         qtbot.addWidget(popup)
         assert self._count_labels(popup, "Same") == 1
 
@@ -1713,7 +1734,7 @@ class TestDetailPopupSubtitle:
             ai_title=None,
             original_name=None
         )
-        popup = SessionDetailPopup(details, s)
+        popup = SessionDetailPopup(details, _session_view(s))
         qtbot.addWidget(popup)
         assert self._label_with_text(popup, "claude-island") is not None
 

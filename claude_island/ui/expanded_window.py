@@ -1607,7 +1607,7 @@ class SessionDetailPopup(QFrame):
     def __init__(
         self,
         details: SessionDetails | None,
-        fallback: Session,
+        view: SessionView,
         parent: QWidget | None = None,
         *,
         on_rename: "Callable[[str, str], bool] | None" = None,
@@ -1626,7 +1626,10 @@ class SessionDetailPopup(QFrame):
         self.setFixedWidth(_PANEL_W)
 
         self._details = details
-        self._fallback = fallback
+        # SessionView is the pre-resolved snapshot the list rows render
+        # off, so the popup's "active <ago>" subtitle uses the same
+        # last_activity (per-uuid meta-merged) as the row — no drift.
+        self._view = view
         # All three callbacks are caller-supplied closures that route
         # to the dispatcher in production. Each returns bool — True on
         # success, False on missing capability / failure. The popup
@@ -1764,7 +1767,7 @@ class SessionDetailPopup(QFrame):
         else:
             fallback = (
                 (d.original_name if d and d.original_name else None)
-                or (self._fallback.project_path.name or None)
+                or (self._view.project_path.name or None)
             )
             subtitle_ai = (
                 fallback if fallback and fallback != title else None
@@ -1858,8 +1861,8 @@ class SessionDetailPopup(QFrame):
         # last-activity recency. Either part of the subtitle can be
         # missing — only show the dot separator when both sides exist.
         sub_parts: list[str] = []
-        if self._fallback.last_activity is not None:
-            sub_parts.append(f"active {_fmt_started(self._fallback.last_activity)}")
+        if self._view.last_activity is not None:
+            sub_parts.append(f"active {_fmt_started(self._view.last_activity)}")
         if d and d.cc_version:
             sub_parts.append(f"v{d.cc_version}")
         if sub_parts:
@@ -1940,7 +1943,7 @@ class SessionDetailPopup(QFrame):
         # revealed on hover — clicking the text should open, not copy).
         # elide=False: setWordWrap(True) below is the chosen overflow
         # strategy for long paths (eliding would lose path tail info).
-        pv = mk_label(str(self._fallback.project_path), elide=False)
+        pv = mk_label(str(self._view.project_path), elide=False)
         pv.setStyleSheet("color: #e8e8e8; font-size: 12px;")
         pv.setWordWrap(True)
         pv.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -1964,7 +1967,7 @@ class SessionDetailPopup(QFrame):
         # ``<project_dir>/.jsonl`` — and clicking would no-op anyway).
         if sess_uuid:
             transcript_path = _transcript_path_for_display(
-                self._fallback.project_path, sess_uuid,
+                self._view.project_path, sess_uuid,
             )
             tr_row = _HoverRevealRow()
             tr_h = QHBoxLayout(tr_row)
@@ -2172,7 +2175,7 @@ class SessionDetailPopup(QFrame):
         )
 
     def _on_open_folder(self) -> None:
-        path = self._fallback.project_path
+        path = self._view.project_path
         if self._on_open_folder_cb is None:
             self._show_status("Open-folder action is not wired", color="#ef4444")
             return
@@ -2441,8 +2444,8 @@ class SessionDetailPopup(QFrame):
         return (
             (d.name if d and d.name else None)
             or (d.ai_title if d and d.ai_title else None)
-            or self._fallback.project_path.name
-            or str(self._fallback.project_path)
+            or self._view.project_path.name
+            or str(self._view.project_path)
         )
 
     def _effective_uuid(self) -> str:
@@ -2451,7 +2454,7 @@ class SessionDetailPopup(QFrame):
         straight from ProcessScanner)."""
         if self._details and self._details.effective_uuid:
             return self._details.effective_uuid
-        return self._fallback.session_uuid or ""
+        return self._view.session_uuid or ""
 
 
 class _AddProviderDialog(QFrame):
@@ -5078,7 +5081,7 @@ class ExpandedWindow(QWidget):
             return bool(self._dispatch(view, Capability.RESET_THINKING))
 
         popup = SessionDetailPopup(
-            details, view.session, parent=self,
+            details, view, parent=self,
             on_rename=_do_rename,
             on_open_folder=_do_open_folder,
             on_open_transcript=_do_open_transcript,
