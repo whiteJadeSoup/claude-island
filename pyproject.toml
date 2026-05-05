@@ -21,6 +21,14 @@ dependencies = [
     "reactivex>=4.1,<5",
     "pywin32>=306; sys_platform == 'win32'",
     "uiautomation>=2.0; sys_platform == 'win32'",
+    # macOS-only: lets us mutate NSBundle.infoDictionary at runtime so the
+    # app runs as LSBackgroundOnly (no dock icon, no Cmd-Tab entry, no
+    # menu-bar title). Without this the user sees the generic Python file
+    # icon labelled "python3" — confusing and ugly. The capsule itself is
+    # the persistent affordance, mirroring Bartender / BetterTouchTool /
+    # Alfred. Graceful degrade: if pyobjc isn't installed (manual install
+    # path), the dock icon stays but the app still works.
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

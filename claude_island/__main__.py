@@ -22,6 +22,50 @@ from pathlib import Path
 from claude_island.core.stderr_noise_filter import install as _install_stderr_filter
 _install_stderr_filter()
 
+
+def _hide_from_macos_dock() -> None:
+    """Mutate the running app's NSBundle info dict so macOS treats us
+    as a background-only LSUIElement — no dock icon, no Cmd-Tab entry,
+    no menu-bar title.
+
+    Why: launching via ``python -m claude_island`` (or ``uv run``) makes
+    macOS show the generic Python file icon labelled "python3", which
+    is both ugly and confusing for users who don't know they're running
+    Python under the hood. The floating capsule is already the app's
+    persistent affordance — a redundant dock entry adds clutter without
+    adding capability. This matches the menu-bar / floating-utility
+    convention used by Bartender, BetterTouchTool, Ice, Alfred's
+    background mode, and the ActivityWatch tray app.
+
+    Must run BEFORE QApplication() is constructed: Qt instantiates
+    NSApplication during QApplication init, which freezes the activation
+    policy. Mutating ``infoDictionary`` after that point has no effect.
+
+    Graceful degrade: if pyobjc isn't installed (manual install or
+    explicit opt-out) we silently skip — the user sees the original
+    ugly Python icon but the app is otherwise unaffected.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSBundle  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    bundle = NSBundle.mainBundle()
+    info = bundle.infoDictionary()
+    if info is None:
+        return
+    # Both keys do similar things; setting both is the belt-and-braces
+    # pattern documented across pyobjc / Qt cookbooks. LSBackgroundOnly
+    # is the older flag; LSUIElement is the modern equivalent. Either
+    # alone may not stick reliably across macOS versions when the host
+    # is the Python launcher rather than a real .app bundle.
+    info["LSBackgroundOnly"] = "1"
+    info["LSUIElement"] = "1"
+
+
+_hide_from_macos_dock()
+
 from platformdirs import user_data_dir
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
