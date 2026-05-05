@@ -40,6 +40,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from claude_island.core.safe_stderr import safe_stderr_write
 from claude_island.core.models import (
     PricingTable,
     register_model_colors,
@@ -272,6 +273,10 @@ def _try_hosts(token: str) -> dict | None:
 
 
 def _fetch_http(url: str, token: str) -> dict | None:
+    """GET ``url`` with Bearer auth. Returns parsed JSON, or ``None``.
+
+    Each failure mode emits a single stderr line so the user can tell
+    network timeout from token rejection from server-shape mismatch."""
     req = urllib.request.Request(
         url,
         headers={
@@ -283,10 +288,30 @@ def _fetch_http(url: str, token: str) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             if resp.status != 200:
+                safe_stderr_write(
+                    f"[claude-island] minimax quota fetch: HTTP {resp.status}"
+                )
                 return None
             return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, UnicodeDecodeError):
+    except urllib.error.HTTPError as e:
+        safe_stderr_write(
+            f"[claude-island] minimax quota fetch: HTTP {e.code} {e.reason}"
+        )
+        return None
+    except urllib.error.URLError as e:
+        safe_stderr_write(
+            f"[claude-island] minimax quota fetch failed: {e.reason}"
+        )
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        safe_stderr_write(
+            f"[claude-island] minimax quota fetch: bad response body ({type(e).__name__})"
+        )
+        return None
+    except OSError as e:
+        safe_stderr_write(
+            f"[claude-island] minimax quota fetch: {type(e).__name__}: {e}"
+        )
         return None
 
 

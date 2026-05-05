@@ -20,6 +20,8 @@ from claude_island.core.models import (
     register_pricing,
 )
 
+from claude_island.core.safe_stderr import safe_stderr_write
+
 from . import (
     HTTP_TIMEOUT, POLL_TTL,
     provider,
@@ -116,6 +118,13 @@ class AnthropicProvider:
 
 
 def _fetch_http(token: str) -> dict | None:
+    """Hit the Anthropic /api/oauth/usage endpoint with a Bearer token.
+
+    Returns parsed JSON on success, ``None`` on any failure. Each
+    failure mode emits a single stderr line so the user can tell network
+    timeout from token rejection from server-shape mismatch — the UI
+    "Quota unavailable" hint promises this and used to lie about it.
+    """
     req = urllib.request.Request(
         URL,
         headers={
@@ -128,12 +137,41 @@ def _fetch_http(token: str) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             if resp.status != 200:
+                safe_stderr_write(
+                    f"[claude-island] anthropic quota fetch: HTTP {resp.status}"
+                )
                 return None
             data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, UnicodeDecodeError):
+    except urllib.error.HTTPError as e:
+        # 401 here typically means the OAuth token expired — Claude Code
+        # refreshes it on its next interaction, so the next 5 min tick
+        # usually self-heals. Print so the user knows that's the cause.
+        safe_stderr_write(
+            f"[claude-island] anthropic quota fetch: HTTP {e.code} {e.reason}"
+        )
+        return None
+    except urllib.error.URLError as e:
+        # DNS / connection refused / timeout. ``e.reason`` is either a
+        # str ("timed out") or an OSError; stringifying handles both.
+        safe_stderr_write(
+            f"[claude-island] anthropic quota fetch failed: {e.reason}"
+        )
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        safe_stderr_write(
+            f"[claude-island] anthropic quota fetch: bad response body ({type(e).__name__})"
+        )
+        return None
+    except OSError as e:
+        safe_stderr_write(
+            f"[claude-island] anthropic quota fetch: {type(e).__name__}: {e}"
+        )
         return None
     if not _has_shape(data):
+        safe_stderr_write(
+            "[claude-island] anthropic quota fetch: response missing "
+            "five_hour/seven_day fields — API contract changed?"
+        )
         return None
     return data
 

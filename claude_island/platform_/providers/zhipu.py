@@ -49,6 +49,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from claude_island.core.safe_stderr import safe_stderr_write
 from claude_island.core.models import (
     register_model_colors,
     register_model_short_names,
@@ -128,10 +129,30 @@ def _fetch_http(token: str) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             if resp.status != 200:
+                safe_stderr_write(
+                    f"[claude-island] zhipu quota fetch: HTTP {resp.status}"
+                )
                 return None
             return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, UnicodeDecodeError):
+    except urllib.error.HTTPError as e:
+        safe_stderr_write(
+            f"[claude-island] zhipu quota fetch: HTTP {e.code} {e.reason}"
+        )
+        return None
+    except urllib.error.URLError as e:
+        safe_stderr_write(
+            f"[claude-island] zhipu quota fetch failed: {e.reason}"
+        )
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        safe_stderr_write(
+            f"[claude-island] zhipu quota fetch: bad response body ({type(e).__name__})"
+        )
+        return None
+    except OSError as e:
+        safe_stderr_write(
+            f"[claude-island] zhipu quota fetch: {type(e).__name__}: {e}"
+        )
         return None
 
 

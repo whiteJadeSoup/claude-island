@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from claude_island.core.models import QuotaSnapshot
+from claude_island.core.safe_stderr import safe_stderr_write
 
 _PROVIDERS: dict[str, type] = {}
 
@@ -464,7 +465,12 @@ def _read_keychain_credentials() -> str | None:
 
 
 def http_get(url: str, token: str) -> dict | None:
-    """Issue a GET with Bearer auth. Returns parsed JSON, or ``None``."""
+    """Issue a GET with Bearer auth. Returns parsed JSON, or ``None``.
+
+    Each failure mode emits one stderr line so silent failures stop
+    looking like "no error happened" — the per-provider _fetch_http
+    helpers do the same; this generic helper mirrors that contract for
+    any future provider that uses it directly."""
     req = urllib.request.Request(
         url,
         headers={
@@ -476,10 +482,30 @@ def http_get(url: str, token: str) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             if resp.status != 200:
+                safe_stderr_write(
+                    f"[claude-island] http_get {url}: HTTP {resp.status}"
+                )
                 return None
             return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, UnicodeDecodeError):
+    except urllib.error.HTTPError as e:
+        safe_stderr_write(
+            f"[claude-island] http_get {url}: HTTP {e.code} {e.reason}"
+        )
+        return None
+    except urllib.error.URLError as e:
+        safe_stderr_write(
+            f"[claude-island] http_get {url} failed: {e.reason}"
+        )
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        safe_stderr_write(
+            f"[claude-island] http_get {url}: bad response body ({type(e).__name__})"
+        )
+        return None
+    except OSError as e:
+        safe_stderr_write(
+            f"[claude-island] http_get {url}: {type(e).__name__}: {e}"
+        )
         return None
 
 
