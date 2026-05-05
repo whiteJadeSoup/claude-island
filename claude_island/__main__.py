@@ -239,19 +239,30 @@ app.setQuitOnLastWindowClosed(False)
 # launch decision via NSBundle.infoDictionary). No-op on non-darwin.
 _apply_macos_accessory_policy()
 
-# Two-pronged dark tooltip styling:
+# Force the Fusion style on macOS so QSS is honoured for QToolTip.
 #
-# 1. App-level QSS — works on Windows / Linux. Covers border / padding
-#    / radius which the QPalette path can't.
-# 2. QToolTip.setPalette — the ONLY thing that works on macOS. The
-#    native Cocoa theme engine ignores QSS for tooltips, so a QSS-only
-#    setup leaves macOS users staring at the system tooltip (light
-#    gray on dark mode) which clashes with our dark UI. ToolTipBase /
-#    ToolTipText palette roles are honoured by the native engine.
+# Why this matters: macOS's native Qt style routes tooltip rendering
+# through Cocoa's NSToolTip, which silently ignores ``QToolTip { ... }``
+# QSS rules — and ALSO silently ignores ``QToolTip.setPalette`` for
+# ToolTipBase / ToolTipText. A dark-themed QSS plus a setPalette pair
+# both pass without error and look correct in code review, but the
+# user sees the system light-gray tooltip on a dark drawer. The only
+# reliable fix is to swap out the platform style for Fusion (Qt's
+# cross-platform style) which honours QSS for every widget including
+# tooltips. The visible blast radius is small here because every
+# top-level surface in this app is frameless + heavily QSS-styled —
+# Fusion replaces only the unstyled bits (default focus rings, scroll
+# bar arrows, etc), and those changes are barely noticeable.
 #
-# Border / radius / padding fall back to platform default on macOS,
-# which is fine — the colours are what carries 90% of the visual
-# coherence with the rest of the dark UI.
+# On Windows / Linux the platform style already honours the QToolTip
+# QSS rule, so swap is unnecessary and skipped — keeping native widget
+# look-and-feel where it works.
+if sys.platform == "darwin":
+    app.setStyle("Fusion")
+
+# Global QToolTip dark-theme rule. With Fusion (macOS) or native Win/
+# Linux styles, this is honoured everywhere in the app, so we don't
+# have to repeat it in every per-widget stylesheet.
 app.setStyleSheet(
     "QToolTip {"
     "  color: #e8e8e8;"
@@ -262,12 +273,6 @@ app.setStyleSheet(
     "  font-size: 12px;"
     "}"
 )
-from PySide6.QtGui import QColor as _QColor, QPalette as _QPalette
-from PySide6.QtWidgets import QToolTip as _QToolTip
-_tooltip_palette = _QToolTip.palette()
-_tooltip_palette.setColor(_QPalette.ColorRole.ToolTipBase, _QColor("#1e1e1e"))
-_tooltip_palette.setColor(_QPalette.ColorRole.ToolTipText, _QColor("#e8e8e8"))
-_QToolTip.setPalette(_tooltip_palette)
 
 from claude_island.ui.capsule_window import CapsuleWindow
 from claude_island.ui.controller import IslandController
