@@ -23,11 +23,10 @@ from claude_island.core.models import (
 from . import (
     HTTP_TIMEOUT,
     provider,
-    read_oauth_token, read_cache, write_cache,
-    snapshot_from_cache,
-    record_failed_attempt,
-    is_fetch_due,
+    read_oauth_token,
+    read_cache_state, write_cache_state,
     log_fetch_failure,
+    Window,
 )
 
 
@@ -85,59 +84,64 @@ class AnthropicProvider:
         *,
         cache_dir: Path,
         bypass_cache: bool = False,
-    ) -> QuotaSnapshot | None:
-        """Fetch from Anthropic's /api/oauth/usage with disk cache."""
-        from claude_island.core.models import QuotaSnapshot
+    ) -> "QuotaSnapshot | None":  # noqa: F821 — string annotation, model imported lazily
+        """Fetch from Anthropic's /api/oauth/usage with disk cache.
 
+        Linearised on QuotaCacheState transitions:
+
+            read state ──► throttle gate? ── True ──► return state.to_snapshot()
+                                │ False
+                                ▼
+                            read token? ── No ──► log + with_failed_attempt
+                                │ Yes
+                                ▼
+                            HTTP fetch ── (None, reason) ──► log + with_failed_attempt
+                                │ (data, None)
+                                ▼
+                            with_successful_fetch(windows)
+                                │
+                                ▼
+                            write_cache_state ──► state.to_snapshot()
+
+        Every transition produces a NEW state — no in-place mutation.
+        Side effects (write_cache_state, log_fetch_failure) are explicit
+        and live at the IO boundary, not inside the state class itself.
+        """
         cache_path = cache_dir / "anthropic-quota.json"
         now = datetime.now(timezone.utc)
+        state = read_cache_state(cache_path, fallback_provider="anthropic")
 
-        if not bypass_cache:
-            cached = read_cache(cache_path)
-            if cached is not None and not is_fetch_due(cached, now=now):
-                # Throttle window active — return whatever cache yields.
-                # First-failure caches have no business data, so _from_cache
-                # returns None; subsequent successful refreshes populate
-                # five_hour/seven_day and the call returns a real snap.
-                # Either way we DO NOT re-issue HTTP within POLL_TTL.
-                return _from_cache(cached, now)
+        # Throttle gate: only honoured for auto-refresh; manual ⟳ ignores it.
+        if not bypass_cache and not state.is_fetch_due(now=now):
+            return state.to_snapshot(now=now)
 
         token = read_oauth_token(_CREDENTIALS_PATH)
         if not token:
             if bypass_cache:
                 return None
-            # Token-missing is a soft failure too: every wake() would
-            # otherwise re-attempt the keychain lookup. Mark the attempt
-            # so retry waits POLL_TTL just like an HTTP failure.
-            log_fetch_failure(
-                cache_path, now=now, provider="anthropic",
-                reason="OAuth credentials not found",
-            )
-            record_failed_attempt(cache_path, now=now, provider="anthropic")
-            return _from_cache(read_cache(cache_path), now)
+            log_fetch_failure(state, reason="OAuth credentials not found", now=now)
+            new_state = state.with_failed_attempt(now=now)
+            write_cache_state(cache_path, new_state)
+            return new_state.to_snapshot(now=now)
 
         data, reason = _fetch_http(token)
         if data is None:
             if bypass_cache:
                 return None
-            # IMPORTANT: log_fetch_failure must run BEFORE
-            # record_failed_attempt — the helper reads the cache's
-            # last_attempt_at as the "previous attempt" timestamp,
-            # which record_failed_attempt is about to overwrite.
-            log_fetch_failure(
-                cache_path, now=now, provider="anthropic",
-                reason=reason or "unknown error",
-            )
-            record_failed_attempt(cache_path, now=now, provider="anthropic")
-            return _from_cache(read_cache(cache_path), now)
+            # log_fetch_failure must run BEFORE with_failed_attempt — the
+            # helper reads state.last_attempt_at as the prior-attempt
+            # timestamp, which the new state will have overwritten with now.
+            log_fetch_failure(state, reason=reason or "unknown error", now=now)
+            new_state = state.with_failed_attempt(now=now)
+            write_cache_state(cache_path, new_state)
+            return new_state.to_snapshot(now=now)
 
-        payload = _normalise(data, fetched_at=now)
-        # Successful refresh writes BOTH timestamps so is_fetch_due
-        # gates the next attempt to POLL_TTL after this success, not
-        # POLL_TTL after some stale prior last_attempt_at marker.
-        payload["last_attempt_at"] = now.isoformat()
-        write_cache(cache_path, payload)
-        return _from_cache(payload, now)
+        five_hour, seven_day = _parse_response(data)
+        new_state = state.with_successful_fetch(
+            now=now, five_hour=five_hour, seven_day=seven_day,
+        )
+        write_cache_state(cache_path, new_state)
+        return new_state.to_snapshot(now=now)
 
 
 def _fetch_http(token: str) -> tuple[dict | None, str | None]:
@@ -199,22 +203,28 @@ def _has_shape(data: object) -> bool:
     return True
 
 
-def _normalise(data: dict, *, fetched_at: datetime) -> dict:
-    return {
-        "provider": "anthropic",
-        "fetched_at": fetched_at.isoformat(),
-        "five_hour": {
-            "pct": float(data["five_hour"]["utilization"]),
-            "resets_at": data["five_hour"]["resets_at"],
-        },
-        "seven_day": {
-            "pct": float(data["seven_day"]["utilization"]),
-            "resets_at": data["seven_day"]["resets_at"],
-        },
-    }
+def _parse_response(data: dict) -> tuple[Window, Window]:
+    """Parse the validated HTTP response into the throttle layer's
+    Window value objects. Must run AFTER _has_shape — it trusts that
+    five_hour/seven_day exist with utilization (number) and
+    resets_at (ISO string) keys."""
+    return (
+        Window(
+            pct=float(data["five_hour"]["utilization"]),
+            resets_at=_parse_resets(data["five_hour"]["resets_at"]),
+        ),
+        Window(
+            pct=float(data["seven_day"]["utilization"]),
+            resets_at=_parse_resets(data["seven_day"]["resets_at"]),
+        ),
+    )
 
 
-def _from_cache(cached: dict | None, now: datetime):
-    if cached is None:
-        return None
-    return snapshot_from_cache(cached, provider="anthropic", now=now)
+def _parse_resets(s: str) -> datetime:
+    """ISO 8601 → tz-aware UTC datetime. Z suffix is normalised to
+    +00:00 because Python's fromisoformat only learned to accept Z in
+    3.11 — keep this for older interpreter compatibility."""
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)

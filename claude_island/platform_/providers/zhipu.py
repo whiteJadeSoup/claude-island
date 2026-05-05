@@ -58,11 +58,10 @@ from . import (
     HTTP_TIMEOUT,
     provider,
     get_provider_setting,
-    read_cache, write_cache,
-    _parse_ms, snapshot_from_cache,
-    record_failed_attempt,
-    is_fetch_due,
+    _parse_ms,
+    read_cache_state, write_cache_state,
     log_fetch_failure,
+    Window,
 )
 
 
@@ -145,19 +144,25 @@ def _fetch_http(token: str) -> tuple[dict | None, str | None]:
         return None, f"{type(e).__name__}: {e}"
 
 
-def _normalise(data: dict, *, fetched_at: datetime) -> dict:
-    """Convert Z.AI's response to the shared cache schema.
+def _parse_response(data: dict, *, now: datetime) -> tuple[Window, Window]:
+    """Parse Z.AI's response into (five_hour, weekly) windows.
 
     Sort rule mirrors cc-switch: filter type==TOKENS_LIMIT, sort
-    ascending by nextResetTime (missing → 2**63-1 so they sort last
-    rather than crashing the comparator), first entry = 5h, second =
-    weekly.
+    ascending by nextResetTime, first entry = 5h, second = weekly.
 
-    Legacy single-limit subscriptions: weekly is missing. We synthesise
-    a sentinel ``fetched_at + 7 days`` so :func:`snapshot_from_cache`
-    accepts the snapshot (it requires both reset timestamps to be real
-    and in the future). The UI then renders Weekly as 0% — honest to
-    "no weekly limit info available", and lets the 5h bar still show.
+    ``now`` is required because legacy single-limit subscriptions (only
+    one TOKENS_LIMIT entry, the 5h tier) need a synthetic weekly with
+    a future resets_at — without it the QuotaCacheState.to_snapshot
+    guard ("five_hour.resets_at must be in the future") would still pass
+    but the UI would render a malformed Weekly window. The sentinel
+    ``now + 7 days`` is honest about "no weekly info" while keeping
+    the 5h bar visible.
+
+    Always returns a complete (Window, Window) — Z.AI's API guarantees
+    at least one TOKENS_LIMIT for any active plan, and we synthesize
+    the second when missing. If even the first is missing (degenerate
+    response), we still produce a Window with a far-future sentinel
+    so to_snapshot's "resets in the past" guard catches it cleanly.
     """
     payload_data = data.get("data") if isinstance(data, dict) else None
     limits = (payload_data or {}).get("limits") or []
@@ -165,44 +170,34 @@ def _normalise(data: dict, *, fetched_at: datetime) -> dict:
         l for l in limits
         if isinstance(l, dict) and str(l.get("type", "")).upper() == "TOKENS_LIMIT"
     ]
-    # Sort ascending by nextResetTime; entries with missing timestamps
-    # sort last (huge sentinel) rather than blowing up the key fn.
     tokens_limits.sort(
         key=lambda l: l.get("nextResetTime") if isinstance(l.get("nextResetTime"), (int, float)) else (2 ** 63 - 1)
     )
-    five_hour = tokens_limits[0] if len(tokens_limits) >= 1 else None
-    weekly = tokens_limits[1] if len(tokens_limits) >= 2 else None
+    five_raw = tokens_limits[0] if len(tokens_limits) >= 1 else None
+    weekly_raw = tokens_limits[1] if len(tokens_limits) >= 2 else None
 
-    five_pct = float(five_hour["percentage"]) if (five_hour and isinstance(five_hour.get("percentage"), (int, float))) else 0.0
-    five_resets = _parse_ms(five_hour.get("nextResetTime")) if five_hour else None
-
-    if weekly:
-        seven_pct = float(weekly["percentage"]) if isinstance(weekly.get("percentage"), (int, float)) else 0.0
-        seven_resets = _parse_ms(weekly.get("nextResetTime"))
+    if five_raw is not None:
+        five_pct = float(five_raw["percentage"]) if isinstance(five_raw.get("percentage"), (int, float)) else 0.0
+        five_resets = _parse_ms(five_raw.get("nextResetTime")) or (now - timedelta(seconds=1))
     else:
-        # Legacy single-limit plan — synthesise a sentinel weekly so the
-        # snapshot_from_cache guard doesn't drop the whole snapshot.
+        # Degenerate — no TOKENS_LIMIT at all. Past-resets_at signals
+        # "expired" to to_snapshot which then returns None (UI "no quota").
+        five_pct = 0.0
+        five_resets = now - timedelta(seconds=1)
+
+    if weekly_raw is not None:
+        seven_pct = float(weekly_raw["percentage"]) if isinstance(weekly_raw.get("percentage"), (int, float)) else 0.0
+        seven_resets = _parse_ms(weekly_raw.get("nextResetTime")) or (now + timedelta(days=7))
+    else:
+        # Legacy single-limit plan — synthesise sentinel so the 5h bar
+        # still renders with the weekly displaying 0%.
         seven_pct = 0.0
-        seven_resets = fetched_at + timedelta(days=7)
+        seven_resets = now + timedelta(days=7)
 
-    return {
-        "provider": "zhipu",
-        "fetched_at": fetched_at.isoformat(),
-        "five_hour": {
-            "pct": five_pct,
-            "resets_at": five_resets.isoformat() if five_resets else None,
-        },
-        "seven_day": {
-            "pct": seven_pct,
-            "resets_at": seven_resets.isoformat() if seven_resets else None,
-        },
-    }
-
-
-def _from_cache(cached: dict | None, now: datetime):
-    if cached is None:
-        return None
-    return snapshot_from_cache(cached, provider="zhipu", now=now)
+    return (
+        Window(pct=five_pct, resets_at=five_resets),
+        Window(pct=seven_pct, resets_at=seven_resets),
+    )
 
 
 @provider("zhipu")
@@ -242,45 +237,36 @@ class ZhipuProvider:
         cache_dir: Path,
         bypass_cache: bool = False,
     ) -> "QuotaSnapshot | None":  # noqa: F821
-        """Fetch from Z.AI's quota endpoint with disk cache. Mirrors
-        the structure of MiniMax / Anthropic providers — disk cache
-        first (skipped on bypass), HTTP fallback, write-through on
-        success, cache fallback on failure."""
+        """Fetch from Z.AI's quota endpoint. See ``anthropic.py:fetch``
+        for the QuotaCacheState transition rationale."""
         cache_path = cache_dir / "zhipu-quota.json"
         now = datetime.now(timezone.utc)
+        state = read_cache_state(cache_path, fallback_provider="zhipu")
 
-        if not bypass_cache:
-            cached = read_cache(cache_path)
-            if cached is not None and not is_fetch_due(cached, now=now):
-                # Throttle window active — see anthropic.py for the
-                # full rationale. Returns prior snap if there was a
-                # successful refresh, None if this is a first-failure
-                # marker. Never re-issues HTTP within POLL_TTL.
-                return _from_cache(cached, now)
+        if not bypass_cache and not state.is_fetch_due(now=now):
+            return state.to_snapshot(now=now)
 
         token = _read_token()
         if not token:
             if bypass_cache:
                 return None
-            log_fetch_failure(
-                cache_path, now=now, provider="zhipu",
-                reason="auth token not configured",
-            )
-            record_failed_attempt(cache_path, now=now, provider="zhipu")
-            return _from_cache(read_cache(cache_path), now)
+            log_fetch_failure(state, reason="auth token not configured", now=now)
+            new_state = state.with_failed_attempt(now=now)
+            write_cache_state(cache_path, new_state)
+            return new_state.to_snapshot(now=now)
 
         data, reason = _fetch_http(token)
         if data is None:
             if bypass_cache:
                 return None
-            log_fetch_failure(
-                cache_path, now=now, provider="zhipu",
-                reason=reason or "unknown error",
-            )
-            record_failed_attempt(cache_path, now=now, provider="zhipu")
-            return _from_cache(read_cache(cache_path), now)
+            log_fetch_failure(state, reason=reason or "unknown error", now=now)
+            new_state = state.with_failed_attempt(now=now)
+            write_cache_state(cache_path, new_state)
+            return new_state.to_snapshot(now=now)
 
-        payload = _normalise(data, fetched_at=now)
-        payload["last_attempt_at"] = now.isoformat()
-        write_cache(cache_path, payload)
-        return _from_cache(payload, now)
+        five_hour, seven_day = _parse_response(data, now=now)
+        new_state = state.with_successful_fetch(
+            now=now, five_hour=five_hour, seven_day=seven_day,
+        )
+        write_cache_state(cache_path, new_state)
+        return new_state.to_snapshot(now=now)

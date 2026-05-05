@@ -50,12 +50,12 @@ from claude_island.core.models import (
 from . import (
     HTTP_TIMEOUT,
     provider,
-    read_env_token, read_cache, write_cache,
+    read_env_token,
     get_provider_setting,
-    _parse_ms, snapshot_from_cache,
-    record_failed_attempt,
-    is_fetch_due,
+    _parse_ms,
+    read_cache_state, write_cache_state,
     log_fetch_failure,
+    Window,
 )
 
 
@@ -227,45 +227,58 @@ class MiniMaxProvider:
         cache_dir: Path,
         bypass_cache: bool = False,
     ) -> "QuotaSnapshot | None":  # noqa: F821
-        """Fetch from MiniMax coding_plan/remains with disk cache."""
+        """Fetch from MiniMax coding_plan/remains with disk cache.
+
+        See ``anthropic.py:fetch`` for the QuotaCacheState transition
+        rationale — the structure here is identical, with ``_try_hosts``
+        replacing the single-host HTTP call.
+        """
         cache_path = cache_dir / "minimax-quota.json"
         now = datetime.now(timezone.utc)
+        state = read_cache_state(cache_path, fallback_provider="minimax")
 
-        if not bypass_cache:
-            cached = read_cache(cache_path)
-            if cached is not None and not is_fetch_due(cached, now=now):
-                # Throttle window active — see anthropic.py for the
-                # full rationale. Returns prior snap if there was a
-                # successful refresh, None if this is a first-failure
-                # marker. Never re-issues HTTP within POLL_TTL.
-                return _from_cache(cached, now)
+        if not bypass_cache and not state.is_fetch_due(now=now):
+            return state.to_snapshot(now=now)
 
         token = _read_token()
         if not token:
             if bypass_cache:
                 return None
-            log_fetch_failure(
-                cache_path, now=now, provider="minimax",
-                reason="auth token not configured",
-            )
-            record_failed_attempt(cache_path, now=now, provider="minimax")
-            return _from_cache(read_cache(cache_path), now)
+            log_fetch_failure(state, reason="auth token not configured", now=now)
+            new_state = state.with_failed_attempt(now=now)
+            write_cache_state(cache_path, new_state)
+            return new_state.to_snapshot(now=now)
 
         data, reason = _try_hosts(token)
         if data is None:
             if bypass_cache:
                 return None
-            log_fetch_failure(
-                cache_path, now=now, provider="minimax",
-                reason=reason or "unknown error",
-            )
-            record_failed_attempt(cache_path, now=now, provider="minimax")
-            return _from_cache(read_cache(cache_path), now)
+            log_fetch_failure(state, reason=reason or "unknown error", now=now)
+            new_state = state.with_failed_attempt(now=now)
+            write_cache_state(cache_path, new_state)
+            return new_state.to_snapshot(now=now)
 
-        payload = _normalise(data, fetched_at=now)
-        payload["last_attempt_at"] = now.isoformat()
-        write_cache(cache_path, payload)
-        return _from_cache(payload, now)
+        parsed = _parse_response(data)
+        if parsed is None:
+            # Response shape is missing the coding-plan model or its
+            # interval/weekly counters — treat as failure rather than
+            # writing a cache entry with None timestamps that the UI
+            # would silently drop. Mirrors anthropic's _has_shape guard.
+            if bypass_cache:
+                return None
+            log_fetch_failure(
+                state, reason="response missing coding_plan fields", now=now,
+            )
+            new_state = state.with_failed_attempt(now=now)
+            write_cache_state(cache_path, new_state)
+            return new_state.to_snapshot(now=now)
+
+        five_hour, seven_day = parsed
+        new_state = state.with_successful_fetch(
+            now=now, five_hour=five_hour, seven_day=seven_day,
+        )
+        write_cache_state(cache_path, new_state)
+        return new_state.to_snapshot(now=now)
 
 
 def _try_hosts(token: str) -> tuple[dict | None, str | None]:
@@ -326,51 +339,39 @@ def _fetch_http(url: str, token: str) -> tuple[dict | None, str | None]:
         return None, f"{type(e).__name__}: {e}"
 
 
-def _normalise(data: dict, *, fetched_at: datetime) -> dict:
-    """Normalise MiniMax response to the same shape as our cache.
+def _parse_response(data: dict) -> tuple[Window, Window] | None:
+    """Parse MiniMax response into (five_hour, seven_day) windows.
 
-    Note: MiniMax returns REMAINING count, not used. pct = (total - remaining).
+    Returns None when the response can't be turned into a complete
+    reading — caller treats that as fetch failure (logs + bumps
+    last_attempt_at). Reasons we may fail to parse:
+      * No matching coding-plan model in model_remains
+      * end_time / weekly_end_time missing or invalid
+
+    pct = (total - remaining) / total — MiniMax returns REMAINING,
+    not used.
     """
     models: list = data.get("model_remains") or []
     m = _find_coding_model(models)
-
-    five_pct = 0.0
-    five_resets: datetime | None = None
-    seven_pct = 0.0
-    seven_resets: datetime | None = None
-
-    if m:
-        five_total = int(m.get("current_interval_total_count", 0))
-        five_rem = int(m.get("current_interval_usage_count", 0))
-        five_used = five_total - five_rem
-        if five_total > 0:
-            five_pct = round(five_used / five_total * 100, 1)
-        five_resets = _parse_ms(m.get("end_time"))
-
-        seven_total = int(m.get("current_weekly_total_count", 0))
-        seven_rem = int(m.get("current_weekly_usage_count", 0))
-        if seven_total > 0:
-            seven_used = seven_total - seven_rem
-            seven_pct = round(seven_used / seven_total * 100, 1)
-        seven_resets = _parse_ms(m.get("weekly_end_time"))
-
-    return {
-        "provider": "minimax",
-        "fetched_at": fetched_at.isoformat(),
-        "five_hour": {
-            "pct": float(five_pct),
-            "resets_at": five_resets.isoformat() if five_resets else None,
-        },
-        "seven_day": {
-            "pct": float(seven_pct),
-            "resets_at": seven_resets.isoformat() if seven_resets else None,
-        },
-    }
-
-
-def _from_cache(cached: dict | None, now: datetime):
-    if cached is None:
+    if not m:
         return None
-    return snapshot_from_cache(cached, provider="minimax", now=now)
+
+    five_total = int(m.get("current_interval_total_count", 0))
+    five_rem = int(m.get("current_interval_usage_count", 0))
+    five_pct = round((five_total - five_rem) / five_total * 100, 1) if five_total > 0 else 0.0
+    five_resets = _parse_ms(m.get("end_time"))
+
+    seven_total = int(m.get("current_weekly_total_count", 0))
+    seven_rem = int(m.get("current_weekly_usage_count", 0))
+    seven_pct = round((seven_total - seven_rem) / seven_total * 100, 1) if seven_total > 0 else 0.0
+    seven_resets = _parse_ms(m.get("weekly_end_time"))
+
+    if five_resets is None or seven_resets is None:
+        return None
+
+    return (
+        Window(pct=float(five_pct), resets_at=five_resets),
+        Window(pct=float(seven_pct), resets_at=seven_resets),
+    )
 
 

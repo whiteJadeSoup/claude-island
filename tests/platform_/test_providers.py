@@ -162,9 +162,8 @@ class TestMiniMaxProvider:
         assert result.five_hour_pct == 7.0
         assert result.provider == "minimax"
 
-    def test_normalise_calculates_pct_from_remaining(self):
-        from claude_island.platform_.providers.minimax import _normalise
-        now = datetime.now(timezone.utc)
+    def test_parse_response_calculates_pct_from_remaining(self):
+        from claude_island.platform_.providers.minimax import _parse_response
         data = {
             "model_remains": [{
                 "model_name": "MiniMax-M2.7-highspeed",
@@ -176,8 +175,10 @@ class TestMiniMaxProvider:
                 "weekly_end_time": 1778319600000,
             }]
         }
-        payload = _normalise(data, fetched_at=now)
-        assert payload["five_hour"]["pct"] == pytest.approx(
+        parsed = _parse_response(data)
+        assert parsed is not None
+        five_hour, _ = parsed
+        assert five_hour.pct == pytest.approx(
             (4500 - 4227) / 4500 * 100, rel=1e-2
         )  # ~6%
 
@@ -535,11 +536,11 @@ class TestZhipuProvider:
         # Self-documenting help string in the seed config.
         assert "_help" in cfg
 
-    def test_normalise_two_limits_assigns_5h_then_weekly_by_reset_time(self):
+    def test_parse_response_two_limits_assigns_5h_then_weekly_by_reset_time(self):
         # Per cc-switch rule: filter type==TOKENS_LIMIT, sort ascending
         # by nextResetTime, first → 5h, second → weekly. Even when the
         # API returns them in a different order.
-        from claude_island.platform_.providers.zhipu import _normalise
+        from claude_island.platform_.providers.zhipu import _parse_response
         now = datetime(2026, 5, 1, tzinfo=timezone.utc)
         # Intentionally weekly-first in the input; sort must reverse it.
         weekly_ms = int(datetime(2026, 5, 8, tzinfo=timezone.utc).timestamp() * 1000)
@@ -558,19 +559,18 @@ class TestZhipuProvider:
                 ],
             },
         }
-        payload = _normalise(data, fetched_at=now)
+        five_hour, seven_day = _parse_response(data, now=now)
         # Sorted ascending: 5h slot is the soonest reset (12.5%),
         # weekly slot is the later reset (80%).
-        assert payload["five_hour"]["pct"] == 12.5
-        assert payload["seven_day"]["pct"] == 80.0
-        assert payload["provider"] == "zhipu"
+        assert five_hour.pct == 12.5
+        assert seven_day.pct == 80.0
 
-    def test_normalise_legacy_single_limit_synthesises_weekly(self):
+    def test_parse_response_legacy_single_limit_synthesises_weekly(self):
         # Pre-2026-02-12 subscriptions only emit one TOKENS_LIMIT; the
-        # snapshot still has to satisfy snapshot_from_cache's "both
-        # windows must have a real reset" gate, so we synthesise a
-        # 7-day-out sentinel for weekly with 0% utilisation.
-        from claude_island.platform_.providers.zhipu import _normalise
+        # snapshot still has to satisfy state.to_snapshot's "both
+        # windows must have a real future reset" gate, so we synthesise
+        # a 7-day-out sentinel for weekly with 0% utilisation.
+        from claude_island.platform_.providers.zhipu import _parse_response
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
         five_ms = int(datetime(2026, 1, 1, 5, tzinfo=timezone.utc).timestamp() * 1000)
         data = {
@@ -582,12 +582,12 @@ class TestZhipuProvider:
                 ],
             },
         }
-        payload = _normalise(data, fetched_at=now)
-        assert payload["five_hour"]["pct"] == 25.0
+        five_hour, seven_day = _parse_response(data, now=now)
+        assert five_hour.pct == 25.0
         # Synthesised weekly: 0%, far-future reset so the snapshot
         # passes the validity gate.
-        assert payload["seven_day"]["pct"] == 0.0
-        assert payload["seven_day"]["resets_at"] is not None
+        assert seven_day.pct == 0.0
+        assert seven_day.resets_at > now
 
     def test_fetch_uses_cache(self, tmp_path):
         from claude_island.platform_.providers.zhipu import ZhipuProvider
@@ -953,84 +953,181 @@ class TestDeleteProviderSettings:
         assert read_provider_config(path) == original
 
 
-class TestNegativeCacheHelper:
-    """Helpers in providers/__init__.py that throttle retry on failure.
+class TestQuotaCacheState:
+    """Throttle-layer first-class object — see providers/__init__.py.
 
-    See record_failed_attempt / is_fetch_due docstrings for the why.
-    Without these, every snapshotter.wake() (fired on every JSONL ingest,
-    file watch, sessions_changed event) would re-issue the failing HTTP
-    request, flooding stderr and burning network on a server already
-    saying no.
+    These tests pin the state machine: failure-only state, success
+    state, throttle gates, UI projection. Together they replace the
+    older free-function helper tests (record_failed_attempt /
+    is_fetch_due / snapshot_from_cache) which were dict-based and
+    required mocking the cache file for trivial assertions.
     """
 
-    def test_record_failed_attempt_writes_last_attempt_at(self, tmp_path):
-        from claude_island.platform_.providers import (
-            record_failed_attempt, read_cache,
+    def _now(self) -> datetime:
+        return datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_with_failed_attempt_bumps_only_last_attempt_at(self):
+        """Failure must NOT touch fetched_at or business data — those
+        come from the LAST SUCCESSFUL fetch and stay frozen across
+        failures so is_stale ageing keeps climbing on real freshness."""
+        from claude_island.platform_.providers import QuotaCacheState, Window
+        prior = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=datetime(2026, 5, 5, 11, 0, 0, tzinfo=timezone.utc),
+            last_attempt_at=datetime(2026, 5, 5, 11, 30, 0, tzinfo=timezone.utc),
+            five_hour=Window(pct=42.0,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+            seven_day=Window(pct=15.0,
+                             resets_at=datetime(2030, 1, 7, tzinfo=timezone.utc)),
         )
-        cache_path = tmp_path / "anthropic-quota.json"
-        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
-        record_failed_attempt(cache_path, now=now, provider="anthropic")
-        cached = read_cache(cache_path)
-        assert cached["last_attempt_at"] == now.isoformat()
-        assert cached["provider"] == "anthropic"
+        new = prior.with_failed_attempt(now=self._now())
+        assert new.last_attempt_at == self._now()
+        assert new.fetched_at == prior.fetched_at      # frozen
+        assert new.five_hour == prior.five_hour        # frozen
+        assert new.seven_day == prior.seven_day        # frozen
 
-    def test_record_failed_attempt_preserves_prior_business_data(self, tmp_path):
-        """Failure must NOT overwrite a prior successful five_hour /
-        seven_day payload — the UI keeps showing the last-known reading
-        with is_stale climbing on the original fetched_at."""
-        from claude_island.platform_.providers import (
-            record_failed_attempt, read_cache,
+    def test_with_successful_fetch_bumps_both_timestamps(self):
+        """Success path moves both fetched_at and last_attempt_at to now,
+        so is_fetch_due gates the next attempt to POLL_TTL after THIS
+        success — not POLL_TTL after some stale prior attempt."""
+        from claude_island.platform_.providers import QuotaCacheState, Window
+        empty = QuotaCacheState.empty("anthropic")
+        new = empty.with_successful_fetch(
+            now=self._now(),
+            five_hour=Window(pct=10.0,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+            seven_day=Window(pct=5.0,
+                             resets_at=datetime(2030, 1, 7, tzinfo=timezone.utc)),
         )
-        cache_path = tmp_path / "anthropic-quota.json"
-        prior_fetch = "2026-05-05T11:00:00+00:00"
-        cache_path.write_text(json.dumps({
-            "provider": "anthropic",
-            "fetched_at": prior_fetch,
-            "five_hour": {"pct": 42.0, "resets_at": "2030-01-01T00:00:00Z"},
-            "seven_day": {"pct": 15.0, "resets_at": "2030-01-07T00:00:00Z"},
-        }))
-        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
-        record_failed_attempt(cache_path, now=now, provider="anthropic")
-        cached = read_cache(cache_path)
-        # Business data preserved …
-        assert cached["five_hour"]["pct"] == 42.0
-        assert cached["fetched_at"] == prior_fetch
-        # … and the retry gate moved forward.
-        assert cached["last_attempt_at"] == now.isoformat()
+        assert new.fetched_at == self._now()
+        assert new.last_attempt_at == self._now()
+        assert new.five_hour.pct == 10.0
 
-    def test_is_fetch_due_prefers_last_attempt_at(self):
-        """When both timestamps exist, the more recent last_attempt_at
-        wins — failure scenarios where fetched_at is hours old but the
-        last failed attempt was 30s ago should still throttle."""
-        from claude_island.platform_.providers import is_fetch_due
-        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
-        cached = {
-            "fetched_at": "2026-05-05T08:00:00+00:00",        # 4 h old
-            "last_attempt_at": "2026-05-05T11:59:30+00:00",   # 30 s old
-        }
-        assert is_fetch_due(cached, now=now) is False
-
-    def test_is_fetch_due_falls_back_to_fetched_at(self):
-        """Caches written before the negative-cache logic landed have
-        no last_attempt_at field; success paths that pre-date this
-        change still need to be gateable."""
-        from claude_island.platform_.providers import is_fetch_due
-        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
-        cached = {"fetched_at": "2026-05-05T11:59:00+00:00"}  # 1 min old
-        assert is_fetch_due(cached, now=now) is False
-
-    def test_is_fetch_due_returns_true_when_no_timestamps(self):
-        from claude_island.platform_.providers import is_fetch_due
-        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
-        assert is_fetch_due({}, now=now) is True
+    def test_is_fetch_due_prefers_last_attempt_over_fetched_at(self):
+        """Failure scenario: fetched_at hours old but the last failed
+        attempt was 30 s ago → still throttled."""
+        from claude_island.platform_.providers import QuotaCacheState
+        state = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=datetime(2026, 5, 5, 8, 0, 0, tzinfo=timezone.utc),       # 4 h old
+            last_attempt_at=datetime(2026, 5, 5, 11, 59, 30, tzinfo=timezone.utc),  # 30 s old
+            five_hour=None, seven_day=None,
+        )
+        assert state.is_fetch_due(now=self._now()) is False
 
     def test_is_fetch_due_returns_true_after_ttl(self):
-        from claude_island.platform_.providers import is_fetch_due, POLL_TTL
-        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
-        # POLL_TTL + 1 s past last attempt → due
-        cached = {"last_attempt_at": "2026-05-05T11:54:59+00:00"}
-        assert is_fetch_due(cached, now=now) is True
-        assert POLL_TTL == 300  # sanity-pin so future bumps trigger review
+        """POLL_TTL + 1 s past last attempt → gate opens."""
+        from claude_island.platform_.providers import QuotaCacheState, POLL_TTL
+        state = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=None,
+            last_attempt_at=datetime(2026, 5, 5, 11, 54, 59, tzinfo=timezone.utc),
+            five_hour=None, seven_day=None,
+        )
+        assert state.is_fetch_due(now=self._now()) is True
+        assert POLL_TTL == 300  # sanity pin
+
+    def test_is_fetch_due_returns_true_for_empty(self):
+        """Cold start → always due."""
+        from claude_island.platform_.providers import QuotaCacheState
+        assert QuotaCacheState.empty("anthropic").is_fetch_due(now=self._now()) is True
+
+    def test_is_stale_uses_fetched_at_not_last_attempt(self):
+        """Stale must reflect data freshness, not retry activity. A
+        cache that fetched 20 min ago and has been failing every 5 min
+        since is stale — even though last_attempt_at is recent."""
+        from claude_island.platform_.providers import QuotaCacheState, Window
+        twenty_min_ago = datetime(2026, 5, 5, 11, 40, 0, tzinfo=timezone.utc)
+        recent_attempt = datetime(2026, 5, 5, 11, 59, 0, tzinfo=timezone.utc)
+        state = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=twenty_min_ago,
+            last_attempt_at=recent_attempt,
+            five_hour=Window(pct=42.0,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+            seven_day=Window(pct=15.0,
+                             resets_at=datetime(2030, 1, 7, tzinfo=timezone.utc)),
+        )
+        # 20 min > POLL_TTL * STALE_MULT (= 15 min) → stale
+        assert state.is_stale(now=self._now()) is True
+
+    def test_to_snapshot_drops_last_attempt_at_field(self):
+        """Crucial layering invariant: last_attempt_at is throttle
+        metadata and must NOT bleed into the UI's QuotaSnapshot — the
+        UI doesn't render it, and dedup keys constructed by surfaces
+        like expanded_window's compute would re-fire on every retry
+        if it did. QuotaSnapshot has no such field; this test checks
+        nobody accidentally adds one."""
+        from claude_island.platform_.providers import QuotaCacheState, Window
+        state = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=datetime(2026, 5, 5, 11, 0, 0, tzinfo=timezone.utc),
+            last_attempt_at=datetime(2026, 5, 5, 11, 59, 0, tzinfo=timezone.utc),
+            five_hour=Window(pct=42.0,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+            seven_day=Window(pct=15.0,
+                             resets_at=datetime(2030, 1, 7, tzinfo=timezone.utc)),
+        )
+        snap = state.to_snapshot(now=self._now())
+        assert snap is not None
+        # QuotaSnapshot only carries fetched_at, not last_attempt_at.
+        # If someone accidentally adds last_attempt_at to the snapshot,
+        # this attribute access would not raise — change this assertion
+        # to a no-attr check.
+        assert hasattr(snap, "fetched_at")
+        assert not hasattr(snap, "last_attempt_at")
+
+    def test_to_snapshot_returns_none_when_window_expired(self):
+        """If the cached five_hour resets_at is already in the past,
+        the data has logically rolled over — UI must not show stale
+        bars. The state itself is preserved (subsequent fetch will
+        rewrite it), but the projection refuses to render."""
+        from claude_island.platform_.providers import QuotaCacheState, Window
+        state = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=datetime(2026, 5, 5, 6, 0, 0, tzinfo=timezone.utc),
+            last_attempt_at=datetime(2026, 5, 5, 6, 0, 0, tzinfo=timezone.utc),
+            five_hour=Window(pct=42.0,
+                             resets_at=datetime(2026, 5, 5, 11, 0, 0, tzinfo=timezone.utc)),  # 1 h ago
+            seven_day=Window(pct=15.0,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+        )
+        assert state.to_snapshot(now=self._now()) is None
+
+    def test_round_trip_through_cache_dict(self):
+        """to_cache_dict + from_cache_dict must round-trip every field."""
+        from claude_island.platform_.providers import QuotaCacheState, Window
+        state = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=datetime(2026, 5, 5, 11, 0, 0, tzinfo=timezone.utc),
+            last_attempt_at=datetime(2026, 5, 5, 11, 30, 0, tzinfo=timezone.utc),
+            five_hour=Window(pct=42.5,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+            seven_day=Window(pct=15.0,
+                             resets_at=datetime(2030, 1, 7, tzinfo=timezone.utc)),
+        )
+        round_tripped = QuotaCacheState.from_cache_dict(
+            state.to_cache_dict(), fallback_provider="anthropic",
+        )
+        assert round_tripped == state
+
+    def test_from_cache_dict_handles_partial_first_failure(self):
+        """First-ever failure cache contains ONLY provider +
+        last_attempt_at (no business data, no fetched_at). Round-trip
+        must preserve the None fields rather than crash."""
+        from claude_island.platform_.providers import QuotaCacheState
+        partial = {
+            "provider": "anthropic",
+            "last_attempt_at": "2026-05-05T11:30:00+00:00",
+        }
+        state = QuotaCacheState.from_cache_dict(
+            partial, fallback_provider="anthropic",
+        )
+        assert state.provider == "anthropic"
+        assert state.fetched_at is None
+        assert state.last_attempt_at is not None
+        assert state.five_hour is None
+        assert state.seven_day is None
 
 
 class TestAnthropicNegativeCache:
@@ -1131,15 +1228,14 @@ class TestLogFetchFailure:
         assert _fmt_ago(timedelta(hours=2, minutes=13)) == "2h 13m"
         assert _fmt_ago(timedelta(seconds=-5))    == "0s"  # clamp
 
-    def test_log_includes_reason_and_first_attempt_when_cache_empty(
-        self, tmp_path, capsys,
-    ):
-        """First-ever failure: no prior cache → 'first attempt — no prior success'."""
-        from claude_island.platform_.providers import log_fetch_failure
-        cache = tmp_path / "anthropic-quota.json"
+    def test_log_includes_reason_and_first_attempt_for_empty_state(self, capsys):
+        """First-ever failure: empty state → 'first attempt — no prior success'."""
+        from claude_island.platform_.providers import (
+            log_fetch_failure, QuotaCacheState,
+        )
         now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
         log_fetch_failure(
-            cache, now=now, provider="anthropic", reason="HTTP 401",
+            QuotaCacheState.empty("anthropic"), reason="HTTP 401", now=now,
         )
         line = capsys.readouterr().err.strip()
         assert "anthropic" in line
@@ -1147,22 +1243,20 @@ class TestLogFetchFailure:
         assert "first attempt" in line
         assert "no prior success" in line
 
-    def test_log_includes_last_attempt_and_last_success_ages(
-        self, tmp_path, capsys,
-    ):
-        """Cache has prior attempt + prior success → both ages quoted."""
-        from claude_island.platform_.providers import log_fetch_failure
-        cache = tmp_path / "anthropic-quota.json"
-        # last attempt 5 min ago, last success 47 min ago
-        cache.write_text(json.dumps({
-            "provider": "anthropic",
-            "fetched_at":      "2026-05-05T11:13:00+00:00",
-            "last_attempt_at": "2026-05-05T11:55:00+00:00",
-        }))
-        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
-        log_fetch_failure(
-            cache, now=now, provider="anthropic", reason="HTTP 429",
+    def test_log_includes_last_attempt_and_last_success_ages(self, capsys):
+        """Prior state has both timestamps → both ages quoted."""
+        from claude_island.platform_.providers import (
+            log_fetch_failure, QuotaCacheState,
         )
+        # last attempt 5 min ago, last success 47 min ago (relative to now below)
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        prior = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=datetime(2026, 5, 5, 11, 13, 0, tzinfo=timezone.utc),
+            last_attempt_at=datetime(2026, 5, 5, 11, 55, 0, tzinfo=timezone.utc),
+            five_hour=None, seven_day=None,
+        )
+        log_fetch_failure(prior, reason="HTTP 429", now=now)
         line = capsys.readouterr().err.strip()
         assert "HTTP 429" in line
         assert "last attempt 5m ago" in line

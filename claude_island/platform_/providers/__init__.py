@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -526,114 +527,6 @@ def write_cache(cache_path: Path, payload: dict) -> None:
         print(f"[claude-island] cache write failed: {e}", file=sys.stderr)
 
 
-def record_failed_attempt(
-    cache_path: Path, *, now: datetime, provider: str,
-) -> None:
-    """Negative-cache a failed quota fetch.
-
-    Each provider's auto-refresh path checks ``is_fetch_due`` to decide
-    whether to issue HTTP. Without this helper, a failed fetch left
-    ``fetched_at`` unchanged, so the next ``snapshotter.wake()`` (fired
-    on every JSONL ingest, file-watch event, sessions_changed, etc.)
-    flagged the cache as expired and retried within milliseconds —
-    flooding stderr with the same 401/429/timeout and burning the
-    network on a server already saying no.
-
-    The fix uses a SEPARATE ``last_attempt_at`` field so retry throttling
-    and ``is_stale`` business-data ageing don't collide. Bumping
-    ``fetched_at`` directly would suppress retries correctly but also
-    keep the UI's stale-warning grey clamp from ever firing — the user
-    would see "fresh" colours on data that's actually 30+ min old.
-
-    Manual refresh (``bypass_cache=True``) skips the cache read entirely
-    so the negative-cache marker doesn't gate it.
-    """
-    cached = read_cache(cache_path) or {}
-    cached.setdefault("provider", provider)
-    cached["last_attempt_at"] = now.isoformat()
-    write_cache(cache_path, cached)
-
-
-def is_fetch_due(cached: dict, *, now: datetime) -> bool:
-    """True when the cache permits a fresh HTTP fetch.
-
-    Consults ``last_attempt_at`` first — it covers both success and
-    failure timestamps, so 5 min after a 401 the gate opens just like
-    5 min after a successful refresh. Falls back to ``fetched_at`` for
-    caches written before the negative-cache logic landed (older
-    snapshots have no ``last_attempt_at`` yet)."""
-    last = _parse_iso(cached.get("last_attempt_at", ""))
-    if last is None:
-        last = _parse_iso(cached.get("fetched_at", ""))
-    if last is None:
-        return True
-    return (now - last).total_seconds() > POLL_TTL
-
-
-def _fmt_ago(td: timedelta) -> str:
-    """Compact human duration: ``3s``, ``47m``, ``2h 13m``, ``3h``.
-
-    Used by ``log_fetch_failure`` to render "last attempt 5m ago" style
-    timing context. Sub-second deltas round up to ``0s`` rather than
-    showing fractional seconds — log readability beats precision here.
-    """
-    total = int(td.total_seconds())
-    if total < 0:
-        total = 0
-    if total < 60:
-        return f"{total}s"
-    if total < 3600:
-        return f"{total // 60}m"
-    h, rem = divmod(total, 3600)
-    m = rem // 60
-    return f"{h}h {m}m" if m else f"{h}h"
-
-
-def log_fetch_failure(
-    cache_path: Path,
-    *,
-    now: datetime,
-    provider: str,
-    reason: str,
-) -> None:
-    """Emit a single stderr line combining failure reason with timing.
-
-    Caller must invoke this BEFORE ``record_failed_attempt`` bumps the
-    cache's ``last_attempt_at`` — otherwise the "last attempt N ago"
-    reading would be 0s on every failure, which is useless. The cache
-    on disk at call time still reflects the prior attempt's timestamp,
-    which is exactly what the user wants to see.
-
-    Output format::
-
-        [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 5m ago — last success 47m ago
-
-    Edge cases:
-      * No prior attempt → "first attempt"
-      * No prior success (token never worked) → "no prior success"
-      * Both missing (cold cache) → "first attempt — no prior success"
-
-    Why a single line: stderr scrolls fast on a real terminal during
-    debugging; a per-failure line is greppable, but a per-failure
-    paragraph is just noise.
-    """
-    cached = read_cache(cache_path) or {}
-    last_attempt = _parse_iso(cached.get("last_attempt_at", ""))
-    last_success = _parse_iso(cached.get("fetched_at", ""))
-    parts = [f"[claude-island] {provider} quota fetch: {reason}"]
-    parts.append(
-        f"last attempt {_fmt_ago(now - last_attempt)} ago"
-        if last_attempt is not None
-        else "first attempt"
-    )
-    parts.append(
-        f"last success {_fmt_ago(now - last_success)} ago"
-        if last_success is not None
-        else "no prior success"
-    )
-    safe_stderr_write(" — ".join(parts))
-
-
 def _parse_iso(s: str) -> datetime | None:
     if not isinstance(s, str):
         return None
@@ -652,39 +545,294 @@ def _parse_ms(ms: int | None) -> datetime | None:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
 
-def snapshot_from_cache(
-    cached: dict,
-    provider: str,
-    now: datetime,
-) -> QuotaSnapshot | None:
-    """Materialise a QuotaSnapshot from a cache dict.
+def _fmt_ago(td: timedelta) -> str:
+    """Compact human duration: ``3s``, ``47m``, ``2h 13m``, ``3h``.
 
-    Returns None when the cache is expired or malformed.
+    Used by ``log_fetch_failure`` for "last attempt 5m ago" style
+    timing context. Sub-second deltas round up to ``0s`` rather than
+    showing fractional seconds — log readability beats precision."""
+    total = int(td.total_seconds())
+    if total < 0:
+        total = 0
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m"
+    h, rem = divmod(total, 3600)
+    m = rem // 60
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
+# ---------------------------------------------------------------------------
+# Throttle-layer first-class objects
+# ---------------------------------------------------------------------------
+#
+# QuotaCacheState is the cache layer's domain object — it represents
+# everything we know about a provider's quota at the throttle layer
+# (last attempt, last success, current reading). The UI layer consumes
+# QuotaSnapshot, which is a strict projection of this object that drops
+# fields the UI doesn't render (e.g. last_attempt_at).
+#
+# Layering:
+#   raw HTTP dict ──► (provider's _normalise) ──► (Window, Window)
+#                                                        │
+#                                                        ▼
+#                                      state.with_successful_fetch(...)
+#                                                        │
+#                                                        ▼
+#                                              QuotaCacheState
+#                                              ├─► to_cache_dict() → JSON
+#                                              └─► to_snapshot()   → UI
+#
+# Why dataclasses with frozen=True + slots=True: every state transition
+# (success, failure, throttle check) returns a NEW instance, never
+# mutates. This makes the throttle logic side-effect-free at the type
+# layer — the only mutation is write_cache_state(path, new_state) at
+# the IO boundary, which is explicit and grep-able.
+
+
+@dataclass(frozen=True, slots=True)
+class Window:
+    """One quota window (5h or weekly): a percentage + when it resets."""
+    pct: float
+    resets_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class QuotaCacheState:
+    """All persistent state the throttle/cache layer keeps per provider.
+
+    Two kinds of fields:
+
+    Throttle metadata (UI never sees these — they go in cache JSON only):
+      * last_attempt_at — when was the last fetch attempted?
+        Used by ``is_fetch_due`` to gate retries; both successes and
+        failures bump it. None on first-ever fetch.
+      * fetched_at — when was the last SUCCESSFUL fetch?
+        Used by ``is_stale`` to grey out the UI when data is too old.
+        Only successful fetches bump it.
+
+    Business data (also goes into QuotaSnapshot for the UI):
+      * five_hour / seven_day — the actual quota windows.
+        None if no fetch has ever succeeded (failure-only state).
     """
-    fetched_at = _parse_iso(cached.get("fetched_at", ""))
-    if fetched_at is None:
-        return None
-    age = (now - fetched_at).total_seconds()
-    is_stale = age > POLL_TTL * STALE_MULT
 
-    five = cached.get("five_hour", {})
-    seven = cached.get("seven_day", {})
-    five_resets = _parse_iso(five.get("resets_at", "")) if isinstance(five.get("resets_at"), str) else _parse_ms(five.get("resets_at"))
-    seven_resets = _parse_iso(seven.get("resets_at", "")) if isinstance(seven.get("resets_at"), str) else _parse_ms(seven.get("resets_at"))
+    provider: str
+    last_attempt_at: datetime | None
+    fetched_at: datetime | None
+    five_hour: Window | None
+    seven_day: Window | None
 
-    if five_resets is None or seven_resets is None:
-        return None
-    if five_resets <= now:
-        return None  # window expired
-    return QuotaSnapshot(
-        five_hour_pct=float(five.get("pct", 0)),
-        five_hour_resets_at=five_resets,
-        seven_day_pct=float(seven.get("pct", 0)),
-        seven_day_resets_at=seven_resets,
-        fetched_at=fetched_at,
-        is_stale=is_stale,
-        provider=provider,
+    # ---- Constructors --------------------------------------------------
+
+    @classmethod
+    def empty(cls, provider: str) -> "QuotaCacheState":
+        """Cold-start state: never attempted, never succeeded."""
+        return cls(
+            provider=provider,
+            last_attempt_at=None, fetched_at=None,
+            five_hour=None, seven_day=None,
+        )
+
+    @classmethod
+    def from_cache_dict(cls, cached: dict, *, fallback_provider: str) -> "QuotaCacheState":
+        """Parse a cache JSON dict into a state.
+
+        Tolerates partial/missing fields — a cache containing only
+        ``last_attempt_at`` (first-failure marker) round-trips correctly.
+        ``fallback_provider`` covers very old caches written before the
+        ``provider`` field was added.
+        """
+        provider = str(cached.get("provider") or fallback_provider)
+        last_attempt = _parse_iso(cached.get("last_attempt_at", ""))
+        fetched = _parse_iso(cached.get("fetched_at", ""))
+
+        def _parse_window(d: object) -> Window | None:
+            if not isinstance(d, dict):
+                return None
+            resets_raw = d.get("resets_at")
+            if isinstance(resets_raw, str):
+                resets = _parse_iso(resets_raw)
+            else:
+                resets = _parse_ms(resets_raw)
+            if resets is None:
+                return None
+            return Window(pct=float(d.get("pct", 0)), resets_at=resets)
+
+        return cls(
+            provider=provider,
+            last_attempt_at=last_attempt,
+            fetched_at=fetched,
+            five_hour=_parse_window(cached.get("five_hour")),
+            seven_day=_parse_window(cached.get("seven_day")),
+        )
+
+    # ---- Serialisation -------------------------------------------------
+
+    def to_cache_dict(self) -> dict:
+        """Serialise to the cache JSON shape (datetimes → ISO 8601 str).
+
+        Schema is the same one the previous dict-based code wrote, so
+        a state-shaped writer can round-trip with caches written before
+        this refactor."""
+        d: dict = {"provider": self.provider}
+        if self.fetched_at is not None:
+            d["fetched_at"] = self.fetched_at.isoformat()
+        if self.last_attempt_at is not None:
+            d["last_attempt_at"] = self.last_attempt_at.isoformat()
+        if self.five_hour is not None:
+            d["five_hour"] = {
+                "pct": self.five_hour.pct,
+                "resets_at": self.five_hour.resets_at.isoformat(),
+            }
+        if self.seven_day is not None:
+            d["seven_day"] = {
+                "pct": self.seven_day.pct,
+                "resets_at": self.seven_day.resets_at.isoformat(),
+            }
+        return d
+
+    # ---- Throttle queries (pure functions of self + now) ---------------
+
+    def is_fetch_due(self, *, now: datetime) -> bool:
+        """True when the cache permits a fresh HTTP fetch.
+
+        Gates on ``last_attempt_at`` (covers success AND failure) so
+        5 min after any kind of attempt the window opens. Falls back
+        to ``fetched_at`` for caches that pre-date the negative-cache
+        logic (no last_attempt_at field)."""
+        last = self.last_attempt_at or self.fetched_at
+        if last is None:
+            return True
+        return (now - last).total_seconds() > POLL_TTL
+
+    def is_stale(self, *, now: datetime) -> bool:
+        """True when the displayed business data is too old to trust.
+
+        Used by the UI to swap the bar colour to grey + show ⚠.
+        ``fetched_at`` (NOT last_attempt_at) drives this — failure
+        attempts must NOT make a 30-min-old reading look fresh."""
+        if self.fetched_at is None:
+            return True
+        return (now - self.fetched_at).total_seconds() > POLL_TTL * STALE_MULT
+
+    # ---- Transitions (return new state, never mutate) ------------------
+
+    def with_failed_attempt(self, *, now: datetime) -> "QuotaCacheState":
+        """Bump last_attempt_at to ``now`` so the gate re-closes for
+        another POLL_TTL. Business data and fetched_at are unchanged —
+        the UI continues to show the last-known reading with rising
+        is_stale until either a success refreshes it or the window
+        ages out."""
+        return replace(self, last_attempt_at=now)
+
+    def with_successful_fetch(
+        self,
+        *,
+        now: datetime,
+        five_hour: Window,
+        seven_day: Window,
+    ) -> "QuotaCacheState":
+        """Replace business data with a fresh reading. Both timestamps
+        move to ``now`` so is_fetch_due gates the next attempt to
+        POLL_TTL after THIS success — not POLL_TTL after some stale
+        prior attempt."""
+        return replace(
+            self,
+            fetched_at=now, last_attempt_at=now,
+            five_hour=five_hour, seven_day=seven_day,
+        )
+
+    # ---- UI projection -------------------------------------------------
+
+    def to_snapshot(self, *, now: datetime) -> QuotaSnapshot | None:
+        """Project to the UI's QuotaSnapshot model.
+
+        Returns None if there's no business data to show (cold cache,
+        or first attempt failed). Returns None ALSO when the cached
+        five-hour window has already passed — the data has logically
+        rolled over, so showing it would mislead the user.
+
+        Does NOT carry last_attempt_at across — that field is throttle
+        metadata, deliberately invisible to the UI (see module-level
+        comment for layering rationale).
+        """
+        if self.fetched_at is None or self.five_hour is None or self.seven_day is None:
+            return None
+        if self.five_hour.resets_at <= now:
+            return None  # window expired, the cached reading is stale beyond use
+        return QuotaSnapshot(
+            five_hour_pct=self.five_hour.pct,
+            five_hour_resets_at=self.five_hour.resets_at,
+            seven_day_pct=self.seven_day.pct,
+            seven_day_resets_at=self.seven_day.resets_at,
+            fetched_at=self.fetched_at,
+            is_stale=self.is_stale(now=now),
+            provider=self.provider,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cache I/O — typed (state-based) helpers
+# ---------------------------------------------------------------------------
+
+
+def read_cache_state(
+    cache_path: Path, *, fallback_provider: str,
+) -> QuotaCacheState:
+    """Read the cache file and parse into a QuotaCacheState.
+
+    Returns ``QuotaCacheState.empty(fallback_provider)`` when the file
+    doesn't exist or is malformed — callers don't need a None branch.
+    The fallback_provider covers cold-start where there's no prior
+    cache to learn the name from."""
+    cached = read_cache(cache_path)
+    if cached is None:
+        return QuotaCacheState.empty(fallback_provider)
+    return QuotaCacheState.from_cache_dict(cached, fallback_provider=fallback_provider)
+
+
+def write_cache_state(cache_path: Path, state: QuotaCacheState) -> None:
+    """Atomic write — see ``write_cache`` for the tmp + os.replace dance."""
+    write_cache(cache_path, state.to_cache_dict())
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
+
+
+def log_fetch_failure(
+    prior: QuotaCacheState, *, reason: str, now: datetime,
+) -> None:
+    """Emit a single stderr line: failure reason + timing context.
+
+    Caller must pass the state BEFORE bumping it via
+    ``with_failed_attempt`` — the helper reads
+    ``prior.last_attempt_at`` as the prior-attempt timestamp, which a
+    bumped state would have already overwritten with ``now``.
+
+    Output format::
+
+        [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 5m ago — last success 47m ago
+
+    Edge cases:
+      * No prior attempt → "first attempt"
+      * No prior success (token never worked) → "no prior success"
+      * Both missing (cold cache) → "first attempt — no prior success"
+    """
+    parts = [f"[claude-island] {prior.provider} quota fetch: {reason}"]
+    parts.append(
+        f"last attempt {_fmt_ago(now - prior.last_attempt_at)} ago"
+        if prior.last_attempt_at is not None
+        else "first attempt"
     )
+    parts.append(
+        f"last success {_fmt_ago(now - prior.fetched_at)} ago"
+        if prior.fetched_at is not None
+        else "no prior success"
+    )
+    safe_stderr_write(" — ".join(parts))
 
 
 # ---------------------------------------------------------------------------
