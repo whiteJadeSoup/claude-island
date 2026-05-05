@@ -53,7 +53,7 @@ class ProcessScanner:
     triggered a per-process NtQueryInformationProcess on Windows that
     measurably contributed to scan-tick CPU on busy machines (500+ procs).
 
-    Liveness filters (two layers):
+    Liveness filters (three layers):
 
     1. Status filter (cross-platform, in ``_build``): drop psutil
        statuses STOPPED / ZOMBIE / DEAD. STOPPED catches the common
@@ -62,7 +62,14 @@ class ProcessScanner:
        leaving the UI claiming the session is "busy / active now"
        indefinitely. See ``_INACTIVE_STATUSES`` for rationale.
 
-    2. Orphan filter (Windows-only, in ``_filter_orphans``): a "live"
+    2. Worker filter (cross-platform, in the scan loop): for the
+       ``node`` candidate path only, drop processes whose direct
+       parent is itself a claude process. claude spawns node children
+       for MCP servers / subagent helpers; they inherit the parent's
+       cwd and may carry "claude" in argv but aren't sessions the
+       user can interact with. See ``_is_claude_worker_child``.
+
+    3. Orphan filter (Windows-only, in ``_filter_orphans``): a "live"
        Claude session must still have a console attached. Probe each
        claude.exe with AttachConsole+GetConsoleWindow; if it fails
        (target has no console at all) the process is detached — its
@@ -130,7 +137,16 @@ class ProcessScanner:
                 elif name in _NODE_NAMES and any(
                     "claude" in arg.lower() for arg in cmdline
                 ):
-                    pass  # node-host confirmation
+                    # Node hosts have a worker-vs-session ambiguity that
+                    # the versioned-binary path doesn't: claude itself
+                    # spawns node children for MCP servers / subagent
+                    # helpers. They inherit cwd and may carry "claude"
+                    # in argv (when bundled inside the claude install).
+                    # Disambiguate via parent: a worker's parent IS a
+                    # claude process; an interactive launch's parent is
+                    # a shell / login / IDE host.
+                    if _is_claude_worker_child(proc):
+                        continue
                 else:
                     continue
 
@@ -169,6 +185,52 @@ class ProcessScanner:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _is_claude_worker_child(proc: psutil.Process) -> bool:
+    """True if ``proc``'s direct parent looks like a Claude process,
+    suggesting ``proc`` is a worker (MCP server, subagent helper)
+    spawned by an interactive session rather than its own session.
+
+    Why direct-parent only: the immediate parent is the precise signal
+    — claude spawns workers as direct children. Walking deeper would
+    risk dropping legitimate launches whose ancestry happens to
+    include a claude process (e.g., one claude session opening a
+    terminal that opens another claude).
+
+    Cheap: one ``parent()`` + one ``name()`` call. Parent ``cmdline()``
+    is read only when the parent name is ambiguous (``node`` /
+    version-like) and we need to confirm it's actually running claude.
+    """
+    try:
+        parent = proc.parent()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    if parent is None:
+        return False
+    try:
+        pname = parent.name().lower()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    if pname in _DIRECT_NAMES:
+        return True
+    if pname in _NODE_NAMES or _VERSION_LIKE.match(pname):
+        try:
+            pcmd = parent.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+        if not pcmd:
+            return False
+        # Same disambiguation rule the scan loop uses for the candidate
+        # itself: argv0 basename is "claude", or (node + "claude" in
+        # any arg). If parent matches this, parent is a claude session
+        # and proc is its child worker.
+        argv0_base = os.path.basename(pcmd[0]).lower()
+        if argv0_base in _DIRECT_NAMES:
+            return True
+        if pname in _NODE_NAMES and any("claude" in a.lower() for a in pcmd):
+            return True
+    return False
+
 
 def _filter_orphans(sessions: list[Session]) -> list[Session]:
     """Drop orphan sessions whose console pipe was severed.
