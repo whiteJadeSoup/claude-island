@@ -23,6 +23,20 @@ _NODE_NAMES = {"node", "node.exe"}
 # version-string changes; the cmdline check rejects false positives.
 _VERSION_LIKE = re.compile(r"^\d+\.\d+\.\d+(?:[.-]\S+)?$")
 
+# psutil status values that mean "the process exists but isn't actually
+# running Claude". Filtered out so the UI never shows a row for them.
+#   STOPPED — SIGSTOP'd (typically Ctrl+Z without bg/fg). The session's
+#     state file ~/.claude/sessions/<pid>.json freezes at whatever value
+#     was last written (often "busy"), so without this filter the row
+#     appears "active now" forever even though no work is happening.
+#   ZOMBIE / DEAD — already exited, just hasn't been reaped. Short-lived
+#     but worth dropping to avoid a flash row that vanishes next tick.
+_INACTIVE_STATUSES = frozenset({
+    psutil.STATUS_STOPPED,
+    psutil.STATUS_ZOMBIE,
+    psutil.STATUS_DEAD,
+})
+
 
 class ProcessScanner:
     """Enumerates running Claude Code processes using psutil.
@@ -39,11 +53,28 @@ class ProcessScanner:
     triggered a per-process NtQueryInformationProcess on Windows that
     measurably contributed to scan-tick CPU on busy machines (500+ procs).
 
-    Orphan filter: a "live" Claude session must still have a console
-    attached. We probe each claude.exe with AttachConsole+GetConsoleWindow;
-    if the call fails (target has no console at all) the process is
-    detached — its conPTY pipe was severed when its WT pane closed,
-    leaving the binary as a no-tty zombie. Drop those.
+    Liveness filters (three layers):
+
+    1. Status filter (cross-platform, in ``_build``): drop psutil
+       statuses STOPPED / ZOMBIE / DEAD. STOPPED catches the common
+       macOS case where a user hits Ctrl+Z without bg/fg — the process
+       still appears in ``process_iter`` but its state file freezes,
+       leaving the UI claiming the session is "busy / active now"
+       indefinitely. See ``_INACTIVE_STATUSES`` for rationale.
+
+    2. Worker filter (cross-platform, in the scan loop): for the
+       ``node`` candidate path only, drop processes whose direct
+       parent is itself a claude process. claude spawns node children
+       for MCP servers / subagent helpers; they inherit the parent's
+       cwd and may carry "claude" in argv but aren't sessions the
+       user can interact with. See ``_is_claude_worker_child``.
+
+    3. Orphan filter (Windows-only, in ``_filter_orphans``): a "live"
+       Claude session must still have a console attached. Probe each
+       claude.exe with AttachConsole+GetConsoleWindow; if it fails
+       (target has no console at all) the process is detached — its
+       conPTY pipe was severed when its WT pane closed, leaving the
+       binary as a no-tty zombie. Drop those.
 
     Why AttachConsole-success rather than UIA tab-title matching:
     matching against TabItem.Name false-positives split panes — only the
@@ -67,9 +98,8 @@ class ProcessScanner:
         Used at startup so the UI populates sessions in ~200ms. A
         follow-up ``scan()`` call ~500ms later runs the full orphan
         filter. Per-session WT window discovery (the wt_hwnd that drives
-        same-tab grouping) now happens inside
-        ``WindowsTerminalAdapter.group()``, not here — process_scanner
-        only enumerates and orphan-filters.
+        same-tab grouping) lives in ``WindowsTerminalAdapter.group()``;
+        process_scanner only enumerates and orphan-filters.
         """
         sessions: list[Session] = []
         for proc in psutil.process_iter(["pid", "name", "create_time"]):
@@ -106,7 +136,16 @@ class ProcessScanner:
                 elif name in _NODE_NAMES and any(
                     "claude" in arg.lower() for arg in cmdline
                 ):
-                    pass  # node-host confirmation
+                    # Node hosts have a worker-vs-session ambiguity that
+                    # the versioned-binary path doesn't: claude itself
+                    # spawns node children for MCP servers / subagent
+                    # helpers. They inherit cwd and may carry "claude"
+                    # in argv (when bundled inside the claude install).
+                    # Disambiguate via parent: a worker's parent IS a
+                    # claude process; an interactive launch's parent is
+                    # a shell / login / IDE host.
+                    if _is_claude_worker_child(proc):
+                        continue
                 else:
                     continue
 
@@ -120,6 +159,12 @@ class ProcessScanner:
 
     @staticmethod
     def _build(proc: psutil.Process, info: dict) -> Session | None:
+        try:
+            if proc.status() in _INACTIVE_STATUSES:
+                return None
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return None
+
         try:
             project_path = Path(proc.cwd())
         except (psutil.AccessDenied, psutil.NoSuchProcess):
@@ -140,6 +185,52 @@ class ProcessScanner:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
+def _is_claude_worker_child(proc: psutil.Process) -> bool:
+    """True if ``proc``'s direct parent looks like a Claude process,
+    suggesting ``proc`` is a worker (MCP server, subagent helper)
+    spawned by an interactive session rather than its own session.
+
+    Why direct-parent only: the immediate parent is the precise signal
+    — claude spawns workers as direct children. Walking deeper would
+    risk dropping legitimate launches whose ancestry happens to
+    include a claude process (e.g., one claude session opening a
+    terminal that opens another claude).
+
+    Cheap: one ``parent()`` + one ``name()`` call. Parent ``cmdline()``
+    is read only when the parent name is ambiguous (``node`` /
+    version-like) and we need to confirm it's actually running claude.
+    """
+    try:
+        parent = proc.parent()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    if parent is None:
+        return False
+    try:
+        pname = parent.name().lower()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    if pname in _DIRECT_NAMES:
+        return True
+    if pname in _NODE_NAMES or _VERSION_LIKE.match(pname):
+        try:
+            pcmd = parent.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+        if not pcmd:
+            return False
+        # Same disambiguation rule the scan loop uses for the candidate
+        # itself: argv0 basename is "claude", or (node + "claude" in
+        # any arg). If parent matches this, parent is a claude session
+        # and proc is its child worker.
+        argv0_base = os.path.basename(pcmd[0]).lower()
+        if argv0_base in _DIRECT_NAMES:
+            return True
+        if pname in _NODE_NAMES and any("claude" in a.lower() for a in pcmd):
+            return True
+    return False
+
+
 def _filter_orphans(sessions: list[Session]) -> list[Session]:
     """Drop orphan sessions whose console pipe was severed.
 
@@ -147,9 +238,9 @@ def _filter_orphans(sessions: list[Session]) -> list[Session]:
     the process has no console attached (its conPTY pipe was severed
     when its WT pane closed) and we drop it.
 
-    The wt_hwnd discovery that PR1 used to do here moved to
+    wt_hwnd discovery for same-tab grouping lives in
     ``WindowsTerminalAdapter.group()`` along with the rest of WT
-    integration. process_scanner stays pure psutil + AttachConsole.
+    integration; process_scanner stays pure psutil + AttachConsole.
 
     Sanity tripwire: if every session would be filtered (system-wide
     AttachConsole brokenness, scan-thread race with our own console

@@ -208,9 +208,8 @@ class TestCapsuleRender:
         assert "0 sessions" in capsule._label.text()
 
     def test_render_cost_in_dedicated_slot_when_positive(self, capsule):
-        # Three-region refactor moved cost into its own QLabel
-        # (_cost_label) so a long session name can never push it
-        # off the pill. Name and cost now live in separate widgets.
+        # Cost lives in its own QLabel (_cost_label) so a long session
+        # name can never push it off the pill.
         v = _view(name="x", is_running=True)
         capsule.render(_snap(sessions=(v,), today_cost_usd=42.0))
         assert "$42" in capsule._cost_label.text()
@@ -218,10 +217,8 @@ class TestCapsuleRender:
         assert capsule._cost_label.isVisibleTo(capsule)
 
     def test_render_cost_slot_collapsed_when_zero(self, capsule):
-        # When today's spend is $0 the cost slot is hidden entirely
-        # so the name region gets the space back. Both the visible
-        # text content AND the widget visibility flag should reflect
-        # that — _apply_capsule branches on whichever is checked.
+        # When today's spend is $0 the cost slot is hidden entirely so
+        # the name region gets the space back.
         capsule.render(_snap(sessions=(), today_cost_usd=0.0))
         assert capsule._cost_label.text() == ""
         assert "$" not in capsule._label.text()

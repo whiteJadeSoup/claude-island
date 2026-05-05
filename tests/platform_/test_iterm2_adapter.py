@@ -380,11 +380,11 @@ class TestFocus:
             assert "\\\\" in script
 
     def test_focus_script_selects_window_for_multi_window_case(self, adapter):
-        """Regression: when iTerm2 has multiple windows, ``activate``
-        alone raises the app but leaves whichever window iTerm2 had
-        frontmost in its own z-order on top — so the target pane stays
-        hidden behind another window. ``select w`` is required to
-        promote the target's containing window inside iTerm2."""
+        """When iTerm2 has multiple windows, ``activate`` alone raises
+        the app but leaves whichever window iTerm2 had frontmost in
+        its own z-order on top — so the target pane stays hidden
+        behind another window. ``select w`` is required to promote
+        the target's containing window inside iTerm2."""
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",

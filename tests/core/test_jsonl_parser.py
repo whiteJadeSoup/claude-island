@@ -632,27 +632,27 @@ def test_subagent_does_not_pollute_parent_metadata(tmp_path):
     assert sub_meta == {}
 
 
-def test_subagent_activity_emits_under_project_slug_not_subagents_dir(tmp_path):
-    """`activity_updated` payload must carry the project slug (so
-    SessionRegistry's per-project join routes the bump to live
-    sessions in that project), NOT "subagents" / "<runId>" — the
-    parent dir name of a subagent file. Without this fix the parent
-    session never sees the activity bump and stays "idle" while a
-    subagent is mid-run."""
+def test_subagent_activity_bumps_parent_meta_last_activity(tmp_path):
+    """Subagent JSONL writes must update the PARENT's
+    ``meta[parent_uuid]["last_activity"]``, not a separate subagent
+    entry — that's how compose_session_view sees the parent as
+    actively producing turns while a subagent is mid-run.
+    """
     _, parser, _, subagent_jsonl, workflow_jsonl = _subagent_env(tmp_path)
-    received: list[tuple[str, datetime]] = []
-    parser.activity_updated.subscribe(lambda payload: received.append(payload))
 
-    subagent_jsonl.write_bytes(_line("2025-01-01T00:00:00Z", 1, 1))
+    subagent_jsonl.write_bytes(_line("2025-02-01T12:00:00Z", 1, 1))
     parser.parse_file(subagent_jsonl)
+    after_sub = parser.get_session_metadata("parent-sid").get("last_activity")
+    assert after_sub == datetime(2025, 2, 1, 12, 0, tzinfo=timezone.utc)
 
-    workflow_jsonl.write_bytes(_line("2025-01-01T00:00:00Z", 1, 1))
+    workflow_jsonl.write_bytes(_line("2025-02-01T12:05:00Z", 1, 1))
     parser.parse_file(workflow_jsonl)
+    after_wf = parser.get_session_metadata("parent-sid").get("last_activity")
+    assert after_wf == datetime(2025, 2, 1, 12, 5, tzinfo=timezone.utc)
 
-    # Both emissions must use the slug, not the immediate parent dir
-    # ("subagents" or the workflow runId).
-    slugs_emitted = {payload[0] for payload in received}
-    assert slugs_emitted == {"proj-hash"}
+    # Subagents must NOT spawn their own metadata entry.
+    assert parser.get_session_metadata("agent-aaa") == {}
+    assert parser.get_session_metadata("agent-bbb") == {}
 
 
 def test_subagent_path_helpers_are_path_only(tmp_path):

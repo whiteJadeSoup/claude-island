@@ -20,8 +20,21 @@ from claude_island.platform_.process_scanner import ProcessScanner
 
 
 def _fake_proc(pid: int, name: str, cmdline: list[str] | None = None,
-               cwd: str = "/cwd"):
-    """Build a MagicMock that quacks like psutil.Process for our scanner."""
+               cwd: str = "/cwd", status: str = "running",
+               parent_name: str = "zsh",
+               parent_cmdline: list[str] | None = None):
+    """Build a MagicMock that quacks like psutil.Process for our scanner.
+
+    ``status`` defaults to ``"running"`` so existing tests pass the
+    cross-platform liveness filter in ``_build``; tests exercising
+    that filter pass ``status="stopped"`` / ``"zombie"`` / ``"dead"``.
+
+    ``parent_name`` defaults to ``"zsh"`` so existing tests pass the
+    worker-vs-session disambiguation (zsh is a shell, not a claude
+    process). Tests exercising the worker filter pass a claude-like
+    name (``"claude"``, a version string, or ``"node"`` + a
+    ``parent_cmdline`` containing ``"claude"``).
+    """
     proc = MagicMock()
     proc.info = {
         "pid": pid,
@@ -30,6 +43,13 @@ def _fake_proc(pid: int, name: str, cmdline: list[str] | None = None,
     }
     proc.cwd.return_value = cwd
     proc.cmdline = MagicMock(return_value=cmdline or [])
+    proc.status = MagicMock(return_value=status)
+
+    parent = MagicMock()
+    parent.name = MagicMock(return_value=parent_name)
+    parent.cmdline = MagicMock(return_value=parent_cmdline or [])
+    proc.parent = MagicMock(return_value=parent)
+
     return proc
 
 
@@ -42,9 +62,9 @@ def patched_process_iter():
     orphan logic stay simple: ``get_console_info`` returns a dummy
     success value so every session survives the AttachConsole probe.
     Tests that exercise orphan filtering override this inside their
-    own ``with patch(...)`` blocks. wt_hwnd discovery moved out of
-    process_scanner in PR2 (now lives in WindowsTerminalAdapter), so
-    no walk_to_visible_host patch is needed here.
+    own ``with patch(...)`` blocks. wt_hwnd discovery lives in
+    ``WindowsTerminalAdapter`` rather than the scanner, so no
+    walk_to_visible_host patch is needed here.
 
     sys.platform is forced to "win32" because the orphan filter
     short-circuits on non-Windows (AttachConsole is Windows-only).
@@ -288,9 +308,163 @@ def test_mixed_attached_and_orphan_passes_normal_filter(patched_process_iter):
 
 
 # ==========================================================================
-# Note: window_handle labelling tests removed in PR2.
-# ProcessScanner no longer fills window_handle on Session — that responsibility
-# moved to TerminalAdapter.group() (see WindowsTerminalAdapter for the
-# AttachConsole + walk_to_visible_host code, now adapter-internal).
-# Adapter-level grouping is covered by tests/platform_/test_dispatcher.py.
+# Status filter (cross-platform): drop processes that exist but aren't
+# actually running. Hits the macOS case where Ctrl+Z leaves a SIGSTOP'd
+# claude in psutil enumeration with a stale "busy" state file.
+# ==========================================================================
+
+def test_stopped_process_is_filtered(patched_process_iter):
+    """SIGSTOP'd claude (Ctrl+Z without bg/fg) must not surface as a
+    session — its state file freezes at "busy" and the UI would
+    otherwise flag it "active now" indefinitely."""
+    stopped = _fake_proc(100, "claude.exe", cwd="/proj", status="stopped")
+    running = _fake_proc(200, "claude.exe", cwd="/proj", status="running")
+    patched_process_iter.extend([stopped, running])
+
+    sessions = ProcessScanner().scan()
+    assert [s.pid for s in sessions] == [200]
+
+
+def test_zombie_process_is_filtered(patched_process_iter):
+    """Zombies (exited, awaiting reap) shouldn't show a row that vanishes
+    next tick."""
+    patched_process_iter.append(
+        _fake_proc(100, "claude.exe", status="zombie")
+    )
+    assert ProcessScanner().scan() == []
+
+
+def test_dead_process_is_filtered(patched_process_iter):
+    """psutil.STATUS_DEAD: terminal state, drop."""
+    patched_process_iter.append(
+        _fake_proc(100, "claude.exe", status="dead")
+    )
+    assert ProcessScanner().scan() == []
+
+
+def test_status_check_handles_no_such_process(patched_process_iter):
+    """Race: process disappears between process_iter and our status()
+    call. Drop the session — equivalent to it never having been there."""
+    import psutil
+    gone = _fake_proc(100, "claude.exe", cwd="/proj")
+    gone.status = MagicMock(side_effect=psutil.NoSuchProcess(100))
+    live = _fake_proc(200, "claude.exe", cwd="/proj")
+    patched_process_iter.extend([gone, live])
+
+    assert [s.pid for s in ProcessScanner().scan()] == [200]
+
+
+# ==========================================================================
+# Worker filter (cross-platform): drop node children spawned by an
+# existing claude session (MCP servers / subagent helpers). They share
+# the parent's cwd and may carry "claude" in argv but aren't user
+# sessions. Only applies to the node-candidate path; direct-name and
+# versioned-binary candidates are unaffected.
+# ==========================================================================
+
+def test_node_worker_with_direct_claude_parent_is_filtered(patched_process_iter):
+    """Parent name is literally "claude" (the direct-name path on
+    Windows / Linux) — child node is a worker."""
+    worker = _fake_proc(
+        100, "node",
+        cmdline=["node", "/path/to/claude/mcp-servers/foo.js"],
+        cwd="/proj",
+        parent_name="claude",
+    )
+    patched_process_iter.append(worker)
+    assert ProcessScanner().scan() == []
+
+
+def test_node_worker_with_versioned_claude_parent_is_filtered(patched_process_iter):
+    """macOS: claude binary appears as a version string (e.g.
+    ``2.1.126``). A node MCP worker spawned by it has parent.name()
+    matching _VERSION_LIKE; the filter must walk that signal too via
+    the parent cmdline."""
+    worker = _fake_proc(
+        100, "node",
+        cmdline=["node", "/path/to/claude/mcp/foo.js"],
+        cwd="/proj",
+        parent_name="2.1.126",
+        parent_cmdline=["claude", "--dangerously-skip-permissions"],
+    )
+    patched_process_iter.append(worker)
+    assert ProcessScanner().scan() == []
+
+
+def test_node_worker_with_node_claude_parent_is_filtered(patched_process_iter):
+    """A nested case: parent is itself ``node /path/to/claude/cli.js``
+    (real claude on systems where the entrypoint is a node script).
+    Child node MCP server has parent_name="node" and parent_cmdline
+    contains "claude" — should still be flagged as a worker."""
+    worker = _fake_proc(
+        100, "node",
+        cmdline=["node", "/path/to/claude/mcp/foo.js"],
+        cwd="/proj",
+        parent_name="node",
+        parent_cmdline=["node", "/usr/local/lib/claude/cli.js"],
+    )
+    patched_process_iter.append(worker)
+    assert ProcessScanner().scan() == []
+
+
+def test_node_with_shell_parent_is_kept(patched_process_iter):
+    """Legitimate launch: ``node /path/to/claude/cli.js`` from a shell.
+    Parent name is zsh, not a claude process — keep."""
+    real = _fake_proc(
+        100, "node",
+        cmdline=["node", "/path/to/claude/cli.js"],
+        cwd="/proj",
+        parent_name="zsh",
+    )
+    patched_process_iter.append(real)
+    assert [s.pid for s in ProcessScanner().scan()] == [100]
+
+
+def test_versioned_binary_path_is_unaffected_by_worker_filter(patched_process_iter):
+    """The worker filter only applies to the ``node`` candidate path.
+    A versioned-binary (e.g. ``2.1.126``) running claude is the real
+    claude executable itself, not a node host — keep regardless of
+    parent identity."""
+    versioned = _fake_proc(
+        100, "2.1.126",
+        cmdline=["claude", "--resume", "abc"],
+        cwd="/proj",
+        parent_name="claude",  # contrived parent — filter shouldn't fire
+    )
+    patched_process_iter.append(versioned)
+    assert [s.pid for s in ProcessScanner().scan()] == [100]
+
+
+def test_direct_name_path_is_unaffected_by_worker_filter(patched_process_iter):
+    """Same scope guard for the direct-name path: ``claude.exe`` is
+    real claude, not a worker, regardless of parent."""
+    real = _fake_proc(
+        100, "claude.exe",
+        cwd="/proj",
+        parent_name="claude.exe",  # contrived
+    )
+    patched_process_iter.append(real)
+    assert [s.pid for s in ProcessScanner().scan()] == [100]
+
+
+def test_worker_filter_handles_no_such_process(patched_process_iter):
+    """Race: parent disappears between candidate match and parent()
+    lookup. Treat as "not a worker" (fail-open) and keep the candidate
+    — better than dropping a real session because of a transient race."""
+    import psutil
+    candidate = _fake_proc(
+        100, "node",
+        cmdline=["node", "/path/to/claude/cli.js"],
+        cwd="/proj",
+    )
+    candidate.parent = MagicMock(side_effect=psutil.NoSuchProcess(100))
+    patched_process_iter.append(candidate)
+    assert [s.pid for s in ProcessScanner().scan()] == [100]
+
+
+# ==========================================================================
+# Adapter-level grouping (the AttachConsole + walk_to_visible_host code
+# in WindowsTerminalAdapter) is covered by
+# tests/platform_/test_dispatcher.py — ProcessScanner doesn't fill
+# window_handle on Session, so there's nothing to test for it here.
 # ==========================================================================

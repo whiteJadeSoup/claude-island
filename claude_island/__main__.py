@@ -19,8 +19,83 @@ from pathlib import Path
 # pipe redirect catches every C-level write to FD 2 — Qt's font
 # subsystem and macOS Input Method Kit both emit harmless lines that
 # we drop here. No-op on non-darwin platforms.
-from claude_island.core.stderr_noise_filter import install as _install_stderr_filter
+from claude_island.platform_.stderr_noise_filter import install as _install_stderr_filter
 _install_stderr_filter()
+
+
+def _hide_from_macos_dock() -> None:
+    """Mutate the running app's NSBundle info dict so macOS treats us
+    as a background-only LSUIElement — no dock icon, no Cmd-Tab entry,
+    no menu-bar title.
+
+    Why: launching via ``python -m claude_island`` (or ``uv run``) makes
+    macOS show the generic Python file icon labelled "python3", which
+    is both ugly and confusing for users who don't know they're running
+    Python under the hood. The floating capsule is already the app's
+    persistent affordance — a redundant dock entry adds clutter without
+    adding capability. This matches the menu-bar / floating-utility
+    convention used by Bartender, BetterTouchTool, Ice, Alfred's
+    background mode, and the ActivityWatch tray app.
+
+    Must run BEFORE QApplication() is constructed: Qt instantiates
+    NSApplication during QApplication init, which freezes the activation
+    policy. Mutating ``infoDictionary`` after that point has no effect.
+
+    Graceful degrade: if pyobjc isn't installed (manual install or
+    explicit opt-out) we silently skip — the user sees the original
+    ugly Python icon but the app is otherwise unaffected.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSBundle  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    bundle = NSBundle.mainBundle()
+    info = bundle.infoDictionary()
+    if info is not None:
+        # ``LSUIElement`` is the correct flag for an "accessory" GUI app:
+        # hidden from dock + Cmd-Tab + menu-bar app title, but windows
+        # can still take keyboard focus. ``LSBackgroundOnly`` looks
+        # similar but tells macOS we are a daemon with no UI — under
+        # that policy NSApplication refuses to make our windows key,
+        # which silently breaks every keyboard-driven affordance (arrow
+        # nav, Enter, search input). A previous revision set both as a
+        # "belt and braces" measure; that's wrong — the two flags
+        # express different intents and combining them inherits the
+        # more restrictive one.
+        info["LSUIElement"] = "1"
+
+
+def _apply_macos_accessory_policy() -> None:
+    """Call ``NSApp.setActivationPolicy_(Accessory)`` after QApplication
+    has been created.
+
+    The infoDictionary mutation in ``_hide_from_macos_dock`` runs BEFORE
+    NSApplication is loaded so the early activation policy decision is
+    correct, but on some macOS versions the launcher's cached state
+    overrides our infoDict mutation and the app still ends up in the
+    default Regular policy. The runtime ``setActivationPolicy_`` call
+    is authoritative — once QApplication has constructed NSApplication,
+    we tell it explicitly to switch to Accessory mode. Belt + braces:
+    one of the two paths always wins.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import (  # type: ignore[import-not-found]
+            NSApp,
+            NSApplicationActivationPolicyAccessory,
+        )
+    except ImportError:
+        return
+    try:
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    except Exception:
+        pass
+
+
+_hide_from_macos_dock()
 
 from platformdirs import user_data_dir
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
@@ -158,6 +233,40 @@ from PySide6.QtCore import QTimer
 
 app = QApplication(sys.argv)
 app.setQuitOnLastWindowClosed(False)
+# Authoritative dock-hide call — must come AFTER QApplication() because
+# it operates on the live NSApplication instance Qt just constructed.
+# Pairs with ``_hide_from_macos_dock`` above (which seeds the early
+# launch decision via NSBundle.infoDictionary). No-op on non-darwin.
+_apply_macos_accessory_policy()
+
+# Force the Fusion style on macOS so QSS is honoured for QToolTip.
+#
+# Why this matters: macOS's native Qt style routes tooltip rendering
+# through Cocoa's NSToolTip, which silently ignores ``QToolTip { ... }``
+# QSS rules — and ALSO silently ignores ``QToolTip.setPalette`` for
+# ToolTipBase / ToolTipText. A dark-themed QSS plus a setPalette pair
+# both pass without error and look correct in code review, but the
+# user sees the system light-gray tooltip on a dark drawer. The only
+# reliable fix is to swap out the platform style for Fusion (Qt's
+# cross-platform style) which honours QSS for every widget including
+# tooltips. The visible blast radius is small here because every
+# top-level surface in this app is frameless + heavily QSS-styled —
+# Fusion replaces only the unstyled bits (default focus rings, scroll
+# bar arrows, etc), and those changes are barely noticeable.
+#
+# On Windows / Linux the platform style already honours the QToolTip
+# QSS rule, so swap is unnecessary and skipped — keeping native widget
+# look-and-feel where it works.
+if sys.platform == "darwin":
+    app.setStyle("Fusion")
+
+# Global tooltip styling — both paths together (see tooltip_style.py
+# for the rationale; tl;dr Qt's QSS resolution for QToolTip on macOS
+# Fusion is flaky depending on widget flags, so we belt-and-braces it
+# with the palette path which works at a lower level).
+from claude_island.ui.tooltip_style import TOOLTIP_QSS, apply_tooltip_palette
+apply_tooltip_palette(app)
+app.setStyleSheet(TOOLTIP_QSS)
 
 from claude_island.ui.capsule_window import CapsuleWindow
 from claude_island.ui.controller import IslandController
@@ -450,11 +559,6 @@ expanded = ExpandedWindow(
 _controller_marshaler = _ControllerMarshaler(controller)  # pin reference
 session_registry.sessions_changed.subscribe(_controller_marshaler.sessions_ready.emit)
 
-# core → core direct subscription: JSONL activity feeds the session registry's
-# override map. update_activity is thread-safe and does not emit, so there is
-# no need to marshal through Qt — the parser thread can call it directly.
-jsonl_parser.activity_updated.subscribe(session_registry.update_activity)
-
 # ---------------------------------------------------------------------------
 # Section 4b: WorldSnapshot broadcast (Phase E — runs IN PARALLEL with the
 # legacy wiring above).
@@ -635,9 +739,10 @@ _recents_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
 # JSONL write / process scan triggers a snap rebuild within the debounce
 # window. wake() is thread-safe — no QtBridge marshaling needed.
 session_registry.sessions_changed.subscribe(lambda _: snapshotter.wake())
+# usage_registry.totals_changed fires on every JSONL ingest — that's the
+# wake driver for activity bumps, since per-session last_activity now
+# lives on JsonlParser._session_meta and is read in compose_session_view.
 usage_registry.totals_changed.subscribe(lambda _: snapshotter.wake())
-# jsonl_parser.activity_updated already feeds session_registry, which then
-# emits sessions_changed → wakes via the line above. No extra hook needed.
 
 snapshotter.start()
 # Boot the UI with one snapshot synchronously so capsule + panel render

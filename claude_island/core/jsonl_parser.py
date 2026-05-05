@@ -7,8 +7,6 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from reactivex.subject import Subject
-
 from .models import UsageRecord
 from .usage_registry import UsageRegistry
 
@@ -103,11 +101,11 @@ class JsonlParser:
         {"type": "assistant", "message": {"model": "...", "usage": {...}},
          "timestamp": "2025-01-01T00:00:00.000Z"}
 
-    activity_updated payload: (project_hash, timestamp).
-    project_hash is the parent directory name of the JSONL file (Claude Code's
-    per-project encoding of the cwd; see core.models.project_hash). This lets
-    SessionRegistry join activity to scanned sessions by recomputing the hash
-    of each session's cwd.
+    Per-session ``last_activity`` is maintained on ``_session_meta[uuid]``
+    (uuid-keyed, so two sessions sharing a cwd never alias). UI consumers
+    pull it via ``compose_session_view`` -> ``get_session_metadata(uuid)``;
+    snapshotter wakes happen through ``UsageRegistry.totals_changed``
+    after ``record_many`` runs, so there's no separate activity event.
 
     Offset tracking (post-DB-removal): byte offsets live in a process-
     local ``_offsets`` dict. They reset to 0 on every restart, so
@@ -123,10 +121,6 @@ class JsonlParser:
         usage_registry: UsageRegistry,
         claude_projects_dir: Path,
     ) -> None:
-        # Reactivex Subject (was Event[T] pre-Phase G2). API-equivalent:
-        # ``subscribe(cb)`` registers, ``on_next(payload)`` emits.
-        # Synchronously dispatches to subscribers on the calling thread.
-        self.activity_updated: Subject[tuple[str, datetime]] = Subject()
         self._usage = usage_registry
         self._projects_dir = claude_projects_dir
         # Per-file locks replace the old single global lock so backfill
@@ -461,6 +455,18 @@ class JsonlParser:
             if existing_last is None or latest_ts > existing_last:
                 meta["last_activity"] = latest_ts
 
+        # Subagent activity must bump the PARENT's persistent
+        # last_activity so the parent session appears "active" while a
+        # subagent is mid-run. The throwaway ``meta`` above correctly
+        # absorbs subagent-specific pollution (ai_title, last_prompt,
+        # permission_mode, cwd, ...); last_activity is the one field
+        # that legitimately belongs on the parent's metadata.
+        if is_subagent and latest_ts is not None:
+            parent_meta = self._session_meta.setdefault(session_uuid, {})
+            existing = parent_meta.get("last_activity")
+            if existing is None or latest_ts > existing:
+                parent_meta["last_activity"] = latest_ts
+
         # Advance offset and emit records. Order is important: advance
         # offset BEFORE the registry call so a watchdog event firing
         # again for this same file (a re-fire on the same write) sees
@@ -469,9 +475,6 @@ class JsonlParser:
         # which we don't want to do twice.
         self._offsets[path_str] = new_offset - tail_len
         self._usage.record_many(batch)
-
-        if last_activity is not None:
-            self.activity_updated.on_next((project_path, last_activity))
 
 
 def _parse_ts(entry: dict) -> datetime | None:

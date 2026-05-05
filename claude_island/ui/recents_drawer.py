@@ -72,6 +72,7 @@ from claude_island.core.launch_intent import LaunchIntent, LaunchIntentRegistry
 from claude_island.core.models import DormantSession
 from claude_island.core.snapshot import WorldSnapshot
 from claude_island.ui.fonts import UI_FONT_STACK
+from claude_island.ui.tooltip_style import TOOLTIP_QSS
 from claude_island.ui.expanded_window import (
     _BG_HOVER_SINGLE,
     _BG_PRESSED,
@@ -127,15 +128,15 @@ _STYLE_MODE_CHIP = (
 
 _STYLE_PRIMARY_BTN = f"""
     QPushButton {{
-        color: #ffffff;
-        background: #2563eb;
-        border: 1px solid #1d4ed8;
-        border-radius: 6px;
-        padding: 6px 0;
+        color: #e8efff;
+        background: #1d4ed8;
+        border: 1px solid #1e3a8a;
+        border-radius: 14px;
+        padding: 4px 12px;
         font-size: 11px;
         font-weight: 500;
     }}
-    QPushButton:hover {{ background: #1d4ed8; }}
+    QPushButton:hover {{ background: #2563eb; border-color: #1d4ed8; }}
     QPushButton:disabled {{
         color: #6b7280; background: {_BG_SINGLE};
         border-color: {_GROUP_OUTLINE_COLOR};
@@ -196,15 +197,22 @@ def _shorten_cwd(cwd_str: str, max_len: int = 60) -> str:
 def _row_title(d: DormantSession) -> str:
     """Human-friendly title for a dormant session row.
 
-    Resolution order: explicit name → first line of last_prompt
-    (truncated) → fallback "Untitled session". The title ends up in
-    both the left list (elided to row width) and the preview header
-    (full text with optional [展开] for very long ones)."""
+    Resolution order:
+      1. explicit name (ai_title or user-set)
+      2. first line of last_prompt, truncated
+      3. cwd basename — most sessions don't have an explicit name AND
+         have no last_prompt yet (a launched-but-not-typed session).
+         Without this fallback the list shows N rows of "Untitled
+         session" with no way to tell them apart.
+      4. literal "Untitled session" as last resort
+    """
     if d.name and d.name.strip():
         return d.name.strip()
     if d.last_prompt and d.last_prompt.strip():
         line = d.last_prompt.strip().splitlines()[0]
         return (line[:40] + "…") if len(line) > 40 else line
+    if d.cwd and d.cwd.name:
+        return d.cwd.name
     return "Untitled session"
 
 
@@ -244,6 +252,15 @@ class _RecentRow(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(_RECENT_ROW_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Per the Spotlight keyboard model the search box owns focus
+        # always — arrow keys flow through ITS eventFilter to drive row
+        # selection. If the row itself can take focus, clicking one
+        # parks Qt focus on the row and Fusion's default focus
+        # highlight (a bluish tint on QPushButton) bleeds through the
+        # row's stylesheet, making the focused row look different from
+        # the selected row. NoFocus pins both states under our own
+        # ``_selected`` styling and preserves the eventFilter route.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._apply_style()
         self.clicked.connect(self._on_clicked)
 
@@ -409,18 +426,14 @@ class RecentsDrawer(QWidget):
         self.setFixedWidth(_DRAWER_WIDTH_FULL)
         self.setMinimumHeight(300)
 
-        # QToolTip styling — without this, tooltips inherit the parent's
-        # translucent BG and render as an unreadable black box.
+        # QToolTip QSS is appended below — Qt's stylesheet resolution
+        # shadows the app-level rule for tooltips popping inside a
+        # widget that has its own setStyleSheet (which we do here), so
+        # the rule MUST also live in this widget's stylesheet to take
+        # effect. Single source: claude_island.ui.tooltip_style.
         self.setStyleSheet(
             f"RecentsDrawer {{ color: white; font-family: {UI_FONT_STACK}; }}"
-            "QToolTip {"
-            "  color: #e8e8e8;"
-            "  background-color: #1e1e1e;"
-            "  border: 1px solid #3a3a3a;"
-            "  padding: 6px 8px;"
-            "  border-radius: 4px;"
-            "  font-size: 12px;"
-            "}"
+            + TOOLTIP_QSS
         )
 
         self._build_ui()
@@ -508,6 +521,10 @@ class RecentsDrawer(QWidget):
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setToolTip("Close · Esc")
         close_btn.setFixedSize(20, 20)
+        # All clickable widgets in the drawer set NoFocus so focus
+        # stays on the search box (Spotlight pattern) — see _RecentRow
+        # for the full rationale.
+        close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         close_btn.clicked.connect(self.hide)
         header.addWidget(close_btn)
         body.addLayout(header)
@@ -607,23 +624,14 @@ class RecentsDrawer(QWidget):
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(lambda: self._toast.setVisible(False))
 
-        # ── sticky Resume footer ─────────────────────────────────────
-        # Lives outside _preview_scroll so its position is anchored
-        # to the drawer bottom — independent of preview content
-        # height. Without this, expanding LAST PROMPT pushed the
-        # button down (Fitts's law violation: target moves under
-        # the user's mouse mid-action) and left a top-heavy panel.
-        # Disabled at rest; _update_resume_target rebinds + enables
-        # whenever the selection changes.
-        self._resume_btn = QPushButton("▶ Resume")
-        self._resume_btn.setObjectName("preview_resume_btn")
-        self._resume_btn.setStyleSheet(_STYLE_PRIMARY_BTN)
-        self._resume_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._resume_btn.setToolTip("Enter")
-        self._resume_btn.setEnabled(False)
+        # Resume button moved INTO the preview header (left of title)
+        # so its visual binding to the selected session is unambiguous.
+        # The previous full-width sticky footer button looked like a
+        # banner action affecting the whole drawer rather than the
+        # specific selection. ``_resume_target_uuid`` is the persistent
+        # binding — the button widget itself is recreated on every
+        # ``_render_preview`` pass alongside the rest of the header.
         self._resume_target_uuid: str | None = None
-        self._resume_btn.clicked.connect(self._on_resume_clicked)
-        body.addWidget(self._resume_btn)
 
     def _on_resume_clicked(self) -> None:
         """Stable click handler that always reads the current selection
@@ -633,11 +641,15 @@ class RecentsDrawer(QWidget):
             self._on_resume(self._resume_target_uuid)
 
     def _update_resume_target(self, uuid: str | None) -> None:
-        """Rebind the sticky footer Resume button at the given UUID.
-        ``None`` (no selection) → button disabled but still visible so
-        the layout doesn't shift between empty / non-empty preview."""
+        """Rebind the persistent resume target the next click consults.
+
+        After the v3.1 redesign the button widget itself is recreated
+        every ``_render_preview`` (it lives inside the header row of
+        the dynamically-rebuilt preview), so there's no widget to
+        toggle here — only the bound UUID. The newly-created button
+        reads ``self._resume_target_uuid`` via ``_on_resume_clicked``
+        and sets its own enabled state at construction time."""
         self._resume_target_uuid = uuid
-        self._resume_btn.setEnabled(uuid is not None)
 
     # ── paintEvent — match ExpandedWindow body ────────────────────────
 
@@ -770,25 +782,70 @@ class RecentsDrawer(QWidget):
             self._update_resume_target(None)
             return
 
-        # ── title ────────────────────────────────────────────────────
-        # Two-tier strategy: short titles wrap freely (most fit in 2-3
-        # lines, no truncation needed); very long titles (>200 chars,
-        # which only happens when the title is a fallback first-line of
-        # a giant prompt) get tail-elided with the full text in tooltip.
-        # No [展开] button — the toggle was both visually noisy and
-        # easy to clip in CJK fonts; tooltip-on-hover is the standard
-        # pattern for "see the full thing" in Notion / GitHub list rows.
+        # ── header row: [▶ Resume] <title> ──────────────────────────
+        # The action button sits LEFT of the title so the visual group
+        # reads "Resume → <this thing>". Compact pill (~96 px wide,
+        # 28 px tall) keeps it from looking like a banner. Title wraps
+        # freely to multiple lines if needed; the button stays anchored
+        # top-left while the text flows beside / below it.
+        #
+        # Two-tier title strategy unchanged: short titles wrap; very
+        # long titles (>200 chars, only happens when the title is a
+        # fallback first-line of a giant prompt) get tail-elided with
+        # the full text in tooltip.
         title_text = _row_title(d)
         if len(title_text) > _TITLE_HARD_CAP:
             display_title = title_text[:_TITLE_HARD_CAP] + "…"
         else:
             display_title = title_text
+
+        header_row = QWidget()
+        header_h = QHBoxLayout(header_row)
+        header_h.setContentsMargins(0, 0, 0, 0)
+        header_h.setSpacing(8)
+
+        resume_btn = QPushButton("▶ Resume")
+        resume_btn.setObjectName("preview_resume_btn")
+        resume_btn.setStyleSheet(_STYLE_PRIMARY_BTN)
+        resume_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Intentionally NO setToolTip — the "▶ Resume" label is its own
+        # affordance; a tooltip repeating the same word adds noise and
+        # overlaps the title text on hover (the bug the user reported).
+        # Keyboard hint (Enter) is documented in the drawer header.
+        resume_btn.setFixedHeight(28)
+        resume_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        resume_btn.clicked.connect(self._on_resume_clicked)
+        # AlignVCenter so a single-line title and the button share a
+        # baseline (visually centred on each other). For multi-line
+        # titles the button still vcenters on the whole title block,
+        # which reads better than top-aligning the button while the
+        # title stretches downward.
+        header_h.addWidget(resume_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
         title_lbl = QLabel(display_title)
         title_lbl.setStyleSheet(_STYLE_PREVIEW_TITLE)
         title_lbl.setWordWrap(True)
-        title_lbl.setToolTip(title_text)
-        self._preview_box.addWidget(title_lbl)
+        # Allow the label to shrink below its sizeHint so the parent
+        # HBoxLayout's width constraint actually clips it. Without an
+        # explicit minimum-zero, QLabel reserves sizeHint() width and
+        # the title overflows past the panel edge instead of wrapping.
+        title_lbl.setMinimumWidth(0)
+        title_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
+        )
+        # Tooltip is set ONLY when the visible string was tail-elided
+        # past the hard cap. For normal-length titles wordWrap shows
+        # the full text across as many lines as needed and a hover-
+        # overlay would be a pure repeat (NN/g: "tooltips with obvious
+        # or redundant text are not beneficial"). For pathological
+        # >200-char titles (typically a fallback first-line of a giant
+        # prompt) we DO need the escape hatch — that's the only path
+        # to recover the dropped tail.
+        if display_title != title_text:
+            title_lbl.setToolTip(title_text)
+        header_h.addWidget(title_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
 
+        self._preview_box.addWidget(header_row)
         self._preview_box.addWidget(self._mk_divider())
 
         # ── meta block ───────────────────────────────────────────────
@@ -803,8 +860,17 @@ class RecentsDrawer(QWidget):
         uuid_h = QHBoxLayout(uuid_row)
         uuid_h.setContentsMargins(0, 0, 0, 0)
         uuid_h.setSpacing(4)
-        uuid_lbl = QLabel(f"🆔  {d.session_uuid}")
+        # UUID has hyphen-separated chunks (8-4-4-4-12). QLabel.wordWrap
+        # only breaks at whitespace by default; a UUID has no spaces, so
+        # without help it overflows or hard-clips. Inserting U+200B
+        # (zero-width space) after each hyphen tells Qt those positions
+        # are valid wrap points without changing the visible text. Falls
+        # back to single-line if the label fits.
+        uuid_text = d.session_uuid.replace("-", "-​")
+        uuid_lbl = QLabel(f"🆔  {uuid_text}")
         uuid_lbl.setStyleSheet(_STYLE_PREVIEW_BODY)
+        uuid_lbl.setWordWrap(True)
+        uuid_lbl.setMinimumWidth(0)
         uuid_lbl.setToolTip("Click to copy session ID · Ctrl+C")
         uuid_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
         uuid_lbl.mousePressEvent = lambda _: self._copy_uuid_current()
@@ -814,6 +880,7 @@ class RecentsDrawer(QWidget):
         uuid_copy.setCursor(Qt.CursorShape.PointingHandCursor)
         uuid_copy.setToolTip("Copy session ID · Ctrl+C")
         uuid_copy.setFixedWidth(16)
+        uuid_copy.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         uuid_copy.clicked.connect(self._copy_uuid_current)
         uuid_h.addWidget(uuid_copy)
         uuid_row.register_reveal(uuid_copy)
@@ -823,10 +890,19 @@ class RecentsDrawer(QWidget):
         cwd_h = QHBoxLayout(cwd_row)
         cwd_h.setContentsMargins(0, 0, 0, 0)
         cwd_h.setSpacing(4)
-        cwd_lbl = QLabel(f"📁  {_shorten_cwd(str(d.cwd))}")
+        # Path: insert U+200B after every "/" so wordWrap can break at
+        # path-segment boundaries. Without the hint Qt has nowhere to
+        # break (paths have no whitespace) and either overflows or
+        # snaps mid-character. ``_shorten_cwd`` still applies for very
+        # long paths so the visible string isn't insanely long even
+        # before wrapping.
+        cwd_visible = _shorten_cwd(str(d.cwd))
+        cwd_with_breaks = cwd_visible.replace("/", "/​")
+        cwd_lbl = QLabel(f"📁  {cwd_with_breaks}")
         cwd_lbl.setStyleSheet(_STYLE_PREVIEW_BODY)
         cwd_lbl.setToolTip(f"{d.cwd}\nClick to open · Ctrl+O")
         cwd_lbl.setWordWrap(True)
+        cwd_lbl.setMinimumWidth(0)
         cwd_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
         cwd_lbl.mousePressEvent = lambda _: self._open_folder_current()
         cwd_h.addWidget(cwd_lbl, 1)
@@ -835,14 +911,27 @@ class RecentsDrawer(QWidget):
         cwd_open.setCursor(Qt.CursorShape.PointingHandCursor)
         cwd_open.setToolTip("Open folder · Ctrl+O")
         cwd_open.setFixedWidth(16)
+        cwd_open.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         cwd_open.clicked.connect(self._open_folder_current)
         cwd_h.addWidget(cwd_open)
         cwd_row.register_reveal(cwd_open)
         self._preview_box.addWidget(cwd_row)
 
-        branch = d.git_branch or "—"
+        # Branch names like ``feat/capsule-three-region-layout`` carry
+        # natural break points at ``/`` and ``-`` — insert U+200B at
+        # each so wordWrap can split there if the row would otherwise
+        # overflow. Time string after the dot has spaces, no help
+        # needed.
+        branch_raw = d.git_branch or "—"
+        branch = branch_raw.replace("/", "/​").replace("-", "-​")
         bt_lbl = QLabel(f"🌿  {branch}  ·  {_relative_time(d.last_activity)}")
         bt_lbl.setStyleSheet(_STYLE_PREVIEW_BODY)
+        bt_lbl.setWordWrap(True)
+        bt_lbl.setMinimumWidth(0)
+        # No setToolTip — wordWrap already shows the full branch name
+        # across multiple lines if needed (the U+200B break hints above
+        # let it split at "/" and "-" boundaries). A hover tooltip would
+        # just repeat what's already visible.
         self._preview_box.addWidget(bt_lbl)
 
         ct_lbl = QLabel(f"💰  {_fmt_money(d.cost_usd)}  ·  {d.turn_count} turns")

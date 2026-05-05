@@ -281,6 +281,88 @@ class TestComposeSessionView:
         assert view.is_high_cost is False
 
 
+class TestComposeLastActivityFromMeta:
+    """Per-uuid JSONL activity must override the scanner's create_time
+    baseline. Two sessions in the same cwd with different uuids must NOT
+    cross-contaminate — that was the project-keyed-override bug."""
+
+    def _compose(
+        self,
+        session: Session,
+        *,
+        sess_uuid: str,
+        meta_last: datetime | None,
+    ):
+        meta = {"last_activity": meta_last} if meta_last is not None else {}
+        return compose_session_view(
+            session,
+            state_reader=FakeStateReader({session.pid: {"sessionId": sess_uuid}}),
+            metadata_provider=FakeMetadataProvider({sess_uuid: meta}),
+            usage_registry=FakeUsageRegistry(),
+            names_store=FakeNamesStore(),
+        )
+
+    def test_meta_last_supersedes_session_baseline(self):
+        scan_time = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+        meta_last = datetime(2025, 1, 1, 14, 0, tzinfo=timezone.utc)
+        view = self._compose(
+            _session(pid=1, last_activity=scan_time),
+            sess_uuid="uuid-A", meta_last=meta_last,
+        )
+        assert view.last_activity == meta_last
+
+    def test_session_baseline_kept_when_meta_older(self):
+        """Old transcripts (e.g., a JSONL from a previous run with the
+        same uuid via --resume) must NOT drag last_activity backward."""
+        scan_time = datetime(2025, 1, 1, 14, 0, tzinfo=timezone.utc)
+        meta_last = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+        view = self._compose(
+            _session(pid=1, last_activity=scan_time),
+            sess_uuid="uuid-A", meta_last=meta_last,
+        )
+        assert view.last_activity == scan_time
+
+    def test_session_baseline_kept_when_no_meta(self):
+        """Session known but no JSONL yet — falls back to scanner's baseline."""
+        scan_time = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+        view = self._compose(
+            _session(pid=1, last_activity=scan_time),
+            sess_uuid="uuid-A", meta_last=None,
+        )
+        assert view.last_activity == scan_time
+
+    def test_two_sessions_same_cwd_get_independent_activity(self):
+        """The bug: two sessions in /home/x — only one has recent JSONL
+        activity. The dormant one must NOT inherit the active one's
+        timestamp.
+        """
+        scan_time = datetime(2025, 1, 1, 9, 0, tzinfo=timezone.utc)
+        active_ts = datetime(2025, 1, 1, 14, 0, tzinfo=timezone.utc)
+
+        active = compose_session_view(
+            _session(pid=1, cwd="/home/x", last_activity=scan_time),
+            state_reader=FakeStateReader({1: {"sessionId": "uuid-A"}}),
+            metadata_provider=FakeMetadataProvider(
+                {"uuid-A": {"last_activity": active_ts},
+                 "uuid-B": {}},
+            ),
+            usage_registry=FakeUsageRegistry(),
+            names_store=FakeNamesStore(),
+        )
+        dormant = compose_session_view(
+            _session(pid=2, cwd="/home/x", last_activity=scan_time),
+            state_reader=FakeStateReader({2: {"sessionId": "uuid-B"}}),
+            metadata_provider=FakeMetadataProvider(
+                {"uuid-A": {"last_activity": active_ts},
+                 "uuid-B": {}},
+            ),
+            usage_registry=FakeUsageRegistry(),
+            names_store=FakeNamesStore(),
+        )
+        assert active.last_activity == active_ts
+        assert dormant.last_activity == scan_time
+
+
 # ---------------------------------------------------------------------------
 # Snapshotter
 # ---------------------------------------------------------------------------

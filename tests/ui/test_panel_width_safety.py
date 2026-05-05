@@ -63,6 +63,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QWidget
 
 from claude_island.core.models import Session, SessionDetails, UsageTotals
+from claude_island.core.snapshot import SessionView
 from claude_island.ui.controller import IslandController
 from claude_island.ui.expanded_window import (
     ExpandedWindow,
@@ -178,7 +179,21 @@ def _build_popup_with_long_session(qtbot) -> SessionDetailPopup:
         sidechain_count=3,
         original_name=_LONG_NAME,
     )
-    popup = SessionDetailPopup(details, s)
+    view = SessionView(
+        pid=s.pid,
+        name=_LONG_NAME,
+        project_path=s.project_path,
+        project_basename=s.project_path.name or "x",
+        last_activity=s.last_activity,
+        is_running=True,
+        cost_usd=12.34,
+        is_high_cost=False,
+        latest_model="claude-opus-4-7",
+        status_word="busy",
+        session=s,
+        session_uuid=s.session_uuid,
+    )
+    popup = SessionDetailPopup(details, view)
     qtbot.addWidget(popup)
     return popup
 

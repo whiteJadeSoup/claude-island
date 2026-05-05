@@ -436,9 +436,22 @@ def compose_session_view(
 
     status_word = state.get("status") if isinstance(state.get("status"), str) else None
 
+    # Per-uuid JSONL activity supersedes the scanner's baseline (process
+    # create_time). The scanner can only observe process-level facts; the
+    # JSONL transcript is the source of truth for "is this session
+    # actively producing turns?". Keyed by session_uuid via the parser's
+    # _session_meta, so two sessions sharing a cwd don't pollute each
+    # other (the bug the project-keyed activity override used to cause).
+    meta_last = meta.get("last_activity")
+    last_activity = (
+        meta_last
+        if isinstance(meta_last, datetime) and meta_last > session.last_activity
+        else session.last_activity
+    )
+
     is_running = _resolve_is_running(
         status_word=status_word,
-        last_activity=session.last_activity,
+        last_activity=last_activity,
         active_threshold_s=active_threshold_s,
     )
 
@@ -447,7 +460,7 @@ def compose_session_view(
         name=name,
         project_path=session.project_path,
         project_basename=session.project_path.name or str(session.project_path),
-        last_activity=session.last_activity,
+        last_activity=last_activity,
         is_running=is_running,
         cost_usd=float(cost),
         is_high_cost=float(cost) >= high_cost_threshold,
