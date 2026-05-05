@@ -260,11 +260,12 @@ _apply_macos_accessory_policy()
 if sys.platform == "darwin":
     app.setStyle("Fusion")
 
-# Global QToolTip dark-theme rule — see ``claude_island.ui.tooltip_style``
-# for why this rule must ALSO be appended to every per-widget
-# stylesheet (Qt's QSS resolution shadows app-level rules for tooltips
-# popping inside widgets that call self.setStyleSheet).
-from claude_island.ui.tooltip_style import TOOLTIP_QSS
+# Global tooltip styling — both paths together (see tooltip_style.py
+# for the rationale; tl;dr Qt's QSS resolution for QToolTip on macOS
+# Fusion is flaky depending on widget flags, so we belt-and-braces it
+# with the palette path which works at a lower level).
+from claude_island.ui.tooltip_style import TOOLTIP_QSS, apply_tooltip_palette
+apply_tooltip_palette(app)
 app.setStyleSheet(TOOLTIP_QSS)
 
 from claude_island.ui.capsule_window import CapsuleWindow
