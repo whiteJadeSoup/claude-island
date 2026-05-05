@@ -276,15 +276,9 @@ _STYLE_PANEL = f"""
         color: white;
         font-family: {UI_FONT_STACK};
     }}
-    QToolTip {{
-        color: #e8e8e8;
-        background-color: #1e1e1e;
-        border: 1px solid #3a3a3a;
-        padding: 6px 8px;
-        border-radius: 4px;
-        font-size: 12px;
-    }}
 """
+# (QToolTip rule lives at app level in __main__.py — single source of
+# truth so the tooltip look stays consistent across every surface.)
 # Bare top-level properties + selector blocks in one stylesheet make
 # Qt fail to parse the entire sheet (silent "Could not parse" warning,
 # and the QToolTip block goes ignored — system default white tooltip
@@ -1705,14 +1699,7 @@ class SessionDetailPopup(QFrame):
             "QPushButton:hover {"
             "    background: transparent;"
             "}"
-            "QToolTip {"
-            "    color: #e8e8e8;"
-            "    background-color: #1e1e1e;"
-            "    border: 1px solid #3a3a3a;"
-            "    padding: 6px 8px;"
-            "    border-radius: 4px;"
-            "    font-size: 12px;"
-            "}"
+            # QToolTip rule lives at app level (see __main__._TOOLTIP_QSS).
         )
         self.adjustSize()
 
@@ -2528,14 +2515,7 @@ class _AddProviderDialog(QFrame):
             f"    font-family: {UI_FONT_STACK};"
             "}"
             "QLabel { color: #e8e8e8; }"
-            "QToolTip {"
-            "    color: #e8e8e8;"
-            "    background-color: #1e1e1e;"
-            "    border: 1px solid #3a3a3a;"
-            "    padding: 6px 8px;"
-            "    border-radius: 4px;"
-            "    font-size: 12px;"
-            "}"
+            # QToolTip rule lives at app level (see __main__._TOOLTIP_QSS).
         )
 
         root = QVBoxLayout(self)

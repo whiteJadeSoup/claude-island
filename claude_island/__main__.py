@@ -260,19 +260,24 @@ _apply_macos_accessory_policy()
 if sys.platform == "darwin":
     app.setStyle("Fusion")
 
-# Global QToolTip dark-theme rule. With Fusion (macOS) or native Win/
-# Linux styles, this is honoured everywhere in the app, so we don't
-# have to repeat it in every per-widget stylesheet.
-app.setStyleSheet(
-    "QToolTip {"
-    "  color: #e8e8e8;"
-    "  background-color: #1e1e1e;"
-    "  border: 1px solid #3a3a3a;"
-    "  padding: 6px 8px;"
-    "  border-radius: 4px;"
-    "  font-size: 12px;"
-    "}"
-)
+# Global QToolTip dark-theme rule — single source of truth for the
+# tooltip look across every surface (capsule, expanded panel, recents
+# drawer, popups, future surfaces). Per-widget stylesheets used to
+# carry their own copy of this rule, but with the app-level QSS path
+# working they were dead duplicates that drifted easily on edits.
+# Anyone who needs to inspect / extend the tooltip style edits this
+# constant — nowhere else.
+_TOOLTIP_QSS = """
+QToolTip {
+    color: #e8e8e8;
+    background-color: #1e1e1e;
+    border: 1px solid #3a3a3a;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+"""
+app.setStyleSheet(_TOOLTIP_QSS)
 
 from claude_island.ui.capsule_window import CapsuleWindow
 from claude_island.ui.controller import IslandController

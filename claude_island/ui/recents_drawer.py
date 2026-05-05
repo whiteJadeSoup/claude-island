@@ -416,18 +416,11 @@ class RecentsDrawer(QWidget):
         self.setFixedWidth(_DRAWER_WIDTH_FULL)
         self.setMinimumHeight(300)
 
-        # QToolTip styling — without this, tooltips inherit the parent's
-        # translucent BG and render as an unreadable black box.
+        # QToolTip rule lives at app level (see __main__._TOOLTIP_QSS) —
+        # one rule covers every surface, so the dark tooltip look stays
+        # consistent and there's no per-widget copy that could drift.
         self.setStyleSheet(
             f"RecentsDrawer {{ color: white; font-family: {UI_FONT_STACK}; }}"
-            "QToolTip {"
-            "  color: #e8e8e8;"
-            "  background-color: #1e1e1e;"
-            "  border: 1px solid #3a3a3a;"
-            "  padding: 6px 8px;"
-            "  border-radius: 4px;"
-            "  font-size: 12px;"
-            "}"
         )
 
         self._build_ui()
