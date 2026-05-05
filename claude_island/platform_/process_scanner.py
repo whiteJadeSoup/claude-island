@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +15,13 @@ from claude_island.platform_ import win32_console
 # the claude script, or as a bundled "claude.exe".
 _DIRECT_NAMES = {"claude", "claude.exe"}
 _NODE_NAMES = {"node", "node.exe"}
+# The macOS installer (~/.local/share/claude/versions/<version>) names
+# the binary after its version string, so psutil reports
+# name="2.1.126" instead of "claude". Recognise version-like names as
+# candidates and confirm via cmdline. Pattern is intentionally loose
+# (X.Y.Z optionally followed by -beta, .rc1, etc.) to survive future
+# version-string changes; the cmdline check rejects false positives.
+_VERSION_LIKE = re.compile(r"^\d+\.\d+\.\d+(?:[.-]\S+)?$")
 
 
 class ProcessScanner:
@@ -73,15 +83,33 @@ class ProcessScanner:
                         sessions.append(session)
                     continue
 
-                if name not in _NODE_NAMES:
+                # Confirmation-required path: either a node host that
+                # might be running claude, or a versioned binary on
+                # macOS. Both need a cmdline() call to distinguish from
+                # unrelated processes.
+                if name not in _NODE_NAMES and not _VERSION_LIKE.match(name):
                     continue
 
                 try:
                     cmdline = proc.cmdline()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-                if not any("claude" in arg.lower() for arg in cmdline):
+                if not cmdline:
                     continue
+
+                # Match if "claude" appears anywhere in cmdline. For
+                # node hosts that's the script path; for the macOS
+                # versioned binary it's argv[0] (basename "claude").
+                argv0_base = os.path.basename(cmdline[0]).lower()
+                if argv0_base in _DIRECT_NAMES:
+                    pass  # versioned-binary confirmation
+                elif name in _NODE_NAMES and any(
+                    "claude" in arg.lower() for arg in cmdline
+                ):
+                    pass  # node-host confirmation
+                else:
+                    continue
+
                 session = self._build(proc, info)
                 if session:
                     sessions.append(session)
@@ -127,7 +155,15 @@ def _filter_orphans(sessions: list[Session]) -> list[Session]:
     AttachConsole brokenness, scan-thread race with our own console
     state, etc.), return the originals unchanged. Better stale than
     blank — the user can still see and manually triage from the list.
+
+    Non-Windows shortcut: AttachConsole is Windows-only and
+    ``get_console_info`` returns None for every pid on macOS / Linux.
+    Without this guard every session would be dropped, and only the
+    "all-filtered" tripwire would save us from an empty list — which is
+    fragile (one accidental non-None makes other sessions disappear).
     """
+    if sys.platform != "win32":
+        return sessions
     if not sessions:
         return sessions
 

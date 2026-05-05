@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+from claude_island.ui.fonts import MONO_FONT_STACK, UI_FONT_STACK
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -76,7 +79,7 @@ class _CopyableIdLabel(QFrame):
         # width — eliding would conflict with both.
         self._uuid_label = mk_label(shown, elide=False)
         self._uuid_label.setStyleSheet(
-            "color: #e8e8e8; font-size: 11px; font-family: Consolas, monospace;"
+            f"color: #e8e8e8; font-size: 11px; font-family: {MONO_FONT_STACK};"
         )
         # When showing the full uuid we want wrapping; the short form
         # never wraps so this is harmless either way.
@@ -99,7 +102,7 @@ class _CopyableIdLabel(QFrame):
 
         self._copied_label = mk_label("Copied", elide=False)
         self._copied_label.setStyleSheet(
-            "color: #4ade80; font-size: 11px; font-family: Consolas, monospace;"
+            f"color: #4ade80; font-size: 11px; font-family: {MONO_FONT_STACK};"
         )
         self._copied_label.hide()
         layout.addWidget(self._copied_label)
@@ -268,19 +271,19 @@ class _SmoothWheelScroller(QObject):
             return True
         return super().eventFilter(obj, event)
 
-_STYLE_PANEL = """
-    ExpandedWindow {
+_STYLE_PANEL = f"""
+    ExpandedWindow {{
         color: white;
-        font-family: 'Segoe UI', sans-serif;
-    }
-    QToolTip {
+        font-family: {UI_FONT_STACK};
+    }}
+    QToolTip {{
         color: #e8e8e8;
         background-color: #1e1e1e;
         border: 1px solid #3a3a3a;
         padding: 6px 8px;
         border-radius: 4px;
         font-size: 12px;
-    }
+    }}
 """
 # Bare top-level properties + selector blocks in one stylesheet make
 # Qt fail to parse the entire sheet (silent "Could not parse" warning,
@@ -1694,7 +1697,7 @@ class SessionDetailPopup(QFrame):
         self.setStyleSheet(
             "SessionDetailPopup {"
             "    color: white;"
-            "    font-family: 'Segoe UI', sans-serif;"
+            f"    font-family: {UI_FONT_STACK};"
             "}"
             "QLabel:hover, QFrame:hover, QWidget:hover {"
             "    background: transparent;"
@@ -2522,7 +2525,7 @@ class _AddProviderDialog(QFrame):
         self.setStyleSheet(
             "_AddProviderDialog {"
             "    color: white;"
-            "    font-family: 'Segoe UI', sans-serif;"
+            f"    font-family: {UI_FONT_STACK};"
             "}"
             "QLabel { color: #e8e8e8; }"
             "QToolTip {"
@@ -2917,11 +2920,15 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_window(self) -> None:
-        self.setWindowFlags(
+        # Qt.Tool dropped on macOS — see CapsuleWindow._setup_window
+        # for the NSPanel WA_TranslucentBackground rendering bug.
+        flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
         )
+        if sys.platform != "darwin":
+            flags |= Qt.WindowType.Tool
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         # Intentionally NOT setting WA_ShowWithoutActivating: that attribute
         # sets WS_EX_NOACTIVATE, which makes WM_MOUSEACTIVATE return

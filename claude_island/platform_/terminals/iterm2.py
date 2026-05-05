@@ -102,10 +102,17 @@ end tell
 """
 
 # AppleScript for FOCUS — finds the iTerm2 pane whose tty matches the
-# clicked session, selects its session + tab, then activates the app.
-# Returns "ok" / "miss" via stdout so the Python side can distinguish
-# "tty wasn't in iTerm2's tree" (return False) from osascript errors
-# (subprocess returncode ≠ 0).
+# clicked session, selects its window + tab + session, then activates
+# the app. Returns "ok" / "miss" via stdout so the Python side can
+# distinguish "tty wasn't in iTerm2's tree" (return False) from
+# osascript errors (subprocess returncode ≠ 0).
+#
+# ``select w`` is load-bearing for the multi-window case: ``activate``
+# raises iTerm2 to the OS foreground, but the window order *inside*
+# iTerm2 is independent — without ``select w`` the target pane lives
+# in whatever iTerm2 window happens to currently be frontmost in the
+# app's own z-order, which can leave the user staring at a different
+# window with the right pane hidden behind it.
 _FOCUS_SCRIPT_TEMPLATE = """\
 tell application "iTerm"
     repeat with w in windows
@@ -114,6 +121,7 @@ tell application "iTerm"
                 if tty of s is "{tty}" then
                     select s
                     select t
+                    select w
                     activate
                     return "ok"
                 end if

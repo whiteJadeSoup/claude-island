@@ -45,6 +45,13 @@ def patched_process_iter():
     own ``with patch(...)`` blocks. wt_hwnd discovery moved out of
     process_scanner in PR2 (now lives in WindowsTerminalAdapter), so
     no walk_to_visible_host patch is needed here.
+
+    sys.platform is forced to "win32" because the orphan filter
+    short-circuits on non-Windows (AttachConsole is Windows-only).
+    Without the patch, S2/S5 would silently pass on macOS for the
+    wrong reason: the filter never runs at all instead of dropping
+    the orphan PID. Forcing the platform keeps test coverage of the
+    actual Windows code path on developers' Macs.
     """
     fake_procs: list = []
 
@@ -56,6 +63,7 @@ def patched_process_iter():
               side_effect=fake_iter),
         patch("claude_island.platform_.process_scanner.win32_console.get_console_info",
               return_value=(1, "any-title")),
+        patch("claude_island.platform_.process_scanner.sys.platform", "win32"),
     ):
         yield fake_procs
 
@@ -149,6 +157,37 @@ def test_access_denied_during_cmdline_does_not_crash(patched_process_iter):
     patched_process_iter.append(node)
 
     assert ProcessScanner().scan() == []  # no crash, no session
+
+
+def test_versioned_binary_recognised_via_cmdline(patched_process_iter):
+    """macOS installer (~/.local/share/claude/versions/<version>) names
+    the binary after its version, so psutil reports name='2.1.126'.
+    The scanner falls back to a cmdline check whose argv[0] basename
+    confirms it as claude. Without this, the running session is
+    invisible and the capsule stays in dot mode."""
+    versioned = _fake_proc(
+        80, "2.1.126",
+        cmdline=["claude", "--resume", "abc"],
+        cwd="/proj",
+    )
+    patched_process_iter.append(versioned)
+
+    sessions = ProcessScanner().scan()
+    assert [s.pid for s in sessions] == [80]
+
+
+def test_versioned_name_without_claude_argv0_is_skipped(patched_process_iter):
+    """A version-like process name alone isn't enough — argv[0] must
+    actually be 'claude'. Guards against false positives (some other
+    binary that happens to be named like a version string)."""
+    other = _fake_proc(
+        90, "1.2.3",
+        cmdline=["/usr/local/bin/something-else", "--flag"],
+        cwd="/x",
+    )
+    patched_process_iter.append(other)
+
+    assert ProcessScanner().scan() == []
 
 
 # ==========================================================================
