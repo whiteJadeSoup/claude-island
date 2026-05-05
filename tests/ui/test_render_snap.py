@@ -141,9 +141,19 @@ class TestCapsuleRender:
         assert "my-project" not in capsule._label.text()
 
     def test_render_one_running_session_shows_its_name(self, capsule):
-        v = _view(name="my-feature-branch", is_running=True)
+        # Keep the name short enough to survive the offscreen-Qt font
+        # metric quirk: with no real font glyphs, QFontMetrics treats
+        # pixelSize as the per-char width regardless of letter, so
+        # ``horizontalAdvance(name) ≈ len(name) × 12``. The capsule's
+        # name slot is ~158 px when no cost is shown, giving ~13 chars
+        # of headroom in tests; "feat-branch" (11 chars) fits with
+        # margin and exercises the same "1 running → label is the
+        # name" path the original "my-feature-branch" was after.
+        # Long-name elide + tooltip recovery is covered separately by
+        # tests/ui/test_capsule_layout.py:TestNameEliding/TestToolTip.
+        v = _view(name="feat-branch", is_running=True)
         capsule.render(_snap(sessions=(v,)))
-        assert "my-feature-branch" in capsule._label.text()
+        assert "feat-branch" in capsule._label.text()
 
     def test_render_two_running_starts_carousel(self, capsule):
         v1 = _view(pid=1, name="alpha", cwd="/a", is_running=True)
