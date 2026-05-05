@@ -80,10 +80,10 @@ class WindowActivator:
             if not wt_uia.select_tab_by_title(hwnd, title) and sibling_pids:
                 _select_tab_via_siblings(hwnd, sibling_pids)
         else:
-            # Fallback: ancestor-pid walk. Used when console detection fails
-            # (legacy conhost, processes started without a console, etc.) or
-            # when the terminal isn't WT.  No console title available here,
-            # so tab selection is skipped.
+            # Fallback: ancestor-pid walk. Used when console detection
+            # fails (conhost, processes started without a console, etc.)
+            # or when the terminal isn't WT. No console title available
+            # here, so tab selection is skipped.
             candidate_pids = _ancestor_pids(pid)
             if candidate_pids:
                 hwnd = _find_window_for_pids(candidate_pids, win32gui, win32process)
@@ -146,7 +146,7 @@ def walk_to_visible_host(conpty_hwnd: int, win32gui) -> int | None:
       console title to drive tab selection + foreground.
     - At scan time: ``ProcessScanner`` calls this to label each session
       with its hosting wt_hwnd, so the UI can group same-tab sessions
-      visually (PR2 grouping).
+      visually.
 
     Returns ``None`` when the chain breaks before reaching a visible
     host within bounded depth (``_MAX_ANCESTOR_DEPTH`` = 10).

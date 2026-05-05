@@ -44,7 +44,8 @@ class IslandController(QObject):
         )
 
     # ------------------------------------------------------------------
-    # Called by QtBridge slots (runs on Qt main thread)
+    # Called from the WorldSnapshot subscription on the Qt main thread
+    # (WorldMarshaler delivers snap → on_world_snap → on_sessions_updated)
     # ------------------------------------------------------------------
 
     def on_sessions_updated(self, sessions: list[Session]) -> None:

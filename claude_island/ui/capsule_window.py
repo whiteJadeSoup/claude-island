@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime, timezone
-from typing import Callable, NamedTuple
+from typing import NamedTuple
 
 from PySide6.QtCore import (
     QEasingCurve, QPoint, QPropertyAnimation, Qt, QTimer,
@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from claude_island.core.models import QuotaSnapshot, Session, SessionDetails
 from claude_island.core.snapshot import SessionView, WorldSnapshot
 from .fonts import UI_FONT_FAMILY, UI_FONT_STACK
 from .controller import IslandController
@@ -34,7 +33,7 @@ _DOT_W = 12
 _DOT_H = 12
 _TOP_MARGIN = 8
 
-# PR2 — long-press unlock + edge-snap
+# Long-press → unlock free-drag (2D + edge snap).
 # 500 ms is the iOS / Android conventional long-press threshold —
 # long enough to not fire on impatient clicks, short enough to feel
 # responsive. AssistiveTouch and Chat Heads both sit in this range.
@@ -48,12 +47,11 @@ _SNAP_DURATION_MS = 200
 # making the pill so faint it's hard to track during the drag.
 _FREE_DRAG_OPACITY = 0.7
 
-# PR3 — edge-idle half-hide
-# When the capsule is docked at a non-top edge (bottom/left/right),
-# it shrinks to a thin strip and fades so the user's working area
-# stays uncluttered. Hover restores it. Mirrors AssistiveTouch idle
-# opacity (40%) tuned a bit brighter for desktop where the user's
-# eye is further from the screen.
+# Edge-idle half-hide: when the capsule is docked at a non-top edge
+# (bottom/left/right), it shrinks to a thin strip and fades so the
+# user's working area stays uncluttered. Hover restores it. Mirrors
+# AssistiveTouch idle opacity (40%) tuned a bit brighter for desktop
+# where the user's eye is further from the screen.
 _IDLE_W = 60         # narrower than _DOT_LEFT_PAD + dot + label slot
 _IDLE_OPACITY = 0.6  # faint enough to disappear, visible enough to find
 # Edges that trigger half-hide. Top is always full-presence (it's
@@ -87,9 +85,9 @@ _QUOTA_RIGHT_PAD = 12  # px from pill's right edge to bar's right edge
 # without information. Once the user is approaching the rate-limit
 # cliff the indicator becomes useful.
 # Re-exported from core/quota_palette so the capsule and the expanded
-# panel can't drift apart (pre-extraction the capsule used 70/90 while
-# the panel used 60/85 — at 86% the two surfaces gave contradictory
-# severity readings to the user).
+# panel always agree on warn / critical boundaries — without a single
+# source two surfaces can give the user contradictory severity
+# readings for the same snapshot %.
 from claude_island.core.quota_palette import (
     WARN_PCT as _QUOTA_WARN_THRESHOLD,
     CRITICAL_PCT as _QUOTA_CRITICAL_THRESHOLD,
@@ -229,14 +227,7 @@ class CapsuleWindow(QWidget):
     Resizes to a small dot when there are no active sessions.
     """
 
-    def __init__(
-        self,
-        controller: IslandController,
-        *,
-        get_today_cost: Callable[[], float] | None = None,
-        get_session_details: Callable[[Session], SessionDetails | None] | None = None,
-        get_quota_snapshot: Callable[[], QuotaSnapshot | None] | None = None,
-    ) -> None:
+    def __init__(self, controller: IslandController) -> None:
         super().__init__()
         self._controller = controller
         self._is_dot = True
@@ -244,13 +235,6 @@ class CapsuleWindow(QWidget):
         # stays gone until the next process restart — there is no tray icon
         # to bring it back, so all auto-show paths must respect this flag.
         self._hidden_by_user = False
-        # Constructor params kept for backwards compat with the wiring
-        # layer's call signature; no longer read internally — the
-        # capsule's data path is render(snap) only after Phase G2.2.
-        # Will be removed once the wiring layer drops them too.
-        self._get_today_cost = get_today_cost
-        self._get_session_details = get_session_details
-        self._get_quota_snapshot = get_quota_snapshot
         # Latest computed view-model. Populated by render(data); read
         # by _compose_label_text, _refresh_active_state, _paint_quota_bar.
         # Empty default so any path called before the first render
@@ -270,17 +254,13 @@ class CapsuleWindow(QWidget):
         self._rotation_timer = QTimer(self)
         self._rotation_timer.setInterval(_ROTATE_INTERVAL_MS)
         self._rotation_timer.timeout.connect(self._on_rotate_tick)
-        # NOTE: previously self._cost_cache (float) and
-        # self._quota_pct_cache (float | None) lived here as separate
-        # paint caches. They have been folded into self._data.cost_str
-        # and self._data.quota_pct (string + int, quantised to display
-        # precision) so dedup keys and paint reads share one source.
 
-        # ── Drag state (PR1: horizontal drag along the top) ────────────
+        # ── Drag state (horizontal drag along the top) ────────────────
         # User can press-and-hold the pill, then drag it left/right to
         # reposition it horizontally along the top edge. The X coord
         # is persisted so the position survives restarts. Y is locked
-        # to top margin in PR1; PR2 will unlock Y via long-press.
+        # to the top margin here — long-press promotion to free-drag
+        # (below) unlocks Y.
         #
         # Drag-vs-click discrimination uses
         # QApplication.startDragDistance() (system-tunable, defaults to
@@ -301,7 +281,7 @@ class CapsuleWindow(QWidget):
         self._is_dragging: bool = False
         self._persisted_pos: tuple[int, int] | None = _load_saved_position()
 
-        # ── Free-drag state (PR2: long-press to unlock 2D drag + edge snap) ──
+        # ── Free-drag state (long-press to unlock 2D drag + edge snap) ──
         # A press-and-hold of _LONG_PRESS_MS unlocks "free drag mode"
         # (Y axis unlocked, capsule renders semi-transparent so the
         # user sees they've entered a different mode). On release the
@@ -313,9 +293,9 @@ class CapsuleWindow(QWidget):
         #
         # The long-press timer races with the click-distance threshold:
         # if the user moves the cursor past startDragDistance BEFORE
-        # the timer fires, we fall through to the PR1 horizontal-drag
-        # mode (Y locked) — fast small adjustments shouldn't have to
-        # wait 0.5 s. The timer is cancelled in that branch.
+        # the timer fires, we fall through to horizontal-drag mode
+        # (Y locked) — fast small adjustments shouldn't have to wait
+        # 0.5 s. The timer is cancelled in that branch.
         #
         # _long_press_timer: single-shot QTimer started on mouse-down.
         # _is_free_drag: True after _LONG_PRESS_MS expires AND the
@@ -331,7 +311,7 @@ class CapsuleWindow(QWidget):
         self._is_free_drag: bool = False
         self._snap_anim: "QPropertyAnimation | None" = None
 
-        # ── Docked-edge idle state (PR3: hide-on-non-top-edge + hover) ──
+        # ── Docked-edge idle state (hide-on-non-top-edge + hover) ──
         # After a free-drag-snap to bottom/left/right the capsule
         # half-hides (narrow + 0.6 opacity) so it stops competing
         # with whatever's behind it. enterEvent restores full size
@@ -352,8 +332,7 @@ class CapsuleWindow(QWidget):
         # but only idle + running fire here (high-cost reads as "not
         # currently producing turns" from the capsule's perspective).
         # When running, the equalizer bars wave; when idle, a single
-        # static dot. Running state previously was the dot's opacity
-        # pulse — same visual story, more obvious indicator.
+        # static dot.
         self._dot_label = _RowStatusGlyph(self)
 
         # Three-region layout (see _apply_capsule): [dot] [name] [cost].
@@ -373,9 +352,8 @@ class CapsuleWindow(QWidget):
         )
         self._cost_label.setStyleSheet(_STYLE_COST)
 
-        # is_breathing is the legacy attribute name for "is the
-        # equalizer currently animating" — kept so existing tests /
-        # callers reading capsule._is_breathing keep working.
+        # True when the equalizer glyph is animating; flipped by
+        # _refresh_active_state alongside the glyph state change.
         self._is_breathing = False
 
         controller.state_changed.connect(self._on_state_changed)
@@ -407,10 +385,9 @@ class CapsuleWindow(QWidget):
 
         Honours the user's persisted drag position when one exists
         AND lands on a currently-connected screen; otherwise falls
-        back to top-centre on the primary screen (the original
-        behaviour). Called from _apply_dot / _apply_capsule on every
-        size-affecting state change so PR1 must keep the user's
-        chosen X across those transitions.
+        back to top-centre on the primary screen. Called from
+        _apply_dot / _apply_capsule on every size-affecting state
+        change so the user's chosen X survives those transitions.
 
         Multi-monitor: a persisted position from a now-disconnected
         monitor would land off-screen; ``_pos_visible_on_any_screen``
@@ -588,10 +565,10 @@ class CapsuleWindow(QWidget):
         the right of cost for the bar + percent caption.
 
         Idle exception: when the capsule is collapsed at a non-top
-        edge (PR3 idle state), skip the geometry reset so a render
-        tick during idle doesn't bounce the capsule back to full
-        width. Label / dot updates still happen — the user will see
-        them next time they hover-out."""
+        edge (idle state), skip the geometry reset so a render tick
+        during idle doesn't bounce the capsule back to full width.
+        Label / dot updates still happen — the user will see them
+        next time they hover-out."""
         self._is_dot = False
         showing_quota = self._should_show_quota_bar()
         cost_text = self._compose_cost_for_label()
@@ -910,12 +887,12 @@ class CapsuleWindow(QWidget):
             new_y = self._drag_origin_window.y() + delta.y()
             self.move(new_x, new_y)
         else:
-            # Horizontal drag (PR1 path): Y tracks each screen's top.
-            # Crossing into a different monitor whose geom.top() isn't
-            # equal to the drag-origin's screen recomputes Y so the
-            # capsule lands on THAT monitor's top edge — without this,
-            # the capsule floats mid-air on a taller / vertically-
-            # offset secondary display.
+            # Horizontal drag: Y tracks each screen's top. Crossing
+            # into a different monitor whose geom.top() isn't equal
+            # to the drag-origin's screen recomputes Y so the capsule
+            # lands on THAT monitor's top edge — without this, the
+            # capsule floats mid-air on a taller / vertically-offset
+            # secondary display.
             new_x = self._clamp_x(
                 self._drag_origin_window.x() + delta.x(), self.width(),
             )
@@ -1067,7 +1044,7 @@ class CapsuleWindow(QWidget):
         if self._docked_edge in _IDLE_EDGES:
             self._enter_idle()
 
-    # ── Edge idle (PR3) ─────────────────────────────────────────────
+    # ── Edge idle ────────────────────────────────────────────────────
 
     def _enter_idle(self) -> None:
         """Collapse the capsule to its idle half-hidden form: thin

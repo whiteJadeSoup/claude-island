@@ -109,10 +109,9 @@ class LocalAppBackend(_CapabilityProvider):
         on success (regardless of whether any blocks were actually
         stripped — the side effect is the .bak file, always written).
 
-        Matches the existing detail-popup ``_on_strip_thinking``
-        behaviour, but loses the count-of-stripped-blocks return — UI
-        layer in PR2 reports success/failure only. (The .bak file is
-        the durable evidence of what changed.)
+        Returns bool only; the granular count of stripped blocks is
+        intentionally not surfaced — the .bak file beside the original
+        is the durable evidence of what changed.
         """
         # Late import: keeps app_backend import-time light and avoids
         # pulling session_repair into modules that don't need it.

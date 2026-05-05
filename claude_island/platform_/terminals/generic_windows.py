@@ -58,10 +58,8 @@ class GenericWindowsAdapter(_CapabilityProvider):
     def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
         """Activate via ancestor-pid EnumWindows walk.
 
-        Same logic as the legacy WindowActivator._activate_windows
-        fallback. Won't select a specific tab, but will bring the
-        host window to the foreground — which is the best we can do
-        for non-WT hosts.
+        Won't select a specific tab — only brings the host window to
+        the foreground, which is the best we can do for non-WT hosts.
 
         ``siblings`` is accepted (and ignored) so the dispatcher can
         pass the same kwargs to every adapter regardless of which one

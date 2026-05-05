@@ -75,8 +75,8 @@ def panel(qtbot):
     yield panel
 
 
-def _panel_with_session(qtbot, get_session_usage):
-    """Build a panel wired with a stub get_session_usage."""
+def _panel_with_session(qtbot):
+    """Build a basic panel with only the required get_usage_totals stub."""
     from claude_island.ui.expanded_window import ExpandedWindow
     capsule = QWidget()
     capsule.show()
@@ -85,7 +85,6 @@ def _panel_with_session(qtbot, get_session_usage):
         capsule=capsule,
         controller=controller,
         get_usage_totals=lambda period: UsageTotals(period=period),
-        get_session_usage=get_session_usage
     )
     qtbot.addWidget(p)
     qtbot.addWidget(capsule)
@@ -368,15 +367,11 @@ def _make_session_usage(
 
 
 def _panel_with_quota(qtbot, *, quota=None, totals=None, by_model=None):
-    """Build a panel wired with the new SPEND + QUOTA APIs.
+    """Build a panel wired with the SPEND + QUOTA APIs.
 
     ``quota``    — drives the QUOTA card (bars / pct / reset).
     ``totals``   — drives the SPEND card amount + I/O lines.
-    ``by_model`` — drives the SPEND card per-model breakdown.
-
-    Use this helper instead of ``_panel_with_session`` for any test
-    that exercises the post-A2 layout. The legacy helper passes
-    ``get_session_usage`` which the new cards no longer read."""
+    ``by_model`` — drives the SPEND card per-model breakdown."""
     capsule = QWidget()
     capsule.show()
     p = ExpandedWindow(
@@ -668,7 +663,7 @@ def test_row_meta_shows_cost_when_details_available(qtbot):
 def test_row_meta_renders_dash_when_no_details(qtbot):
     """Composer unwired → meta shows ``—`` (not an age fallback)."""
     from PySide6.QtWidgets import QLabel as _QL
-    panel = _panel_with_session(qtbot, lambda: None)
+    panel = _panel_with_session(qtbot)
     panel._render_sessions([_session(7, "/proj/foo")])
     btn = panel._rows[7]
     assert btn.findChild(_QL, "meta_label").text() == "—"
@@ -678,7 +673,7 @@ def test_row_has_custom_context_menu_policy(qtbot):
     """Right-click is wired via Qt.CustomContextMenu so we own the
     event. Without this, Qt would either show its built-in
     text-context-menu or do nothing."""
-    panel = _panel_with_session(qtbot, lambda: None)
+    panel = _panel_with_session(qtbot)
     panel._render_sessions([_session(1, "/a")])
     btn = panel._rows[1]
     from PySide6.QtCore import Qt as _Qt
@@ -863,7 +858,6 @@ def _build_panel_with_tabs(
     available,
     selected="anthropic",
     on_provider_selected=None,
-    get_session_usage=None
 ):
     capsule = QWidget()
     capsule.show()
@@ -872,7 +866,6 @@ def _build_panel_with_tabs(
         capsule=capsule,
         controller=controller,
         get_usage_totals=lambda period: UsageTotals(period=period),
-        get_session_usage=get_session_usage,
         available_providers=available,
         selected_provider=selected,
         on_provider_selected=on_provider_selected

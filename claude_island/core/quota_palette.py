@@ -1,14 +1,11 @@
 """Single source of truth for 5h quota severity thresholds + colours.
 
-Why this exists: pre-extraction the capsule pill (`ui/capsule_window.py`)
-and the expanded panel's TODAY card (`ui/expanded_window.py`) each
-defined their own thresholds AND their own bar colours. Capsule used
-warn=70 / critical=90; panel used warn=60 / critical=85. At 86 % the
-two surfaces gave **contradictory severity readings to the user**:
-the capsule mini-bar showed amber ("warn"), the panel bar showed red
-("critical"). Same snapshot value, different visual story.
-
-This module collapses both axes into one place:
+Both the capsule pill and the expanded panel's QUOTA card render the
+same 5h utilization %. If each surface decided its own thresholds or
+colours independently, the two could disagree on severity for the
+same snapshot — e.g., one showing "warn amber" and the other showing
+"critical red" at 86 %. This module collapses both axes into one
+dispatch:
 
     pct → severity (ok | warn | critical) → bar colour (hex)
 
@@ -16,16 +13,15 @@ Every surface that renders quota state pulls from here. Adding a new
 surface = ``from claude_island.core.quota_palette import quota_bar_color``
 — no risk of drifting away from the canonical scheme.
 
-Threshold choice (warn=70, critical=85): 90 % was too late on the 5 h
-window (≈30 min headroom); 60 % was too early (alarm fatigue). 70 %
-gives a comfortable amber band before things get tight; 85 % matches
-how the panel already escalated to red and leaves a 15 % critical
-window — long enough to defer big tasks, short enough to actually
-notice.
+Threshold choice (warn=70, critical=85): 90 % only leaves ~30 min
+headroom on the 5h window before reset; 60 % triggers warn during
+normal use and reads as alarm fatigue. 70 % gives a comfortable amber
+band; 85 % leaves a 15 % critical window — long enough to defer big
+tasks, short enough to actually notice.
 
 Architecture: lives in ``core/`` because it has no Qt / no platform_
 deps and is consumed by both render code and ``compute(snap)``
-selectors (the F4 dedup path) — same rationale as ``core/formatting.py``.
+selectors — same layering rationale as ``core/formatting.py``.
 """
 from __future__ import annotations
 

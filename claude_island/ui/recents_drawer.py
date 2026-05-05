@@ -301,9 +301,10 @@ class _RecentRow(QPushButton):
         self._apply_style()
         self.update()  # repaint accent
 
-    # Compatibility shim for legacy tests that drove resume directly via
-    # _on_resume() on the row. The redesigned flow routes through the
-    # drawer, but keeping this method makes the migration painless.
+    # Test convenience: invoke the drawer's resume callback for this
+    # row directly, without simulating a double-click. The drawer
+    # itself never calls this — production goes through the
+    # double-click path that triggers the same callback.
     def _on_resume(self) -> None:
         self._on_resume_cb(self._dormant.session_uuid)
 

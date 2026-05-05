@@ -8,11 +8,9 @@ FOCUS capability: SetForegroundWindow on the WT window + UIA
 Select on the tab whose TabItem.Name matches (via console title or
 sibling fallback from inactive split panes).
 
-This file absorbs the logic previously spread across:
-- platform_/window_activator.py (click-to-focus)
-- platform_/process_scanner._filter_orphans (wt_hwnd assignment)
-- platform_/win32_console.py (kept as is, called from here)
-- platform_/wt_uia.py (kept as is, called from here)
+Helpers it leans on:
+- ``platform_/win32_console.py`` for AttachConsole-driven title reads
+- ``platform_/wt_uia.py`` for UIA tab discovery + selection
 """
 from __future__ import annotations
 
@@ -83,10 +81,9 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         """True when the session's process ancestry includes
         WindowsTerminal.exe or a conpty host that traces there.
 
-        Uses the same psutil ancestry walk the legacy WindowActivator
-        relied on, but extended: on Windows *any* claude session is
-        in a terminal (WT, conhost, or a bundled app). We only claim
-        WT sessions — generic_windows adapter claims the rest."""
+        Walks ancestors via psutil. On Windows every claude session is
+        inside *some* terminal (WT, conhost, or a bundled app); we
+        only claim WT-hosted sessions, generic_windows claims the rest."""
         import psutil
         try:
             proc = psutil.Process(session.pid)
@@ -119,11 +116,11 @@ class WindowsTerminalAdapter(_CapabilityProvider):
              different project open in two tabs). The cwd component is
              worktree-normalised so a Claude Code worktree merges with
              its parent repo.
-          4. Views whose wt_hwnd can't be resolved (window_handle=None
-             pre-PR2) become singleton groups — one card each, NEVER
-             merged with anything. This avoids the bug where every
-             unresolvable view collapsed into one mega-card just
-             because their key all happened to be 0.
+          4. Views whose wt_hwnd can't be resolved become singleton
+             groups — one card each, NEVER merged with anything.
+             This avoids the bug where every unresolvable view would
+             collapse into one mega-card just because their key all
+             happened to be 0.
 
         Each emitted SessionGroup renders as one card in the panel."""
         from dataclasses import replace
@@ -290,21 +287,19 @@ class WindowsTerminalAdapter(_CapabilityProvider):
 
 
 # ---------------------------------------------------------------------------
-# Helpers — lifted from the legacy window_activator.py with adapter
-# boundaries preserved.
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _activate_windows(pid: int, sibling_pids: list[int] | None = None) -> bool:
     """Resolve console window → UIA tab select (with sibling fallback)
     → SetForegroundWindow.
 
-    Mirrors legacy WindowActivator._activate_windows including the
-    sibling-fallback path for inactive split panes (originally fixed
-    in commit 7daa451). When the clicked row is an inactive pane, its
-    own console title doesn't appear in any TabItem.Name — UI exposes
-    only the active pane's title in the tab strip. Walking sibling
-    pids tries each sibling's console title; one of them IS the active
-    pane in the same tab and its title DOES match.
+    Sibling fallback handles the inactive split-pane case: when the
+    clicked row is an inactive pane, its own console title doesn't
+    appear in any TabItem.Name — WT only exposes the active pane's
+    title in the tab strip. Walking sibling pids tries each sibling's
+    console title; one of them IS the active pane in the same tab
+    and its title DOES match.
     """
     try:
         import win32con
@@ -326,9 +321,8 @@ def _activate_windows(pid: int, sibling_pids: list[int] | None = None) -> bool:
         if not wt_uia.select_tab_by_title(hwnd, title) and sibling_pids:
             # Fallback for inactive split-pane clicks — try each sibling's
             # console title; one of them is the active pane and its title
-            # matches a tab. Reuses the legacy helper so the AttachConsole
-            # dance is shared between adapter and (future-deletable) legacy
-            # WindowActivator.
+            # matches a tab. Reuses the AttachConsole helper from
+            # window_activator so the dance lives in one place.
             from claude_island.platform_.window_activator import _select_tab_via_siblings
             _select_tab_via_siblings(hwnd, sibling_pids)
     else:

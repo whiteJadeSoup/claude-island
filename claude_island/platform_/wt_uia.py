@@ -16,10 +16,6 @@ Both functions accept and return primitives so future ConEmu / iTerm2
 backends can sit alongside without coupling to claude-island domain types.
 Both are fail-safe: any UIA failure returns the "unknown / no-op"
 sentinel (``None`` / ``False``) so callers can fall back gracefully.
-
-Reserved for PR2 (not implemented here): ``collect_wt_tab_panes`` —
-maps console title to ``(wt_hwnd, tab_index)`` so the UI can group
-same-tab sessions visually.
 """
 from __future__ import annotations
 

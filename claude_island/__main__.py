@@ -476,18 +476,6 @@ def _build_session_details(session):
 controller = IslandController()
 capsule = CapsuleWindow(
     controller,
-    # Pull today's cumulative spend lazily — usage_registry is rebuilt
-    # from JSONL on every start, so the call is just a list comprehension
-    # over in-memory records (cheap, sub-ms at typical user scale).
-    get_today_cost=lambda: usage_registry.get_totals("today").cost_usd,
-    # Capsule shows the running session's name when exactly one is
-    # active. Reuse the same composer the panel rows use so the pill
-    # picks up custom renames + ai-titles consistently.
-    get_session_details=_build_session_details,
-    # Quota snapshot for the mini progress bar. Same closure pattern
-    # as expanded.refresh_usage_bar — reads the panel's selected
-    # provider so a tab click in the panel propagates to the pill.
-    get_quota_snapshot=_get_quota_snapshot,
 )
 # Provider-settings hooks: wrap the platform_.providers module-level
 # functions and inject them so the UI layer never imports platform code

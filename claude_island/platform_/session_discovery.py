@@ -64,8 +64,8 @@ class SessionDiscovery:
         # Otherwise stop() returns, the app starts tearing down its Qt
         # objects, and our registry.update emits into a half-destroyed
         # event loop. The lock window is short — registry.update only
-        # iterates Event handlers and (via QtBridge) calls Signal.emit,
-        # which is thread-safe and microseconds-fast.
+        # iterates Event handlers, which is microseconds-fast and the
+        # Snapshotter wake() it ultimately drives is itself thread-safe.
         with self._lock:
             if self._stopped:
                 return

@@ -19,8 +19,9 @@ position references one specific monitor's coordinate slot — if that
 monitor is later disconnected, the load helper falls back to centred
 on the primary screen rather than restoring an off-screen position.
 
-Both axes are stored even though PR1 only writes X (Y is locked to
-top margin). PR2 unlocks Y when the user enters free-drag mode.
+Both axes are stored: horizontal-drag keeps Y at the top margin, but
+the long-press free-drag mode lets the user reposition both axes —
+the saved Y is what restores the user to whichever edge they docked at.
 
 Cross-platform: paths use ``Path.home()`` (works on Windows / macOS /
 Linux). The atomic-rename idiom uses ``os.replace`` which is the

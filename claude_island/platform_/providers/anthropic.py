@@ -31,10 +31,7 @@ from . import (
 
 
 # Per-Mtok rates from https://platform.claude.com/docs/en/about-claude/pricing
-# Heads-up: Opus dropped from $15/$75 (3.x, 4.0, 4.1) to $5/$25 starting
-# with 4.5 and held through 4.6/4.7 — legacy 4.0/4.1 are silently 3×
-# under-reported. Acceptable trade-off: recent versions converge on the
-# new rate. Lookup is by family-token substring match.
+# Lookup is by family-token substring match.
 register_pricing({
     "haiku":  PricingTable(input_per_mtok=1.0, output_per_mtok=5.0),
     "sonnet": PricingTable(input_per_mtok=3.0, output_per_mtok=15.0),

@@ -41,7 +41,6 @@ from claude_island.core.models import (
     QuotaSnapshot,
     Session,
     SessionDetails,
-    SessionUsage,
     UsageTotals,
     resolve_model_color,
     resolve_model_short_name,
@@ -544,17 +543,12 @@ class _RowStatusGlyph(QWidget):
     _MIN_PCT = 0.20
     _MAX_PCT = 1.00
     _DEFAULT_W = _BAR_W * _BAR_COUNT + _BAR_GAP * (_BAR_COUNT - 1)
-    # Slot width floor matches the legacy dot_label.setFixedWidth(12)
-    # so swapping into the row layout doesn't shift other widgets.
+    # Slot width floor matches the dot label's 12 px so swapping the
+    # status glyph in/out of the row layout doesn't shift other widgets.
     _MIN_SLOT_W = 12
 
     STATE_IDLE = "idle"
     STATE_RUNNING = "running"
-    # STATE_HIGH_COST removed — high-cost moved to the cost label
-    # colour (yellow + bold). Legacy attribute kept as an alias to
-    # STATE_IDLE so external callers that still reference it degrade
-    # gracefully instead of crashing.
-    STATE_HIGH_COST = "idle"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -619,9 +613,8 @@ class _RowStatusGlyph(QWidget):
         Idempotent — calling with the same state is a no-op so this
         is safe to call from every refresh tick. Only state
         transitions start / stop the animations."""
-        # Anything other than RUNNING collapses to IDLE — keeps the
-        # API permissive for the legacy STATE_HIGH_COST alias and
-        # any future caller that forgets the bi-state contract.
+        # Anything other than RUNNING collapses to IDLE — defensive
+        # so a typo'd or future-unknown state string doesn't crash.
         if state != self.STATE_RUNNING:
             state = self.STATE_IDLE
         if dot_color is not None:
@@ -1200,12 +1193,11 @@ _STYLE_USAGE_TOKEN_ROW = "color: #9ca3af; font-size: 11px;"
 
 # Quota progress-bar colour thresholds — re-exported from the shared
 # core palette so this surface and the capsule mini-bar can't drift
-# apart (pre-extraction this file used 60/85 while the capsule used
-# 70/90; at 86 % the user saw a "warn" amber on one and a "critical"
-# red on the other for the same snapshot value).
+# apart on what counts as warn vs critical.
 #
-# The legacy ``_BAR_*`` aliases preserve callers (and tests) that
-# imported the constants by name from this module.
+# ``_BAR_*`` are imported under their local names so the parity test
+# in ``tests/core/test_quota_palette.py`` can grep for them and assert
+# this module hasn't quietly redefined the colours locally.
 from claude_island.core.quota_palette import (
     BAR_GREEN as _BAR_GREEN,
     BAR_AMBER as _BAR_YELLOW,
@@ -1568,12 +1560,9 @@ def _fmt_local_dt(dt: datetime | None) -> str:
 def _quota_color(pct: float, stale: bool) -> str:
     """Pick the progress-bar / pct-text colour for a 5h quota reading.
 
-    Thin alias over ``core.quota_palette.quota_bar_color`` — kept as
-    a module-level function so existing callers (and the test suite)
-    can keep importing ``_quota_color`` from this module without
-    needing to know the palette is now centralised. The kwarg name
-    differs between the legacy signature (positional ``stale``) and
-    the core API (kwarg ``stale=``), so this shim normalises that."""
+    Wraps ``core.quota_palette.quota_bar_color`` so callers in this
+    module can pass ``stale`` positionally (the core API requires it
+    as a kwarg)."""
     return _quota_bar_color_core(pct, stale=stale)
 
 
@@ -1845,7 +1834,10 @@ class SessionDetailPopup(QFrame):
             )
             self._repair_btn.setFixedSize(24, 22)
             self._repair_btn.clicked.connect(self._on_strip_thinking)
-            self._repair_icon = self._repair_btn  # back-compat alias
+            # Tests reach for ``_repair_icon``; production reads
+            # ``_repair_btn``. Same widget, two attribute names —
+            # cheaper than renaming through every test assertion.
+            self._repair_icon = self._repair_btn
             head.addWidget(self._repair_btn)
         layout.addLayout(head)
 
@@ -2328,8 +2320,8 @@ class SessionDetailPopup(QFrame):
         """Delegate to the injected callback (which routes through the
         dispatcher → AppBackend.reset_thinking).
 
-        The callback returns bool — we lost the granular count/error
-        from the legacy in-popup path, but the .bak file beside the
+        The callback returns bool only — granular count/error info is
+        intentionally not surfaced because the .bak file beside the
         original is the durable evidence the user can inspect to
         confirm what changed."""
         if self._on_strip_thinking_cb is None:
@@ -2359,9 +2351,6 @@ class SessionDetailPopup(QFrame):
         self._repair_status.setStyleSheet(f"color: {color}; font-size: 11px;")
         self._repair_status.show()
         self.adjustSize()
-
-    # Back-compat name kept for tests that referenced the old method.
-    _show_repair_status = _show_status
 
     # ------------------------------------------------------------------
     # Layout maintenance: bar fills must be sized after the layout has
@@ -2763,7 +2752,6 @@ class ExpandedWindow(QWidget):
         capsule: QWidget,
         controller: IslandController,
         get_usage_totals: Callable[[str], UsageTotals],
-        get_session_usage: Callable[[], SessionUsage] | None = None,
         on_refresh_clicked: Callable[[], None] | None = None,
         get_session_details: Callable[[Session], SessionDetails] | None = None,
         available_providers: list[str] | None = None,
@@ -2785,20 +2773,14 @@ class ExpandedWindow(QWidget):
         self._controller = controller
         self._get_usage_totals = get_usage_totals
         # Per-period per-model breakdown for the SPEND card's model
-        # row. None → row stays empty (used in legacy tests). When
-        # wired in __main__, points at usage_registry.get_totals_by_model.
+        # row. None → row stays empty (test setup). When wired in
+        # __main__, points at usage_registry.get_totals_by_model.
         self._get_totals_by_model = get_totals_by_model
         # Per-provider quota snapshot for the QUOTA card. None → bars
         # stay hidden (single-provider case OR test setup). When wired,
         # the closure reads the panel's currently-selected provider so
         # tab clicks immediately re-fetch the right provider's quota.
         self._get_quota_snapshot = get_quota_snapshot
-        # Legacy: SessionUsage-based combined quota+spend feed. Still
-        # accepted so existing tests construct successfully, but the
-        # new SPEND/QUOTA split reads from _get_totals_by_model and
-        # _get_quota_snapshot directly. Will be removed once tests are
-        # all on the new API.
-        self._get_session_usage = get_session_usage
         # Optional manual-refresh hook. Wired in __main__ to bypass the
         # provider's TTL and force an immediate fetch — gives the user
         # an out when the auto-refresh hasn't caught the latest state
@@ -3188,7 +3170,7 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _render_sessions(self, sessions: "list[Session]") -> None:
-        """Test/legacy shim: wrap each Session into a SessionView in its
+        """Test seeder: wrap each Session into a SessionView in its
         own singleton group, then call the real renderer.
 
         Production code never reaches this — render(snap) goes straight
@@ -3652,14 +3634,12 @@ class ExpandedWindow(QWidget):
         # · cache w A · cache r B" without a single pixel of layout
         # movement. The same data is also available on right-click of
         # the corresponding session row in the SessionDetailPopup.
-        self._spend_details_open = False  # kept for legacy callers
-
         return card
 
     def _on_period_combo_changed(self, index: int) -> None:
-        """QComboBox handler — extract the period key stored on the item
-        and route through the legacy period-change path so existing
-        tests / refresh logic keep working."""
+        """QComboBox handler — extract the period key stored on the
+        item and forward to ``_on_period`` (the real period-change
+        path that tests and the refresh logic both call directly)."""
         if 0 <= index < len(self._period_combo_items):
             _label, key = self._period_combo_items[index]
             self._on_period(key)
@@ -3736,15 +3716,13 @@ class ExpandedWindow(QWidget):
         v.addLayout(top)
 
         # Store on the row widget for later access by _show_spend_row.
-        # _spend_tokens kept as None — legacy attribute slot; the
-        # detail line moved to a row tooltip in the no-layout-change
-        # redesign. Future code that wants the breakdown should set
-        # row.setToolTip(...) via _show_spend_row instead.
+        # Per-model breakdown (in/out/cw/cr) is exposed via row.setToolTip
+        # in _show_spend_row — the disclosure pattern moved off the
+        # layout (every click resized the panel) onto hover.
         row._spend_name = name_lbl
         row._spend_bar_fill = bar_fill
         row._spend_cost = cost_lbl
         row._spend_aggregate = agg_lbl
-        row._spend_tokens = None
         row._spend_bar_track = bar_track
 
         return row
@@ -3766,8 +3744,9 @@ class ExpandedWindow(QWidget):
         else:
             self._spend_amount.setText(_fmt_money(t.cost_usd))
 
-        # Per-model proportional bars. Only rendered when the wiring layer
-        # provides get_totals_by_model. Falls silent for legacy tests.
+        # Per-model proportional bars. Only rendered when the wiring
+        # layer provides get_totals_by_model — tests that don't pass it
+        # see the SPEND card without per-model rows, no warnings raised.
         show_bars = (
             self._get_totals_by_model is not None
             and t.cost_usd > 0
@@ -3977,9 +3956,9 @@ class ExpandedWindow(QWidget):
         self._tab_strip_layout = QHBoxLayout()
         self._tab_strip_layout.setSpacing(8)
         self._tab_strip_layout.setContentsMargins(0, 0, 0, 0)
-        # Always-present hidden label so legacy tests that grep for
-        # "QUOTA" text in the widget tree keep passing. Shown only in
-        # the no-providers fallback branch.
+        # Reserved header label for the no-providers fallback branch
+        # (see _refresh_quota_card → no providers configured): shown
+        # only when the tab strip can't be populated, otherwise hidden.
         self._quota_hdr = mk_label("QUOTA", elide=False)
         self._build_provider_tab_strip()
         quota_hdr.addLayout(self._tab_strip_layout, 1)
@@ -3995,29 +3974,6 @@ class ExpandedWindow(QWidget):
         quota_hdr.addWidget(self._refresh_btn)
 
         layout.addLayout(quota_hdr)
-
-        # The 5h bar moved to the top focus summary in P1.1 — keeping
-        # it here too was visually redundant ("the same number twice
-        # on one screen, why?"). Build the widget but hide it; the
-        # references are kept so refresh_quota_card / tests can still
-        # touch the same fields without conditional plumbing.
-        row5, self._quota_bar_5h, self._quota_pct_5h, self._quota_reset_5h = (
-            self._build_quota_row("5h")
-        )
-        row5.hide()
-        self._quota_row_5h = row5  # so tests / future code can re-show
-        layout.addWidget(row5)
-        # Weekly bar likewise hidden — replaced by the compact inline
-        # text below ("Weekly 57% used · resets 1h 11m") per user
-        # feedback that a full progress bar was overkill for one
-        # value already shown in the summary card's neighbourhood.
-        # Widget refs preserved so legacy tests keep finding them.
-        row_week, self._quota_bar_week, self._quota_pct_week, self._quota_reset_week = (
-            self._build_quota_row("Weekly")
-        )
-        row_week.hide()
-        self._quota_row_week = row_week
-        layout.addWidget(row_week)
 
         # 5h + Weekly compressed onto a single rich-text line —
         # ``5h 53% · 3h 5m  │  Weekly 57% · 55m``. Each half can take
@@ -4045,23 +4001,12 @@ class ExpandedWindow(QWidget):
         )
         self._quota_inline.hide()
         layout.addWidget(self._quota_inline)
-        # Legacy attribute slots for tests that look these up by name.
-        # Both still constructed but hidden — the visible status now
-        # lives entirely on _quota_inline.
-        # Hidden legacy slot — elide=False is consistent with sibling.
-        self._quota_5h_inline = mk_label("", elide=False)
-        self._quota_5h_inline.hide()
-        layout.addWidget(self._quota_5h_inline)
-        self._quota_weekly_inline = mk_label("", elide=False)
-        self._quota_weekly_inline.hide()
-        layout.addWidget(self._quota_weekly_inline)
 
         # "Unavailable" hint, hidden at rest. Shown by _refresh_quota_card
-        # when the provider's fetch returns None — replaces the silent
-        # empty bars (which previously left users staring at "5h" /
-        # "Weekly" labels with no values and no clue why). Wraps because
-        # the tip references an environment variable / file path that
-        # can be longer than the card width.
+        # when the provider's fetch returns None — gives the user a
+        # diagnostic instead of an empty card. Wraps because the tip
+        # references an environment variable / file path that can be
+        # longer than the card width.
         # elide=False: setWordWrap(True) below is the strategy.
         self._quota_unavailable = mk_label("", elide=False)
         self._quota_unavailable.setStyleSheet(
@@ -4084,12 +4029,7 @@ class ExpandedWindow(QWidget):
 
         if snap is None:
             self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
-            # Skip updating the 5h row widgets — that row is hidden
-            # under the new summary-card design (5h lives there now).
-            self._hide_quota_row(self._quota_bar_week, self._quota_pct_week, self._quota_reset_week)
             self._quota_inline.hide()
-            self._quota_5h_inline.hide()
-            self._quota_weekly_inline.hide()
             self._show_quota_unavailable_hint()
             return
 
@@ -4104,17 +4044,6 @@ class ExpandedWindow(QWidget):
             _STYLE_DOT.format(color=_DOT_GREEN if active else _DOT_GRAY)
         )
 
-        # 5h + Weekly bars are both hidden — the summary card carries
-        # 5h, and the Weekly bar was overkill for one number. Push
-        # values into the legacy bar widgets anyway (cheap, lets
-        # tests / future "show bars" toggle keep working) but render
-        # the user-visible Weekly status as a compact inline line.
-        self._render_quota_row(
-            self._quota_bar_week, self._quota_pct_week, self._quota_reset_week,
-            pct=snap.seven_day_pct,
-            resets_at=snap.seven_day_resets_at,
-            stale=snap.is_stale,
-        )
         # 5h + Weekly compressed onto one rich-text line. Each half
         # carries its own threshold colour (5h often warns first since
         # that's the tighter window). Format: "5h 53% · 3h 5m │
@@ -4176,85 +4105,6 @@ class ExpandedWindow(QWidget):
         ))
         self._quota_unavailable.show()
 
-    def _build_quota_row(self, label: str) -> tuple[QWidget, "QProgressBar", QLabel, QLabel]:
-        """Compact two-line widget for one quota window:
-            [label] ───── bar ─────  [N% used]
-                                        resets in Xh Ym
-        The progress-bar uses Expanding sizePolicy so it absorbs all
-        available width once label + pct are laid out.
-        """
-        wrap = QWidget()
-        v = QVBoxLayout(wrap)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(1)
-
-        # Top line: label + bar + pct
-        top = QHBoxLayout()
-        top.setSpacing(8)
-        # setFixedWidth(42) below caps width, elide=False is fine.
-        lbl = mk_label(label, elide=False)
-        lbl.setStyleSheet("color: #9ca3af; font-size: 11px;")
-        lbl.setFixedWidth(42)
-        top.addWidget(lbl)
-        bar = QProgressBar()
-        bar.setRange(0, 100)
-        bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        bar.setFixedHeight(8)
-        bar.setTextVisible(False)
-        bar.setStyleSheet(_PROGRESS_BAR_TPL.format(color=_BAR_GREEN))
-        bar.hide()
-        top.addWidget(bar, 1)
-        # setFixedWidth(86) below caps width, elide=False is fine.
-        pct = mk_label("", elide=False)
-        pct.setStyleSheet(_STYLE_USAGE_PCT_BIG)
-        pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        pct.setFixedWidth(86)
-        top.addWidget(pct)
-        v.addLayout(top)
-
-        # Bottom line: reset countdown, indented under the bar so it
-        # reads "this is metadata about the bar above"
-        # "resets in Xh Ym" — bounded short, elide=False is safe.
-        reset = mk_label("", elide=False)
-        reset.setStyleSheet(_STYLE_USAGE_RESET)
-        reset.setContentsMargins(50, 0, 0, 0)
-        v.addWidget(reset)
-
-        return wrap, bar, pct, reset
-
-    def _render_quota_row(
-        self,
-        bar: "QProgressBar",
-        pct_label: QLabel,
-        reset_label: QLabel,
-        *,
-        pct: float,
-        resets_at: datetime | None,
-        stale: bool,
-    ) -> None:
-        """Fill one quota row (bar + pct + reset). Bar chunk and pct
-        text share the threshold colour so the signal is consistent
-        whether the eye lands on the bar or the number first."""
-        clamped = max(0, min(100, int(round(pct))))
-        color = _quota_color(clamped, stale=stale)
-        stale_marker = " ⚠" if stale else ""
-        bar.setValue(clamped)
-        bar.setStyleSheet(_PROGRESS_BAR_TPL.format(color=color))
-        bar.show()
-        pct_label.setStyleSheet(f"color: {color}; {_STYLE_USAGE_PCT_BIG}")
-        pct_label.setText(f"{clamped}% used{stale_marker}")
-        reset_label.setText("resets " + _fmt_reset(resets_at))
-
-    def _hide_quota_row(
-        self,
-        bar: "QProgressBar",
-        pct_label: QLabel,
-        reset_label: QLabel,
-    ) -> None:
-        bar.hide()
-        pct_label.setText("")
-        reset_label.setText("")
-
     def _on_state_changed(self, state: str) -> None:
         if state == "expanded":
             if self._latest_snap is not None:
@@ -4271,13 +4121,12 @@ class ExpandedWindow(QWidget):
             self.hide()
 
     def _on_period(self, period: str) -> None:
-        """Switch the SPEND time window. Kept the legacy entry point so
-        existing tests that drive period changes via ``_on_period``
-        continue to work; the dropdown handler routes through here.
+        """Switch the SPEND time window. Single entry point used by
+        both the dropdown handler (``_on_period_combo_changed``) and
+        any direct programmatic caller (tests, future hotkey bindings).
 
-        Sync the dropdown's selection to ``period`` so programmatic
-        callers (tests, future hotkey bindings) and the user's clicks
-        leave the visible state consistent.
+        Syncs the dropdown's selection to ``period`` so the visible
+        state stays consistent regardless of who triggered the change.
         """
         self._period = period
         combo = getattr(self, "_period_combo", None)
@@ -4301,12 +4150,8 @@ class ExpandedWindow(QWidget):
     def selected_provider_name(self) -> str | None:
         """Read the currently-active provider tab.
 
-        Wiring layer (``__main__.py``) calls this from inside its
-        ``_build_session_usage`` closure to decide which provider's
-        quota to fetch. Stored on the panel (rather than threaded
-        through the get_session_usage signature) so tests using the
-        legacy no-arg callable still work.
-        """
+        The wiring layer reads this from inside its quota-snapshot
+        closure to decide which provider to fetch from."""
         return self._selected_provider
 
     def _on_provider_clicked(self, name: str) -> None:
@@ -4445,8 +4290,8 @@ class ExpandedWindow(QWidget):
         Source of truth lives in platform_/providers; the wiring layer
         passes us a callable so this widget never imports platform code
         (import-linter contract). When the callback is None (tests), the
-        list is empty and the + button stays hidden — matches the legacy
-        "single-provider users see no add UI" behaviour.
+        list is empty and the + button stays hidden so single-provider
+        users don't see an add UI they can't act on.
         """
         if self._list_configurable_providers is None:
             return []
@@ -4528,13 +4373,6 @@ class ExpandedWindow(QWidget):
                 import sys as _sys
                 print(f"[claude-island] provider-config-changed callback failed: {exc}",
                       file=_sys.stderr)
-
-    # _on_session_renamed deleted in PR2 cleanup: rename now flows
-    # popup → on_rename callback (provided by _show_detail_popup) →
-    # self._dispatch(view, Capability.RENAME, new_name=...) → AppBackend.
-    # The AppBackend's on_change closure (snapshotter.wake) refreshes
-    # the UI within the debounce window, so we no longer need to
-    # manually re-render here.
 
     def set_available_providers(
         self, providers: list[str], selected: str | None = None
@@ -4820,8 +4658,8 @@ class ExpandedWindow(QWidget):
         #      Updated by _build_session_details via
         #      usage_registry.get_latest_model on every refresh tick,
         #      so model switches propagate within a tick.
-        #   2. ``per_model[0]`` — legacy fallback for code paths that
-        #      don't populate latest_model (older composers, tests).
+        #   2. ``per_model[0]`` — fallback for paths (some composers,
+        #      tests) that don't populate latest_model.
         #   3. Empty string — chip hidden.
         model_id = ""
         if details is not None:
@@ -4861,7 +4699,7 @@ class ExpandedWindow(QWidget):
         btn.setProperty("_session", view)
 
     # ------------------------------------------------------------------
-    # Card composition (PR2: same-tab grouping)
+    # Card composition (same-tab grouping)
     # ------------------------------------------------------------------
 
     def _make_group_widget(
@@ -5117,8 +4955,7 @@ class ExpandedWindow(QWidget):
         # inactive-split-pane case: when the clicked row's own console
         # title isn't in any UIA TabItem.Name (only the active pane's
         # title is exposed), we need to fall back to a sibling's title
-        # to actually switch the WT tab. See commit 7daa451 for the
-        # original incident; PR2 lost it, restored in PR2.5.
+        # to actually switch the WT tab.
         sibling_pids = [s.session.pid for s in siblings]
         self._dispatch(view, Capability.FOCUS, siblings=sibling_pids)
         self._controller.toggle_expanded()

@@ -108,7 +108,7 @@ class SessionView:
     # Empty string when no uuid could be resolved (transcript not
     # written yet); backends treat empty as "skip, no-op".
     session_uuid: str = ""
-    # ── Capability framework fields (PR1 added; PR2 makes UI consume) ──
+    # ── Capability framework fields ─────────────────────────────────
     # Frozen set of capabilities the user can trigger on this view.
     # Computed at group time = (terminal adapter caps for this view) ∪
     # (os backend caps) ∪ (app backend caps). UI checks membership to
@@ -125,8 +125,8 @@ class SessionView:
     # The dispatcher uses it to look up the adapter when dispatching
     # TERMINAL-scope capabilities. UI MUST NOT parse this string — its
     # value is internal to the platform layer (e.g. "windows-terminal",
-    # "iterm2", "generic-mac"). Empty default for backward-compat with
-    # legacy construction; PR2 makes adapters always populate it.
+    # "iterm2", "generic-mac"). Empty default exists so tests that
+    # construct a SessionView without an adapter still validate.
     adapter_id: str = ""
 
     def __post_init__(self) -> None:
@@ -328,8 +328,7 @@ class _NamesStoreProto(Protocol):
 # Callable signature for the platform-side grouping function. Snapshotter
 # accepts an instance and invokes it on every build to convert the flat
 # sessions list into pre-grouped SessionGroups. Default implementation
-# (``_default_group_sessions``) emits one group per session, matching
-# pre-PR1 behaviour where the UI did its own grouping by window_handle.
+# (``_default_group_sessions``) emits one singleton group per session.
 # Production wires in ``TerminalDispatcher.group_sessions`` from the
 # platform layer, which routes through the adapter chain.
 class _GroupSessionsProto(Protocol):
@@ -357,10 +356,9 @@ def _default_group_sessions(views: list["SessionView"]) -> list["SessionGroup"]:
     adapter_id and no title hint.
 
     Used when no real grouper is injected (most tests, and the boot
-    sequence before ``__main__`` builds the dispatcher). The output
-    is structurally valid — UI consuming session_groups in PR2 will
-    render each as a singleton card. Capabilities on the views are
-    untouched (whatever the view came in with stays)."""
+    sequence before ``__main__`` builds the dispatcher). UI renders
+    each as a singleton card. Capabilities on the views are untouched
+    (whatever the view came in with stays)."""
     return [
         SessionGroup(
             group_id=f"singleton:{v.pid}",
@@ -629,14 +627,14 @@ class Snapshotter:
         throttle_first_window_s: float = 0.2,
     ) -> None:
         # ``publish`` is required and keyword-only — it must NEVER
-        # default to ``world.push``. The whole point of the
-        # WorldMarshaler shim is to ensure subscribers (capsule.render,
-        # expanded.render) fire on the Qt main thread; defaulting to
-        # ``world.push`` would silently route _do_build's worker-thread
-        # call straight into the BehaviorSubject's synchronous
-        # dispatch, and the next Qt widget mutation would crash.
-        # Tests must pass a thread-safe callable (e.g. ``received.append``).
-        # Production passes ``WorldMarshaler.snap_ready.emit``.
+        # default to ``world.push``. WorldMarshaler exists to ensure
+        # subscribers (capsule.render, expanded.render) fire on the
+        # Qt main thread; defaulting to ``world.push`` would silently
+        # route _do_build's worker-thread call straight into the
+        # BehaviorSubject's synchronous dispatch, and the next Qt
+        # widget mutation would crash. Tests must pass a thread-safe
+        # callable (e.g. ``received.append``). Production passes
+        # ``WorldMarshaler.snap_ready.emit``.
         self._session_source = session_source
         self._state_reader = state_reader
         self._metadata_provider = metadata_provider

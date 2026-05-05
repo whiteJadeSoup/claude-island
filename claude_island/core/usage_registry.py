@@ -173,8 +173,8 @@ class UsageRegistry:
     """
 
     def __init__(self) -> None:
-        # Reactivex Subject (was Event[None] pre-Phase G2). on_next(None)
-        # synchronously notifies subscribers on the calling thread.
+        # Reactivex Subject — on_next(None) synchronously notifies
+        # subscribers on the calling thread.
         self.totals_changed: Subject[None] = Subject()
         self._records: list[UsageRecord] = []
         # Dedup keyed by Anthropic ``message.id``. One API response is

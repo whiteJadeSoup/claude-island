@@ -1,11 +1,8 @@
 """Windows implementation of OsBackend.
 
-REVEAL_CWD via ``explorer /select,<path>`` (selects the folder in its
-parent in Explorer; if the target IS a folder, the folder is opened).
-Pre-PR1 the inline ``_open_in_explorer`` in expanded_window.py used
-``os.startfile`` which opens *into* the folder; ``explorer /select,``
-matches what users expect when they click "reveal in Finder/Explorer"
-from a session row (the project root selected in its parent).
+REVEAL_CWD via ``explorer /select,<path>`` so the folder is selected
+in its parent (matches what users expect from "reveal in Explorer"),
+not opened *into*; the latter is what ``os.startfile`` does.
 
 COPY_PATH via the built-in ``clip.exe`` — present on every Windows
 since Vista. No pywin32 dependency required.

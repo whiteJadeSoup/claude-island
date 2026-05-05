@@ -50,7 +50,6 @@ UI Layer (PySide6)  ──→  Core Layer (pure Python)  ←──  Platform Lay
 - `session_discovery.py` — Timer-driven orchestrator merging process scan + file watch into `SessionRegistry`
 
 **`claude_island/ui/`** — PySide6 Qt widgets.
-- `qt_bridge.py` — Marshals core `Event[T]` → Qt `Signal` via `Qt.QueuedConnection`. **Legacy** — only used by the controller's `on_sessions_updated` wire after the broadcast refactor (Phase G1). New code should subscribe to `world.observable()` and let the marshaler handle threading.
 - `world_marshaler.py` — Tiny `QObject` whose `snap_ready` Signal is connected to `world.push` via `Qt.QueuedConnection`. This is what crosses the worker → Qt main thread boundary for the WorldSnapshot pipeline (reactivex's `QtScheduler` doesn't, see comments in `world_marshaler.py`).
 - `controller.py` — `IslandController` state machine (`transitions` lib): dot ↔ collapsed ↔ expanded
 - `capsule_window.py` — Frameless always-on-top floating capsule (collapsed state). Renders via `render(snap)`.

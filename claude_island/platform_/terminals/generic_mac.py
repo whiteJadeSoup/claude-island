@@ -6,10 +6,6 @@ via a simple osascript call — "frontmost of process whose unix id is X".
 LAUNCH spawns Terminal.app via ``osascript "tell application Terminal
 to do script ..."`` so RecentsDrawer's Resume works for users who
 aren't on iTerm2 (which has its own LAUNCH on iTerm2Adapter).
-
-This is the only adapter shipped for macOS in PR1 (iterm2/kitty/
-terminal-app adapters come in follow-up PRs when mac hardware testing
-is available).
 """
 from __future__ import annotations
 

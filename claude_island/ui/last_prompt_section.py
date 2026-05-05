@@ -15,10 +15,6 @@ hooks two things:
 - ``expansion_changed`` Signal — SessionDetailPopup connects this to
   ``adjustSize()`` so the popup grows when the user expands. RecentsDrawer
   doesn't need to react (its preview lives in a fixed-width column).
-
-Pre-extraction this lived inline in SessionDetailPopup as ~80 lines
-of mixed state + helper methods. Extracting kept both surfaces visually
-identical while letting the prompt section evolve in one place.
 """
 from __future__ import annotations
 
@@ -185,7 +181,6 @@ class LastPromptSection(QWidget):
         self.expansion_changed.emit(self._expanded)
 
     def _build_full_view(self) -> QTextEdit:
-        # Critical settings: see expanded_window comments pre-extraction.
         # WidgetWidth + minWidth=0 + Ignored h-policy together prevent
         # the QTextEdit from driving the host pane wider via its content
         # sizeHint. Fixed (not max) height so the popup's adjustSize
