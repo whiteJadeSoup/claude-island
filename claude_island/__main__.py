@@ -53,15 +53,46 @@ def _hide_from_macos_dock() -> None:
         return
     bundle = NSBundle.mainBundle()
     info = bundle.infoDictionary()
-    if info is None:
+    if info is not None:
+        # ``LSUIElement`` is the correct flag for an "accessory" GUI app:
+        # hidden from dock + Cmd-Tab + menu-bar app title, but windows
+        # can still take keyboard focus. ``LSBackgroundOnly`` looks
+        # similar but tells macOS we are a daemon with no UI — under
+        # that policy NSApplication refuses to make our windows key,
+        # which silently breaks every keyboard-driven affordance (arrow
+        # nav, Enter, search input). A previous revision set both as a
+        # "belt and braces" measure; that's wrong — the two flags
+        # express different intents and combining them inherits the
+        # more restrictive one.
+        info["LSUIElement"] = "1"
+
+
+def _apply_macos_accessory_policy() -> None:
+    """Call ``NSApp.setActivationPolicy_(Accessory)`` after QApplication
+    has been created.
+
+    The infoDictionary mutation in ``_hide_from_macos_dock`` runs BEFORE
+    NSApplication is loaded so the early activation policy decision is
+    correct, but on some macOS versions the launcher's cached state
+    overrides our infoDict mutation and the app still ends up in the
+    default Regular policy. The runtime ``setActivationPolicy_`` call
+    is authoritative — once QApplication has constructed NSApplication,
+    we tell it explicitly to switch to Accessory mode. Belt + braces:
+    one of the two paths always wins.
+    """
+    if sys.platform != "darwin":
         return
-    # Both keys do similar things; setting both is the belt-and-braces
-    # pattern documented across pyobjc / Qt cookbooks. LSBackgroundOnly
-    # is the older flag; LSUIElement is the modern equivalent. Either
-    # alone may not stick reliably across macOS versions when the host
-    # is the Python launcher rather than a real .app bundle.
-    info["LSBackgroundOnly"] = "1"
-    info["LSUIElement"] = "1"
+    try:
+        from AppKit import (  # type: ignore[import-not-found]
+            NSApp,
+            NSApplicationActivationPolicyAccessory,
+        )
+    except ImportError:
+        return
+    try:
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    except Exception:
+        pass
 
 
 _hide_from_macos_dock()
@@ -202,6 +233,28 @@ from PySide6.QtCore import QTimer
 
 app = QApplication(sys.argv)
 app.setQuitOnLastWindowClosed(False)
+# Authoritative dock-hide call — must come AFTER QApplication() because
+# it operates on the live NSApplication instance Qt just constructed.
+# Pairs with ``_hide_from_macos_dock`` above (which seeds the early
+# launch decision via NSBundle.infoDictionary). No-op on non-darwin.
+_apply_macos_accessory_policy()
+
+# Global QToolTip QSS so tooltips inherit the dark-theme look across
+# every surface (capsule, expanded panel, recents drawer, popups). Qt's
+# default tooltip is white-on-pale-yellow, which clashes badly with a
+# dark UI — we'd otherwise have to repeat this rule in every per-widget
+# stylesheet. Setting it on QApplication propagates everywhere and
+# survives setStyleSheet calls on individual widgets.
+app.setStyleSheet(
+    "QToolTip {"
+    "  color: #e8e8e8;"
+    "  background-color: #1e1e1e;"
+    "  border: 1px solid #3a3a3a;"
+    "  padding: 6px 8px;"
+    "  border-radius: 4px;"
+    "  font-size: 12px;"
+    "}"
+)
 
 from claude_island.ui.capsule_window import CapsuleWindow
 from claude_island.ui.controller import IslandController
