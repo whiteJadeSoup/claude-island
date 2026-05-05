@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from claude_island.ui.fonts import MONO_FONT_STACK, UI_FONT_STACK
+from claude_island.ui.tooltip_style import TOOLTIP_QSS
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -276,9 +277,10 @@ _STYLE_PANEL = f"""
         color: white;
         font-family: {UI_FONT_STACK};
     }}
-"""
-# (QToolTip rule lives at app level in __main__.py — single source of
-# truth so the tooltip look stays consistent across every surface.)
+""" + TOOLTIP_QSS
+# QToolTip QSS appended above — Qt's stylesheet resolution shadows the
+# app-level rule when a widget calls self.setStyleSheet, so we have
+# to include it here too. Single source: claude_island.ui.tooltip_style.
 # Bare top-level properties + selector blocks in one stylesheet make
 # Qt fail to parse the entire sheet (silent "Could not parse" warning,
 # and the QToolTip block goes ignored — system default white tooltip
@@ -1699,7 +1701,7 @@ class SessionDetailPopup(QFrame):
             "QPushButton:hover {"
             "    background: transparent;"
             "}"
-            # QToolTip rule lives at app level (see __main__._TOOLTIP_QSS).
+            + TOOLTIP_QSS
         )
         self.adjustSize()
 
@@ -2515,7 +2517,7 @@ class _AddProviderDialog(QFrame):
             f"    font-family: {UI_FONT_STACK};"
             "}"
             "QLabel { color: #e8e8e8; }"
-            # QToolTip rule lives at app level (see __main__._TOOLTIP_QSS).
+            + TOOLTIP_QSS
         )
 
         root = QVBoxLayout(self)

@@ -72,6 +72,7 @@ from claude_island.core.launch_intent import LaunchIntent, LaunchIntentRegistry
 from claude_island.core.models import DormantSession
 from claude_island.core.snapshot import WorldSnapshot
 from claude_island.ui.fonts import UI_FONT_STACK
+from claude_island.ui.tooltip_style import TOOLTIP_QSS
 from claude_island.ui.expanded_window import (
     _BG_HOVER_SINGLE,
     _BG_PRESSED,
@@ -127,15 +128,15 @@ _STYLE_MODE_CHIP = (
 
 _STYLE_PRIMARY_BTN = f"""
     QPushButton {{
-        color: #ffffff;
-        background: #2563eb;
-        border: 1px solid #1d4ed8;
+        color: #e8efff;
+        background: #1d4ed8;
+        border: 1px solid #1e3a8a;
         border-radius: 14px;
         padding: 4px 12px;
         font-size: 11px;
         font-weight: 500;
     }}
-    QPushButton:hover {{ background: #1d4ed8; }}
+    QPushButton:hover {{ background: #2563eb; border-color: #1d4ed8; }}
     QPushButton:disabled {{
         color: #6b7280; background: {_BG_SINGLE};
         border-color: {_GROUP_OUTLINE_COLOR};
@@ -425,11 +426,14 @@ class RecentsDrawer(QWidget):
         self.setFixedWidth(_DRAWER_WIDTH_FULL)
         self.setMinimumHeight(300)
 
-        # QToolTip rule lives at app level (see __main__._TOOLTIP_QSS) —
-        # one rule covers every surface, so the dark tooltip look stays
-        # consistent and there's no per-widget copy that could drift.
+        # QToolTip QSS is appended below — Qt's stylesheet resolution
+        # shadows the app-level rule for tooltips popping inside a
+        # widget that has its own setStyleSheet (which we do here), so
+        # the rule MUST also live in this widget's stylesheet to take
+        # effect. Single source: claude_island.ui.tooltip_style.
         self.setStyleSheet(
             f"RecentsDrawer {{ color: white; font-family: {UI_FONT_STACK}; }}"
+            + TOOLTIP_QSS
         )
 
         self._build_ui()
@@ -804,11 +808,19 @@ class RecentsDrawer(QWidget):
         resume_btn.setObjectName("preview_resume_btn")
         resume_btn.setStyleSheet(_STYLE_PRIMARY_BTN)
         resume_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        resume_btn.setToolTip("Resume in terminal · Enter")
+        # Intentionally NO setToolTip — the "▶ Resume" label is its own
+        # affordance; a tooltip repeating the same word adds noise and
+        # overlaps the title text on hover (the bug the user reported).
+        # Keyboard hint (Enter) is documented in the drawer header.
         resume_btn.setFixedHeight(28)
         resume_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         resume_btn.clicked.connect(self._on_resume_clicked)
-        header_h.addWidget(resume_btn, 0, Qt.AlignmentFlag.AlignTop)
+        # AlignVCenter so a single-line title and the button share a
+        # baseline (visually centred on each other). For multi-line
+        # titles the button still vcenters on the whole title block,
+        # which reads better than top-aligning the button while the
+        # title stretches downward.
+        header_h.addWidget(resume_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         title_lbl = QLabel(display_title)
         title_lbl.setStyleSheet(_STYLE_PREVIEW_TITLE)
