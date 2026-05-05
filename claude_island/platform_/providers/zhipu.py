@@ -49,7 +49,6 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from claude_island.core.safe_stderr import safe_stderr_write
 from claude_island.core.models import (
     register_model_colors,
     register_model_short_names,
@@ -63,6 +62,7 @@ from . import (
     _parse_ms, snapshot_from_cache,
     record_failed_attempt,
     is_fetch_due,
+    log_fetch_failure,
 )
 
 
@@ -112,9 +112,12 @@ def _host() -> str:
     return _DEFAULT_HOST
 
 
-def _fetch_http(token: str) -> dict | None:
-    """Single GET to the quota endpoint. Returns None on any network
-    or parse failure so the caller can fall back to the disk cache."""
+def _fetch_http(token: str) -> tuple[dict | None, str | None]:
+    """Single GET to the quota endpoint.
+
+    Returns ``(data, None)`` on success, ``(None, reason)`` on failure.
+    See ``anthropic.py:_fetch_http`` for the full rationale on why we
+    return reason instead of printing it here."""
     req = urllib.request.Request(
         _host() + _PATH,
         headers={
@@ -130,31 +133,16 @@ def _fetch_http(token: str) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             if resp.status != 200:
-                safe_stderr_write(
-                    f"[claude-island] zhipu quota fetch: HTTP {resp.status}"
-                )
-                return None
-            return json.loads(resp.read().decode("utf-8"))
+                return None, f"HTTP {resp.status}"
+            return json.loads(resp.read().decode("utf-8")), None
     except urllib.error.HTTPError as e:
-        safe_stderr_write(
-            f"[claude-island] zhipu quota fetch: HTTP {e.code} {e.reason}"
-        )
-        return None
+        return None, f"HTTP {e.code} {e.reason}"
     except urllib.error.URLError as e:
-        safe_stderr_write(
-            f"[claude-island] zhipu quota fetch failed: {e.reason}"
-        )
-        return None
+        return None, f"network error: {e.reason}"
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        safe_stderr_write(
-            f"[claude-island] zhipu quota fetch: bad response body ({type(e).__name__})"
-        )
-        return None
+        return None, f"bad response body ({type(e).__name__})"
     except OSError as e:
-        safe_stderr_write(
-            f"[claude-island] zhipu quota fetch: {type(e).__name__}: {e}"
-        )
-        return None
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _normalise(data: dict, *, fetched_at: datetime) -> dict:
@@ -274,13 +262,21 @@ class ZhipuProvider:
         if not token:
             if bypass_cache:
                 return None
+            log_fetch_failure(
+                cache_path, now=now, provider="zhipu",
+                reason="auth token not configured",
+            )
             record_failed_attempt(cache_path, now=now, provider="zhipu")
             return _from_cache(read_cache(cache_path), now)
 
-        data = _fetch_http(token)
+        data, reason = _fetch_http(token)
         if data is None:
             if bypass_cache:
                 return None
+            log_fetch_failure(
+                cache_path, now=now, provider="zhipu",
+                reason=reason or "unknown error",
+            )
             record_failed_attempt(cache_path, now=now, provider="zhipu")
             return _from_cache(read_cache(cache_path), now)
 

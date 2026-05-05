@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -568,6 +568,70 @@ def is_fetch_due(cached: dict, *, now: datetime) -> bool:
     if last is None:
         return True
     return (now - last).total_seconds() > POLL_TTL
+
+
+def _fmt_ago(td: timedelta) -> str:
+    """Compact human duration: ``3s``, ``47m``, ``2h 13m``, ``3h``.
+
+    Used by ``log_fetch_failure`` to render "last attempt 5m ago" style
+    timing context. Sub-second deltas round up to ``0s`` rather than
+    showing fractional seconds — log readability beats precision here.
+    """
+    total = int(td.total_seconds())
+    if total < 0:
+        total = 0
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m"
+    h, rem = divmod(total, 3600)
+    m = rem // 60
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
+def log_fetch_failure(
+    cache_path: Path,
+    *,
+    now: datetime,
+    provider: str,
+    reason: str,
+) -> None:
+    """Emit a single stderr line combining failure reason with timing.
+
+    Caller must invoke this BEFORE ``record_failed_attempt`` bumps the
+    cache's ``last_attempt_at`` — otherwise the "last attempt N ago"
+    reading would be 0s on every failure, which is useless. The cache
+    on disk at call time still reflects the prior attempt's timestamp,
+    which is exactly what the user wants to see.
+
+    Output format::
+
+        [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 5m ago — last success 47m ago
+
+    Edge cases:
+      * No prior attempt → "first attempt"
+      * No prior success (token never worked) → "no prior success"
+      * Both missing (cold cache) → "first attempt — no prior success"
+
+    Why a single line: stderr scrolls fast on a real terminal during
+    debugging; a per-failure line is greppable, but a per-failure
+    paragraph is just noise.
+    """
+    cached = read_cache(cache_path) or {}
+    last_attempt = _parse_iso(cached.get("last_attempt_at", ""))
+    last_success = _parse_iso(cached.get("fetched_at", ""))
+    parts = [f"[claude-island] {provider} quota fetch: {reason}"]
+    parts.append(
+        f"last attempt {_fmt_ago(now - last_attempt)} ago"
+        if last_attempt is not None
+        else "first attempt"
+    )
+    parts.append(
+        f"last success {_fmt_ago(now - last_success)} ago"
+        if last_success is not None
+        else "no prior success"
+    )
+    safe_stderr_write(" — ".join(parts))
 
 
 def _parse_iso(s: str) -> datetime | None:

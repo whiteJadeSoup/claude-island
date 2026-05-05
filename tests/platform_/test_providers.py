@@ -108,9 +108,11 @@ class TestAnthropicProvider:
         }))
         p = AnthropicProvider()
         # Patch at module level since _fetch_http is a module function.
+        # Returns (data, reason) tuple — None data with a reason string
+        # signals a network/auth failure to the fetch() coordinator.
         with patch(
             "claude_island.platform_.providers.anthropic._fetch_http",
-            return_value=None,
+            return_value=(None, "test network error"),
         ):
             result = p.fetch(cache_dir=tmp_path, bypass_cache=True)
             # Network failure + bypass=True → no cached fallback
@@ -404,24 +406,34 @@ class TestMiniMaxHostProbing:
 
         def fake_fetch(url, token):
             calls.append(url)
+            # _fetch_http now returns (data, reason). The 1004 here is
+            # a HTTP 200 + business-level auth error — the JSON body is
+            # valid, _try_hosts handles the auth-error filter itself.
             if "minimaxi.com" in url:
-                return {"base_resp": {"status_code": 1004, "status_msg": "cookie"}}
-            return {
-                "model_remains": [{
-                    "model_name": "MiniMax-M*",
-                    "current_interval_total_count": 100,
-                    "current_interval_usage_count": 80,
-                    "end_time": 9999999999000,
-                    "current_weekly_total_count": 1000,
-                    "current_weekly_usage_count": 900,
-                    "weekly_end_time": 9999999999000,
-                }],
-            }
+                return (
+                    {"base_resp": {"status_code": 1004, "status_msg": "cookie"}},
+                    None,
+                )
+            return (
+                {
+                    "model_remains": [{
+                        "model_name": "MiniMax-M*",
+                        "current_interval_total_count": 100,
+                        "current_interval_usage_count": 80,
+                        "end_time": 9999999999000,
+                        "current_weekly_total_count": 1000,
+                        "current_weekly_usage_count": 900,
+                        "weekly_end_time": 9999999999000,
+                    }],
+                },
+                None,
+            )
 
         with patch.object(mm, "_fetch_http", side_effect=fake_fetch):
-            data = mm._try_hosts("sk-cp-fake")
+            data, reason = mm._try_hosts("sk-cp-fake")
 
         assert data is not None
+        assert reason is None
         assert mm._HOST_CACHE == "https://api.minimax.io"
         assert any("minimaxi.com" in c for c in calls)
         assert any("minimax.io" in c for c in calls)
@@ -606,8 +618,10 @@ class TestZhipuProvider:
             raise OSError("intercepted")  # we don't care about the response
 
         with patch.object(zh.urllib.request, "urlopen", side_effect=fake_urlopen):
-            zh._fetch_http("raw-test-key")
+            data, reason = zh._fetch_http("raw-test-key")
 
+        assert data is None  # urlopen raised OSError → failure path
+        assert reason is not None  # error reason string captured
         assert captured["auth"] == "raw-test-key"
         assert not captured["auth"].startswith("Bearer ")
 
@@ -624,16 +638,17 @@ class TestZhipuProvider:
         monkeypatch.setenv("ZHIPU_API_KEY", "any-key")
         # bypass_cache forces an HTTP attempt; force it to fail and verify
         # the cached snapshot is NOT returned (bypass=True path).
+        # _fetch_http now returns (data, reason); failure = (None, str).
         with patch(
             "claude_island.platform_.providers.zhipu._fetch_http",
-            return_value=None,
+            return_value=(None, "test failure"),
         ):
             result = ZhipuProvider().fetch(cache_dir=tmp_path, bypass_cache=True)
             assert result is None
         # And without bypass, an HTTP failure DOES fall back to cache.
         with patch(
             "claude_island.platform_.providers.zhipu._fetch_http",
-            return_value=None,
+            return_value=(None, "test failure"),
         ):
             # Wipe the cache freshness so we hit the HTTP path then
             # fall back; easier than mocking _is_expired.
@@ -1043,7 +1058,7 @@ class TestAnthropicNegativeCache:
         from claude_island.platform_.providers import anthropic as anth
         creds = self._seed_token(tmp_path)
         with patch.object(anth, "_CREDENTIALS_PATH", creds), \
-             patch.object(anth, "_fetch_http", return_value=None) as mock_http:
+             patch.object(anth, "_fetch_http", return_value=(None, "test")) as mock_http:
             p = anth.AnthropicProvider()
             p.fetch(cache_dir=tmp_path)            # first call → HTTP fires
             p.fetch(cache_dir=tmp_path)            # second call → throttled
@@ -1060,7 +1075,7 @@ class TestAnthropicNegativeCache:
         from claude_island.platform_.providers import anthropic as anth
         creds = self._seed_token(tmp_path)
         with patch.object(anth, "_CREDENTIALS_PATH", creds), \
-             patch.object(anth, "_fetch_http", return_value=None) as mock_http:
+             patch.object(anth, "_fetch_http", return_value=(None, "test")) as mock_http:
             p = anth.AnthropicProvider()
             p.fetch(cache_dir=tmp_path)                            # auto: HTTP
             p.fetch(cache_dir=tmp_path, bypass_cache=True)         # manual: HTTP
@@ -1081,7 +1096,7 @@ class TestAnthropicNegativeCache:
         }))
         creds = self._seed_token(tmp_path)
         with patch.object(anth, "_CREDENTIALS_PATH", creds), \
-             patch.object(anth, "_fetch_http", return_value=None):
+             patch.object(anth, "_fetch_http", return_value=(None, "test")):
             p = anth.AnthropicProvider()
             # Cache age (1 h) is past POLL_TTL, so this fetch attempts HTTP,
             # fails, and falls back to cache.
@@ -1092,3 +1107,97 @@ class TestAnthropicNegativeCache:
         assert cached["fetched_at"] == "2026-05-05T11:00:00+00:00"
         # … last_attempt_at marker added so the next wake throttles.
         assert "last_attempt_at" in cached
+
+
+class TestLogFetchFailure:
+    """log_fetch_failure helper — single-line stderr with timing context.
+
+    The helper is the user-visible diagnostic channel when quota fetch
+    fails. It must:
+      • Read the cache BEFORE record_failed_attempt overwrites it.
+      • Quote the failure reason verbatim from the caller.
+      • Show "first attempt" / "no prior success" when those facts apply.
+    """
+
+    def test_fmt_ago_buckets(self):
+        from claude_island.platform_.providers import _fmt_ago
+        from datetime import timedelta
+        assert _fmt_ago(timedelta(seconds=0))     == "0s"
+        assert _fmt_ago(timedelta(seconds=42))    == "42s"
+        assert _fmt_ago(timedelta(seconds=59))    == "59s"
+        assert _fmt_ago(timedelta(seconds=60))    == "1m"
+        assert _fmt_ago(timedelta(minutes=47))    == "47m"
+        assert _fmt_ago(timedelta(hours=1))       == "1h"
+        assert _fmt_ago(timedelta(hours=2, minutes=13)) == "2h 13m"
+        assert _fmt_ago(timedelta(seconds=-5))    == "0s"  # clamp
+
+    def test_log_includes_reason_and_first_attempt_when_cache_empty(
+        self, tmp_path, capsys,
+    ):
+        """First-ever failure: no prior cache → 'first attempt — no prior success'."""
+        from claude_island.platform_.providers import log_fetch_failure
+        cache = tmp_path / "anthropic-quota.json"
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        log_fetch_failure(
+            cache, now=now, provider="anthropic", reason="HTTP 401",
+        )
+        line = capsys.readouterr().err.strip()
+        assert "anthropic" in line
+        assert "HTTP 401" in line
+        assert "first attempt" in line
+        assert "no prior success" in line
+
+    def test_log_includes_last_attempt_and_last_success_ages(
+        self, tmp_path, capsys,
+    ):
+        """Cache has prior attempt + prior success → both ages quoted."""
+        from claude_island.platform_.providers import log_fetch_failure
+        cache = tmp_path / "anthropic-quota.json"
+        # last attempt 5 min ago, last success 47 min ago
+        cache.write_text(json.dumps({
+            "provider": "anthropic",
+            "fetched_at":      "2026-05-05T11:13:00+00:00",
+            "last_attempt_at": "2026-05-05T11:55:00+00:00",
+        }))
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        log_fetch_failure(
+            cache, now=now, provider="anthropic", reason="HTTP 429",
+        )
+        line = capsys.readouterr().err.strip()
+        assert "HTTP 429" in line
+        assert "last attempt 5m ago" in line
+        assert "last success 47m ago" in line
+
+    def test_log_runs_before_cache_bumps(self, tmp_path, capsys):
+        """End-to-end ordering: anthropic.fetch must call log_fetch_failure
+        BEFORE record_failed_attempt — otherwise 'last attempt N ago'
+        always reads 0s and is useless. Verify by setting a known
+        last_attempt_at, triggering failure, and confirming the log
+        quotes the OLD value.
+        """
+        from claude_island.platform_.providers import anthropic as anth
+        cache_path = tmp_path / "anthropic-quota.json"
+        # Old last_attempt_at = 8 minutes ago
+        cache_path.write_text(json.dumps({
+            "provider": "anthropic",
+            "last_attempt_at": (datetime.now(timezone.utc).isoformat()
+                                .replace("+00:00", "+00:00")),
+        }))
+        # Wind it back by parsing then re-writing 8 min in the past
+        from datetime import timedelta
+        eight_ago = datetime.now(timezone.utc) - timedelta(minutes=8)
+        cache_path.write_text(json.dumps({
+            "provider": "anthropic",
+            "last_attempt_at": eight_ago.isoformat(),
+        }))
+        creds = tmp_path / "credentials.json"
+        creds.write_text(json.dumps({
+            "claudeAiOauth": {"accessToken": "fake"},
+        }))
+        with patch.object(anth, "_CREDENTIALS_PATH", creds), \
+             patch.object(anth, "_fetch_http", return_value=(None, "HTTP 401")):
+            anth.AnthropicProvider().fetch(cache_dir=tmp_path)
+        line = capsys.readouterr().err.strip()
+        assert "HTTP 401" in line
+        # Should quote ~8m, not 0s — proves log ran before record_failed_attempt
+        assert "last attempt 8m ago" in line or "last attempt 7m ago" in line

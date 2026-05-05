@@ -40,7 +40,6 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from claude_island.core.safe_stderr import safe_stderr_write
 from claude_island.core.models import (
     PricingTable,
     register_model_colors,
@@ -56,6 +55,7 @@ from . import (
     _parse_ms, snapshot_from_cache,
     record_failed_attempt,
     is_fetch_due,
+    log_fetch_failure,
 )
 
 
@@ -244,13 +244,21 @@ class MiniMaxProvider:
         if not token:
             if bypass_cache:
                 return None
+            log_fetch_failure(
+                cache_path, now=now, provider="minimax",
+                reason="auth token not configured",
+            )
             record_failed_attempt(cache_path, now=now, provider="minimax")
             return _from_cache(read_cache(cache_path), now)
 
-        data = _try_hosts(token)
+        data, reason = _try_hosts(token)
         if data is None:
             if bypass_cache:
                 return None
+            log_fetch_failure(
+                cache_path, now=now, provider="minimax",
+                reason=reason or "unknown error",
+            )
             record_failed_attempt(cache_path, now=now, provider="minimax")
             return _from_cache(read_cache(cache_path), now)
 
@@ -260,34 +268,41 @@ class MiniMaxProvider:
         return _from_cache(payload, now)
 
 
-def _try_hosts(token: str) -> dict | None:
+def _try_hosts(token: str) -> tuple[dict | None, str | None]:
     """Walk the candidate hosts until one returns a real payload.
 
+    Returns ``(data, None)`` on success or ``(None, reason)`` on
+    failure. ``reason`` summarises the multi-host attempt so the caller
+    can log "all hosts failed: api.minimaxi.com → HTTP 401, api.minimax.io
+    → HTTP 401" — useful when only one of two regions is gated.
+
     Updates ``_HOST_CACHE`` on the first success so the next call skips
-    the dead host. Returns the parsed JSON (with the auth-error
-    response filtered out) or None if every candidate failed.
+    the dead host.
     """
     global _HOST_CACHE
+    per_host_reasons: list[str] = []
     for host in _candidate_hosts():
         url = f"{host}{_path()}"
-        data = _fetch_http(url, token)
+        data, reason = _fetch_http(url, token)
         if data is None:
+            per_host_reasons.append(f"{host} → {reason}")
             continue
         if _is_auth_error(data):
-            # Wrong region or invalid key for this host — silently move
-            # on; the next host might be the right region. We don't
-            # surface the 1004 because that label is misleading.
+            # Wrong region or invalid key for this host — record the
+            # 1004 generically and move on; another region may answer.
+            per_host_reasons.append(f"{host} → auth-error (wrong region?)")
             continue
         _HOST_CACHE = host
-        return data
-    return None
+        return data, None
+    return None, "; ".join(per_host_reasons) if per_host_reasons else "no candidate hosts"
 
 
-def _fetch_http(url: str, token: str) -> dict | None:
-    """GET ``url`` with Bearer auth. Returns parsed JSON, or ``None``.
+def _fetch_http(url: str, token: str) -> tuple[dict | None, str | None]:
+    """GET ``url`` with Bearer auth.
 
-    Each failure mode emits a single stderr line so the user can tell
-    network timeout from token rejection from server-shape mismatch."""
+    Returns ``(data, None)`` on success, ``(None, reason)`` on failure.
+    See ``anthropic.py:_fetch_http`` for the rationale on returning
+    reason instead of printing here."""
     req = urllib.request.Request(
         url,
         headers={
@@ -299,31 +314,16 @@ def _fetch_http(url: str, token: str) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             if resp.status != 200:
-                safe_stderr_write(
-                    f"[claude-island] minimax quota fetch: HTTP {resp.status}"
-                )
-                return None
-            return json.loads(resp.read().decode("utf-8"))
+                return None, f"HTTP {resp.status}"
+            return json.loads(resp.read().decode("utf-8")), None
     except urllib.error.HTTPError as e:
-        safe_stderr_write(
-            f"[claude-island] minimax quota fetch: HTTP {e.code} {e.reason}"
-        )
-        return None
+        return None, f"HTTP {e.code} {e.reason}"
     except urllib.error.URLError as e:
-        safe_stderr_write(
-            f"[claude-island] minimax quota fetch failed: {e.reason}"
-        )
-        return None
+        return None, f"network error: {e.reason}"
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        safe_stderr_write(
-            f"[claude-island] minimax quota fetch: bad response body ({type(e).__name__})"
-        )
-        return None
+        return None, f"bad response body ({type(e).__name__})"
     except OSError as e:
-        safe_stderr_write(
-            f"[claude-island] minimax quota fetch: {type(e).__name__}: {e}"
-        )
-        return None
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _normalise(data: dict, *, fetched_at: datetime) -> dict:

@@ -20,8 +20,6 @@ from claude_island.core.models import (
     register_pricing,
 )
 
-from claude_island.core.safe_stderr import safe_stderr_write
-
 from . import (
     HTTP_TIMEOUT,
     provider,
@@ -29,6 +27,7 @@ from . import (
     snapshot_from_cache,
     record_failed_attempt,
     is_fetch_due,
+    log_fetch_failure,
 )
 
 
@@ -110,13 +109,25 @@ class AnthropicProvider:
             # Token-missing is a soft failure too: every wake() would
             # otherwise re-attempt the keychain lookup. Mark the attempt
             # so retry waits POLL_TTL just like an HTTP failure.
+            log_fetch_failure(
+                cache_path, now=now, provider="anthropic",
+                reason="OAuth credentials not found",
+            )
             record_failed_attempt(cache_path, now=now, provider="anthropic")
             return _from_cache(read_cache(cache_path), now)
 
-        data = _fetch_http(token)
+        data, reason = _fetch_http(token)
         if data is None:
             if bypass_cache:
                 return None
+            # IMPORTANT: log_fetch_failure must run BEFORE
+            # record_failed_attempt — the helper reads the cache's
+            # last_attempt_at as the "previous attempt" timestamp,
+            # which record_failed_attempt is about to overwrite.
+            log_fetch_failure(
+                cache_path, now=now, provider="anthropic",
+                reason=reason or "unknown error",
+            )
             record_failed_attempt(cache_path, now=now, provider="anthropic")
             return _from_cache(read_cache(cache_path), now)
 
@@ -129,13 +140,18 @@ class AnthropicProvider:
         return _from_cache(payload, now)
 
 
-def _fetch_http(token: str) -> dict | None:
+def _fetch_http(token: str) -> tuple[dict | None, str | None]:
     """Hit the Anthropic /api/oauth/usage endpoint with a Bearer token.
 
-    Returns parsed JSON on success, ``None`` on any failure. Each
-    failure mode emits a single stderr line so the user can tell network
-    timeout from token rejection from server-shape mismatch — the UI
-    "Quota unavailable" hint promises this and used to lie about it.
+    Returns ``(data, None)`` on success, ``(None, reason)`` on any
+    failure. The reason string is consumed by ``log_fetch_failure`` in
+    the caller, which combines it with cache-derived timing context
+    (last attempt N ago, last success M ago) into a single stderr line.
+
+    Why we don't print here anymore: a stderr line emitted at the HTTP
+    layer can't include "last success was 47m ago" — that fact lives
+    in the cache, which only the fetch() coordinator reads. Pushing
+    the print up one level lets one log line carry the full picture.
     """
     req = urllib.request.Request(
         URL,
@@ -149,43 +165,24 @@ def _fetch_http(token: str) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             if resp.status != 200:
-                safe_stderr_write(
-                    f"[claude-island] anthropic quota fetch: HTTP {resp.status}"
-                )
-                return None
+                return None, f"HTTP {resp.status}"
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         # 401 here typically means the OAuth token expired — Claude Code
         # refreshes it on its next interaction, so the next 5 min tick
-        # usually self-heals. Print so the user knows that's the cause.
-        safe_stderr_write(
-            f"[claude-island] anthropic quota fetch: HTTP {e.code} {e.reason}"
-        )
-        return None
+        # usually self-heals.
+        return None, f"HTTP {e.code} {e.reason}"
     except urllib.error.URLError as e:
         # DNS / connection refused / timeout. ``e.reason`` is either a
         # str ("timed out") or an OSError; stringifying handles both.
-        safe_stderr_write(
-            f"[claude-island] anthropic quota fetch failed: {e.reason}"
-        )
-        return None
+        return None, f"network error: {e.reason}"
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        safe_stderr_write(
-            f"[claude-island] anthropic quota fetch: bad response body ({type(e).__name__})"
-        )
-        return None
+        return None, f"bad response body ({type(e).__name__})"
     except OSError as e:
-        safe_stderr_write(
-            f"[claude-island] anthropic quota fetch: {type(e).__name__}: {e}"
-        )
-        return None
+        return None, f"{type(e).__name__}: {e}"
     if not _has_shape(data):
-        safe_stderr_write(
-            "[claude-island] anthropic quota fetch: response missing "
-            "five_hour/seven_day fields — API contract changed?"
-        )
-        return None
-    return data
+        return None, "response missing five_hour/seven_day fields (API contract changed?)"
+    return data, None
 
 
 def _has_shape(data: object) -> bool:
