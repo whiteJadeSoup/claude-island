@@ -65,12 +65,12 @@ _DOT_LABEL_W = 14   # px reserved for the "●" glyph
 _TEXT_LEFT = _DOT_LEFT_PAD + _DOT_LABEL_W + 4  # 4px gap between dot and text
 
 # Cost is rendered in its own fixed right-side slot so a long session
-# name can never push it off the pill (the bug we're fixing). 56 px
-# fits "$999.99" — three digits + decimals + symbol — at the body
-# weight + size used by _STYLE_LABEL with a few px of slack. The slot
-# is only allocated when cost > 0; days with no spend give the space
-# back to the name region. 8 px gap keeps the two regions visually
-# distinct without wasting width.
+# name can never push it off the pill. 56 px fits "$999.99" — three
+# digits + decimals + symbol — at the body weight + size used by
+# _STYLE_LABEL with a few px of slack. The slot is only allocated
+# when cost > 0; days with no spend give the space back to the name
+# region. 8 px gap keeps the two regions visually distinct without
+# wasting width.
 _COST_SLOT_W = 56
 _NAME_COST_GAP = 8
 
@@ -345,8 +345,7 @@ class CapsuleWindow(QWidget):
         # slot); ``_cost_label`` holds the cost string in a fixed
         # right-side slot (right-aligned). Splitting cost into its own
         # widget guarantees a long name can never push the cost off
-        # the pill — the failure mode the previous single-label layout
-        # had with names like "Sync current remote master branch".
+        # the pill — name and cost live in independent slots.
         self._label = QLabel("", self)
         self._label.setAlignment(
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,

@@ -13,8 +13,8 @@ unchanged. The reader is daemonised so it dies with the process — no
 shutdown wiring needed.
 
 Activated only on macOS (Linux / Windows have their own log channels
-and don't emit these specific messages). Lives in core because it has
-no Qt / PySide dependency — it's pure stdlib FD plumbing.
+and don't emit these specific messages). Pure stdlib FD plumbing —
+no Qt / PySide dependency.
 """
 from __future__ import annotations
 
@@ -95,17 +95,17 @@ def install() -> None:
     pump_thread.start()
 
     def _drain_at_exit() -> None:
-        """Give the pump thread a brief window to flush remaining
-        bytes after sys.stderr is flushed but before the process dies.
-        Without this, writes that landed in the pipe in the last few
-        ms before exit (typical: shutdown messages, atexit-registered
-        prints) are lost. 50 ms is more than enough for a healthy
-        pipe and short enough that quit feels instant.
+        """Give the pump thread one scheduling window to flush
+        remaining bytes after sys.stderr is flushed but before the
+        process dies. Without it, writes that landed in the pipe in
+        the last few ms before exit (atexit-registered prints,
+        shutdown messages) are lost. 10 ms is enough for the pump's
+        next read+forward cycle on a healthy system.
         """
         try:
             sys.stderr.flush()
         except Exception:
             pass
-        time.sleep(0.05)
+        time.sleep(0.01)
 
     atexit.register(_drain_at_exit)

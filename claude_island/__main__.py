@@ -19,7 +19,7 @@ from pathlib import Path
 # pipe redirect catches every C-level write to FD 2 — Qt's font
 # subsystem and macOS Input Method Kit both emit harmless lines that
 # we drop here. No-op on non-darwin platforms.
-from claude_island.core.stderr_noise_filter import install as _install_stderr_filter
+from claude_island.platform_.stderr_noise_filter import install as _install_stderr_filter
 _install_stderr_filter()
 
 
@@ -239,12 +239,19 @@ app.setQuitOnLastWindowClosed(False)
 # launch decision via NSBundle.infoDictionary). No-op on non-darwin.
 _apply_macos_accessory_policy()
 
-# Global QToolTip QSS so tooltips inherit the dark-theme look across
-# every surface (capsule, expanded panel, recents drawer, popups). Qt's
-# default tooltip is white-on-pale-yellow, which clashes badly with a
-# dark UI — we'd otherwise have to repeat this rule in every per-widget
-# stylesheet. Setting it on QApplication propagates everywhere and
-# survives setStyleSheet calls on individual widgets.
+# Two-pronged dark tooltip styling:
+#
+# 1. App-level QSS — works on Windows / Linux. Covers border / padding
+#    / radius which the QPalette path can't.
+# 2. QToolTip.setPalette — the ONLY thing that works on macOS. The
+#    native Cocoa theme engine ignores QSS for tooltips, so a QSS-only
+#    setup leaves macOS users staring at the system tooltip (light
+#    gray on dark mode) which clashes with our dark UI. ToolTipBase /
+#    ToolTipText palette roles are honoured by the native engine.
+#
+# Border / radius / padding fall back to platform default on macOS,
+# which is fine — the colours are what carries 90% of the visual
+# coherence with the rest of the dark UI.
 app.setStyleSheet(
     "QToolTip {"
     "  color: #e8e8e8;"
@@ -255,6 +262,12 @@ app.setStyleSheet(
     "  font-size: 12px;"
     "}"
 )
+from PySide6.QtGui import QColor as _QColor, QPalette as _QPalette
+from PySide6.QtWidgets import QToolTip as _QToolTip
+_tooltip_palette = _QToolTip.palette()
+_tooltip_palette.setColor(_QPalette.ColorRole.ToolTipBase, _QColor("#1e1e1e"))
+_tooltip_palette.setColor(_QPalette.ColorRole.ToolTipText, _QColor("#e8e8e8"))
+_QToolTip.setPalette(_tooltip_palette)
 
 from claude_island.ui.capsule_window import CapsuleWindow
 from claude_island.ui.controller import IslandController

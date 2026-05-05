@@ -98,9 +98,8 @@ class ProcessScanner:
         Used at startup so the UI populates sessions in ~200ms. A
         follow-up ``scan()`` call ~500ms later runs the full orphan
         filter. Per-session WT window discovery (the wt_hwnd that drives
-        same-tab grouping) now happens inside
-        ``WindowsTerminalAdapter.group()``, not here — process_scanner
-        only enumerates and orphan-filters.
+        same-tab grouping) lives in ``WindowsTerminalAdapter.group()``;
+        process_scanner only enumerates and orphan-filters.
         """
         sessions: list[Session] = []
         for proc in psutil.process_iter(["pid", "name", "create_time"]):
@@ -239,9 +238,9 @@ def _filter_orphans(sessions: list[Session]) -> list[Session]:
     the process has no console attached (its conPTY pipe was severed
     when its WT pane closed) and we drop it.
 
-    The wt_hwnd discovery that PR1 used to do here moved to
+    wt_hwnd discovery for same-tab grouping lives in
     ``WindowsTerminalAdapter.group()`` along with the rest of WT
-    integration. process_scanner stays pure psutil + AttachConsole.
+    integration; process_scanner stays pure psutil + AttachConsole.
 
     Sanity tripwire: if every session would be filtered (system-wide
     AttachConsole brokenness, scan-thread race with our own console

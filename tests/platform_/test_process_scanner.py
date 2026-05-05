@@ -62,9 +62,9 @@ def patched_process_iter():
     orphan logic stay simple: ``get_console_info`` returns a dummy
     success value so every session survives the AttachConsole probe.
     Tests that exercise orphan filtering override this inside their
-    own ``with patch(...)`` blocks. wt_hwnd discovery moved out of
-    process_scanner in PR2 (now lives in WindowsTerminalAdapter), so
-    no walk_to_visible_host patch is needed here.
+    own ``with patch(...)`` blocks. wt_hwnd discovery lives in
+    ``WindowsTerminalAdapter`` rather than the scanner, so no
+    walk_to_visible_host patch is needed here.
 
     sys.platform is forced to "win32" because the orphan filter
     short-circuits on non-Windows (AttachConsole is Windows-only).
@@ -463,9 +463,8 @@ def test_worker_filter_handles_no_such_process(patched_process_iter):
 
 
 # ==========================================================================
-# Note: window_handle labelling tests removed in PR2.
-# ProcessScanner no longer fills window_handle on Session — that responsibility
-# moved to TerminalAdapter.group() (see WindowsTerminalAdapter for the
-# AttachConsole + walk_to_visible_host code, now adapter-internal).
-# Adapter-level grouping is covered by tests/platform_/test_dispatcher.py.
+# Adapter-level grouping (the AttachConsole + walk_to_visible_host code
+# in WindowsTerminalAdapter) is covered by
+# tests/platform_/test_dispatcher.py — ProcessScanner doesn't fill
+# window_handle on Session, so there's nothing to test for it here.
 # ==========================================================================

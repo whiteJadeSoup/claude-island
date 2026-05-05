@@ -2,7 +2,7 @@
 
 The three regions [dot] [name] [cost] enforce:
   1. Cost slot is fixed-width and right-anchored — long names never
-     push it off the pill (the bug that motivated the refactor).
+     push it off the pill.
   2. Name uses ``Qt.ElideMiddle`` so commit-message-style strings
      keep both head and tail recognisable.
   3. Cost slot collapses to zero width when today's spend is $0,
@@ -99,10 +99,9 @@ def _render(cap: CapsuleWindow, snap: WorldSnapshot) -> None:
 
 class TestCostSlotCannotBeOverwritten:
     def test_long_name_does_not_overlap_cost_slot(self, capsule):
-        """The original bug: a long session name pushed the cost off
-        the visible area. With three regions, name and cost are
-        siblings — name's right edge must stop strictly before the
-        cost slot's left edge."""
+        """A long session name must not encroach on the cost slot:
+        name and cost are siblings, so the name region's right edge
+        must stop strictly before the cost slot's left edge."""
         long = "Sync current remote master branch with upstream tracking"
         v = _view(name=long, cost_usd=42.0)
         _render(capsule, _snap(v, today_cost_usd=42.0))
@@ -130,7 +129,12 @@ class TestCostSlotCollapse:
     def test_zero_cost_hides_cost_label(self, capsule):
         v = _view(name="x", cost_usd=0.0)
         _render(capsule, _snap(v, today_cost_usd=0.0))
-        assert capsule._cost_label.isVisible() is False
+        # ``isVisibleTo`` checks visibility relative to the parent
+        # widget, ignoring whether the parent itself was shown — the
+        # capsule fixture never calls .show(), so a bare isVisible()
+        # would always be False and the assertion would pass for the
+        # wrong reason.
+        assert capsule._cost_label.isVisibleTo(capsule) is False
         assert capsule._cost_label.text() == ""
 
     def test_zero_cost_donates_space_to_name(self, capsule):
