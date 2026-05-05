@@ -559,11 +559,6 @@ expanded = ExpandedWindow(
 _controller_marshaler = _ControllerMarshaler(controller)  # pin reference
 session_registry.sessions_changed.subscribe(_controller_marshaler.sessions_ready.emit)
 
-# core → core direct subscription: JSONL activity feeds the session registry's
-# override map. update_activity is thread-safe and does not emit, so there is
-# no need to marshal through Qt — the parser thread can call it directly.
-jsonl_parser.activity_updated.subscribe(session_registry.update_activity)
-
 # ---------------------------------------------------------------------------
 # Section 4b: WorldSnapshot broadcast (Phase E — runs IN PARALLEL with the
 # legacy wiring above).
@@ -744,9 +739,10 @@ _recents_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
 # JSONL write / process scan triggers a snap rebuild within the debounce
 # window. wake() is thread-safe — no QtBridge marshaling needed.
 session_registry.sessions_changed.subscribe(lambda _: snapshotter.wake())
+# usage_registry.totals_changed fires on every JSONL ingest — that's the
+# wake driver for activity bumps, since per-session last_activity now
+# lives on JsonlParser._session_meta and is read in compose_session_view.
 usage_registry.totals_changed.subscribe(lambda _: snapshotter.wake())
-# jsonl_parser.activity_updated already feeds session_registry, which then
-# emits sessions_changed → wakes via the line above. No extra hook needed.
 
 snapshotter.start()
 # Boot the UI with one snapshot synchronously so capsule + panel render
