@@ -2604,3 +2604,78 @@ class TestRowStatusGlyph:
 #       cached HoverRow instance survives across renders
 
 
+class TestHoverRevealRowLayoutStability:
+    """Hover-reveal must not shift the surrounding layout.
+
+    The naive ``widget.hide()`` Qt does pulls the hidden widget out
+    of layout sizing (default ``QSizePolicy.retainSizeWhenHidden=False``),
+    so on hover the sibling label loses ~20 px and — if it's a wrapped
+    label sitting near the wrap boundary — reflows onto a second line,
+    growing the row taller and pushing every widget below it down.
+    The visible symptom is "the panel stretches and the Resume button
+    jumps when I mouse over a row".
+
+    ``_HoverRevealRow.register_reveal`` must therefore flip
+    ``retainSizeWhenHidden`` to True on every registered widget, so
+    its slot stays reserved at all times and only visibility — not
+    layout — changes on hover.
+    """
+
+    def test_registered_widget_retains_size_when_hidden(self, qtbot):
+        from PySide6.QtWidgets import QPushButton
+        from claude_island.ui.expanded_window import _HoverRevealRow
+
+        row = _HoverRevealRow()
+        qtbot.addWidget(row)
+        btn = QPushButton("↗", parent=row)
+        btn.setFixedWidth(16)
+
+        row.register_reveal(btn)
+
+        assert btn.isHidden()
+        assert btn.sizePolicy().retainSizeWhenHidden() is True
+
+    def test_recents_drawer_reveal_buttons_retain_size(self, qtbot):
+        """End-to-end: every hover-reveal button in the RecentsDrawer
+        preview (cwd ↗ + uuid ⧉) must have retainSizeWhenHidden set,
+        so hovering over a row never shifts the Resume button or
+        stretches the panel. Pin the contract on the actual surface
+        users see — not just the helper class — so a future hover
+        row added without going through ``register_reveal`` would
+        be caught by this test as well."""
+        from PySide6.QtWidgets import QPushButton
+        from claude_island.ui.recents_drawer import RecentsDrawer
+        from claude_island.core.launch_intent import LaunchIntentRegistry
+        # Reuse fixtures from the recents drawer test module — same
+        # dispatcher and dormant-session helpers as everywhere else.
+        from tests.ui.test_recents_drawer import (
+            _dormant, _empty_snap, _FakeDispatcher,
+        )
+
+        parent = QWidget()
+        qtbot.addWidget(parent)
+        d = RecentsDrawer(
+            expanded=parent,
+            dispatcher=_FakeDispatcher(),
+            launch_intent=LaunchIntentRegistry(),
+            on_wake=lambda: None,
+        )
+        qtbot.addWidget(d)
+        d.render(_empty_snap(dormant=[_dormant("u1")]))
+        d._select_uuid("u1")
+
+        # The two glyph buttons live inside _HoverRevealRow instances
+        # in the preview — find them via their pinned glyph text.
+        glyph_btns = [
+            b for b in d._preview_container.findChildren(QPushButton)
+            if b.text() in ("↗", "⧉")
+        ]
+        # ↗ on cwd row + ⧉ on uuid row.
+        assert len(glyph_btns) == 2
+        for b in glyph_btns:
+            assert b.sizePolicy().retainSizeWhenHidden() is True, (
+                f"reveal button {b.text()!r} loses its layout slot when "
+                "hidden — hover will reflow surrounding widgets"
+            )
+
+

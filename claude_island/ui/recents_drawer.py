@@ -72,7 +72,6 @@ from claude_island.core.launch_intent import LaunchIntent, LaunchIntentRegistry
 from claude_island.core.models import DormantSession
 from claude_island.core.snapshot import WorldSnapshot
 from claude_island.ui.fonts import UI_FONT_STACK
-from claude_island.ui.collapsible import CollapsibleLinkButton
 from claude_island.ui.expanded_window import (
     _BG_HOVER_SINGLE,
     _BG_PRESSED,
@@ -103,7 +102,12 @@ _DRAWER_GAP = 6
 _RECENT_ROW_HEIGHT = 32       # compact — main panel uses 52 for two-line rows
 _ROW_GAP = 2
 _HIGH_COST_USD = 50.0
-_TITLE_COLLAPSE_AT = 60
+# Past this many chars the title gets tail-elided + a hover tooltip
+# carries the full text. Picked at 200 because a real session title
+# (user-given name OR first line of last_prompt) almost always fits in
+# 2-3 wrapped lines below this; only pathological prompt-fallback
+# titles hit the cap. See _row_title for what produces a "title".
+_TITLE_HARD_CAP = 200
 # LAST PROMPT collapsing now lives in LastPromptSection (shared with
 # SessionDetailPopup) — no per-surface threshold here.
 
@@ -114,7 +118,6 @@ _ACCENT_COLOR = QColor("#9ca3af")  # selected row left-side accent
 # polluting the main panel's stylesheet vocabulary).
 _STYLE_PREVIEW_BODY = "color: #c9c9c9; font-size: 12px;"
 _STYLE_PREVIEW_TITLE = "color: #ffffff; font-size: 14px; font-weight: 500;"
-_STYLE_UUID = "color: #6b7280; font-size: 10px;"
 
 _STYLE_MODE_CHIP = (
     "color: #f59e0b; font-size: 10px; padding: 1px 6px;"
@@ -137,6 +140,19 @@ _STYLE_PRIMARY_BTN = f"""
         color: #6b7280; background: {_BG_SINGLE};
         border-color: {_GROUP_OUTLINE_COLOR};
     }}
+"""
+
+# Header close glyph — matches the panel's mute palette; only takes
+# colour on hover so it stays unobtrusive at rest.
+_STYLE_CLOSE_BTN = """
+    QPushButton {
+        color: #6b7280;
+        background: transparent;
+        border: none;
+        font-size: 16px;
+        padding: 0;
+    }
+    QPushButton:hover { color: #e8e8e8; }
 """
 
 
@@ -378,7 +394,6 @@ class RecentsDrawer(QWidget):
         self._row_widgets: dict[str, _RecentRow] = {}
         self._preview_visible: bool = True
         self._prompt_expanded: bool = False
-        self._title_expanded: bool = False
 
         # Same flag combo as ExpandedWindow. Qt.Tool is dropped on
         # macOS — see CapsuleWindow._setup_window for the NSPanel
@@ -473,20 +488,28 @@ class RecentsDrawer(QWidget):
         body.setContentsMargins(14, 14, 14, 14)
         body.setSpacing(8)
 
-        # header
+        # header — RECENTS · count merged into one label so the count
+        # sits adjacent to the title (the prior layout pushed it to the
+        # far right via addStretch which made the gap confusing). The
+        # decorative "Esc" label is replaced by an actual × close button
+        # — same affordance, but actually clickable. Esc still works as
+        # the tooltip + the existing QShortcut.
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        title = QLabel("RECENTS")
-        title.setStyleSheet(_STYLE_TITLE)
-        header.addWidget(title)
+        self._header_label = QLabel("RECENTS")
+        self._header_label.setStyleSheet(_STYLE_TITLE)
+        self._header_label.setToolTip(
+            "Esc closes · Tab toggles preview · ↑↓ select · Enter resume"
+        )
+        header.addWidget(self._header_label)
         header.addStretch(1)
-        self._count_label = QLabel("")
-        self._count_label.setStyleSheet(_STYLE_AGE)
-        header.addWidget(self._count_label)
-        hint = QLabel("Esc")
-        hint.setStyleSheet("color: #6b7280; font-size: 10px;")
-        hint.setToolTip("Esc closes · Tab toggles preview · ↑↓ select · Enter resume")
-        header.addWidget(hint)
+        close_btn = QPushButton("×")
+        close_btn.setStyleSheet(_STYLE_CLOSE_BTN)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setToolTip("Close · Esc")
+        close_btn.setFixedSize(20, 20)
+        close_btn.clicked.connect(self.hide)
+        header.addWidget(close_btn)
         body.addLayout(header)
 
         # search
@@ -584,6 +607,38 @@ class RecentsDrawer(QWidget):
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(lambda: self._toast.setVisible(False))
 
+        # ── sticky Resume footer ─────────────────────────────────────
+        # Lives outside _preview_scroll so its position is anchored
+        # to the drawer bottom — independent of preview content
+        # height. Without this, expanding LAST PROMPT pushed the
+        # button down (Fitts's law violation: target moves under
+        # the user's mouse mid-action) and left a top-heavy panel.
+        # Disabled at rest; _update_resume_target rebinds + enables
+        # whenever the selection changes.
+        self._resume_btn = QPushButton("▶ Resume")
+        self._resume_btn.setObjectName("preview_resume_btn")
+        self._resume_btn.setStyleSheet(_STYLE_PRIMARY_BTN)
+        self._resume_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._resume_btn.setToolTip("Enter")
+        self._resume_btn.setEnabled(False)
+        self._resume_target_uuid: str | None = None
+        self._resume_btn.clicked.connect(self._on_resume_clicked)
+        body.addWidget(self._resume_btn)
+
+    def _on_resume_clicked(self) -> None:
+        """Stable click handler that always reads the current selection
+        target — avoids the per-render lambda-capture pattern that the
+        previous in-content button needed."""
+        if self._resume_target_uuid is not None:
+            self._on_resume(self._resume_target_uuid)
+
+    def _update_resume_target(self, uuid: str | None) -> None:
+        """Rebind the sticky footer Resume button at the given UUID.
+        ``None`` (no selection) → button disabled but still visible so
+        the layout doesn't shift between empty / non-empty preview."""
+        self._resume_target_uuid = uuid
+        self._resume_btn.setEnabled(uuid is not None)
+
     # ── paintEvent — match ExpandedWindow body ────────────────────────
 
     def paintEvent(self, event):  # type: ignore[override]
@@ -611,10 +666,10 @@ class RecentsDrawer(QWidget):
             filter_by_query(dormant_all, self._search_query),
         )
 
-        count_text = f"· {len(dormant_all)}"
+        count_text = f"RECENTS · {len(dormant_all)}"
         if launching:
             count_text += f"  ⏳ {len(launching)}"
-        self._count_label.setText(count_text)
+        self._header_label.setText(count_text)
 
         # Launching first.
         for intent in launching:
@@ -673,9 +728,10 @@ class RecentsDrawer(QWidget):
         if uuid in self._row_widgets:
             self._row_widgets[uuid].set_selected(True)
             self._list_scroll.ensureWidgetVisible(self._row_widgets[uuid])
-        # Reset both expansion states — new selection is fresh content.
+        # Reset prompt expansion — new selection is fresh content.
+        # (Title no longer has an expansion state; long titles are
+        # always tail-elided + tooltip, no per-selection toggle.)
         self._prompt_expanded = False
-        self._title_expanded = False
         if self._last_snap is not None:
             self._render_preview(self._last_snap)
 
@@ -709,31 +765,60 @@ class RecentsDrawer(QWidget):
             placeholder.setWordWrap(True)
             self._preview_box.addWidget(placeholder)
             self._preview_box.addStretch(1)
+            # Sticky footer button stays visible for layout stability
+            # but disables when there's nothing to resume into.
+            self._update_resume_target(None)
             return
 
         # ── title ────────────────────────────────────────────────────
+        # Two-tier strategy: short titles wrap freely (most fit in 2-3
+        # lines, no truncation needed); very long titles (>200 chars,
+        # which only happens when the title is a fallback first-line of
+        # a giant prompt) get tail-elided with the full text in tooltip.
+        # No [展开] button — the toggle was both visually noisy and
+        # easy to clip in CJK fonts; tooltip-on-hover is the standard
+        # pattern for "see the full thing" in Notion / GitHub list rows.
         title_text = _row_title(d)
-        if self._title_expanded or len(title_text) <= _TITLE_COLLAPSE_AT:
-            display_title = title_text
+        if len(title_text) > _TITLE_HARD_CAP:
+            display_title = title_text[:_TITLE_HARD_CAP] + "…"
         else:
-            display_title = title_text[:_TITLE_COLLAPSE_AT] + "…"
+            display_title = title_text
         title_lbl = QLabel(display_title)
         title_lbl.setStyleSheet(_STYLE_PREVIEW_TITLE)
         title_lbl.setWordWrap(True)
+        title_lbl.setToolTip(title_text)
         self._preview_box.addWidget(title_lbl)
-        if len(title_text) > _TITLE_COLLAPSE_AT:
-            t = CollapsibleLinkButton()
-            t.set_expanded(self._title_expanded)
-            t.state_changed.connect(self._on_title_toggle)
-            self._preview_box.addWidget(t)
 
         self._preview_box.addWidget(self._mk_divider())
 
         # ── meta block ───────────────────────────────────────────────
-        # The cwd row is hover-reveal: ↗ glyph appears on hover, the
-        # path text itself is also clickable so a near-cursor click
-        # works without aiming. Same affordance shape as the
-        # SessionDetailPopup Path row — two surfaces, one pattern.
+        # Order: UUID first (the canonical identifier — what `claude
+        # --resume` actually consumes), then path / branch / time /
+        # cost / permission. UUID + path rows use hover-reveal: a glyph
+        # button appears on row hover and the text itself is also
+        # clickable, so a near-cursor click works without aiming.
+        # Same affordance shape as SessionDetailPopup — two surfaces,
+        # one pattern.
+        uuid_row = _HoverRevealRow()
+        uuid_h = QHBoxLayout(uuid_row)
+        uuid_h.setContentsMargins(0, 0, 0, 0)
+        uuid_h.setSpacing(4)
+        uuid_lbl = QLabel(f"🆔  {d.session_uuid}")
+        uuid_lbl.setStyleSheet(_STYLE_PREVIEW_BODY)
+        uuid_lbl.setToolTip("Click to copy session ID · Ctrl+C")
+        uuid_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        uuid_lbl.mousePressEvent = lambda _: self._copy_uuid_current()
+        uuid_h.addWidget(uuid_lbl, 1)
+        uuid_copy = QPushButton("⧉")
+        uuid_copy.setStyleSheet(_STYLE_TEXT_LINK)
+        uuid_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        uuid_copy.setToolTip("Copy session ID · Ctrl+C")
+        uuid_copy.setFixedWidth(16)
+        uuid_copy.clicked.connect(self._copy_uuid_current)
+        uuid_h.addWidget(uuid_copy)
+        uuid_row.register_reveal(uuid_copy)
+        self._preview_box.addWidget(uuid_row)
+
         cwd_row = _HoverRevealRow()
         cwd_h = QHBoxLayout(cwd_row)
         cwd_h.setContentsMargins(0, 0, 0, 0)
@@ -794,43 +879,12 @@ class RecentsDrawer(QWidget):
             section.expansion_changed.connect(self._on_prompt_section_toggled)
             self._preview_box.addWidget(section)
 
-        # ── uuid (click to copy) ────────────────────────────────────
-        # Same hover-reveal pattern as the cwd row above.
-        self._preview_box.addWidget(self._mk_divider())
-        uuid_row = _HoverRevealRow()
-        uuid_h = QHBoxLayout(uuid_row)
-        uuid_h.setContentsMargins(0, 0, 0, 0)
-        uuid_h.setSpacing(4)
-        uuid_lbl = QLabel(d.session_uuid)
-        uuid_lbl.setStyleSheet(_STYLE_UUID)
-        uuid_lbl.setToolTip("Click to copy · Ctrl+C")
-        uuid_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
-        uuid_lbl.mousePressEvent = lambda _: self._copy_uuid_current()
-        uuid_h.addWidget(uuid_lbl, 1)
-        uuid_copy = QPushButton("⧉")
-        uuid_copy.setStyleSheet(_STYLE_TEXT_LINK)
-        uuid_copy.setCursor(Qt.CursorShape.PointingHandCursor)
-        uuid_copy.setToolTip("Copy session ID · Ctrl+C")
-        uuid_copy.setFixedWidth(16)
-        uuid_copy.clicked.connect(self._copy_uuid_current)
-        uuid_h.addWidget(uuid_copy)
-        uuid_row.register_reveal(uuid_copy)
-        self._preview_box.addWidget(uuid_row)
+        # Resume now lives in a sticky footer outside the preview
+        # ScrollArea (see _build_ui) — it stays put when the prompt
+        # expands and never moves with content. Just re-target it at
+        # the current selection here.
+        self._update_resume_target(d.session_uuid)
 
-        # ── action: Resume only ─────────────────────────────────────
-        # Open / Copy buttons removed — those affordances now live on
-        # the rows above (hover ↗ / ⧉). Resume gets full width.
-        resume_btn = QPushButton("▶ Resume")
-        resume_btn.setObjectName("preview_resume_btn")
-        resume_btn.setStyleSheet(_STYLE_PRIMARY_BTN)
-        resume_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        resume_btn.setToolTip("Enter")
-        # Capture uuid in default-arg closure so a later selection change
-        # doesn't repoint this button at the wrong session.
-        resume_btn.clicked.connect(
-            lambda _checked=False, uuid=d.session_uuid: self._on_resume(uuid)
-        )
-        self._preview_box.addWidget(resume_btn)
         self._preview_box.addStretch(1)
 
     def _mk_divider(self) -> QFrame:
@@ -846,11 +900,6 @@ class RecentsDrawer(QWidget):
         instead of collapsing back to default. No re-render here —
         the section already updated its own content in-place."""
         self._prompt_expanded = expanded
-
-    def _on_title_toggle(self, expanded: bool) -> None:
-        self._title_expanded = expanded
-        if self._last_snap is not None:
-            self._render_preview(self._last_snap)
 
     # ── search / keyboard ─────────────────────────────────────────────
 

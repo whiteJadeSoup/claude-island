@@ -33,6 +33,13 @@ from claude_island.ui.collapsible import CollapsibleLinkButton
 _TITLE_STYLE = "color: #888; font-size: 10px; letter-spacing: 1px;"
 _BODY_STYLE = "color: #c9c9c9; font-size: 12px;"
 
+# Minimum width reserved for the [展开] / [收起] toggle button. CJK
+# rendering in 11 px QPushButton without explicit width tends to ask
+# for ~32 px from QFontMetrics — Qt then clips to "[展" in a narrow
+# preview column (the RecentsDrawer at 220 px). 56 px covers both
+# labels plus a couple px of padding without ever overflowing.
+_TOGGLE_MIN_W = 56
+
 # Hard cap on what we'll render in expanded mode. A pasted multi-MB
 # transcript blob would otherwise hang Qt's text shaping. Diagnostic
 # value past this length is near zero — the user can open the .jsonl
@@ -92,12 +99,19 @@ class LastPromptSection(QWidget):
         self._layout = layout
 
         # Header: title + toggle (toggle hidden until we know we're truncating).
+        # ``setMinimumWidth`` on the toggle is critical — without it the
+        # CJK font metrics for "[展开]" / "[收起]" undersize the button
+        # in narrow preview columns and Qt clips it to "[展" (visible
+        # bug in the RecentsDrawer preview at 220 px width). Fix-the-
+        # -size at the lower bound of what the widest label ("[收起]")
+        # actually needs at the configured 11 px font.
         head = QHBoxLayout()
         title_lbl = QLabel(title)
         title_lbl.setStyleSheet(_TITLE_STYLE)
         head.addWidget(title_lbl)
         head.addStretch()
         self._toggle = CollapsibleLinkButton()
+        self._toggle.setMinimumWidth(_TOGGLE_MIN_W)
         self._toggle.clicked.connect(self._on_toggle)
         self._toggle.hide()
         head.addWidget(self._toggle)

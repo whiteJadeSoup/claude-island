@@ -189,8 +189,9 @@ class TestDrawerRender:
     def test_empty_snap_shows_placeholder(self, drawer):
         d, *_ = drawer
         d.render(_empty_snap())
-        # Just assert no exception + the count label is empty/zero
-        assert "0" in d._count_label.text()
+        # The count is now merged into the header label as
+        # "RECENTS · N" (count adjacent to title — no addStretch gap).
+        assert "0" in d._header_label.text()
 
     def test_dormant_rows_appear(self, drawer):
         d, *_ = drawer
@@ -212,8 +213,8 @@ class TestDrawerRender:
             requested_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
         )
         d.render(_empty_snap(launching=[intent]))
-        # Count label format: "· N  ⏳ M" (N dormant, M launching).
-        assert "⏳ 1" in d._count_label.text()
+        # Header label format: "RECENTS · N  ⏳ M" (N dormant, M launching).
+        assert "⏳ 1" in d._header_label.text()
 
 
 class TestResumeClick:
@@ -688,10 +689,22 @@ class TestPreviewActionRow:
         d = self._drawer(qtbot)
         d.render(_empty_snap(dormant=[_dormant("u1")]))
         d._select_uuid("u1")
-        from PySide6.QtWidgets import QPushButton
-        resume = d._preview_container.findChild(QPushButton, "preview_resume_btn")
+        # Resume now lives in the drawer's main body layout (sticky
+        # footer outside _preview_scroll). Find via the public attr.
+        resume = d._resume_btn
         assert resume is not None
         assert "Resume" in resume.text()
+        # Anchored in the drawer body — explicitly NOT inside the
+        # preview ScrollArea (the whole point of the redesign).
+        from PySide6.QtWidgets import QPushButton
+        in_preview = d._preview_container.findChild(
+            QPushButton, "preview_resume_btn",
+        )
+        assert in_preview is None, (
+            "Resume button must live in the drawer footer, not the "
+            "preview ScrollArea — otherwise expanding LAST PROMPT "
+            "pushes it down again."
+        )
 
     def test_cwd_row_uses_hover_reveal(self, qtbot):
         """The cwd row should be a _HoverRevealRow so the ↗ open glyph
@@ -701,8 +714,197 @@ class TestPreviewActionRow:
         d._select_uuid("u1")
         from claude_island.ui.expanded_window import _HoverRevealRow
         rows = d._preview_container.findChildren(_HoverRevealRow)
-        # Two hover rows expected: cwd row + uuid row.
+        # Two hover rows expected: uuid row + cwd row.
         assert len(rows) == 2
+
+
+# ── Redesign R1-R5: header / meta order / sticky footer / title ────────
+
+
+class TestPreviewRedesign:
+    """Pin the post-redesign UI contract:
+
+    - **Header** combines title + count into one label; standalone
+      "Esc" hint label is gone (× close button replaces it).
+    - **Meta block order**: UUID is the FIRST row (primary identifier
+      for ``claude --resume``), followed by path / branch / cost.
+    - **Sticky Resume**: button lives outside the preview ScrollArea
+      so expanding LAST PROMPT never pushes it down. Disabled state
+      reserved for "no selection" so the layout is stable.
+    - **Title without [展开]**: the title-level CollapsibleLinkButton
+      was removed; long titles wrap freely up to a 200-char hard cap,
+      then tail-elide with full text in tooltip.
+
+    Each test pins one of these so a future refactor can't quietly
+    revert the visual cleanup the user signed off on.
+    """
+
+    def _drawer(self, qtbot):
+        from PySide6.QtWidgets import QWidget
+        parent = QWidget()
+        qtbot.addWidget(parent)
+        d = RecentsDrawer(
+            expanded=parent,
+            dispatcher=_FakeDispatcher(),
+            launch_intent=LaunchIntentRegistry(),
+            on_wake=lambda: None,
+        )
+        qtbot.addWidget(d)
+        return d
+
+    def test_R1_header_label_carries_count_inline(self, qtbot):
+        """Header text starts with 'RECENTS' AND ends with the count
+        — no separate _count_label, no addStretch gap between them."""
+        d = self._drawer(qtbot)
+        d.render(_empty_snap(dormant=[_dormant("u1"), _dormant("u2")]))
+        text = d._header_label.text()
+        assert text.startswith("RECENTS")
+        assert "2" in text
+        # No bare 'Esc' text label anywhere in the header (replaced
+        # by an actual × close button, see R2).
+        from PySide6.QtWidgets import QLabel
+        labels = [
+            lbl.text() for lbl in d.findChildren(QLabel)
+            if lbl.text() == "Esc"
+        ]
+        assert labels == []
+
+    def test_R2_close_button_hides_drawer(self, qtbot):
+        """The × close button replaces the decorative 'Esc' label —
+        clicking it must actually close the drawer (Esc still works
+        too via QShortcut, but the affordance is now real)."""
+        from PySide6.QtWidgets import QPushButton
+        d = self._drawer(qtbot)
+        d.render(_empty_snap())
+        d.toggle()  # show
+        assert not d.isHidden()
+        # Find the close button by its glyph text.
+        close_btns = [
+            b for b in d.findChildren(QPushButton) if b.text() == "×"
+        ]
+        assert len(close_btns) == 1
+        close_btns[0].click()
+        assert d.isHidden()
+
+    def test_R3_uuid_is_first_meta_row(self, qtbot):
+        """UUID must precede the cwd row in the meta block — it's the
+        canonical identifier for ``claude --resume`` and the user's
+        primary recognition cue when scrolling the recents list."""
+        from claude_island.ui.expanded_window import _HoverRevealRow
+        d = self._drawer(qtbot)
+        d.render(_empty_snap(dormant=[
+            _dormant("aaaa-bbbb-cccc-uuid", cwd=Path("D:/projects/foo")),
+        ]))
+        d._select_uuid("aaaa-bbbb-cccc-uuid")
+        # _HoverRevealRow children appear in layout order (Qt's
+        # findChildren traverses depth-first in insertion order).
+        hover_rows = d._preview_container.findChildren(_HoverRevealRow)
+        assert len(hover_rows) == 2
+        # First hover row should contain the UUID; second should
+        # contain the cwd path. Identify by inspecting child labels.
+        from PySide6.QtWidgets import QLabel
+        first_text = " ".join(
+            lbl.text() for lbl in hover_rows[0].findChildren(QLabel)
+        )
+        second_text = " ".join(
+            lbl.text() for lbl in hover_rows[1].findChildren(QLabel)
+        )
+        assert "aaaa-bbbb-cccc-uuid" in first_text, (
+            f"UUID row must be first — got first={first_text!r}, "
+            f"second={second_text!r}"
+        )
+        assert "projects" in second_text and "foo" in second_text
+
+    def test_R4_resume_disabled_when_no_selection(self, qtbot):
+        """Sticky Resume stays visible always (layout stability) but
+        disables when there's no selectable session."""
+        d = self._drawer(qtbot)
+        d.render(_empty_snap())  # no dormant sessions → no selection
+        assert d._resume_btn.isEnabled() is False
+        # Now add a session and select it — button enables.
+        d.render(_empty_snap(dormant=[_dormant("u1")]))
+        d._select_uuid("u1")
+        assert d._resume_btn.isEnabled() is True
+
+    def test_R5_resume_does_not_move_when_prompt_expands(self, qtbot):
+        """Core promise of the sticky-footer redesign: expanding
+        LAST PROMPT must not change the Resume button's position.
+        Pre-redesign the button lived in the preview ScrollArea
+        and got pushed down on expand."""
+        d = self._drawer(qtbot)
+        d.show()  # show so positions resolve to non-zero
+        long_p = "lorem ipsum " * 30
+        d.render(_empty_snap(dormant=[_dormant("u1", last_prompt=long_p)]))
+        d._select_uuid("u1")
+        # Force layouts to settle so geometry is real.
+        d.adjustSize()
+        before = d._resume_btn.mapTo(d, d._resume_btn.rect().topLeft())
+        # Expand the prompt section.
+        from claude_island.ui.last_prompt_section import LastPromptSection
+        sections = d._preview_container.findChildren(LastPromptSection)
+        assert sections
+        sections[0]._on_toggle()
+        d.adjustSize()
+        after = d._resume_btn.mapTo(d, d._resume_btn.rect().topLeft())
+        assert before == after, (
+            f"Resume button moved on prompt expand: {before} -> {after}"
+        )
+
+    def test_R6_title_has_no_expand_toggle(self, qtbot):
+        """Title-level [展开] button was removed — long titles use
+        wordwrap + tooltip instead. Pin so a future revert doesn't
+        bring back the noisy in-title toggle."""
+        d = self._drawer(qtbot)
+        long_title = "x" * 250  # past the hard cap
+        d.render(_empty_snap(dormant=[_dormant("u1", name=long_title)]))
+        d._select_uuid("u1")
+        # The title-level CollapsibleLinkButton should NOT exist.
+        # The LAST PROMPT section's toggle is fine — but here we
+        # didn't pass a prompt, so any CollapsibleLinkButton found
+        # would be the title's (which we just deleted).
+        from claude_island.ui.collapsible import CollapsibleLinkButton
+        toggles = d._preview_container.findChildren(CollapsibleLinkButton)
+        assert toggles == [], (
+            "Title-level [展开] button must not exist — title now "
+            "uses wordwrap + tooltip for long text."
+        )
+
+    def test_R8_last_prompt_toggle_has_min_width(self, qtbot):
+        """LAST PROMPT [展开] / [收起] toggle was getting clipped to
+        '[展' in narrow preview columns because CJK QFontMetrics
+        under-sized the QPushButton — fix is a hard min-width
+        reservation. Pin the floor so a refactor doesn't drop it."""
+        from claude_island.ui.collapsible import CollapsibleLinkButton
+        d = self._drawer(qtbot)
+        long_p = "lorem ipsum " * 30
+        d.render(_empty_snap(dormant=[_dormant("u1", last_prompt=long_p)]))
+        d._select_uuid("u1")
+        toggles = d._preview_container.findChildren(CollapsibleLinkButton)
+        assert len(toggles) == 1
+        # 56 px is the floor — covers both [展开] and [收起] at 11 px
+        # font without overflow.
+        assert toggles[0].minimumWidth() >= 56
+
+    def test_R7_long_title_full_text_in_tooltip(self, qtbot):
+        """When a title is tail-elided past the hard cap, the full
+        text must remain accessible via tooltip — this is the user's
+        only way to see the elided tail."""
+        from PySide6.QtWidgets import QLabel
+        d = self._drawer(qtbot)
+        long_title = "abc" * 100  # 300 chars > _TITLE_HARD_CAP
+        d.render(_empty_snap(dormant=[_dormant("u1", name=long_title)]))
+        d._select_uuid("u1")
+        # The title label is the first QLabel with PREVIEW_TITLE
+        # styling — find it by its long-text fingerprint.
+        title_labels = [
+            lbl for lbl in d._preview_container.findChildren(QLabel)
+            if lbl.text().startswith("abc") and len(lbl.text()) > 50
+        ]
+        assert len(title_labels) == 1
+        # Display text is elided…
+        assert title_labels[0].text().endswith("…")
+        # …but tooltip carries the full string verbatim.
+        assert title_labels[0].toolTip() == long_title
 
 
 # ── Rename compatibility (R1-R3) ────────────────────────────────────────
