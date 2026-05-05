@@ -126,38 +126,16 @@ class TestConptyCache:
 
     def test_second_call_skips_attach_console(self, adapter, patched):
         """Cache hit on the same pid avoids the AttachConsole syscall —
-        this is the whole point of F1."""
+        this is the whole point of the conpty cache."""
         patched.set_console({1234: 0xAA})
-        patched.set_walk({0xAA: 0x11})
 
         adapter.group([_view(1234)])
         adapter.group([_view(1234)])
 
         assert patched.get_console_info.call_count == 1
-        # walk_to_visible_host runs every tick (drag-tab correctness)
-        assert patched.walk.call_count == 2
-
-    def test_wt_hwnd_can_change_between_ticks(self, adapter, patched):
-        """Drag-tab correctness: same pid, same conpty_hwnd, but
-        wt_hwnd changes after a "Move tab to another window". Group
-        must reflect the new wt_hwnd immediately, not return a stale
-        cached value."""
-        patched.set_console({1234: 0xAA})
-
-        patched.set_walk({0xAA: 0x11})
-        groups_before = adapter.group([_view(1234)])
-        gid_before = groups_before[0].group_id
-
-        # User dragged the tab; conpty_hwnd is still 0xAA but its
-        # owning WT window is now 0x22.
-        patched.set_walk({0xAA: 0x22})
-        groups_after = adapter.group([_view(1234)])
-        gid_after = groups_after[0].group_id
-
-        assert gid_before != gid_after
-        # group_id is f"wt:{wt_hwnd}:{cwd}" — decimal int, not hex
-        assert f":{0x11}:" in gid_before
-        assert f":{0x22}:" in gid_after
+        # walk_to_visible_host is no longer called from group() — it's
+        # only invoked at focus-click time inside _activate_windows.
+        assert patched.walk.call_count == 0
 
     def test_multiple_pids_cached_independently(self, adapter, patched):
         patched.set_console({1234: 0xAA, 5678: 0xBB})
@@ -246,6 +224,66 @@ class TestCacheGC:
         adapter.group([_view(1234)])  # pid back
 
         assert patched.get_console_info.call_count == 2
+
+
+# ── Singleton-grouping invariant ──────────────────────────────────────
+
+class TestSingletonGrouping:
+    """Lock in the post-bug-fix contract: every view becomes its own
+    SessionGroup, regardless of cwd or any wt-window relationship.
+
+    This is the regression guard for the bug where two `claude` sessions
+    launched from the same project root in two tabs of the same WT window
+    were silently merged into one card, and the inactive tab's click
+    routed to its sibling. See group() docstring for the WinUI3 / UIA
+    rationale that forced singleton-only grouping on Windows."""
+
+    def test_each_view_is_its_own_group(self, adapter, patched):
+        """Two live views with the same cwd → two distinct groups."""
+        patched.set_console({1234: 0xAA, 5678: 0xBB})
+
+        groups = adapter.group([_view(1234, "C:\\proj"), _view(5678, "C:\\proj")])
+
+        assert len(groups) == 2
+        assert {g.group_id for g in groups} == {"wt:1234", "wt:5678"}
+        # Each group holds exactly one view.
+        for g in groups:
+            assert len(g.views) == 1
+
+    def test_same_cwd_does_not_merge_regression(self, adapter, patched):
+        """Regression: dev + dev2 in two tabs of the same WT window,
+        both cd'd to the same project. Pre-fix this collapsed into a
+        single 2-view group with title_hint set; click on inactive
+        tab routed to active tab via sibling fallback. Now: each
+        gets its own card, each focus click routes to its own pid."""
+        patched.set_console({100: 0xA0, 200: 0xB0})
+
+        groups = adapter.group([
+            _view(100, "D:\\coding projects\\claude-island"),
+            _view(200, "D:\\coding projects\\claude-island"),
+        ])
+
+        # Two views, two groups, no merging.
+        assert len(groups) == 2
+        all_pids = {v.pid for g in groups for v in g.views}
+        assert all_pids == {100, 200}
+        # No multi-view group with merged title hint.
+        for g in groups:
+            assert g.title_hint is None
+            assert len(g.views) == 1
+
+    def test_orphan_dropped_live_kept_as_singleton(self, adapter, patched):
+        """Orphan filter is preserved by singleton refactor: a pid
+        whose AttachConsole fails is dropped; surviving pids each
+        become their own group."""
+        patched.set_console({100: 0xA0, 200: None, 300: 0xC0})
+
+        groups = adapter.group([_view(100), _view(200), _view(300)])
+
+        kept_pids = {v.pid for g in groups for v in g.views}
+        assert kept_pids == {100, 300}
+        # Each survivor is its own singleton.
+        assert len(groups) == 2
 
 
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────

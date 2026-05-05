@@ -1,12 +1,16 @@
-"""Windows Terminal adapter — AttachConsole + UIA grouping and focus.
+"""Windows Terminal adapter — AttachConsole orphan filter + per-tab focus.
 
 Handles claude.exe / node.exe (claude) sessions launched inside
-Windows Terminal. Groups by ``wt_hwnd`` (the visible WT main window);
-within a group, sorts by tab-order heuristic from WT's UIA tree.
+Windows Terminal. Emits one singleton SessionGroup per session — no
+multi-view grouping. WinUI3 lazy-loads inactive tab subtrees, so a
+conpty in an inactive tab has no TermControl in the UIA tree we
+could match against; the previous (wt_hwnd, cwd) approximation
+silently merged unrelated tabs that happened to share a project
+directory. See ``group`` docstring for the full rationale.
 
 FOCUS capability: SetForegroundWindow on the WT window + UIA
-Select on the tab whose TabItem.Name matches (via console title or
-sibling fallback from inactive split panes).
+Select on the tab whose TabItem.Name matches the session's console
+title (set by claude itself, e.g. "claude-island-dev").
 
 Helpers it leans on:
 - ``platform_/win32_console.py`` for AttachConsole-driven title reads
@@ -30,7 +34,7 @@ from claude_island.core.capabilities import (
     capability,
 )
 from claude_island.core.models import Session
-from claude_island.core.snapshot import SessionGroup, SessionView, _normalize_project_path
+from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
 from claude_island.platform_.terminals.protocols import TerminalAdapter
 
@@ -52,16 +56,13 @@ class WindowsTerminalAdapter(_CapabilityProvider):
 
     def __init__(self) -> None:
         super().__init__()
-        # pid → conpty_hwnd. Caches *only* the stable half of the
-        # resolution chain — the conPTY hwnd is allocated by the OS
-        # at process start and freed when the pid dies, so it cannot
-        # change for the lifetime of pid. Crucially we do NOT cache
-        # wt_hwnd: the user can drag a tab to another WT window
-        # ("Move tab to another window" / tear-off-tab), which keeps
-        # the conPTY but moves it under a different host. Re-running
-        # walk_to_visible_host every group() is cheap (~0.5 ms × N,
-        # in-process Win32 GetWindow walk, no AttachConsole) and
-        # keeps grouping correct after a tab move with zero TTL.
+        # pid → conpty_hwnd. Used by group() as the orphan-filter probe
+        # cache: a non-zero conpty_hwnd means AttachConsole succeeded
+        # last tick, so the pid still has a live console — skip the
+        # ~3 ms AttachConsole syscall (which holds a process-global lock)
+        # on every wake after the first. The conPTY hwnd is allocated
+        # by the OS at process start and freed when the pid dies, so
+        # it cannot change for the lifetime of pid.
         #
         # Negative results (orphan / race) are NOT cached — a brief
         # race between process_scanner accepting a pid and our group()
@@ -103,58 +104,43 @@ class WindowsTerminalAdapter(_CapabilityProvider):
     # ── group ───────────────────────────────────────────────────────────
 
     def group(self, views: list[SessionView]) -> list[SessionGroup]:
-        """Bucket views by (wt_hwnd, normalized_cwd), drop orphans,
-        stamp adapter identity.
+        """Drop orphans, stamp adapter identity, emit one singleton
+        SessionGroup per view.
 
-        Input is already-resolved SessionViews from the snapshotter —
-        we do NOT re-run compose_session_view. Per-view work here:
-          1. AttachConsole probe to drop orphans (no console attached).
-          2. walk_to_visible_host to compute the wt_hwnd grouping key.
-          3. Bucket views by ``(wt_hwnd, normalized_cwd)`` — same WT
-             window AND same project = same card. Different cwds in
-             the same WT window stay separate (e.g. main repo + a
-             different project open in two tabs). The cwd component is
-             worktree-normalised so a Claude Code worktree merges with
-             its parent repo.
-          4. Views whose wt_hwnd can't be resolved become singleton
-             groups — one card each, NEVER merged with anything.
-             This avoids the bug where every unresolvable view would
-             collapse into one mega-card just because their key all
-             happened to be 0.
+        Why one-per-view (not tab-level grouping):
+        WT's UIA tree only fully populates the *currently active* tab —
+        WinUI3 lazy-loads inactive tab subtrees, so a conpty in an
+        inactive tab has no TermControl in the UIA tree we could match
+        against. The previous (wt_hwnd, normalized_cwd) approximation
+        merged any two tabs in the same WT window that shared a cwd
+        (the common case: two ``claude`` sessions launched from the
+        same project root) into one card; clicks on the inactive one
+        silently routed to the active sibling via the title fallback.
+        See WT issues #5694, #1351 + WinUI3 issue #8719 for why a
+        proper conpty→TabItem mapping is not feasible here.
 
-        Each emitted SessionGroup renders as one card in the panel."""
+        Per-view work:
+          1. AttachConsole probe (cached) to drop orphans (no console).
+          2. Stamp adapter identity, emit one SessionGroup per view.
+
+        Drag-tab correctness still works without group() doing anything:
+        ``_activate_windows`` re-runs ``walk_to_visible_host`` on every
+        focus click, so dragging a tab to another WT window is reflected
+        on the next click without group() needing to recompute.
+        """
         from dataclasses import replace
-        from claude_island.platform_ import win32_console, window_activator
+        from claude_island.platform_ import win32_console
 
-        win32gui = None
-        try:
-            import win32gui as _w32g
-            win32gui = _w32g
-        except ImportError:
-            pass
-
-        # --- orphan filter + per-view wt_hwnd ---
-        # Pair each surviving view with the wt_hwnd grouping key. Views
-        # whose AttachConsole fails are dropped (no console = orphan).
-        # ``wt_hwnd`` is None when we couldn't resolve to a WT window —
-        # treated as ungroupable below.
-        #
-        # Cache discipline: conpty_hwnd is read from / written to
-        # self._conpty_cache so we skip the AttachConsole syscall
-        # (~3 ms, holds a process-global lock) on every wake after the
-        # first. wt_hwnd is *always* recomputed via walk_to_visible_host
-        # because the user can drag a tab to a different WT window at
-        # any time — see __init__ docstring for the trade-off.
-        # GC: drop entries for pids that left views (process exited or
-        # was reassigned to a different adapter). Done before the loop
-        # so the cache stays bounded by the live session count.
+        # GC: drop cache entries for pids that left views (process
+        # exited or was reassigned to a different adapter). Done before
+        # the loop so the cache stays bounded by the live session count.
         alive_pids = {v.session.pid for v in views}
         if self._conpty_cache:
             self._conpty_cache = {
                 p: h for p, h in self._conpty_cache.items() if p in alive_pids
             }
 
-        kept: list[tuple[int | None, SessionView]] = []
+        kept: list[SessionView] = []
         for v in views:
             pid = v.session.pid
             conpty_hwnd = self._conpty_cache.get(pid)
@@ -166,53 +152,27 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 if not conpty_hwnd:
                     continue
                 self._conpty_cache[pid] = conpty_hwnd
-            wt_hwnd: int | None = None
-            if win32gui is not None:
-                wt_hwnd = window_activator.walk_to_visible_host(
-                    conpty_hwnd, win32gui,
-                )
-            kept.append((wt_hwnd, v))
+            kept.append(v)
 
         # Tripwire: every view filtered → likely a race with our own
-        # console state. Keep originals as ungroupable singletons so
-        # the user still sees rows (rather than a blank list).
+        # console state. Keep originals so the user still sees rows
+        # (rather than a blank list).
         if not kept:
-            kept = [(None, v) for v in views]
+            kept = list(views)
 
-        # --- bucket by (wt_hwnd, normalized_cwd) ---
-        # Resolved wt_hwnd → ("wt", hwnd, cwd) — same hwnd + same cwd
-        # collapse into one card.
-        # Unresolved wt_hwnd → ("singleton", pid) — never merges with
-        # anything (each unresolvable view gets its own card).
-        buckets: dict[tuple, list[SessionView]] = {}
-        for wt_hwnd, v in kept:
-            if wt_hwnd is None:
-                key: tuple = ("singleton", v.pid)
-            else:
-                key = ("wt", wt_hwnd, _normalize_project_path(v.project_path))
-            buckets.setdefault(key, []).append(v)
-
-        # --- stamp identity onto each view, build SessionGroups ---
         result: list[SessionGroup] = []
-        for key, batch in buckets.items():
-            stamped = [
-                replace(
-                    v,
-                    adapter_id=self.name,
-                    focus_granularity=FocusGranularity.TAB,
-                    capabilities=type(self).capabilities,
-                )
-                for v in batch
-            ]
-            if key[0] == "wt":
-                gid = f"wt:{key[1]}:{key[2]}"
-            else:
-                gid = f"wt:singleton:{key[1]}"
-            project_paths = {_normalize_project_path(v.project_path) for v in stamped}
-            title = ", ".join(sorted(project_paths)[:2]) if project_paths else None
+        for v in kept:
+            stamped = replace(
+                v,
+                adapter_id=self.name,
+                focus_granularity=FocusGranularity.TAB,
+                capabilities=type(self).capabilities,
+            )
             result.append(SessionGroup(
-                group_id=gid, title_hint=title,
-                adapter_id=self.name, views=tuple(stamped),
+                group_id=f"wt:{stamped.pid}",
+                title_hint=None,
+                adapter_id=self.name,
+                views=(stamped,),
             ))
         return result
 
