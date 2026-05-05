@@ -98,6 +98,28 @@ Operators (whitelist):
 - `ops.debounce(window, scheduler=...)` — coalesce a burst of events into the last one after `window` of quiet.
 - `ops.throttle_first(window, scheduler=...)` — emit the first event, then suppress until `window` elapses.
 
+### Design Principles
+
+When designing or refactoring, prefer **extensible, declarative patterns** over imperative wiring. The "Key Patterns to Follow" below are concrete applications of these principles — read these first when a new feature doesn't obviously fit one of those patterns.
+
+1. **Single source of truth.** Per-domain state lives in exactly one place: `WorldSnapshot` for UI-visible state, `JsonlParser._session_meta` for per-session JSONL-derived facts, `SessionRegistry._sessions` for live process output. Subscribers/composers read from it; nothing mirrors. Two sources of truth always drift.
+
+2. **Identity by the most specific key.** Per-session activity is keyed by `session_uuid`, never by `project_hash`. Coarser keys alias unrelated entities and silently couple them — e.g., the project-keyed activity override that flagged every session in a shared cwd as "active" simultaneously. When two things can ever differ, give them separate keys from day one.
+
+3. **Compose pre-resolves; render paints.** `compose_session_view` evaluates priority chains (`is_running`, `is_high_cost`, name resolution) once per snapshot and freezes the result on `SessionView`. `render(snap)` only draws what's in the snapshot — no `if status == "busy" and ...` in Qt widgets. Policy in render duplicates across surfaces and silently drifts.
+
+4. **Declarative subscription over hand-wired chains.** Adding a UI surface is one line: `world.observable().pipe(ops.distinct_until_changed(...)).subscribe(on_next=my_render, on_error=...)`. Resist "registry X emits → bridge Y marshals → widget Z re-renders" chains; that's how 6 surfaces become 30 wires. Wake the pipeline (`snapshotter.wake()`); never push directly into a UI.
+
+5. **Protocols at layer boundaries.** Cross-layer dependencies use `typing.Protocol` (`platform_/protocols.py`, `core/snapshot.py`'s `_*Proto` types). Concrete classes implement; tests fake; `__main__.py` injects. Adding a new platform capability = one Protocol + one implementation, not a new branch in core.
+
+6. **Capability framework over per-feature branches.** New right-click / row actions = one `Capability` enum value + one method on the relevant backend (`OsBackend` / `AppBackend` / `TerminalAdapter`). UI checks `cap in view.capabilities`; the dispatcher routes by scope. Don't thread a new bool through `Session` / `SessionView` / every UI consumer.
+
+7. **Frozen value objects with structural equality.** `Session`, `SessionView`, `WorldSnapshot` are `@dataclass(frozen=True, slots=True)`. This is what makes `distinct_until_changed` work without custom comparators and lets the snapshot pipeline reason about "is this redundant?" declaratively. Don't stash mutable caches on these — caches belong on the consumer.
+
+8. **Architecture as code, not aspirational docstring.** Layer rules live in `pyproject.toml:[tool.importlinter]` and are checked by `lint-imports`. Run it after any import change. Documentation drifts; CI doesn't.
+
+When a fix needs you to special-case "if N sessions in this cwd…" or "if X is also Y but not Z…", that's a signal one of the principles above was violated upstream — fix the source, not the symptom.
+
 ### Key Patterns to Follow
 
 - **Adding a new session data field**: update `models.py` → `session_registry.py` → `jsonl_parser.py` → add to `SessionView` in `core/snapshot.py` → resolve in `compose_session_view` → consume in `render(snap)` on the relevant UI surface.
