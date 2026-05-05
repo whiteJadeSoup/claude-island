@@ -826,19 +826,27 @@ def _bootstrap_session_discovery() -> None:
     """Background-thread bootstrap for the session pipeline.
 
     Two phases on the worker thread:
-      1. scan_fast() — pure psutil, no Win32. Sessions appear in the
-         UI within ~200ms because session_registry.update marshals
-         sessions_changed back to the Qt main thread via QtBridge.
+      1. scan_fast() — pure psutil, lazy attr access. Sessions appear
+         in the UI within tens of milliseconds. After registry.update
+         we publish a snapshot synchronously via marshaler.snap_ready
+         so the first frame doesn't pay the wake pipeline's
+         debounce(0.1) — that 100 ms is ~free during steady-state
+         coalescing but pure waste on a cold first-frame request.
       2. session_discovery.start() — runs one full scan() (with the
-         orphan filter that costs ~1-2s) and arms the periodic
-         10-second timer. Doing this on the worker thread means the
-         user sees the fast-scan result instantly and the full
-         filtered list lands a second later, while the Qt main thread
-         stays responsive throughout startup.
+         orphan filter) and arms the periodic 10-second timer. Doing
+         this on the worker thread means the user sees the fast-scan
+         result instantly and the full filtered list lands a moment
+         later, while the Qt main thread stays responsive throughout.
     """
     try:
         sessions = process_scanner.scan_fast()
         session_registry.update(sessions)
+        # Bypass wake pipeline debounce for the first frame: build now,
+        # publish via the same marshaler used by the wake-driven path.
+        # snap_ready.emit is thread-safe (Qt Signal QueuedConnection
+        # marshals onto the Qt main thread regardless of caller).
+        snap = snapshotter.build_now()
+        _world_marshaler.snap_ready.emit(snap)
     except Exception as exc:
         _safe_stderr_write(f"[claude-island] fast scan failed: {exc}")
     # session_discovery.start() runs the first scan() synchronously

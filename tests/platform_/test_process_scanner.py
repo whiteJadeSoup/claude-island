@@ -36,10 +36,17 @@ def _fake_proc(pid: int, name: str, cmdline: list[str] | None = None,
     ``parent_cmdline`` containing ``"claude"``).
     """
     proc = MagicMock()
+    # The scanner reads name / create_time / pid lazily off proc itself
+    # (no longer through proc.info), so fakes must expose those as
+    # callable / attribute mocks. proc.info kept as a leftover convenience
+    # for tests that still inspect it.
+    proc.pid = pid
+    proc.name = MagicMock(return_value=name)
+    proc.create_time = MagicMock(return_value=time.time())
     proc.info = {
         "pid": pid,
         "name": name,
-        "create_time": time.time(),
+        "create_time": proc.create_time.return_value,
     }
     proc.cwd.return_value = cwd
     proc.cmdline = MagicMock(return_value=cmdline or [])
