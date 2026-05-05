@@ -490,6 +490,16 @@ class RecentsDrawer(QWidget):
             self._reposition()
             self.show()
             self.raise_()
+            # ``activateWindow()`` is required on Windows: ``Qt.Tool``
+            # adds the ``WS_EX_TOOLWINDOW`` extended style, which by
+            # design does NOT steal focus from the parent app on
+            # show. Without this call ``_search.setFocus()`` only
+            # sets the *logical* focus marker — the window stays
+            # inactive, so the user's arrow-key presses route to
+            # whichever window IS active (the panel behind, or the
+            # underlying browser) and surface as page-scroll
+            # instead of row navigation.
+            self.activateWindow()
             self._search.setFocus()
             if self._selected_uuid is None and self._row_widgets:
                 self._select_first_visible_row()
@@ -566,6 +576,13 @@ class RecentsDrawer(QWidget):
         self._list_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._list_scroll.setStyleSheet(_SCROLLAREA_STYLE)
         self._list_scroll.setFixedWidth(_LIST_COL_WIDTH)
+        # QScrollArea defaults to Qt.WheelFocus — once the user wheel-
+        # scrolls the list, focus migrates to the scroll area and ↑/↓
+        # routes to its built-in keyPressEvent (= scroll one line),
+        # bypassing the search box's eventFilter that drives row
+        # selection. NoFocus pins the Spotlight contract: search box
+        # owns focus, scroll area is mouse-only chrome.
+        self._list_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._list_container = QWidget()
         self._list_container.setStyleSheet("background: transparent;")
         self._list_box = QVBoxLayout(self._list_container)
@@ -593,6 +610,9 @@ class RecentsDrawer(QWidget):
         )
         self._preview_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._preview_scroll.setStyleSheet(_SCROLLAREA_STYLE)
+        # Same Spotlight focus contract as the list scroll above —
+        # see comment there for why.
+        self._preview_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._preview_container = QWidget()
         self._preview_container.setStyleSheet("background: transparent;")
         self._preview_box = QVBoxLayout(self._preview_container)

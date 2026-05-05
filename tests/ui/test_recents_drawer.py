@@ -541,6 +541,53 @@ class TestKeyboardNavigation:
         self._key(d, Qt.Key.Key_Down)
         assert d._selected_uuid == "u1"
 
+    def test_K7_toggle_activates_window_then_focuses_search(self, drawer):
+        """Spotlight contract: search box owns focus the moment the
+        drawer becomes visible — the only way the eventFilter
+        intercepts ↑/↓ and turns them into row navigation.
+
+        On Windows ``Qt.Tool`` adds ``WS_EX_TOOLWINDOW`` which by
+        design does NOT activate on show — without an explicit
+        ``activateWindow()`` the ``setFocus()`` call only sets a
+        logical marker; arrow keys leak to whichever window IS
+        active (panel behind, or the underlying browser → page
+        scroll). offscreen Qt's ``hasFocus()`` is unreliable
+        (windows never truly activate), so we assert the *call
+        order*: ``activateWindow`` runs BEFORE ``setFocus`` on
+        every show path."""
+        d, *_ = drawer
+        d.render(_empty_snap(dormant=[_dormant("u1")]))
+        calls: list[str] = []
+        # Wrap the methods to record the call ordering on toggle().
+        # Using lambdas (not mock.patch) keeps the original behaviour
+        # intact so the rest of toggle() still executes correctly.
+        orig_activate = d.activateWindow
+        orig_focus = d._search.setFocus
+        d.activateWindow = lambda: (calls.append("activate"), orig_activate())[1]  # type: ignore[method-assign]
+        d._search.setFocus = lambda: (calls.append("focus"), orig_focus())[1]      # type: ignore[method-assign]
+        try:
+            d.toggle()  # show
+            assert calls == ["activate", "focus"], (
+                f"expected activateWindow → setFocus, got {calls}"
+            )
+        finally:
+            d.activateWindow = orig_activate         # type: ignore[method-assign]
+            d._search.setFocus = orig_focus          # type: ignore[method-assign]
+            if not d.isHidden():
+                d.toggle()
+
+    def test_K8_scrollareas_cannot_steal_focus(self, drawer):
+        """QScrollArea defaults to ``Qt.WheelFocus``: a wheel-scroll
+        moves focus into the scroll area, which then handles ↑/↓ as
+        a built-in line-scroll instead of letting the search box's
+        eventFilter turn them into row navigation. Both scroll areas
+        must be ``NoFocus`` so the Spotlight focus contract holds
+        even after the user mouse-wheels the list or preview."""
+        d, *_ = drawer
+        from PySide6.QtCore import Qt as _Qt
+        assert d._list_scroll.focusPolicy() == _Qt.FocusPolicy.NoFocus
+        assert d._preview_scroll.focusPolicy() == _Qt.FocusPolicy.NoFocus
+
 
 # ── Preview toggle (D3.3) ───────────────────────────────────────────────
 
