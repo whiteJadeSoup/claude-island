@@ -2861,8 +2861,26 @@ class ExpandedWindow(QWidget):
             lambda *args, **kwargs: False
         )
 
+        # Sibling-window references for the auto-hide whitelist (see
+        # ``event``). When the panel loses focus, we close UNLESS the
+        # focus went to one of "our" related windows. Detail popups
+        # are tracked here as they're created in _show_detail_popup;
+        # recents drawer is injected via set_recents_drawer at boot.
+        self._active_detail_popup: "QWidget | None" = None
+        self._recents_drawer_window: "QWidget | None" = None
+
         self._setup_window()
         self._build_ui()
+
+        # Esc closes the panel — same handle the capsule click toggles.
+        # ``WindowShortcut`` (the QShortcut default) means it only fires
+        # while THIS window has focus, so it doesn't conflict with the
+        # recents drawer's own Esc shortcut: whichever window owns
+        # focus is the one that closes.
+        from PySide6.QtGui import QShortcut, QKeySequence
+        QShortcut(
+            QKeySequence(Qt.Key.Key_Escape), self, self._close_via_esc,
+        )
 
         controller.state_changed.connect(self._on_state_changed)
 
@@ -2878,6 +2896,58 @@ class ExpandedWindow(QWidget):
         exists only for potential future use (e.g., spend card rows).
         """
         return super().eventFilter(obj, event)
+
+    def event(self, e: QEvent) -> bool:  # type: ignore[override]
+        """Auto-hide when focus moves to a non-related window.
+
+        ``WindowDeactivate`` fires when our window loses keyboard
+        focus to ANY other window. We want to close in that case
+        UNLESS focus went to a "satellite" of ours — capsule, recents
+        drawer, or the currently-open detail popup — in which case
+        the user is still navigating our app and the panel should stay.
+
+        The check runs on the next event-loop tick (``singleShot(0)``)
+        because Qt updates ``QApplication.activeWindow()`` AFTER
+        delivering ``WindowDeactivate``; reading it inside the handler
+        would still return us.
+        """
+        if e.type() == QEvent.Type.WindowDeactivate:
+            QTimer.singleShot(0, self._maybe_hide_on_deactivate)
+        return super().event(e)
+
+    # ── Auto-hide helpers ──────────────────────────────────────────────
+
+    def _close_via_esc(self) -> None:
+        """Esc handler — same teardown as a click on the capsule."""
+        if self._controller.state == "expanded":
+            self._controller.toggle_expanded()
+
+    def _satellite_windows(self) -> set:
+        """Set of top-level windows that count as "still our app" for
+        the auto-hide whitelist. Built fresh each call because the
+        detail popup comes and goes; capsule + recents drawer are
+        stable but cheap to re-collect."""
+        sats: set = set()
+        if self._capsule is not None:
+            sats.add(self._capsule)
+        if self._recents_drawer_window is not None:
+            sats.add(self._recents_drawer_window)
+        if self._active_detail_popup is not None:
+            sats.add(self._active_detail_popup)
+        return sats
+
+    def _maybe_hide_on_deactivate(self) -> None:
+        """Deferred half of the WindowDeactivate handler. Runs after
+        Qt has updated ``QApplication.activeWindow()``; closes the
+        panel only when the new active window is not one of ours."""
+        if not self.isVisible():
+            return  # already torn down by another path (esc, capsule click)
+        if self._controller.state != "expanded":
+            return  # state machine already moved on
+        new_active = QApplication.activeWindow()
+        if new_active in self._satellite_windows():
+            return  # focus went to a sibling we control — stay open
+        self._controller.toggle_expanded()
 
     # ------------------------------------------------------------------
     # Window setup
@@ -3148,6 +3218,14 @@ class ExpandedWindow(QWidget):
         Kept as a setter (not a ctor arg) because ExpandedWindow already
         has a long ctor and recents is an optional/late-bound feature."""
         self._recents_toggle = toggle
+
+    def set_recents_drawer(self, drawer: QWidget) -> None:
+        """Inject the RecentsDrawer instance so the auto-hide-on-focus-
+        loss check can recognise it as a sibling and stay open while the
+        user is interacting with it. Optional — when unwired, the drawer
+        will count as "outside" and clicking into it will collapse the
+        panel."""
+        self._recents_drawer_window = drawer
 
     def update_recents_count(self, n: int) -> None:
         """Refresh the chip's "Recents · N" label. Hides when n == 0.
@@ -4947,10 +5025,11 @@ class ExpandedWindow(QWidget):
         self._active_detail_popup = popup
 
     def _on_row_clicked(self, view: "SessionView", siblings: list["SessionView"]) -> None:
-        # Activate first, then collapse — order matters: while our panel is
-        # still on top (StaysOnTopHint) we are the foreground process, which
-        # is the only state in which SetForegroundWindow is allowed to
-        # surface another process's window.
+        # Just activate the terminal — the panel auto-hides via
+        # ``event``'s WindowDeactivate hook when the activation moves
+        # focus to the terminal app. SetForegroundWindow's foreground-
+        # transfer rule is still satisfied: we ARE the foreground
+        # process at the moment of dispatch, before focus shifts.
         # Sibling pids are needed by WindowsTerminalAdapter for the
         # inactive-split-pane case: when the clicked row's own console
         # title isn't in any UIA TabItem.Name (only the active pane's
@@ -4958,7 +5037,6 @@ class ExpandedWindow(QWidget):
         # to actually switch the WT tab.
         sibling_pids = [s.session.pid for s in siblings]
         self._dispatch(view, Capability.FOCUS, siblings=sibling_pids)
-        self._controller.toggle_expanded()
 
     def resizeEvent(self, event: object) -> None:  # type: ignore[override]
         """Recompute proportional bar fill widths after a layout resize.

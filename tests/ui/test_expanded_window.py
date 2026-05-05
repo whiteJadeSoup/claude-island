@@ -160,7 +160,7 @@ def test_placeholder_disappears_when_sessions_arrive(panel):
 def test_session_click_dispatches_focus_with_latest_view(qtbot):
     """Property carrier (_session) on the button must be refreshed on each
     update so a click after activity changed dispatches the new view.
-    PR2: actions flow through the injected dispatch callable."""
+    Actions flow through the injected dispatch callable."""
     from claude_island.core.capabilities import Capability
     received: list = []
 
@@ -188,6 +188,134 @@ def test_session_click_dispatches_focus_with_latest_view(qtbot):
     # WindowsTerminalAdapter.focus for why this kwarg is required.
     assert kwargs == {"siblings": []}
     assert view.last_activity == fresh.last_activity
+
+
+# ── Auto-hide-on-focus-loss (Esc + WindowDeactivate hooks) ───────────
+
+
+def _panel_with_controller(qtbot):
+    """Build a panel + capsule + controller wired well enough to drive
+    state-machine transitions (capsule force-shown to satisfy controller
+    bookkeeping)."""
+    capsule = QWidget(); capsule.show()
+    controller = IslandController()
+    panel = ExpandedWindow(
+        capsule=capsule,
+        controller=controller,
+        get_usage_totals=lambda period: UsageTotals(period=period),
+    )
+    qtbot.addWidget(panel); qtbot.addWidget(capsule)
+    # Drive state machine to expanded so toggle_expanded() actually flips.
+    controller.on_sessions_updated([_session(1, "/a")])  # dot → collapsed
+    controller.toggle_expanded()                          # collapsed → expanded
+    assert controller.state == "expanded"
+    return panel, capsule, controller
+
+
+def test_row_click_no_longer_collapses_panel(qtbot):
+    """Pre-redesign the row click activated the terminal AND collapsed
+    the panel. New behaviour leaves the panel open — the
+    WindowDeactivate hook handles auto-hide when the activated terminal
+    actually steals focus. Pin the missing toggle so a future revert
+    doesn't quietly bring back the dismiss-on-click behaviour."""
+    received: list = []
+    capsule = QWidget(); capsule.show()
+    controller = IslandController()
+    panel = ExpandedWindow(
+        capsule=capsule,
+        controller=controller,
+        get_usage_totals=lambda period: UsageTotals(period=period),
+        dispatch=lambda v, cap, **kw: (received.append(cap) or True),
+    )
+    qtbot.addWidget(panel); qtbot.addWidget(capsule)
+    controller.on_sessions_updated([_session(1, "/a")])  # dot → collapsed
+    controller.toggle_expanded()                          # collapsed → expanded
+    assert controller.state == "expanded"
+
+    panel._render_sessions([_session(1, "/a")])
+    panel._rows[1].click()
+
+    # FOCUS was dispatched (terminal activation requested) …
+    from claude_island.core.capabilities import Capability
+    assert received == [Capability.FOCUS]
+    # … but the controller stays in "expanded" — no auto-collapse.
+    assert controller.state == "expanded"
+
+
+def test_esc_shortcut_collapses_panel(qtbot):
+    """Esc on the panel must close it (mirrors the recents drawer's
+    Esc handler). WindowShortcut context: only fires when the panel
+    has keyboard focus, so it can't conflict with the recents drawer's
+    Esc — whichever window owns focus closes."""
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import QEvent as _QEvent
+    from PySide6.QtWidgets import QApplication
+    panel, _, controller = _panel_with_controller(qtbot)
+    panel.show()
+    QApplication.setActiveWindow(panel)
+    panel.setFocus()
+    # Synthesise the Esc keypress at the application level so the
+    # QShortcut catches it.
+    ev = QKeyEvent(_QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(panel, ev)
+    assert controller.state == "collapsed", (
+        "Esc must flip controller back to collapsed; got "
+        f"{controller.state!r}"
+    )
+
+
+def test_window_deactivate_to_satellite_keeps_panel_open(qtbot, monkeypatch):
+    """When focus moves to a known sibling window (capsule, recents
+    drawer, or active detail popup), the panel must stay open — the
+    user is still navigating our app."""
+    panel, capsule, controller = _panel_with_controller(qtbot)
+    # Pretend the recents drawer just took focus.
+    fake_recents = QWidget()
+    qtbot.addWidget(fake_recents)
+    panel.set_recents_drawer(fake_recents)
+    monkeypatch.setattr(
+        "claude_island.ui.expanded_window.QApplication.activeWindow",
+        staticmethod(lambda: fake_recents),
+    )
+    panel._maybe_hide_on_deactivate()
+    assert controller.state == "expanded", (
+        "panel collapsed when focus went to the recents drawer (a "
+        "sibling); the auto-hide whitelist should have kept it open"
+    )
+
+
+def test_window_deactivate_to_outside_collapses_panel(qtbot, monkeypatch):
+    """When focus moves to a window we don't own (terminal, browser,
+    other app), the panel auto-hides — the entire point of the
+    redesign."""
+    panel, _, controller = _panel_with_controller(qtbot)
+    foreign = QWidget()
+    qtbot.addWidget(foreign)
+    monkeypatch.setattr(
+        "claude_island.ui.expanded_window.QApplication.activeWindow",
+        staticmethod(lambda: foreign),
+    )
+    panel._maybe_hide_on_deactivate()
+    assert controller.state == "collapsed", (
+        "panel stayed open when focus went to an unrelated window; "
+        "the WindowDeactivate hook should have closed it"
+    )
+
+
+def test_satellite_set_includes_capsule_recents_and_popup(qtbot):
+    """Pin the contract that the satellite-window set has all three
+    members the design promises. A future refactor adding a new
+    sibling window must extend this set or the panel will close on
+    every click into the new surface."""
+    panel, capsule, _ = _panel_with_controller(qtbot)
+    fake_recents = QWidget(); qtbot.addWidget(fake_recents)
+    fake_popup = QWidget(); qtbot.addWidget(fake_popup)
+    panel.set_recents_drawer(fake_recents)
+    panel._active_detail_popup = fake_popup
+    sats = panel._satellite_windows()
+    assert capsule in sats
+    assert fake_recents in sats
+    assert fake_popup in sats
 
 
 # --------------------------------------------------------------------------

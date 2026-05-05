@@ -702,6 +702,10 @@ recents_drawer = RecentsDrawer(
     on_wake=snapshotter.wake,
 )
 expanded.set_recents_toggle(recents_drawer.toggle)
+# Inject the drawer instance so the panel's auto-hide-on-focus-loss
+# whitelist recognises clicks into the drawer as "still our app" and
+# keeps the panel open.
+expanded.set_recents_drawer(recents_drawer)
 
 _recents_subscription = (
     world.observable()
