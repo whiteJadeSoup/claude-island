@@ -57,11 +57,13 @@ register_model_short_names({
 })
 
 
-# Claude Code stores the OAuth access token here. Hardcoded — same as
-# the old QuotaProvider — because there is exactly one place Claude
-# Code writes credentials, and threading it through ProviderEngine
-# would just be ceremony. If a non-Claude-Code use case ever needs a
-# different path, take a constructor arg then.
+# Claude Code stores the OAuth access token here. Hardcoded because
+# there is exactly one place Claude Code writes credentials, and
+# threading it through ProviderEngine would just be ceremony. If a
+# non-Claude-Code use case ever needs a different path, take a
+# constructor arg then. (macOS variant lives in the login keychain
+# under service "Claude Code-credentials"; the file-read failure path
+# in ``read_oauth_token`` falls back to ``/usr/bin/security`` there.)
 _CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 
 

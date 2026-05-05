@@ -2800,10 +2800,10 @@ class ExpandedWindow(QWidget):
         # all on the new API.
         self._get_session_usage = get_session_usage
         # Optional manual-refresh hook. Wired in __main__ to bypass the
-        # QuotaProvider's TTL and force an immediate fetch — gives the
-        # user an out when the auto-refresh hasn't caught the latest
-        # state yet (cache TTL is 5 min, heartbeat is 60 s, so worst
-        # case the displayed % can lag 5 min behind reality).
+        # provider's TTL and force an immediate fetch — gives the user
+        # an out when the auto-refresh hasn't caught the latest state
+        # yet (cache TTL is 5 min, heartbeat is 60 s, so worst case
+        # the displayed % can lag 5 min behind reality).
         self._on_refresh_clicked = on_refresh_clicked
         # Per-session detail composer. Wired in __main__ to combine
         # JSONL metadata (aiTitle / gitBranch / lastPrompt / version),
@@ -3366,7 +3366,7 @@ class ExpandedWindow(QWidget):
 
     def _on_manual_refresh(self) -> None:
         """User clicked the ↻ button. Force a quota fetch (bypassing
-        the QuotaProvider's TTL) and immediately redraw the cards.
+        the provider's TTL) and immediately redraw the cards.
 
         The fetch is synchronous on the Qt main thread — we live with
         the ~3s worst-case HTTP timeout (matches the rest of the

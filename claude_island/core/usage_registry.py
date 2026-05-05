@@ -44,7 +44,7 @@ from .models import (
 
 # Anthropic consumer-plan session window. Local-derived windows
 # approximate this (rolling 5h); the real boundary comes from
-# QuotaProvider's /api/oauth/usage when the caller passes it in.
+# AnthropicProvider's /api/oauth/usage when the caller passes it in.
 _SESSION_WINDOW_HOURS = 5
 
 # Rolling windows, not calendar periods — "monthly" is the trailing
@@ -385,7 +385,7 @@ class UsageRegistry:
           record in the last 5h, returns a SessionUsage with
           start_time=None (caller renders "no active session").
 
-        ``quota`` is left as None — the QuotaProvider lives in the
+        ``quota`` is left as None — the ProviderEngine lives in the
         platform layer and core can't import it. The wiring layer
         (``__main__.py``) replaces this with a populated QuotaSnapshot
         when one is available.
