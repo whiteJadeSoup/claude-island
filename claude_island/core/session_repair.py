@@ -13,10 +13,11 @@ API rejects the next call with::
 The fix is to drop the thinking blocks from the historical transcript
 so the next prompt's payload no longer includes them.
 
-This module is the pure operation; the standalone ``clean_session.py``
-script wraps it with identifier resolution (UUID / name / path) for
-CLI use, and the GUI (``SessionDetailPopup``) calls it directly with
-a known transcript path.
+This module is the pure operation; the standalone
+``scripts/clean_session.py`` script wraps it with identifier
+resolution (UUID / name / path) for CLI use, and the GUI
+(``SessionDetailPopup``) calls it directly with a known transcript
+path.
 """
 from __future__ import annotations
 

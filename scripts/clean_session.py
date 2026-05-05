@@ -2,12 +2,12 @@
 """Remove thinking blocks from a Claude Code session JSONL file.
 
 Usage:
-    python clean_session.py <session-id-or-name-or-project-path>
+    python scripts/clean_session.py <session-id-or-name-or-project-path>
 
 Examples:
-    python clean_session.py 1adbe247-f557-49be-8ed4-2ad65b89aea7
-    python clean_session.py cc-learning
-    python clean_session.py "D:\\Learning\\cc"
+    python scripts/clean_session.py 1adbe247-f557-49be-8ed4-2ad65b89aea7
+    python scripts/clean_session.py cc-learning
+    python scripts/clean_session.py "D:\\Learning\\cc"
 """
 from __future__ import annotations
 
