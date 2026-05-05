@@ -514,21 +514,29 @@ def test_period_selector_includes_5h(qtbot):
 @pytest.mark.parametrize("pct,expected_color", [
     (0.0,   "#4ade80"),   # green tier — bottom of range
     (10.0,  "#4ade80"),
-    (59.0,  "#4ade80"),   # still green just below threshold
-    (60.0,  "#facc15"),   # yellow tier — at threshold
+    (60.0,  "#4ade80"),   # still green — new warn boundary is 70
+    (69.0,  "#4ade80"),   # still green just below new threshold
+    (70.0,  "#facc15"),   # yellow tier — at the unified warn threshold
     (75.0,  "#facc15"),
-    (84.0,  "#facc15"),   # still yellow just below threshold
+    (84.0,  "#facc15"),   # still yellow just below critical threshold
     (85.0,  "#ef4444"),   # red tier — at threshold
     (99.0,  "#ef4444"),
     (100.0, "#ef4444"),
 ])
 def test_quota_bar_color_thresholds(qtbot, pct, expected_color):
-    """U8: threshold colour escalates green → yellow → red at 60% / 85%.
+    """U8: threshold colour escalates green → yellow → red at 70% / 85%.
+
+    Boundaries are sourced from ``core/quota_palette`` so the capsule
+    mini-bar and this panel's inline reading stay in lock-step. The
+    pre-extraction panel used 60/85 while the capsule used 70/90;
+    at 86 % the user saw amber on one and red on the other for the
+    same snapshot. Now both surfaces dispatch on the same severity
+    function and produce identical colours.
+
     Verified on the combined inline rich-text label — each half (5h
     and Weekly) carries its own colour span, so the right colour for
-    the seven_day_pct must appear in the rich text.
-
-    Driven via seven_day_pct."""
+    the seven_day_pct must appear in the rich text. Driven via
+    seven_day_pct."""
     p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=10.0))
     snap = p._get_quota_snapshot()
     from dataclasses import replace
@@ -539,7 +547,10 @@ def test_quota_bar_color_thresholds(qtbot, pct, expected_color):
     assert expected_color in p._quota_inline.text()
 
 
-@pytest.mark.parametrize("pct", [0.0, 59.0, 59.6, 60.0, 75.0, 84.0, 84.6, 85.0, 99.0, 100.0])
+@pytest.mark.parametrize(
+    "pct",
+    [0.0, 69.0, 69.6, 70.0, 75.0, 84.0, 84.6, 85.0, 99.0, 100.0],
+)
 def test_summary_and_quota_card_use_same_color_for_same_pct(qtbot, pct):
     """Regression for the c685bb7 / A-001 bug: same five_hour_pct
     must produce the same threshold colour everywhere it's rendered.
@@ -549,8 +560,9 @@ def test_summary_and_quota_card_use_same_color_for_same_pct(qtbot, pct):
     (yellow) while QUOTA bucketed to 85 (red). User saw two
     different colours for one snapshot.
 
-    Boundary values 59.6 / 84.6 are deliberately included — those
-    are the inputs that hit the truncate-vs-round disagreement."""
+    Boundary values 69.6 / 84.6 are deliberately included — those
+    are the inputs that hit the truncate-vs-round disagreement at
+    the new warn (70) and critical (85) thresholds."""
     snap = _make_quota(five_pct=pct)
     p = _panel_with_quota(qtbot, quota=snap)
     p._render_cards()

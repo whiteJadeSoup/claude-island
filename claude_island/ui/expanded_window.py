@@ -1198,20 +1198,21 @@ _STYLE_USAGE_PERIOD_NAME = "color: #c9c9c9; font-size: 12px;"
 _STYLE_USAGE_PERIOD_TOTAL = "color: #f5f5f5; font-size: 13px; font-weight: 500;"
 _STYLE_USAGE_TOKEN_ROW = "color: #9ca3af; font-size: 11px;"
 
-# Quota progress-bar colour thresholds. The bar's chunk colour escalates
-# from green to yellow to red as the user's 5h quota fills, so the user
-# can read "how worried should I be" at a glance without parsing the
-# percentage text. Stale data (cache > 3×TTL) overrides any colour to
-# gray — we don't want to alarm (or reassure) on a number we can't trust.
+# Quota progress-bar colour thresholds — re-exported from the shared
+# core palette so this surface and the capsule mini-bar can't drift
+# apart (pre-extraction this file used 60/85 while the capsule used
+# 70/90; at 86 % the user saw a "warn" amber on one and a "critical"
+# red on the other for the same snapshot value).
 #
-#   < 60%        green   — plenty of runway, large operations are fine
-#   60–85%       yellow  — over half spent, start sizing requests
-#   ≥ 85%        red     — only 15% headroom, defer big tasks past reset
-#   stale (any%) gray    — endpoint quiet for >15 min, value is old
-_BAR_GREEN  = "#4ade80"  # matches _DOT_GREEN
-_BAR_YELLOW = "#facc15"  # matches _DOT_YELLOW
-_BAR_RED    = "#ef4444"  # Tailwind red-500
-_BAR_STALE  = "#6b7280"
+# The legacy ``_BAR_*`` aliases preserve callers (and tests) that
+# imported the constants by name from this module.
+from claude_island.core.quota_palette import (
+    BAR_GREEN as _BAR_GREEN,
+    BAR_AMBER as _BAR_YELLOW,
+    BAR_RED   as _BAR_RED,
+    BAR_STALE as _BAR_STALE,
+    quota_bar_color as _quota_bar_color_core,
+)
 
 _STYLE_REFRESH_BTN = """
     QPushButton {
@@ -1567,17 +1568,13 @@ def _fmt_local_dt(dt: datetime | None) -> str:
 def _quota_color(pct: float, stale: bool) -> str:
     """Pick the progress-bar / pct-text colour for a 5h quota reading.
 
-    Stale data wins regardless of percentage — we surface "I don't
-    trust this" before "how full is it". Thresholds documented at the
-    _BAR_* constants above.
-    """
-    if stale:
-        return _BAR_STALE
-    if pct >= 85:
-        return _BAR_RED
-    if pct >= 60:
-        return _BAR_YELLOW
-    return _BAR_GREEN
+    Thin alias over ``core.quota_palette.quota_bar_color`` — kept as
+    a module-level function so existing callers (and the test suite)
+    can keep importing ``_quota_color`` from this module without
+    needing to know the palette is now centralised. The kwarg name
+    differs between the legacy signature (positional ``stale``) and
+    the core API (kwarg ``stale=``), so this shim normalises that."""
+    return _quota_bar_color_core(pct, stale=stale)
 
 
 # Same re-export pattern as _fmt_started above — canonical impl in core.

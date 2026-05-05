@@ -86,8 +86,16 @@ _QUOTA_RIGHT_PAD = 12  # px from pill's right edge to bar's right edge
 # carry a green-only "everything's fine" indicator that adds noise
 # without information. Once the user is approaching the rate-limit
 # cliff the indicator becomes useful.
-_QUOTA_WARN_THRESHOLD = 70
-_QUOTA_CRITICAL_THRESHOLD = 90
+# Re-exported from core/quota_palette so the capsule and the expanded
+# panel can't drift apart (pre-extraction the capsule used 70/90 while
+# the panel used 60/85 — at 86% the two surfaces gave contradictory
+# severity readings to the user).
+from claude_island.core.quota_palette import (
+    WARN_PCT as _QUOTA_WARN_THRESHOLD,
+    CRITICAL_PCT as _QUOTA_CRITICAL_THRESHOLD,
+    quota_bar_color as _quota_bar_color,
+    quota_severity as _quota_severity,
+)
 
 # Multi-running carousel cadence. 3 s lands at the sweet spot: a
 # casual glance reads a name in ~0.5–1 s, so 3 s gives the user
@@ -129,12 +137,20 @@ _BG_COLOR = QColor(18, 18, 18, 230)
 _BG_COLOR_WARN = QColor(120, 53, 15, 230)
 _BG_COLOR_CRITICAL = QColor(127, 29, 29, 230)
 _DOT_COLOR = QColor(80, 80, 80, 200)
-# Mini quota bar pen / brush colours. Threshold-driven, mirroring the
-# summary card's progress bar palette so the user sees the same colour
-# story in both places.
+# Mini quota bar pen / brush colours. Resolved from core's shared
+# palette via ``_quota_bar_color()`` at paint time — never define
+# bar colours here directly (would re-open the cross-surface drift
+# this module's import block warns about).
 _QUOTA_BAR_TRACK = QColor(255, 255, 255, 40)
-_QUOTA_BAR_FILL_WARN = QColor(250, 204, 21)     # amber
-_QUOTA_BAR_FILL_CRITICAL = QColor(248, 113, 113)  # bright red
+# BG wash colours for the pill body, keyed by severity name. Dark
+# variants of the bar palette so the wash stays a contextual cue
+# rather than competing with the bar for attention. The ok variant
+# is the standard dark grey — no quota wash below the warn band.
+_BG_BY_SEVERITY: dict[str, QColor] = {
+    "ok":       QColor(18, 18, 18, 230),
+    "warn":     _BG_COLOR_WARN,
+    "critical": _BG_COLOR_CRITICAL,
+}
 _STYLE_QUOTA_PCT = "color: #fde68a; font-size: 11px; font-weight: 600;"
 _STYLE_QUOTA_PCT_CRITICAL = "color: #fee2e2; font-size: 11px; font-weight: 600;"
 
@@ -780,17 +796,17 @@ class CapsuleWindow(QWidget):
         path = QPainterPath()
         r = self.height() / 2
 
-        # Background colour reflects quota severity. Critical (≥ 90 %)
-        # gets a deep red wash; warning (≥ 70 %) gets amber. Below the
-        # warn threshold (and in dot mode) we use the standard dark
-        # grey so normal operation looks unobtrusive.
+        # Background colour reflects quota severity. Dispatched on
+        # ``quota_severity()`` from the shared core palette so this
+        # surface and the panel's TODAY card always agree on what
+        # band a given pct lands in. Below the warn band (and in
+        # dot mode) we use the standard dark grey so normal operation
+        # looks unobtrusive.
         pct = self._data.quota_pct
         if self._is_dot:
             color = _DOT_COLOR
-        elif pct is not None and pct >= _QUOTA_CRITICAL_THRESHOLD:
-            color = _BG_COLOR_CRITICAL
-        elif pct is not None and pct >= _QUOTA_WARN_THRESHOLD:
-            color = _BG_COLOR_WARN
+        elif pct is not None:
+            color = _BG_BY_SEVERITY[_quota_severity(pct)]
         else:
             color = _BG_COLOR
 
@@ -822,17 +838,16 @@ class CapsuleWindow(QWidget):
         )
         painter.fillPath(track_path, _QUOTA_BAR_TRACK)
 
-        # Fill — width = pct * bar_w / 100
+        # Fill — width = pct * bar_w / 100. Colour is resolved through
+        # the shared core palette so the panel's TODAY card and this
+        # mini-bar always agree on what colour a given pct should be.
         fill_w = max(1, int(_QUOTA_BAR_W * pct / 100))
         fill_path = QPainterPath()
         fill_path.addRoundedRect(
             bar_x, bar_y, fill_w, _QUOTA_BAR_H,
             _QUOTA_BAR_H / 2, _QUOTA_BAR_H / 2,
         )
-        painter.fillPath(
-            fill_path,
-            _QUOTA_BAR_FILL_CRITICAL if critical else _QUOTA_BAR_FILL_WARN,
-        )
+        painter.fillPath(fill_path, QColor(_quota_bar_color(pct)))
 
         # "78%" caption to the right of the bar. Native QPainter draw
         # so we don't have to manage another QLabel + opacity effect.
