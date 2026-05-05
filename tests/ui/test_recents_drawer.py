@@ -685,26 +685,21 @@ class TestPreviewActionRow:
         ]
         assert btns_with_clipboard == []
 
-    def test_resume_button_still_present(self, qtbot):
+    def test_resume_button_in_preview_header(self, qtbot):
+        """v3.1 redesign: Resume button moved INTO the preview header
+        (left of title) so its visual binding to the selected session
+        is unambiguous. The pre-v3.1 sticky-footer button sat in the
+        drawer body and looked like a banner action affecting the
+        whole drawer."""
+        from PySide6.QtWidgets import QPushButton
         d = self._drawer(qtbot)
         d.render(_empty_snap(dormant=[_dormant("u1")]))
         d._select_uuid("u1")
-        # Resume now lives in the drawer's main body layout (sticky
-        # footer outside _preview_scroll). Find via the public attr.
-        resume = d._resume_btn
-        assert resume is not None
-        assert "Resume" in resume.text()
-        # Anchored in the drawer body — explicitly NOT inside the
-        # preview ScrollArea (the whole point of the redesign).
-        from PySide6.QtWidgets import QPushButton
         in_preview = d._preview_container.findChild(
             QPushButton, "preview_resume_btn",
         )
-        assert in_preview is None, (
-            "Resume button must live in the drawer footer, not the "
-            "preview ScrollArea — otherwise expanding LAST PROMPT "
-            "pushes it down again."
-        )
+        assert in_preview is not None
+        assert "Resume" in in_preview.text()
 
     def test_cwd_row_uses_hover_reveal(self, qtbot):
         """The cwd row should be a _HoverRevealRow so the ↗ open glyph
@@ -809,43 +804,67 @@ class TestPreviewRedesign:
         second_text = " ".join(
             lbl.text() for lbl in hover_rows[1].findChildren(QLabel)
         )
-        assert "aaaa-bbbb-cccc-uuid" in first_text, (
+        # v3.1 inserts U+200B after "-" in the UUID and after "/" in
+        # the cwd so wordWrap has break points. Strip them before
+        # substring matching so the test stays focused on row order
+        # rather than rendering details.
+        zwsp = "​"
+        assert "aaaa-bbbb-cccc-uuid" in first_text.replace(zwsp, ""), (
             f"UUID row must be first — got first={first_text!r}, "
             f"second={second_text!r}"
         )
-        assert "projects" in second_text and "foo" in second_text
+        cleaned_second = second_text.replace(zwsp, "")
+        assert "projects" in cleaned_second and "foo" in cleaned_second
 
-    def test_R4_resume_disabled_when_no_selection(self, qtbot):
-        """Sticky Resume stays visible always (layout stability) but
-        disables when there's no selectable session."""
+    def test_R4_resume_absent_when_no_selection(self, qtbot):
+        """v3.1: with no selection the preview shows a placeholder
+        ("Select a session...") and no Resume button is rendered at
+        all — the button is part of the dynamic preview header which
+        only exists when a session is selected. After selecting a
+        session the button appears in the header."""
+        from PySide6.QtWidgets import QPushButton
         d = self._drawer(qtbot)
-        d.render(_empty_snap())  # no dormant sessions → no selection
-        assert d._resume_btn.isEnabled() is False
-        # Now add a session and select it — button enables.
+        d.render(_empty_snap())
+        # Empty selection → placeholder, no resume button.
+        assert d._preview_container.findChild(
+            QPushButton, "preview_resume_btn",
+        ) is None
         d.render(_empty_snap(dormant=[_dormant("u1")]))
         d._select_uuid("u1")
-        assert d._resume_btn.isEnabled() is True
+        # After selection the button materialises in the header.
+        btn = d._preview_container.findChild(
+            QPushButton, "preview_resume_btn",
+        )
+        assert btn is not None
+        assert btn.isEnabled() is True
 
-    def test_R5_resume_does_not_move_when_prompt_expands(self, qtbot):
-        """Core promise of the sticky-footer redesign: expanding
-        LAST PROMPT must not change the Resume button's position.
-        Pre-redesign the button lived in the preview ScrollArea
-        and got pushed down on expand."""
+    def test_R5_resume_stays_at_top_when_prompt_expands(self, qtbot):
+        """v3.1 promise: Resume sits in the preview HEADER (top of the
+        column), so expanding LAST PROMPT (which lives below the meta
+        block) cannot push it down. Expansion grows the bottom of the
+        preview, not the top."""
+        from PySide6.QtWidgets import QPushButton
         d = self._drawer(qtbot)
-        d.show()  # show so positions resolve to non-zero
+        d.show()
         long_p = "lorem ipsum " * 30
         d.render(_empty_snap(dormant=[_dormant("u1", last_prompt=long_p)]))
         d._select_uuid("u1")
-        # Force layouts to settle so geometry is real.
         d.adjustSize()
-        before = d._resume_btn.mapTo(d, d._resume_btn.rect().topLeft())
-        # Expand the prompt section.
+        btn_before = d._preview_container.findChild(
+            QPushButton, "preview_resume_btn",
+        )
+        assert btn_before is not None
+        before = btn_before.mapTo(d, btn_before.rect().topLeft())
         from claude_island.ui.last_prompt_section import LastPromptSection
         sections = d._preview_container.findChildren(LastPromptSection)
         assert sections
         sections[0]._on_toggle()
         d.adjustSize()
-        after = d._resume_btn.mapTo(d, d._resume_btn.rect().topLeft())
+        btn_after = d._preview_container.findChild(
+            QPushButton, "preview_resume_btn",
+        )
+        assert btn_after is not None
+        after = btn_after.mapTo(d, btn_after.rect().topLeft())
         assert before == after, (
             f"Resume button moved on prompt expand: {before} -> {after}"
         )
@@ -884,6 +903,65 @@ class TestPreviewRedesign:
         # 56 px is the floor — covers both [展开] and [收起] at 11 px
         # font without overflow.
         assert toggles[0].minimumWidth() >= 56
+
+    def test_v3_row_title_falls_back_to_cwd_basename(self, qtbot):
+        """When name and last_prompt are both absent (typical for a
+        launched-but-not-yet-typed-into session) the row title should
+        fall back to the cwd basename instead of the literal
+        "Untitled session". Without this the recents list shows N rows
+        of "Untitled session" with no way to tell them apart, which is
+        exactly the bug the user reported in screenshot #7."""
+        from claude_island.ui.recents_drawer import _row_title
+        from dataclasses import replace
+        d = _dormant("u1", name=None, cwd=Path("/Users/me/myproj"))
+        # _dormant may default last_prompt to something non-empty;
+        # force the worst-case "no name AND no prompt" combo.
+        d = replace(d, name=None, last_prompt=None)
+        assert _row_title(d) == "myproj"
+
+    def test_v3_uuid_label_has_zero_width_space_break_hints(self, qtbot):
+        """v3.1 fix for "UUID overflows / hard-clips in narrow preview":
+        QLabel.wordWrap only breaks at whitespace, but a UUID has none.
+        Insert U+200B after each "-" so wordWrap has legal break points
+        and the visible string is unchanged. Pin so a refactor that
+        strips the breaks doesn't silently regress wrapping."""
+        from PySide6.QtWidgets import QLabel
+        d = self._drawer(qtbot)
+        d.render(_empty_snap(dormant=[
+            _dormant("aaaa-bbbb-cccc-dddd-eeeeeeee"),
+        ]))
+        d._select_uuid("aaaa-bbbb-cccc-dddd-eeeeeeee")
+        labels = [
+            lbl for lbl in d._preview_container.findChildren(QLabel)
+            if "aaaa" in lbl.text()
+        ]
+        assert labels
+        # Visible text contains U+200B after every "-"
+        text = labels[0].text()
+        assert "​" in text
+        # And word wrap is on so Qt can act on those break points.
+        assert labels[0].wordWrap() is True
+
+    def test_v3_branch_label_has_break_hints(self, qtbot):
+        """Branch names like ``feat/capsule-three-region-layout`` need
+        break hints at "/" and "-" so they wrap rather than overflow.
+        Same U+200B mechanism as UUID."""
+        from PySide6.QtWidgets import QLabel
+        d = self._drawer(qtbot)
+        d.render(_empty_snap(dormant=[
+            _dormant("u1", git_branch="feat/capsule-three-region-layout"),
+        ]))
+        d._select_uuid("u1")
+        labels = [
+            lbl for lbl in d._preview_container.findChildren(QLabel)
+            if "feat" in lbl.text() and "layout" in lbl.text()
+        ]
+        assert labels
+        text = labels[0].text()
+        # Break hints inserted at both "/" and "-" boundaries.
+        assert "/​" in text
+        assert "-​" in text
+        assert labels[0].wordWrap() is True
 
     def test_R7_long_title_full_text_in_tooltip(self, qtbot):
         """When a title is tail-elided past the hard cap, the full
