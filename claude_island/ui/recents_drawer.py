@@ -251,6 +251,15 @@ class _RecentRow(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(_RECENT_ROW_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Per the Spotlight keyboard model the search box owns focus
+        # always — arrow keys flow through ITS eventFilter to drive row
+        # selection. If the row itself can take focus, clicking one
+        # parks Qt focus on the row and Fusion's default focus
+        # highlight (a bluish tint on QPushButton) bleeds through the
+        # row's stylesheet, making the focused row look different from
+        # the selected row. NoFocus pins both states under our own
+        # ``_selected`` styling and preserves the eventFilter route.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._apply_style()
         self.clicked.connect(self._on_clicked)
 
@@ -508,6 +517,10 @@ class RecentsDrawer(QWidget):
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setToolTip("Close · Esc")
         close_btn.setFixedSize(20, 20)
+        # All clickable widgets in the drawer set NoFocus so focus
+        # stays on the search box (Spotlight pattern) — see _RecentRow
+        # for the full rationale.
+        close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         close_btn.clicked.connect(self.hide)
         header.addWidget(close_btn)
         body.addLayout(header)
@@ -793,6 +806,7 @@ class RecentsDrawer(QWidget):
         resume_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         resume_btn.setToolTip("Resume in terminal · Enter")
         resume_btn.setFixedHeight(28)
+        resume_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         resume_btn.clicked.connect(self._on_resume_clicked)
         header_h.addWidget(resume_btn, 0, Qt.AlignmentFlag.AlignTop)
 
@@ -845,6 +859,7 @@ class RecentsDrawer(QWidget):
         uuid_copy.setCursor(Qt.CursorShape.PointingHandCursor)
         uuid_copy.setToolTip("Copy session ID · Ctrl+C")
         uuid_copy.setFixedWidth(16)
+        uuid_copy.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         uuid_copy.clicked.connect(self._copy_uuid_current)
         uuid_h.addWidget(uuid_copy)
         uuid_row.register_reveal(uuid_copy)
@@ -875,6 +890,7 @@ class RecentsDrawer(QWidget):
         cwd_open.setCursor(Qt.CursorShape.PointingHandCursor)
         cwd_open.setToolTip("Open folder · Ctrl+O")
         cwd_open.setFixedWidth(16)
+        cwd_open.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         cwd_open.clicked.connect(self._open_folder_current)
         cwd_h.addWidget(cwd_open)
         cwd_row.register_reveal(cwd_open)
