@@ -526,6 +526,50 @@ def write_cache(cache_path: Path, payload: dict) -> None:
         print(f"[claude-island] cache write failed: {e}", file=sys.stderr)
 
 
+def record_failed_attempt(
+    cache_path: Path, *, now: datetime, provider: str,
+) -> None:
+    """Negative-cache a failed quota fetch.
+
+    Each provider's auto-refresh path checks ``is_fetch_due`` to decide
+    whether to issue HTTP. Without this helper, a failed fetch left
+    ``fetched_at`` unchanged, so the next ``snapshotter.wake()`` (fired
+    on every JSONL ingest, file-watch event, sessions_changed, etc.)
+    flagged the cache as expired and retried within milliseconds —
+    flooding stderr with the same 401/429/timeout and burning the
+    network on a server already saying no.
+
+    The fix uses a SEPARATE ``last_attempt_at`` field so retry throttling
+    and ``is_stale`` business-data ageing don't collide. Bumping
+    ``fetched_at`` directly would suppress retries correctly but also
+    keep the UI's stale-warning grey clamp from ever firing — the user
+    would see "fresh" colours on data that's actually 30+ min old.
+
+    Manual refresh (``bypass_cache=True``) skips the cache read entirely
+    so the negative-cache marker doesn't gate it.
+    """
+    cached = read_cache(cache_path) or {}
+    cached.setdefault("provider", provider)
+    cached["last_attempt_at"] = now.isoformat()
+    write_cache(cache_path, cached)
+
+
+def is_fetch_due(cached: dict, *, now: datetime) -> bool:
+    """True when the cache permits a fresh HTTP fetch.
+
+    Consults ``last_attempt_at`` first — it covers both success and
+    failure timestamps, so 5 min after a 401 the gate opens just like
+    5 min after a successful refresh. Falls back to ``fetched_at`` for
+    caches written before the negative-cache logic landed (older
+    snapshots have no ``last_attempt_at`` yet)."""
+    last = _parse_iso(cached.get("last_attempt_at", ""))
+    if last is None:
+        last = _parse_iso(cached.get("fetched_at", ""))
+    if last is None:
+        return True
+    return (now - last).total_seconds() > POLL_TTL
+
+
 def _parse_iso(s: str) -> datetime | None:
     if not isinstance(s, str):
         return None

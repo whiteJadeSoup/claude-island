@@ -23,10 +23,12 @@ from claude_island.core.models import (
 from claude_island.core.safe_stderr import safe_stderr_write
 
 from . import (
-    HTTP_TIMEOUT, POLL_TTL,
+    HTTP_TIMEOUT,
     provider,
     read_oauth_token, read_cache, write_cache,
-    _parse_iso, snapshot_from_cache,
+    snapshot_from_cache,
+    record_failed_attempt,
+    is_fetch_due,
 )
 
 
@@ -93,25 +95,36 @@ class AnthropicProvider:
 
         if not bypass_cache:
             cached = read_cache(cache_path)
-            if cached is not None:
-                snap = _from_cache(cached, now)
-                if snap is not None and not _is_expired(cached, now):
-                    return snap
+            if cached is not None and not is_fetch_due(cached, now=now):
+                # Throttle window active — return whatever cache yields.
+                # First-failure caches have no business data, so _from_cache
+                # returns None; subsequent successful refreshes populate
+                # five_hour/seven_day and the call returns a real snap.
+                # Either way we DO NOT re-issue HTTP within POLL_TTL.
+                return _from_cache(cached, now)
 
         token = read_oauth_token(_CREDENTIALS_PATH)
         if not token:
-            if not bypass_cache:
-                return _from_cache(read_cache(cache_path), now)
-            return None
+            if bypass_cache:
+                return None
+            # Token-missing is a soft failure too: every wake() would
+            # otherwise re-attempt the keychain lookup. Mark the attempt
+            # so retry waits POLL_TTL just like an HTTP failure.
+            record_failed_attempt(cache_path, now=now, provider="anthropic")
+            return _from_cache(read_cache(cache_path), now)
 
         data = _fetch_http(token)
         if data is None:
             if bypass_cache:
                 return None
-            cached = read_cache(cache_path)
-            return _from_cache(cached, now)
+            record_failed_attempt(cache_path, now=now, provider="anthropic")
+            return _from_cache(read_cache(cache_path), now)
 
         payload = _normalise(data, fetched_at=now)
+        # Successful refresh writes BOTH timestamps so is_fetch_due
+        # gates the next attempt to POLL_TTL after this success, not
+        # POLL_TTL after some stale prior last_attempt_at marker.
+        payload["last_attempt_at"] = now.isoformat()
         write_cache(cache_path, payload)
         return _from_cache(payload, now)
 
@@ -208,10 +221,3 @@ def _from_cache(cached: dict | None, now: datetime):
     if cached is None:
         return None
     return snapshot_from_cache(cached, provider="anthropic", now=now)
-
-
-def _is_expired(cached: dict, now: datetime) -> bool:
-    fetched = _parse_iso(cached.get("fetched_at", ""))
-    if fetched is None:
-        return True
-    return (now - fetched).total_seconds() > POLL_TTL

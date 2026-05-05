@@ -60,8 +60,9 @@ from . import (
     provider,
     get_provider_setting,
     read_cache, write_cache,
-    _parse_ms, _parse_iso, snapshot_from_cache,
-    POLL_TTL,
+    _parse_ms, snapshot_from_cache,
+    record_failed_attempt,
+    is_fetch_due,
 )
 
 
@@ -216,13 +217,6 @@ def _from_cache(cached: dict | None, now: datetime):
     return snapshot_from_cache(cached, provider="zhipu", now=now)
 
 
-def _is_expired(cached: dict, now: datetime) -> bool:
-    fetched = _parse_iso(cached.get("fetched_at", ""))
-    if fetched is None:
-        return True
-    return (now - fetched).total_seconds() > POLL_TTL
-
-
 @provider("zhipu")
 class ZhipuProvider:
     name = "zhipu"
@@ -269,19 +263,28 @@ class ZhipuProvider:
 
         if not bypass_cache:
             cached = read_cache(cache_path)
-            if cached is not None:
-                snap = _from_cache(cached, now)
-                if snap is not None and not _is_expired(cached, now):
-                    return snap
+            if cached is not None and not is_fetch_due(cached, now=now):
+                # Throttle window active — see anthropic.py for the
+                # full rationale. Returns prior snap if there was a
+                # successful refresh, None if this is a first-failure
+                # marker. Never re-issues HTTP within POLL_TTL.
+                return _from_cache(cached, now)
 
         token = _read_token()
         if not token:
-            return None if bypass_cache else _from_cache(read_cache(cache_path), now)
+            if bypass_cache:
+                return None
+            record_failed_attempt(cache_path, now=now, provider="zhipu")
+            return _from_cache(read_cache(cache_path), now)
 
         data = _fetch_http(token)
         if data is None:
-            return None if bypass_cache else _from_cache(read_cache(cache_path), now)
+            if bypass_cache:
+                return None
+            record_failed_attempt(cache_path, now=now, provider="zhipu")
+            return _from_cache(read_cache(cache_path), now)
 
         payload = _normalise(data, fetched_at=now)
+        payload["last_attempt_at"] = now.isoformat()
         write_cache(cache_path, payload)
         return _from_cache(payload, now)

@@ -936,3 +936,159 @@ class TestDeleteProviderSettings:
         with patch("claude_island.platform_.providers.PROVIDER_CONFIG_PATH", path):
             delete_provider_settings("zhipu")  # never configured
         assert read_provider_config(path) == original
+
+
+class TestNegativeCacheHelper:
+    """Helpers in providers/__init__.py that throttle retry on failure.
+
+    See record_failed_attempt / is_fetch_due docstrings for the why.
+    Without these, every snapshotter.wake() (fired on every JSONL ingest,
+    file watch, sessions_changed event) would re-issue the failing HTTP
+    request, flooding stderr and burning network on a server already
+    saying no.
+    """
+
+    def test_record_failed_attempt_writes_last_attempt_at(self, tmp_path):
+        from claude_island.platform_.providers import (
+            record_failed_attempt, read_cache,
+        )
+        cache_path = tmp_path / "anthropic-quota.json"
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        record_failed_attempt(cache_path, now=now, provider="anthropic")
+        cached = read_cache(cache_path)
+        assert cached["last_attempt_at"] == now.isoformat()
+        assert cached["provider"] == "anthropic"
+
+    def test_record_failed_attempt_preserves_prior_business_data(self, tmp_path):
+        """Failure must NOT overwrite a prior successful five_hour /
+        seven_day payload — the UI keeps showing the last-known reading
+        with is_stale climbing on the original fetched_at."""
+        from claude_island.platform_.providers import (
+            record_failed_attempt, read_cache,
+        )
+        cache_path = tmp_path / "anthropic-quota.json"
+        prior_fetch = "2026-05-05T11:00:00+00:00"
+        cache_path.write_text(json.dumps({
+            "provider": "anthropic",
+            "fetched_at": prior_fetch,
+            "five_hour": {"pct": 42.0, "resets_at": "2030-01-01T00:00:00Z"},
+            "seven_day": {"pct": 15.0, "resets_at": "2030-01-07T00:00:00Z"},
+        }))
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        record_failed_attempt(cache_path, now=now, provider="anthropic")
+        cached = read_cache(cache_path)
+        # Business data preserved …
+        assert cached["five_hour"]["pct"] == 42.0
+        assert cached["fetched_at"] == prior_fetch
+        # … and the retry gate moved forward.
+        assert cached["last_attempt_at"] == now.isoformat()
+
+    def test_is_fetch_due_prefers_last_attempt_at(self):
+        """When both timestamps exist, the more recent last_attempt_at
+        wins — failure scenarios where fetched_at is hours old but the
+        last failed attempt was 30s ago should still throttle."""
+        from claude_island.platform_.providers import is_fetch_due
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        cached = {
+            "fetched_at": "2026-05-05T08:00:00+00:00",        # 4 h old
+            "last_attempt_at": "2026-05-05T11:59:30+00:00",   # 30 s old
+        }
+        assert is_fetch_due(cached, now=now) is False
+
+    def test_is_fetch_due_falls_back_to_fetched_at(self):
+        """Caches written before the negative-cache logic landed have
+        no last_attempt_at field; success paths that pre-date this
+        change still need to be gateable."""
+        from claude_island.platform_.providers import is_fetch_due
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        cached = {"fetched_at": "2026-05-05T11:59:00+00:00"}  # 1 min old
+        assert is_fetch_due(cached, now=now) is False
+
+    def test_is_fetch_due_returns_true_when_no_timestamps(self):
+        from claude_island.platform_.providers import is_fetch_due
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        assert is_fetch_due({}, now=now) is True
+
+    def test_is_fetch_due_returns_true_after_ttl(self):
+        from claude_island.platform_.providers import is_fetch_due, POLL_TTL
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        # POLL_TTL + 1 s past last attempt → due
+        cached = {"last_attempt_at": "2026-05-05T11:54:59+00:00"}
+        assert is_fetch_due(cached, now=now) is True
+        assert POLL_TTL == 300  # sanity-pin so future bumps trigger review
+
+
+class TestAnthropicNegativeCache:
+    """Behaviour-level tests on the anthropic provider's failure path.
+
+    Companion to TestNegativeCacheHelper which covers the helpers in
+    isolation. These tests verify the provider actually wires the
+    helpers in correctly — without them a refactor that re-introduces
+    the every-wake retry would slip past unit tests.
+    """
+
+    def _seed_token(self, tmp_path):
+        """Create a fake credentials file the anthropic module reads."""
+        creds = tmp_path / "credentials.json"
+        creds.write_text(json.dumps({
+            "claudeAiOauth": {"accessToken": "fake-bearer"},
+        }))
+        return creds
+
+    def test_failed_fetch_throttles_retry_within_ttl(self, tmp_path):
+        """First fetch fails → second fetch within TTL must NOT re-issue
+        HTTP. Direct regression for the stderr-flood bug: every JSONL
+        ingest triggered wake() → fetch() → HTTP → 401 → again.
+        """
+        from claude_island.platform_.providers import anthropic as anth
+        creds = self._seed_token(tmp_path)
+        with patch.object(anth, "_CREDENTIALS_PATH", creds), \
+             patch.object(anth, "_fetch_http", return_value=None) as mock_http:
+            p = anth.AnthropicProvider()
+            p.fetch(cache_dir=tmp_path)            # first call → HTTP fires
+            p.fetch(cache_dir=tmp_path)            # second call → throttled
+            p.fetch(cache_dir=tmp_path)            # third call → throttled
+            assert mock_http.call_count == 1, (
+                f"expected 1 HTTP attempt across 3 fetches, got "
+                f"{mock_http.call_count}"
+            )
+
+    def test_bypass_cache_skips_throttle(self, tmp_path):
+        """Manual refresh path (bypass_cache=True) must always issue
+        HTTP — the user clicked the refresh button to force it.
+        """
+        from claude_island.platform_.providers import anthropic as anth
+        creds = self._seed_token(tmp_path)
+        with patch.object(anth, "_CREDENTIALS_PATH", creds), \
+             patch.object(anth, "_fetch_http", return_value=None) as mock_http:
+            p = anth.AnthropicProvider()
+            p.fetch(cache_dir=tmp_path)                            # auto: HTTP
+            p.fetch(cache_dir=tmp_path, bypass_cache=True)         # manual: HTTP
+            p.fetch(cache_dir=tmp_path, bypass_cache=True)         # manual: HTTP
+            assert mock_http.call_count == 3
+
+    def test_failed_fetch_preserves_prior_business_data(self, tmp_path):
+        """Cache had a successful payload from earlier; current fetch
+        fails → cache must still expose the old five_hour/seven_day
+        so the UI shows last-known reading + the stale grey clamp."""
+        from claude_island.platform_.providers import anthropic as anth
+        cache_path = tmp_path / "anthropic-quota.json"
+        cache_path.write_text(json.dumps({
+            "provider": "anthropic",
+            "fetched_at": "2026-05-05T11:00:00+00:00",
+            "five_hour": {"pct": 42.0, "resets_at": "2030-01-01T00:00:00Z"},
+            "seven_day": {"pct": 15.0, "resets_at": "2030-01-07T00:00:00Z"},
+        }))
+        creds = self._seed_token(tmp_path)
+        with patch.object(anth, "_CREDENTIALS_PATH", creds), \
+             patch.object(anth, "_fetch_http", return_value=None):
+            p = anth.AnthropicProvider()
+            # Cache age (1 h) is past POLL_TTL, so this fetch attempts HTTP,
+            # fails, and falls back to cache.
+            p.fetch(cache_dir=tmp_path)
+        cached = json.loads(cache_path.read_text())
+        # Business data intact …
+        assert cached["five_hour"]["pct"] == 42.0
+        assert cached["fetched_at"] == "2026-05-05T11:00:00+00:00"
+        # … last_attempt_at marker added so the next wake throttles.
+        assert "last_attempt_at" in cached
