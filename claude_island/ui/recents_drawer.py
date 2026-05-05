@@ -833,7 +833,16 @@ class RecentsDrawer(QWidget):
         title_lbl.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
         )
-        title_lbl.setToolTip(title_text)
+        # Tooltip is set ONLY when the visible string was tail-elided
+        # past the hard cap. For normal-length titles wordWrap shows
+        # the full text across as many lines as needed and a hover-
+        # overlay would be a pure repeat (NN/g: "tooltips with obvious
+        # or redundant text are not beneficial"). For pathological
+        # >200-char titles (typically a fallback first-line of a giant
+        # prompt) we DO need the escape hatch — that's the only path
+        # to recover the dropped tail.
+        if display_title != title_text:
+            title_lbl.setToolTip(title_text)
         header_h.addWidget(title_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
 
         self._preview_box.addWidget(header_row)
@@ -919,7 +928,10 @@ class RecentsDrawer(QWidget):
         bt_lbl.setStyleSheet(_STYLE_PREVIEW_BODY)
         bt_lbl.setWordWrap(True)
         bt_lbl.setMinimumWidth(0)
-        bt_lbl.setToolTip(f"Branch: {branch_raw}")
+        # No setToolTip — wordWrap already shows the full branch name
+        # across multiple lines if needed (the U+200B break hints above
+        # let it split at "/" and "-" boundaries). A hover tooltip would
+        # just repeat what's already visible.
         self._preview_box.addWidget(bt_lbl)
 
         ct_lbl = QLabel(f"💰  {_fmt_money(d.cost_usd)}  ·  {d.turn_count} turns")

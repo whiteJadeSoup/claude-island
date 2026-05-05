@@ -2379,14 +2379,22 @@ class TestHighCostRowAlert:
         btn = p._rows[1]
         # Left-side glyph is IDLE — high-cost no longer hijacks it.
         assert btn._status_glyph.state() == _RowStatusGlyph.STATE_IDLE
-        # Cost label is yellow + bold.
+        # Yellow + bold cost label IS the high-cost signal — that's
+        # the YNAB/Mint pattern referenced in expanded_window.py:
+        # the expensive value highlights itself, no separate icon
+        # or row-level tooltip needed. Pre-Layer 1, a hover-anywhere
+        # row tooltip restated the cost with vague "consider checking
+        # this" advice while covering adjacent rows; the user
+        # reported that as a UX bug. The yellow numeral remains the
+        # single visual channel.
         meta = btn.findChild(QLabel, "meta_label")
         assert meta is not None
         css = meta.styleSheet()
         assert "facc15" in css
         assert "600" in css  # font-weight bold-ish
-        # Tooltip lives on the row.
-        assert "high cumulative spend" in btn.toolTip().lower()
+        # No row-level tooltip — verify so a refactor that adds one
+        # back has to update this assertion, prompting reconsideration.
+        assert btn.toolTip() == ""
 
     def test_running_high_cost_independent_signals(self, qtbot):
         """A session that is BOTH running AND high-cost runs the

@@ -4798,15 +4798,18 @@ class ExpandedWindow(QWidget):
             if meta_label.styleSheet() != target_cost_style:
                 meta_label.setStyleSheet(target_cost_style)
 
-        # Tooltip on the row explains the warning when present so a
-        # hover anywhere on the row surfaces it.
-        if high_cost and details is not None:
-            btn.setToolTip(
-                f"High cumulative spend (${details.cost_usd:.0f}) — "
-                "consider checking this session"
-            )
-        else:
-            btn.setToolTip("")
+        # No row-level tooltip for the high-cost warning. The cost
+        # label itself is already yellow + bold via _STYLE_COST_HIGH
+        # (the YNAB/Mint pattern noted above) — that is the visible
+        # signal. A hover-anywhere tooltip on top added only a
+        # rephrased dollar amount + a vague "consider checking" line,
+        # while covering the row below the cursor (the bug the user
+        # reported in screenshot #18). Removing it follows NN/g's
+        # rule: "tooltips with obvious or redundant text are not
+        # beneficial". A future iteration can add an inline ⚠️ chip
+        # next to the cost if a stronger warning becomes warranted —
+        # the chip can carry its own tooltip without covering rows.
+        btn.setToolTip("")
 
         # Model chip. Priority:
         #   1. ``latest_model`` — the model from the most recent
