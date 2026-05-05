@@ -20,8 +20,13 @@ from claude_island.platform_.process_scanner import ProcessScanner
 
 
 def _fake_proc(pid: int, name: str, cmdline: list[str] | None = None,
-               cwd: str = "/cwd"):
-    """Build a MagicMock that quacks like psutil.Process for our scanner."""
+               cwd: str = "/cwd", status: str = "running"):
+    """Build a MagicMock that quacks like psutil.Process for our scanner.
+
+    ``status`` defaults to ``"running"`` so existing tests pass the
+    cross-platform liveness filter in ``_build``; tests exercising the
+    filter pass ``status="stopped"`` / ``"zombie"`` / ``"dead"``.
+    """
     proc = MagicMock()
     proc.info = {
         "pid": pid,
@@ -30,6 +35,7 @@ def _fake_proc(pid: int, name: str, cmdline: list[str] | None = None,
     }
     proc.cwd.return_value = cwd
     proc.cmdline = MagicMock(return_value=cmdline or [])
+    proc.status = MagicMock(return_value=status)
     return proc
 
 
@@ -285,6 +291,53 @@ def test_mixed_attached_and_orphan_passes_normal_filter(patched_process_iter):
         sessions = ProcessScanner().scan()
 
     assert {s.pid for s in sessions} == {10, 20, 30}
+
+
+# ==========================================================================
+# Status filter (cross-platform): drop processes that exist but aren't
+# actually running. Hits the macOS case where Ctrl+Z leaves a SIGSTOP'd
+# claude in psutil enumeration with a stale "busy" state file.
+# ==========================================================================
+
+def test_stopped_process_is_filtered(patched_process_iter):
+    """SIGSTOP'd claude (Ctrl+Z without bg/fg) must not surface as a
+    session — its state file freezes at "busy" and the UI would
+    otherwise flag it "active now" indefinitely."""
+    stopped = _fake_proc(100, "claude.exe", cwd="/proj", status="stopped")
+    running = _fake_proc(200, "claude.exe", cwd="/proj", status="running")
+    patched_process_iter.extend([stopped, running])
+
+    sessions = ProcessScanner().scan()
+    assert [s.pid for s in sessions] == [200]
+
+
+def test_zombie_process_is_filtered(patched_process_iter):
+    """Zombies (exited, awaiting reap) shouldn't show a row that vanishes
+    next tick."""
+    patched_process_iter.append(
+        _fake_proc(100, "claude.exe", status="zombie")
+    )
+    assert ProcessScanner().scan() == []
+
+
+def test_dead_process_is_filtered(patched_process_iter):
+    """psutil.STATUS_DEAD: terminal state, drop."""
+    patched_process_iter.append(
+        _fake_proc(100, "claude.exe", status="dead")
+    )
+    assert ProcessScanner().scan() == []
+
+
+def test_status_check_handles_no_such_process(patched_process_iter):
+    """Race: process disappears between process_iter and our status()
+    call. Drop the session — equivalent to it never having been there."""
+    import psutil
+    gone = _fake_proc(100, "claude.exe", cwd="/proj")
+    gone.status = MagicMock(side_effect=psutil.NoSuchProcess(100))
+    live = _fake_proc(200, "claude.exe", cwd="/proj")
+    patched_process_iter.extend([gone, live])
+
+    assert [s.pid for s in ProcessScanner().scan()] == [200]
 
 
 # ==========================================================================

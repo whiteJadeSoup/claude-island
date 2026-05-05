@@ -23,6 +23,20 @@ _NODE_NAMES = {"node", "node.exe"}
 # version-string changes; the cmdline check rejects false positives.
 _VERSION_LIKE = re.compile(r"^\d+\.\d+\.\d+(?:[.-]\S+)?$")
 
+# psutil status values that mean "the process exists but isn't actually
+# running Claude". Filtered out so the UI never shows a row for them.
+#   STOPPED — SIGSTOP'd (typically Ctrl+Z without bg/fg). The session's
+#     state file ~/.claude/sessions/<pid>.json freezes at whatever value
+#     was last written (often "busy"), so without this filter the row
+#     appears "active now" forever even though no work is happening.
+#   ZOMBIE / DEAD — already exited, just hasn't been reaped. Short-lived
+#     but worth dropping to avoid a flash row that vanishes next tick.
+_INACTIVE_STATUSES = frozenset({
+    psutil.STATUS_STOPPED,
+    psutil.STATUS_ZOMBIE,
+    psutil.STATUS_DEAD,
+})
+
 
 class ProcessScanner:
     """Enumerates running Claude Code processes using psutil.
@@ -39,11 +53,21 @@ class ProcessScanner:
     triggered a per-process NtQueryInformationProcess on Windows that
     measurably contributed to scan-tick CPU on busy machines (500+ procs).
 
-    Orphan filter: a "live" Claude session must still have a console
-    attached. We probe each claude.exe with AttachConsole+GetConsoleWindow;
-    if the call fails (target has no console at all) the process is
-    detached — its conPTY pipe was severed when its WT pane closed,
-    leaving the binary as a no-tty zombie. Drop those.
+    Liveness filters (two layers):
+
+    1. Status filter (cross-platform, in ``_build``): drop psutil
+       statuses STOPPED / ZOMBIE / DEAD. STOPPED catches the common
+       macOS case where a user hits Ctrl+Z without bg/fg — the process
+       still appears in ``process_iter`` but its state file freezes,
+       leaving the UI claiming the session is "busy / active now"
+       indefinitely. See ``_INACTIVE_STATUSES`` for rationale.
+
+    2. Orphan filter (Windows-only, in ``_filter_orphans``): a "live"
+       Claude session must still have a console attached. Probe each
+       claude.exe with AttachConsole+GetConsoleWindow; if it fails
+       (target has no console at all) the process is detached — its
+       conPTY pipe was severed when its WT pane closed, leaving the
+       binary as a no-tty zombie. Drop those.
 
     Why AttachConsole-success rather than UIA tab-title matching:
     matching against TabItem.Name false-positives split panes — only the
@@ -120,6 +144,12 @@ class ProcessScanner:
 
     @staticmethod
     def _build(proc: psutil.Process, info: dict) -> Session | None:
+        try:
+            if proc.status() in _INACTIVE_STATUSES:
+                return None
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return None
+
         try:
             project_path = Path(proc.cwd())
         except (psutil.AccessDenied, psutil.NoSuchProcess):
