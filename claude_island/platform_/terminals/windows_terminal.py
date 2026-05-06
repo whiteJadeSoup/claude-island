@@ -227,6 +227,7 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # because all panes within one window resolve to the same
         # hwnd; one walk per window is enough.
         if win32gui_mod is not None:
+            from claude_island.platform_.wt_pane_siblings import _dbg as _focus_dbg
             wt_hwnds: set[int] = set()
             for v in kept:
                 conpty = self._conpty_cache.get(v.session.pid)
@@ -237,6 +238,10 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 )
                 if wt_hwnd:
                     wt_hwnds.add(wt_hwnd)
+            _focus_dbg(
+                f"group() wt_hwnds={[hex(h) for h in wt_hwnds]} "
+                f"(kept={len(kept)} sessions)"
+            )
             for wt_hwnd in wt_hwnds:
                 self._sibling_tracker.update_from_active_tab(wt_hwnd)
 
@@ -440,10 +445,17 @@ def _activate_windows(
         )
         return False
 
+    from claude_island.platform_.wt_pane_siblings import _dbg
+
+    _dbg(
+        f"_activate_windows(pid={pid}, expected={expected_title!r}, "
+        f"siblings={list(sibling_sentinels)!r})"
+    )
     resolved = _resolve_console_window(pid, win32gui)
     hwnd: int | None = None
     if resolved is not None:
         hwnd, current_title = resolved
+        _dbg(f"  resolved → wt_hwnd={hex(hwnd)}, current_title={current_title!r}")
         from claude_island.platform_ import win32_console, wt_uia
 
         # Click-time reconcile: claude may have rewritten the title via
@@ -453,30 +465,36 @@ def _activate_windows(
         # before we issue the select.
         target_title = expected_title or current_title
         if expected_title and current_title != expected_title:
-            win32_console.set_console_title(pid, expected_title)
+            ok = win32_console.set_console_title(pid, expected_title)
+            _dbg(f"  set_console_title → {ok}")
             # Poll up to 200ms. If WT silently dropped our set
             # (suppressApplicationTitle profile), this returns False
             # and the select_tab_by_title below will also fail — we
             # still fall back to siblings and then plain foreground.
-            wt_uia.wait_for_tab_name(hwnd, expected_title, timeout_ms=200)
+            wait_ok = wt_uia.wait_for_tab_name(hwnd, expected_title, timeout_ms=200)
+            _dbg(f"  wait_for_tab_name → {wait_ok}")
 
         # Step 1: try our own sentinel.
         hit = wt_uia.select_tab_by_title(hwnd, target_title)
+        _dbg(f"  step1 select_tab_by_title({target_title!r}) → {hit}")
 
         # Step 2: try each cached sibling sentinel — covers
         # inactive-pane-in-split-tab.
         if not hit:
             for sib in sibling_sentinels:
-                if sib and sib != target_title and \
-                        wt_uia.select_tab_by_title(hwnd, sib):
-                    hit = True
-                    break
+                if sib and sib != target_title:
+                    sib_hit = wt_uia.select_tab_by_title(hwnd, sib)
+                    _dbg(f"  step2 select_tab_by_title({sib!r}) → {sib_hit}")
+                    if sib_hit:
+                        hit = True
+                        break
 
         # Step 3: cache miss / stale. Fire async refresh for next
         # click; don't block this one. Tracker has duck-typed
         # ``schedule_update`` (object-typed parameter so this module
         # doesn't need to import the concrete class).
         if not hit and sibling_tracker is not None:
+            _dbg("  step3 fire schedule_update (cache miss / stale)")
             try:
                 sibling_tracker.schedule_update(hwnd)
             except Exception:

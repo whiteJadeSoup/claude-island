@@ -44,10 +44,22 @@ Cache discipline
 """
 from __future__ import annotations
 
+import os
 import sys
 import threading
 from collections.abc import Callable
 from typing import Protocol
+
+
+# Set CLAUDE_ISLAND_FOCUS_DEBUG=1 to dump every cache update + click
+# decision to stderr. Used to trace why a click didn't land — DO NOT
+# leave on in production (one stderr line per wake per WT window).
+_DEBUG = os.environ.get("CLAUDE_ISLAND_FOCUS_DEBUG") == "1"
+
+
+def _dbg(msg: str) -> None:
+    if _DEBUG:
+        print(f"[ci-focus] {msg}", file=sys.stderr, flush=True)
 
 
 class _EnumerateProto(Protocol):
@@ -90,7 +102,13 @@ class PaneSiblingTracker:
         update_from_active_tab. Empty set on cache miss.
         """
         with self._lock:
-            return set(self._siblings.get(sentinel, ()))
+            result = set(self._siblings.get(sentinel, ()))
+            cache_size = len(self._siblings)
+        _dbg(
+            f"siblings_of({sentinel!r}) → {result!r} "
+            f"(cache has {cache_size} sentinels)"
+        )
+        return result
 
     def update_from_active_tab(self, wt_hwnd: int) -> None:
         """Synchronously enumerate *wt_hwnd*'s active tab and rewrite
@@ -106,6 +124,7 @@ class PaneSiblingTracker:
         is COM-marshalled.
         """
         sentinels = self._enumerate(wt_hwnd)
+        _dbg(f"update_from_active_tab(hwnd={hex(wt_hwnd)}) → {sentinels!r}")
         if not sentinels:
             return
         with self._lock:

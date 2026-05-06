@@ -291,22 +291,29 @@ def enumerate_active_tab_sentinels(hwnd: int) -> set[str]:
     if sys.platform != "win32":
         return set()
 
+    from claude_island.platform_.wt_pane_siblings import _dbg
+
     sentinels: set[str] = set()
     try:
         import uiautomation as auto
 
         root = auto.ControlFromHandle(hwnd)
         if root is None:
+            _dbg(f"enumerate({hex(hwnd)}): root is None")
             return sentinels
         tab_control = root.TabControl(searchDepth=10)
         if not tab_control.Exists(0.1):
+            _dbg(f"enumerate({hex(hwnd)}): no TabControl in UIA tree")
             return sentinels
 
         active_tab = _find_active_tab_item(tab_control, max_depth=4)
         if active_tab is None:
+            _dbg(f"enumerate({hex(hwnd)}): no active TabItem found")
             return sentinels
 
+        _dbg(f"enumerate({hex(hwnd)}): active TabItem.Name={active_tab.Name!r}")
         _collect_termcontrol_sentinels(active_tab, sentinels, max_depth=8)
+        _dbg(f"enumerate({hex(hwnd)}): collected sentinels={sentinels!r}")
     except Exception as exc:
         import sys as _sys
         print(f"[claude-island] wt_uia.enumerate_active_tab_sentinels: {exc}",
@@ -343,10 +350,18 @@ def _find_active_tab_item(elem: object, *, max_depth: int) -> object | None:
 def _collect_termcontrol_sentinels(
     elem: object, sink: set[str], *, max_depth: int,
 ) -> None:
-    """BFS under *elem*; for each TermControl-classed descendant, add
-    its Name to *sink* if it starts with ``ci:``. Bounded BFS so we
-    don't blow the stack on a pathological tree."""
+    """BFS under *elem*; for each descendant whose Name starts with
+    ``ci:``, add it to *sink*. Don't descend into TermControl-classed
+    nodes (their subtree is screen-reader text, not more sentinels)
+    but DO descend into anything else regardless of ClassName — WinUI3
+    wraps TermControl in several layers of ContentPresenter / Border
+    / Pane / etc, and we don't know all the wrapper class names. The
+    Name match is what makes us precise; ClassName is just an
+    optimization to skip TermControl's chatty interior."""
+    from claude_island.platform_.wt_pane_siblings import _dbg
+
     frontier: list[tuple[object, int]] = [(elem, 0)]
+    visited_classes: dict[str, int] = {}
     while frontier:
         node, depth = frontier.pop(0)
         try:
@@ -354,15 +369,22 @@ def _collect_termcontrol_sentinels(
         except Exception:
             continue
         for child in children:
-            if getattr(child, "ClassName", "") == "TermControl":
-                name = getattr(child, "Name", "") or ""
-                if name.startswith("ci:"):
-                    sink.add(name)
-                # TermControl's subtree is text content (XAML automation
-                # for screen-reader access) — never more TermControls.
-                continue
+            class_name = getattr(child, "ClassName", "") or ""
+            visited_classes[class_name] = visited_classes.get(class_name, 0) + 1
+            name = getattr(child, "Name", "") or ""
+            if name.startswith("ci:"):
+                sink.add(name)
+                _dbg(
+                    f"  collect: matched name={name!r} "
+                    f"class={class_name!r} depth={depth + 1}"
+                )
+                # If it's TermControl, don't descend — its subtree is
+                # text content; we won't find more sentinels there.
+                if class_name == "TermControl":
+                    continue
             if depth + 1 < max_depth:
                 frontier.append((child, depth + 1))
+    _dbg(f"  collect: visited classes (count) = {visited_classes!r}")
 
 
 def wait_for_tab_name(
