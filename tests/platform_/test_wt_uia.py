@@ -520,3 +520,143 @@ class TestSelectAnyCiTab:
             ok = wt_uia.select_any_ci_tab(hwnd=0xCAFE)
 
         assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# enumerate_active_tab_sentinels — feeds PaneSiblingTracker. Walks
+# the active TabItem's subtree and returns ci:* TermControl Names.
+# ---------------------------------------------------------------------------
+
+class TestEnumerateActiveTabSentinels:
+
+    def _make_tab_with_termcontrols(
+        self, *, is_selected: bool, term_names: list[str],
+    ) -> object:
+        """Build a TabItemControl mock containing N TermControls."""
+        tab_item = MagicMock()
+        tab_item.ControlTypeName = "TabItemControl"
+        pattern = MagicMock()
+        pattern.IsSelected = is_selected
+        tab_item.GetSelectionItemPattern.return_value = pattern
+
+        term_children = []
+        for name in term_names:
+            tc = MagicMock()
+            tc.ClassName = "TermControl"
+            tc.Name = name
+            tc.GetChildren.return_value = []  # no descent into TermControl
+            term_children.append(tc)
+        tab_item.GetChildren.return_value = term_children
+        return tab_item
+
+    def _make_root_with_tabs(self, *tab_items: object) -> tuple[MagicMock, MagicMock]:
+        """Build an auto module mock whose ControlFromHandle returns a
+        root with a TabControl whose GetChildren yields the given tabs."""
+        auto = MagicMock()
+        root = MagicMock()
+        auto.ControlFromHandle.return_value = root
+        tab_control = MagicMock()
+        tab_control.Exists.return_value = True
+        tab_control.GetChildren.return_value = list(tab_items)
+        root.TabControl.return_value = tab_control
+        return auto, tab_control
+
+    def test_collects_sentinels_from_active_tab(self):
+        """One active tab containing 2 ci:* TermControls → both
+        returned as siblings."""
+        from claude_island.platform_ import wt_uia
+
+        active = self._make_tab_with_termcontrols(
+            is_selected=True, term_names=["ci:build", "ci:mini"],
+        )
+        auto, _ = self._make_root_with_tabs(active)
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
+
+        assert result == {"ci:build", "ci:mini"}
+
+    def test_skips_inactive_tabs(self):
+        """Inactive tabs' subtrees must NOT be enumerated — those
+        TermControls aren't present in real UIA (lazy-load) and we
+        don't want to be misled by mocks that return them."""
+        from claude_island.platform_ import wt_uia
+
+        inactive = self._make_tab_with_termcontrols(
+            is_selected=False, term_names=["ci:should_not_appear"],
+        )
+        active = self._make_tab_with_termcontrols(
+            is_selected=True, term_names=["ci:active_pane"],
+        )
+        # Order matters: inactive comes first to make sure we don't
+        # just stop at the first tab.
+        auto, _ = self._make_root_with_tabs(inactive, active)
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
+
+        assert result == {"ci:active_pane"}
+        assert "ci:should_not_appear" not in result
+
+    def test_filters_non_ci_termcontrol_names(self):
+        """A TermControl whose Name doesn't start with ci: (e.g. a
+        non-claude shell, or a session whose sentinel write hasn't
+        happened yet) is ignored."""
+        from claude_island.platform_ import wt_uia
+
+        active = self._make_tab_with_termcontrols(
+            is_selected=True,
+            term_names=["ci:claude_a", "PowerShell", "ci:claude_b"],
+        )
+        auto, _ = self._make_root_with_tabs(active)
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
+
+        assert result == {"ci:claude_a", "ci:claude_b"}
+
+    def test_no_active_tab_returns_empty(self):
+        """If no TabItem reports IsSelected=True (degenerate UIA
+        state) — return empty, don't crash."""
+        from claude_island.platform_ import wt_uia
+
+        inactive_a = self._make_tab_with_termcontrols(
+            is_selected=False, term_names=["ci:x"],
+        )
+        inactive_b = self._make_tab_with_termcontrols(
+            is_selected=False, term_names=["ci:y"],
+        )
+        auto, _ = self._make_root_with_tabs(inactive_a, inactive_b)
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
+
+        assert result == set()
+
+    def test_no_tab_control_returns_empty(self):
+        """Non-WT terminal (no TabControl in UIA tree)."""
+        from claude_island.platform_ import wt_uia
+
+        auto = MagicMock()
+        root = MagicMock()
+        auto.ControlFromHandle.return_value = root
+        tab_control = MagicMock()
+        tab_control.Exists.return_value = False
+        root.TabControl.return_value = tab_control
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
+
+        assert result == set()
+
+    def test_uia_exception_returns_empty(self):
+        """Mid-walk UIA exceptions get swallowed; result empty."""
+        from claude_island.platform_ import wt_uia
+
+        auto = MagicMock()
+        auto.ControlFromHandle.side_effect = RuntimeError("UIA gone")
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
+
+        assert result == set()

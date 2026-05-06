@@ -162,10 +162,13 @@ class TestConptyCache:
         adapter.group([_view(1234)])
         adapter.group([_view(1234)])
 
+        # AttachConsole is cached; only the first call probes.
         assert patched.get_console_info.call_count == 1
-        # walk_to_visible_host is no longer called from group() — it's
-        # only invoked at focus-click time inside _activate_windows.
-        assert patched.walk.call_count == 0
+        # walk_to_visible_host now runs every group() to feed the
+        # sibling tracker (one walk per cached pid per wake). So 2
+        # ticks × 1 pid = 2 walks. This is independent of the
+        # AttachConsole cache (walk reads the cached conpty_hwnd).
+        assert patched.walk.call_count == 2
 
     def test_multiple_pids_cached_independently(self, adapter, patched):
         patched.set_console({1234: 0xAA, 5678: 0xBB})
@@ -445,6 +448,156 @@ class TestSentinelReconcile:
         assert calls == {(100, f"ci:{uuid_a}"), (200, f"ci:{uuid_b}")}
 
 
+# ── Sibling tracker integration ───────────────────────────────────────
+
+class TestSiblingTrackerIntegration:
+    """group() must drive the PaneSiblingTracker so the click-time
+    fallback chain has fresh sibling info to work with.
+
+    These tests replace the adapter's tracker with a Mock so we can
+    assert the calls without running real UIA."""
+
+    UUID = "a1b2c3d4" + "0" * 24
+
+    def test_group_calls_update_for_each_unique_wt_hwnd(
+        self, adapter, patched,
+    ):
+        """One walk_to_visible_host per distinct wt_hwnd; tracker
+        update fires for each unique hwnd (not per-pid duplicates)."""
+        # Two sessions in same WT window (same wt_hwnd).
+        patched.set_console({100: 0xA0, 200: 0xB0})
+        patched.set_walk({0xA0: 0x1111, 0xB0: 0x1111})  # same wt_hwnd
+
+        tracker = mock.Mock()
+        adapter._sibling_tracker = tracker
+
+        adapter.group([
+            _view(100, session_uuid="a" * 32),
+            _view(200, session_uuid="b" * 32),
+        ])
+
+        # Both pids walked, but only one unique wt_hwnd → one update.
+        tracker.update_from_active_tab.assert_called_once_with(0x1111)
+
+    def test_group_update_called_per_distinct_wt_hwnd(
+        self, adapter, patched,
+    ):
+        """Two WT windows → two updates (one per window)."""
+        patched.set_console({100: 0xA0, 200: 0xB0})
+        patched.set_walk({0xA0: 0x1111, 0xB0: 0x2222})  # different wt_hwnds
+
+        tracker = mock.Mock()
+        adapter._sibling_tracker = tracker
+
+        adapter.group([
+            _view(100, session_uuid="a" * 32),
+            _view(200, session_uuid="b" * 32),
+        ])
+
+        assert tracker.update_from_active_tab.call_count == 2
+        called_hwnds = {
+            c.args[0] for c in tracker.update_from_active_tab.call_args_list
+        }
+        assert called_hwnds == {0x1111, 0x2222}
+
+    def test_group_skips_update_when_walk_returns_none(
+        self, adapter, patched,
+    ):
+        """If walk_to_visible_host can't resolve (orphan / WT gone),
+        tracker is not called for that pid."""
+        patched.set_console({100: 0xA0})
+        patched.set_walk({0xA0: None})  # walk fails
+
+        tracker = mock.Mock()
+        adapter._sibling_tracker = tracker
+
+        adapter.group([_view(100, session_uuid="a" * 32)])
+
+        tracker.update_from_active_tab.assert_not_called()
+
+
+class TestFocusPassesSiblingSentinels:
+    """focus() must read the tracker's cache for the clicked view's
+    sentinel and forward it to _activate_windows."""
+
+    UUID = "a" * 32
+    EXPECTED = f"ci:{UUID}"
+
+    def test_focus_forwards_cached_siblings(self, monkeypatch):
+        """tracker.siblings_of returns {ci:sib} → focus passes it
+        through as sibling_sentinels."""
+        from claude_island.core.capabilities import FocusGranularity
+        from claude_island.platform_.terminals.windows_terminal import (
+            WindowsTerminalAdapter,
+        )
+
+        adapter = WindowsTerminalAdapter()
+        adapter.name = "windows-terminal"
+        adapter._priority = 100
+
+        # Stub the tracker.
+        tracker = mock.Mock()
+        tracker.siblings_of.return_value = {"ci:sib_uuid"}
+        adapter._sibling_tracker = tracker
+
+        # Stub _activate_windows to capture the call.
+        captured: dict = {}
+        def _stub_activate(pid, **kwargs):
+            captured["pid"] = pid
+            captured.update(kwargs)
+            return True
+        monkeypatch.setattr(
+            "claude_island.platform_.terminals.windows_terminal._activate_windows",
+            _stub_activate,
+        )
+
+        view = _view(999, session_uuid=self.UUID)
+        # Stamp the FocusGranularity / adapter_id as group() would.
+        from dataclasses import replace
+        view = replace(
+            view,
+            adapter_id=adapter.name,
+            focus_granularity=FocusGranularity.TAB,
+        )
+
+        adapter.focus(view)
+
+        tracker.siblings_of.assert_called_once_with(self.EXPECTED)
+        assert captured["pid"] == 999
+        assert captured["expected_title"] == self.EXPECTED
+        assert set(captured["sibling_sentinels"]) == {"ci:sib_uuid"}
+        # tracker reference forwarded for fire-and-forget refresh.
+        assert captured["sibling_tracker"] is tracker
+
+    def test_focus_with_no_uuid_skips_sibling_lookup(self, monkeypatch):
+        """Degraded view (empty uuid) → no sentinel → no sibling
+        cache lookup."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            WindowsTerminalAdapter,
+        )
+
+        adapter = WindowsTerminalAdapter()
+        adapter.name = "windows-terminal"
+        tracker = mock.Mock()
+        adapter._sibling_tracker = tracker
+
+        captured: dict = {}
+        def _stub_activate(pid, **kwargs):
+            captured.update(kwargs)
+            return True
+        monkeypatch.setattr(
+            "claude_island.platform_.terminals.windows_terminal._activate_windows",
+            _stub_activate,
+        )
+
+        view = _view(999, session_uuid="")
+        adapter.focus(view)
+
+        tracker.siblings_of.assert_not_called()
+        assert captured["expected_title"] is None
+        assert captured["sibling_sentinels"] == ()
+
+
 # ── _activate_windows click-time reconcile ────────────────────────────
 
 class TestActivateWindowsReconcile:
@@ -478,7 +631,6 @@ class TestActivateWindowsReconcile:
         set_console_title = mock.Mock(return_value=True)
         wait_for_tab_name = mock.Mock(return_value=True)
         select_tab_by_title = mock.Mock(return_value=True)
-        select_any_ci_tab = mock.Mock(return_value=False)
         force_foreground = mock.Mock(return_value=True)
         walk_to_visible_host = mock.Mock(return_value=0xCAFE)  # WT hwnd
 
@@ -499,10 +651,6 @@ class TestActivateWindowsReconcile:
             select_tab_by_title,
         )
         monkeypatch.setattr(
-            "claude_island.platform_.wt_uia.select_any_ci_tab",
-            select_any_ci_tab,
-        )
-        monkeypatch.setattr(
             "claude_island.platform_.window_activator._force_foreground",
             force_foreground,
         )
@@ -518,7 +666,6 @@ class TestActivateWindowsReconcile:
         bag.set_console_title = set_console_title
         bag.wait_for_tab_name = wait_for_tab_name
         bag.select_tab_by_title = select_tab_by_title
-        bag.select_any_ci_tab = select_any_ci_tab
         bag.force_foreground = force_foreground
         return bag
 
@@ -599,36 +746,42 @@ class TestActivateWindowsReconcile:
             0xCAFE, "some title",
         )
 
-    def test_select_failure_falls_back_to_select_any_ci_tab(
+    def test_sibling_sentinel_tried_when_primary_select_fails(
         self, patched_activate,
     ):
-        """Split-pane click: target session is the inactive pane of a
-        split tab; its sentinel doesn't match TabItem.Name (which
-        reflects the active sibling's sentinel). select_tab_by_title
-        returns False → fallback select_any_ci_tab catches the sibling
-        tab → user lands on the right tab, wrong pane (Alt+arrow to
-        finish)."""
+        """Split-pane click: select(my sentinel) fails → try cached
+        sibling sentinels in order → first one that hits wins."""
         from claude_island.platform_.terminals.windows_terminal import (
             _activate_windows,
         )
 
         patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
-        patched_activate.select_tab_by_title.return_value = False
-        patched_activate.select_any_ci_tab.return_value = True
+        # Primary select fails; first sibling fails too; second hits.
+        patched_activate.select_tab_by_title.side_effect = [
+            False,  # primary
+            False,  # sibling 1
+            True,   # sibling 2
+        ]
 
-        ok = _activate_windows(pid=999, expected_title=self.EXPECTED)
+        ok = _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_sentinels=("ci:sib1_uuid", "ci:sib2_uuid"),
+        )
 
         assert ok is True
-        patched_activate.select_tab_by_title.assert_called_once_with(
-            0xCAFE, self.EXPECTED,
-        )
-        patched_activate.select_any_ci_tab.assert_called_once_with(0xCAFE)
+        # 3 calls: primary + 2 siblings.
+        assert patched_activate.select_tab_by_title.call_count == 3
+        calls = [c.args for c in patched_activate.select_tab_by_title.call_args_list]
+        assert calls[0] == (0xCAFE, self.EXPECTED)
+        assert calls[1] == (0xCAFE, "ci:sib1_uuid")
+        assert calls[2] == (0xCAFE, "ci:sib2_uuid")
         patched_activate.force_foreground.assert_called_once()
 
-    def test_select_any_ci_tab_not_called_when_primary_select_succeeds(
+    def test_sibling_sentinels_not_tried_when_primary_succeeds(
         self, patched_activate,
     ):
-        """Common path: select_tab_by_title hits → no fallback needed."""
+        """Fast path: primary select hits → siblings never tried."""
         from claude_island.platform_.terminals.windows_terminal import (
             _activate_windows,
         )
@@ -636,9 +789,102 @@ class TestActivateWindowsReconcile:
         patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
         patched_activate.select_tab_by_title.return_value = True
 
-        _activate_windows(pid=999, expected_title=self.EXPECTED)
+        _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_sentinels=("ci:sib_uuid",),
+        )
 
-        patched_activate.select_any_ci_tab.assert_not_called()
+        # Only the primary call.
+        assert patched_activate.select_tab_by_title.call_count == 1
+
+    def test_tracker_schedule_update_fires_on_full_miss(
+        self, patched_activate,
+    ):
+        """All select calls miss → tracker.schedule_update is fired
+        for next-click cache repair. force_foreground still called
+        for visual feedback."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        patched_activate.select_tab_by_title.return_value = False
+
+        tracker = mock.Mock()
+
+        ok = _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_sentinels=("ci:sib_uuid",),
+            sibling_tracker=tracker,
+        )
+
+        assert ok is True  # force_foreground returned True
+        tracker.schedule_update.assert_called_once_with(0xCAFE)
+        patched_activate.force_foreground.assert_called_once()
+
+    def test_tracker_not_fired_when_primary_hits(self, patched_activate):
+        """Common path: primary hit → no schedule_update wasted."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        patched_activate.select_tab_by_title.return_value = True
+
+        tracker = mock.Mock()
+
+        _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_tracker=tracker,
+        )
+
+        tracker.schedule_update.assert_not_called()
+
+    def test_tracker_not_fired_when_sibling_hits(self, patched_activate):
+        """A sibling hit means the cache was good — don't refresh."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        patched_activate.select_tab_by_title.side_effect = [False, True]
+
+        tracker = mock.Mock()
+
+        _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_sentinels=("ci:sib_uuid",),
+            sibling_tracker=tracker,
+        )
+
+        tracker.schedule_update.assert_not_called()
+
+    def test_tracker_schedule_update_failure_does_not_raise(
+        self, patched_activate,
+    ):
+        """If schedule_update raises (degraded tracker), _activate_windows
+        must still return cleanly — tracker is best-effort."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        patched_activate.select_tab_by_title.return_value = False
+
+        tracker = mock.Mock()
+        tracker.schedule_update.side_effect = RuntimeError("tracker died")
+
+        # Should not raise.
+        _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_tracker=tracker,
+        )
+        patched_activate.force_foreground.assert_called_once()
 
 
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────

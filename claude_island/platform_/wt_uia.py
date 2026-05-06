@@ -1,6 +1,6 @@
 """Windows Terminal UI Automation operations.
 
-Single entry point for all UIA work in claude-island. Four public
+Single entry point for all UIA work in claude-island. Five public
 functions:
 
 - ``collect_wt_tab_titles`` — set of every visible TabItem.Name across
@@ -19,6 +19,12 @@ functions:
   given Name appears. Used after ``set_console_title`` to confirm WT
   picked up the OSC-propagated title change before we issue
   ``select_tab_by_title``.
+- ``enumerate_active_tab_sentinels`` — enumerate the ``ci:*`` Names
+  of every TermControl inside the active TabItem of *hwnd*. Powers
+  the sibling-pane cache that resolves the split-pane click problem
+  (only the active pane's sentinel reaches TabItem.Name; sibling
+  panes' sentinels live on their own TermControl.Name inside the
+  active tab's subtree, where WinUI3 does NOT virtualize them).
 
 All three accept and return primitives so future ConEmu / iTerm2
 backends can sit alongside without coupling to claude-island domain types.
@@ -254,6 +260,109 @@ def _find_first_ci_tab(elem: object, *, max_depth: int) -> object | None:
             if depth + 1 < max_depth:
                 frontier.append((child, depth + 1))
     return None
+
+
+def enumerate_active_tab_sentinels(hwnd: int) -> set[str]:
+    """Return the set of ``ci:*`` Names of every TermControl inside
+    the *active* TabItem under *hwnd*.
+
+    Powers ``PaneSiblingTracker``: every sentinel returned here is a
+    pane in the same WT tab as every other sentinel returned (they
+    are observed siblings). The caller records the set so that future
+    clicks on any of these sentinels can fall back to the others.
+
+    Why active-tab only: WinUI3 TabView virtualizes inactive tabs —
+    their TermControls aren't in the UIA tree until that tab becomes
+    active. The active tab's subtree IS fully populated (including
+    its inactive panes), which is exactly what we need.
+
+    ``TermControl.Name`` is set to ``StartingTitle`` by
+    ``TermControlAutomationPeer::GetNameCore``; this equals our
+    ``--title ci:{uuid}`` arg from Plan-L spawn. For Plan-O sessions
+    (sentinel set via SetConsoleTitleW after spawn), StartingTitle
+    is empty so Name falls back to the live ``Title()`` — also our
+    sentinel. Either way Name carries ``ci:*`` for the sessions we
+    care about.
+
+    Returns empty set on any failure (non-Windows, library absent,
+    no active tab found, no TermControls under it, UIA exception).
+    Never raises.
+    """
+    if sys.platform != "win32":
+        return set()
+
+    sentinels: set[str] = set()
+    try:
+        import uiautomation as auto
+
+        root = auto.ControlFromHandle(hwnd)
+        if root is None:
+            return sentinels
+        tab_control = root.TabControl(searchDepth=10)
+        if not tab_control.Exists(0.1):
+            return sentinels
+
+        active_tab = _find_active_tab_item(tab_control, max_depth=4)
+        if active_tab is None:
+            return sentinels
+
+        _collect_termcontrol_sentinels(active_tab, sentinels, max_depth=8)
+    except Exception as exc:
+        import sys as _sys
+        print(f"[claude-island] wt_uia.enumerate_active_tab_sentinels: {exc}",
+              file=_sys.stderr)
+    return sentinels
+
+
+def _find_active_tab_item(elem: object, *, max_depth: int) -> object | None:
+    """BFS for the TabItemControl whose SelectionItemPattern.IsSelected
+    is True. Returns the element or None."""
+    frontier: list[tuple[object, int]] = [(elem, 0)]
+    while frontier:
+        node, depth = frontier.pop(0)
+        try:
+            children = node.GetChildren()
+        except Exception:
+            continue
+        for child in children:
+            if getattr(child, "ControlTypeName", "") == "TabItemControl":
+                try:
+                    p = child.GetSelectionItemPattern()
+                    if p is not None and p.IsSelected:
+                        return child
+                except Exception:
+                    pass
+                # Don't descend into other TabItems either way — they
+                # are siblings in the strip, not parents of more tabs.
+                continue
+            if depth + 1 < max_depth:
+                frontier.append((child, depth + 1))
+    return None
+
+
+def _collect_termcontrol_sentinels(
+    elem: object, sink: set[str], *, max_depth: int,
+) -> None:
+    """BFS under *elem*; for each TermControl-classed descendant, add
+    its Name to *sink* if it starts with ``ci:``. Bounded BFS so we
+    don't blow the stack on a pathological tree."""
+    frontier: list[tuple[object, int]] = [(elem, 0)]
+    while frontier:
+        node, depth = frontier.pop(0)
+        try:
+            children = node.GetChildren()
+        except Exception:
+            continue
+        for child in children:
+            if getattr(child, "ClassName", "") == "TermControl":
+                name = getattr(child, "Name", "") or ""
+                if name.startswith("ci:"):
+                    sink.add(name)
+                # TermControl's subtree is text content (XAML automation
+                # for screen-reader access) — never more TermControls.
+                continue
+            if depth + 1 < max_depth:
+                frontier.append((child, depth + 1))
 
 
 def wait_for_tab_name(
