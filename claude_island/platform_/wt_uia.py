@@ -1,6 +1,6 @@
 """Windows Terminal UI Automation operations.
 
-Single entry point for all UIA work in claude-island. Three public
+Single entry point for all UIA work in claude-island. Four public
 functions:
 
 - ``collect_wt_tab_titles`` — set of every visible TabItem.Name across
@@ -8,6 +8,12 @@ functions:
   claude.exe processes (a process whose console title doesn't appear
   in any visible WT tab is no longer rendered anywhere — it's an
   orphan, hide it).
+- ``list_ci_tab_names`` — set of every ``ci:*`` TabItem.Name in
+  *hwnd*'s tab strip. Used by the WT adapter's group() to decide
+  whether same-cwd sessions in one window are split panes or just
+  separate tabs — sessions whose sentinel doesn't appear here are
+  inactive panes (no own TabItem), so they belong with their
+  active sibling in a multi-view group.
 - ``select_tab_by_title`` — within a specific WT window's UIA tree,
   bring the matching TabItem to the foreground. Used by the WT
   adapter's focus path on click.
@@ -179,6 +185,58 @@ def select_tab_by_title(hwnd: int, title: str) -> bool:
         print(f"[claude-island] wt_uia.select_tab_by_title: {exc}",
               file=_sys.stderr)
         return False
+
+
+def list_ci_tab_names(hwnd: int) -> set[str]:
+    """Return the set of ``ci:*`` TabItem.Name values in *hwnd*'s
+    tab strip.
+
+    Used by the WT adapter's group() to decide whether two same-cwd
+    same-window sessions are real split panes (≥1 sentinel missing
+    from the set) vs. separate tabs that happen to share cwd (every
+    sentinel present). Latter case was the dev/dev2 over-grouping
+    bug that motivated the singleton-only fix earlier in this branch;
+    we now restore cwd-based grouping but use this signal to detect
+    and skip the false-positive case.
+
+    Returns empty set on any failure or non-Windows.
+    """
+    if sys.platform != "win32":
+        return set()
+    out: set[str] = set()
+    try:
+        import uiautomation as auto
+
+        root = auto.ControlFromHandle(hwnd)
+        if root is None:
+            return out
+        tab_control = root.TabControl(searchDepth=10)
+        if not tab_control.Exists(0.1):
+            return out
+
+        # BFS bounded — TabItemControls live a few levels under
+        # TabControl (WinUI3 wraps in ListView).
+        frontier: list[tuple[object, int]] = [(tab_control, 0)]
+        while frontier:
+            node, depth = frontier.pop(0)
+            try:
+                children = node.GetChildren()
+            except Exception:
+                continue
+            for child in children:
+                if getattr(child, "ControlTypeName", "") == "TabItemControl":
+                    name = getattr(child, "Name", "") or ""
+                    if name.startswith("ci:"):
+                        out.add(name)
+                    # Don't descend — TabItem subtree is label widgets.
+                    continue
+                if depth + 1 < 4:
+                    frontier.append((child, depth + 1))
+    except Exception as exc:
+        import sys as _sys
+        print(f"[claude-island] wt_uia.list_ci_tab_names: {exc}",
+              file=_sys.stderr)
+    return out
 
 
 def wait_for_tab_name(

@@ -76,6 +76,15 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # worker thread (reactivex EventLoopScheduler), so no lock.
         self._conpty_cache: dict[int, int] = {}
 
+        # pid → SessionView. Populated in group() at every wake; read
+        # in focus() to compute cwd-matched sibling sentinels for the
+        # inactive-pane fallback. focus() runs on Qt main thread; the
+        # write in group() runs on the snapshotter worker — but
+        # dict assignment of full snapshot (`self._view_cache = {...}`)
+        # is atomic at the GIL level (single bytecode op), so no lock
+        # needed for this read/write pattern.
+        self._view_cache: dict[int, SessionView] = {}
+
     # ── can_handle ──────────────────────────────────────────────────────
 
     def can_handle(self, session: Session) -> bool:
@@ -212,11 +221,19 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         if not kept:
             kept = list(views)
 
-        # Bucket by wt_hwnd. Views whose hwnd resolves go into per-
-        # window groups; unresolvable views become singleton groups so
-        # they never silently disappear.
-        buckets: dict[int, list[SessionView]] = {}
+        # Bucket by (wt_hwnd, normalized_cwd). Same WT window AND same
+        # project → likely split panes of one tab → group. Different
+        # cwd → certainly different tabs (panes of one tab share cwd
+        # by construction; they're started from `claude` in the same
+        # working dir). Worktree paths are normalised back to their
+        # parent repo (a subdirectory of the project), since
+        # claude-code split-pane between main repo + worktree is a
+        # common workflow.
+        from claude_island.core.snapshot import _normalize_project_path
+        from claude_island.platform_ import wt_uia
+        buckets: dict[tuple, list[SessionView]] = {}
         singletons: list[SessionView] = []
+        view_wt_hwnd: dict[int, int] = {}  # pid → wt_hwnd, for sentinel-detect
         for v in kept:
             wt_hwnd: int | None = None
             if win32gui_mod is not None:
@@ -226,12 +243,38 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                         conpty, win32gui_mod,
                     )
             if wt_hwnd:
-                buckets.setdefault(wt_hwnd, []).append(v)
+                view_wt_hwnd[v.session.pid] = wt_hwnd
+                key = (wt_hwnd, _normalize_project_path(v.project_path))
+                buckets.setdefault(key, []).append(v)
             else:
                 singletons.append(v)
 
+        # Sentinel-presence detection: for each multi-view bucket, check
+        # whether ALL views' sentinels appear in the wt_hwnd's
+        # TabItem.Names. If yes → these are separate tabs that happen
+        # to share cwd (each is its own active pane) → split into
+        # singletons. If at least one is missing → that view is an
+        # inactive pane → keep grouped (it's truly co-pane with the
+        # active sibling whose sentinel IS in TabItem.Name).
+        # Single UIA call per wt_hwnd (cached across buckets).
+        tab_names_by_hwnd: dict[int, set[str]] = {}
+        for (wt_hwnd, _cwd), batch in list(buckets.items()):
+            if len(batch) <= 1:
+                continue  # singleton bucket: nothing to detect
+            if wt_hwnd not in tab_names_by_hwnd:
+                tab_names_by_hwnd[wt_hwnd] = wt_uia.list_ci_tab_names(wt_hwnd)
+            tab_names = tab_names_by_hwnd[wt_hwnd]
+            sentinels = {sentinel_title(v.session_uuid) for v in batch}
+            sentinels.discard(None)
+            if sentinels and sentinels.issubset(tab_names):
+                # All sessions are own-tab active panes — separate
+                # tabs that happen to share cwd. Demote to singletons.
+                key = (wt_hwnd, _cwd)
+                del buckets[key]
+                singletons.extend(batch)
+
         result: list[SessionGroup] = []
-        for wt_hwnd, batch in buckets.items():
+        for (wt_hwnd, cwd_norm), batch in buckets.items():
             stamped = tuple(
                 replace(
                     v,
@@ -241,8 +284,12 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 )
                 for v in batch
             )
+            # group_id includes a hash-stable suffix based on cwd so
+            # the UI's per-group_id card cache survives wakes. Use
+            # the normalised cwd so worktree → parent renames don't
+            # generate a new group_id mid-session.
             result.append(SessionGroup(
-                group_id=f"wt:{wt_hwnd}",
+                group_id=f"wt:{wt_hwnd}:{cwd_norm}",
                 title_hint=None,
                 adapter_id=self.name,
                 views=stamped,
@@ -260,6 +307,14 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 adapter_id=self.name,
                 views=(stamped,),
             ))
+
+        # Snapshot the view cache for click-time sibling lookup. Built
+        # from `kept` (orphan-filtered, post-reconcile) so focus() can
+        # translate sibling pids into SessionViews → cwd / session_uuid
+        # → cwd-matched sibling sentinels for the inactive-pane fallback.
+        # Atomic dict swap; no lock needed for the worker-write /
+        # Qt-main-read pattern.
+        self._view_cache = {v.session.pid: v for v in kept}
         return result
 
     # ── FOCUS ────────────────────────────────────────────────────────────
@@ -273,16 +328,49 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         sentinel if claude or the user has clobbered it since group()
         last reconciled.
 
-        ``siblings`` (pid list) is preserved for dispatcher kwargs
-        uniformity — ignored here since wt_hwnd-grouping doesn't need
-        it (UI groups same-window sessions visually; click on any of
-        them does best-effort tab select).
+        Inactive-pane fallback: when the click target is the inactive
+        pane of a split tab, its sentinel doesn't appear in any
+        TabItem.Name. We pre-compute the sentinels of *same-cwd
+        siblings* (other claude sessions in the same WT window whose
+        cwd matches view's cwd — a strong signal they're split panes
+        of the same tab, since users usually split panes within one
+        project) and pass them as a fallback sentinel list. One of
+        them is likely the active pane of the click target's tab,
+        and selecting its sentinel switches WT to the right tab.
+        User then uses Alt+arrow to focus the right pane.
+
+        We ignore the cross-cwd siblings (same wt_hwnd but different
+        cwd) — those are almost certainly separate tabs, so trying
+        their sentinels would just take us to the wrong tab.
         """
+        from claude_island.core.snapshot import _normalize_project_path
         from claude_island.platform_.wt_session_title import sentinel_title
         expected = sentinel_title(view.session_uuid)
+
+        # Translate sibling pids → SessionViews via the cache built in
+        # group(). Filter to same-cwd siblings only (they're the
+        # likely-pane-mate candidates), compute their sentinels.
+        # Normalize worktree paths back to their parent repo so e.g.
+        # `D:\proj\.claude\worktrees\feat-x` matches `D:\proj` —
+        # claude-code split panes between main repo and worktree are
+        # very common (verified empirically: build-mini-cc + its
+        # worktree share a WT split tab).
+        my_cwd = _normalize_project_path(view.project_path)
+        sib_sentinels: list[str] = []
+        for sib_pid in siblings:
+            sib_view = self._view_cache.get(sib_pid)
+            if sib_view is None:
+                continue
+            if _normalize_project_path(sib_view.project_path) != my_cwd:
+                continue  # different project → almost certainly a different tab
+            sib_sentinel = sentinel_title(sib_view.session_uuid)
+            if sib_sentinel and sib_sentinel != expected:
+                sib_sentinels.append(sib_sentinel)
+
         return _activate_windows(
             view.session.pid,
             expected_title=expected,
+            sibling_sentinels=tuple(sib_sentinels),
         )
 
     # ── LAUNCH ───────────────────────────────────────────────────────────
@@ -372,6 +460,7 @@ def _activate_windows(
     pid: int,
     *,
     expected_title: str | None = None,
+    sibling_sentinels: tuple[str, ...] = (),
 ) -> bool:
     """Resolve console window → (re-assert sentinel title if needed)
     → UIA tab select → SetForegroundWindow.
@@ -384,22 +473,30 @@ def _activate_windows(
     mirrors the change into TabItem.Name (or 200ms times out — typical
     when the user's profile has ``suppressApplicationTitle: true``).
 
+    ``sibling_sentinels``: same-cwd same-wt-window claude sessions'
+    sentinels, pre-filtered by ``focus()``. Used as the inactive-pane
+    fallback — see the chain below.
+
     Tab-select chain:
       1. ``select_tab_by_title(expected)`` — exact match. Hits the
          active-pane / single-pane case.
-      2. ``_force_foreground(hwnd)`` — runs unconditionally after
-         step 1, so the user always gets visual feedback (WT window
-         comes to foreground) even if the precise tab select missed.
-         Inactive panes in split tabs land here: WT lands on whatever
-         tab is currently active in that window; the user uses
-         WT's own Alt+arrow to focus the right pane.
+      2. If step 1 misses (inactive pane in split tab), try each
+         sibling sentinel in order. Same-cwd siblings are very
+         likely co-pane: WT users typically split-pane within one
+         project, so a sibling that shares cwd is almost certainly
+         the active pane of the click target's tab. Selecting its
+         sentinel switches WT to the right tab; user uses Alt+arrow
+         to focus the intended pane.
+      3. ``_force_foreground(hwnd)`` — runs unconditionally after
+         step 1/2 so the WT window itself always comes to foreground.
 
     Per-pane disambiguation of inactive split panes is impossible
     from outside WT (TabItem.Name reflects only the active pane;
     inactive panes have no UIA presence — see scripts/dump_wt_uia.py
     output and TerminalApp/TabManagement.cpp's _UpdatedSelectedTab).
-    The UI compensates by visually grouping same-window sessions in
-    one card so users understand why the precise pane wasn't reached.
+    The cwd filter on sibling_sentinels prevents the click from
+    landing on an unrelated tab (e.g. another project's session in
+    the same WT window).
 
     Returns whatever ``_force_foreground`` returns when we found a
     host hwnd — even if the tab select failed, raising the WT window
@@ -437,7 +534,16 @@ def _activate_windows(
             # still fall back to plain foreground at the end.
             wt_uia.wait_for_tab_name(hwnd, expected_title, timeout_ms=200)
 
-        wt_uia.select_tab_by_title(hwnd, target_title)
+        if not wt_uia.select_tab_by_title(hwnd, target_title):
+            # Inactive-pane fallback: try cwd-matched sibling
+            # sentinels (caller-filtered to same-cwd same-wt-window).
+            # One of them is likely the active pane of the click
+            # target's tab — selecting its sentinel switches WT to
+            # the right tab.
+            for sib_name in sibling_sentinels:
+                if sib_name and sib_name != target_title and \
+                        wt_uia.select_tab_by_title(hwnd, sib_name):
+                    break
     else:
         from claude_island.platform_.window_activator import _ancestor_pids, _find_window_for_pids
         candidate_pids = _ancestor_pids(pid)

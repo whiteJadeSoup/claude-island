@@ -85,6 +85,11 @@ def patched(monkeypatch):
     # Default: pretend SetConsoleTitleW always succeeds. Tests that
     # need to inspect the calls assert against this mock.
     set_console_title = mock.Mock(return_value=True)
+    # Default: no ci:* TabItem.Names visible — sentinel-presence
+    # detection treats every multi-view bucket as "has inactive
+    # panes" → keeps grouped. Tests that exercise the dev/dev2
+    # demote-to-singleton path stage a non-empty return.
+    list_ci_tab_names = mock.Mock(return_value=set())
 
     monkeypatch.setattr(
         "claude_island.platform_.win32_console.get_console_info",
@@ -95,6 +100,10 @@ def patched(monkeypatch):
         set_console_title,
     )
     monkeypatch.setattr(
+        "claude_island.platform_.wt_uia.list_ci_tab_names",
+        list_ci_tab_names,
+    )
+    monkeypatch.setattr(
         "claude_island.platform_.window_activator.walk_to_visible_host",
         walk,
     )
@@ -103,6 +112,7 @@ def patched(monkeypatch):
         def __init__(self):
             self.get_console_info = get_console_info
             self.set_console_title = set_console_title
+            self.list_ci_tab_names = list_ci_tab_names
             self.walk = walk
 
         def set_console(
@@ -262,50 +272,102 @@ class TestCacheGC:
 # ── Singleton-grouping invariant ──────────────────────────────────────
 
 class TestWtHwndGrouping:
-    """Plan D: bucket views by wt_hwnd so the UI groups same-window
-    sessions in one card. Per-pane targeting of inactive split panes
-    is impossible from outside WT (verified via scripts/dump_wt_uia.py
-    — TermControl.Name is the live console title, not our sentinel,
-    and inactive panes are physically absent from the UIA tree).
-    Window-grouping makes the imprecision visible to users."""
+    """Bucket views by (wt_hwnd, normalized_cwd). Sessions sharing
+    the same WT window AND same normalised cwd are likely split
+    panes (claude-code split-pane within one project is the common
+    workflow). Sentinel-presence detection demotes false positives
+    (separate tabs that happen to share cwd) back to singletons —
+    that's the dev/dev2 over-grouping case from earlier in this
+    branch."""
 
-    def test_two_sessions_in_same_window_share_one_group(self, adapter, patched):
-        """Both pids walk to the same wt_hwnd → one SessionGroup with
-        two views. UI renders this as one card."""
+    def test_same_window_same_cwd_groups_when_some_inactive(
+        self, adapter, patched,
+    ):
+        """build-mini-cc + worktree pane: same wt_hwnd, same
+        normalised cwd. One sentinel is in TabItem.Names (the active
+        pane) and one is missing (the inactive pane). → group them."""
         patched.set_console({100: 0xA0, 200: 0xB0})
-        patched.set_walk({0xA0: 0x1111, 0xB0: 0x1111})  # same wt_hwnd
+        patched.set_walk({0xA0: 0x1111, 0xB0: 0x1111})
+        # Only one sentinel visible in TabItems → other is inactive
+        # pane → keep grouped.
+        patched.list_ci_tab_names.return_value = {f"ci:{'a' * 32}"}
 
         groups = adapter.group([
-            _view(100, session_uuid="a" * 32),
-            _view(200, session_uuid="b" * 32),
+            _view(100, "C:\\proj", session_uuid="a" * 32),
+            _view(200, "C:\\proj", session_uuid="b" * 32),
         ])
 
         assert len(groups) == 1
-        assert groups[0].group_id == f"wt:{0x1111}"
+        assert groups[0].group_id == f"wt:{0x1111}:C:\\proj"
         all_pids = {v.pid for v in groups[0].views}
         assert all_pids == {100, 200}
 
+    def test_dev_dev2_separate_tabs_demote_to_singletons(
+        self, adapter, patched,
+    ):
+        """dev + dev2 in same WT window same cwd as SEPARATE tabs:
+        both sentinels visible in TabItem.Names → both are own-tab
+        active panes → demote to singletons (regression of the
+        over-grouping bug)."""
+        patched.set_console({100: 0xA0, 200: 0xB0})
+        patched.set_walk({0xA0: 0x1111, 0xB0: 0x1111})
+        # Both sentinels present in TabItems → independent tabs.
+        patched.list_ci_tab_names.return_value = {
+            f"ci:{'a' * 32}", f"ci:{'b' * 32}",
+        }
+
+        groups = adapter.group([
+            _view(100, "C:\\proj", session_uuid="a" * 32),
+            _view(200, "C:\\proj", session_uuid="b" * 32),
+        ])
+
+        # Demoted to singletons — two independent cards.
+        assert len(groups) == 2
+        assert {g.group_id for g in groups} == {
+            "wt:singleton:100", "wt:singleton:200",
+        }
+
     def test_distinct_wt_windows_give_distinct_groups(self, adapter, patched):
-        """Two pids walking to different wt_hwnds → two groups, one
-        each. Two physical WT windows in the UI."""
+        """Two pids in different WT windows → two groups, never
+        merged regardless of cwd."""
         patched.set_console({100: 0xA0, 200: 0xB0})
         patched.set_walk({0xA0: 0x1111, 0xB0: 0x2222})
 
         groups = adapter.group([
-            _view(100, session_uuid="a" * 32),
-            _view(200, session_uuid="b" * 32),
+            _view(100, "C:\\proj", session_uuid="a" * 32),
+            _view(200, "C:\\proj", session_uuid="b" * 32),
         ])
 
         assert len(groups) == 2
         ids = {g.group_id for g in groups}
-        assert ids == {f"wt:{0x1111}", f"wt:{0x2222}"}
+        assert ids == {f"wt:{0x1111}:C:\\proj", f"wt:{0x2222}:C:\\proj"}
+
+    def test_distinct_cwds_in_same_window_give_distinct_groups(
+        self, adapter, patched,
+    ):
+        """Two pids in same WT window but different cwds → two groups.
+        Different cwd is a strong signal they're not split panes
+        (panes share cwd by construction)."""
+        patched.set_console({100: 0xA0, 200: 0xB0})
+        patched.set_walk({0xA0: 0x1111, 0xB0: 0x1111})
+
+        groups = adapter.group([
+            _view(100, "C:\\proj_a", session_uuid="a" * 32),
+            _view(200, "C:\\proj_b", session_uuid="b" * 32),
+        ])
+
+        assert len(groups) == 2
+        ids = {g.group_id for g in groups}
+        assert ids == {
+            f"wt:{0x1111}:C:\\proj_a",
+            f"wt:{0x1111}:C:\\proj_b",
+        }
 
     def test_unresolved_wt_hwnd_falls_back_to_singleton(self, adapter, patched):
-        """If walk_to_visible_host returns None (orphan WT, conpty in
-        flux), the view becomes a singleton group keyed by pid so it
-        never disappears from the UI."""
+        """walk_to_visible_host returns None → singleton (no card
+        disappears even when WT host can't be resolved)."""
         patched.set_console({100: 0xA0})
-        patched.set_walk({0xA0: None})  # walk fails
+        patched.set_walk({0xA0: None})
 
         groups = adapter.group([_view(100, session_uuid="a" * 32)])
 
@@ -314,25 +376,26 @@ class TestWtHwndGrouping:
 
     def test_orphan_dropped_resolved_views_grouped(self, adapter, patched):
         """Orphan filter still works: pid whose AttachConsole fails
-        is dropped; the rest are bucketed normally."""
+        is dropped; the rest are bucketed by (wt_hwnd, cwd)."""
         patched.set_console_per_pid({
             100: (0xA0, "Claude Code"),
-            200: None,                       # orphan
+            200: None,
             300: (0xC0, "Claude Code"),
         })
-        patched.set_walk({0xA0: 0x1111, 0xC0: 0x1111})  # both in one window
+        patched.set_walk({0xA0: 0x1111, 0xC0: 0x1111})
 
         groups = adapter.group([
-            _view(100, session_uuid="a" * 32),
-            _view(200, session_uuid="b" * 32),
-            _view(300, session_uuid="c" * 32),
+            _view(100, "C:\\proj", session_uuid="a" * 32),
+            _view(200, "C:\\proj", session_uuid="b" * 32),
+            _view(300, "C:\\proj", session_uuid="c" * 32),
         ])
 
         kept_pids = {v.pid for g in groups for v in g.views}
         assert kept_pids == {100, 300}  # 200 dropped
-        # Both survivors share one wt_hwnd → one group.
+        # Default mock: list_ci_tab_names returns {} → kept grouped
+        # (treated as "has inactive panes since no sentinels visible").
         assert len(groups) == 1
-        assert groups[0].group_id == f"wt:{0x1111}"
+        assert groups[0].group_id == f"wt:{0x1111}:C:\\proj"
 
 
 # ── Plan O sentinel reconcile ─────────────────────────────────────────
@@ -610,6 +673,170 @@ class TestActivateWindowsReconcile:
         patched_activate.select_tab_by_title.assert_called_once_with(
             0xCAFE, "some title",
         )
+
+    def test_inactive_pane_falls_back_to_sibling_sentinel(self, patched_activate):
+        """The build-mini-cc bug: target session's sentinel doesn't
+        match any TabItem.Name (it's the inactive pane in a split tab).
+        Step 1 select misses; step 2 tries each cwd-matched sibling
+        sentinel — first hit wins. The matching sibling IS the active
+        pane of the click target's tab, so WT switches to the right
+        tab. User uses Alt+arrow inside WT to focus the target pane."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        # Primary select misses (inactive pane).
+        # First sibling also misses (different tab).
+        # Second sibling hits (same tab — active pane sibling).
+        patched_activate.select_tab_by_title.side_effect = [
+            False, False, True,
+        ]
+
+        ok = _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_sentinels=("ci:other_tab_uuid", "ci:our_tab_uuid"),
+        )
+
+        assert ok is True
+        # 3 select calls: primary + 2 siblings.
+        assert patched_activate.select_tab_by_title.call_count == 3
+        calls = [c.args for c in patched_activate.select_tab_by_title.call_args_list]
+        assert calls[0] == (0xCAFE, self.EXPECTED)
+        assert calls[1] == (0xCAFE, "ci:other_tab_uuid")
+        assert calls[2] == (0xCAFE, "ci:our_tab_uuid")
+        patched_activate.force_foreground.assert_called_once()
+
+    def test_sibling_sentinels_skipped_when_primary_hits(self, patched_activate):
+        """Common path: primary select hits → siblings never tried.
+        Avoids wasted UIA work for the active-pane / single-pane case."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        patched_activate.select_tab_by_title.return_value = True
+
+        _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_sentinels=("ci:sib_a", "ci:sib_b"),
+        )
+
+        # Only the primary call.
+        assert patched_activate.select_tab_by_title.call_count == 1
+
+    def test_sibling_loop_skips_self_sentinel(self, patched_activate):
+        """If a sibling sentinel happens to equal target_title (defensive
+        — caller should already filter, but double-check), skip without
+        an extra UIA roundtrip."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        patched_activate.select_tab_by_title.side_effect = [False, True]
+
+        _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_sentinels=(self.EXPECTED, "ci:other"),
+        )
+
+        # 2 calls only: primary + the non-self sibling. Self-sentinel skipped.
+        assert patched_activate.select_tab_by_title.call_count == 2
+        calls = [c.args for c in patched_activate.select_tab_by_title.call_args_list]
+        assert calls[1] == (0xCAFE, "ci:other")
+
+
+# ── focus() cwd-filtered sibling sentinel computation ─────────────────
+
+class TestFocusCwdFilteredSiblings:
+    """focus(view, siblings=[pids]) translates pids → SessionViews via
+    _view_cache and filters to same-cwd siblings only. Cross-cwd
+    siblings are dropped because they're almost certainly separate
+    tabs (different projects, not split panes of the same tab)."""
+
+    UUID = "a1b2c3d4" + "0" * 24
+    EXPECTED = f"ci:{UUID}"
+
+    def test_only_same_cwd_siblings_passed_to_activate(self, monkeypatch):
+        """4 siblings: 2 in same cwd, 2 in different cwd. Only the
+        2 same-cwd sentinels reach _activate_windows."""
+        from dataclasses import replace
+        from claude_island.core.capabilities import FocusGranularity
+        from claude_island.platform_.terminals.windows_terminal import (
+            WindowsTerminalAdapter,
+        )
+
+        adapter = WindowsTerminalAdapter()
+        adapter.name = "windows-terminal"
+
+        clicked_view = replace(
+            _view(999, cwd="D:\\proj_a", session_uuid=self.UUID),
+            adapter_id=adapter.name,
+            focus_granularity=FocusGranularity.TAB,
+        )
+        # Pre-populate the cache as group() would. Mark same-cwd vs
+        # different-cwd siblings.
+        adapter._view_cache = {
+            999: clicked_view,
+            100: _view(100, cwd="D:\\proj_a", session_uuid="a" * 32),  # same cwd
+            200: _view(200, cwd="D:\\proj_b", session_uuid="b" * 32),  # diff cwd
+            300: _view(300, cwd="D:\\proj_a", session_uuid="c" * 32),  # same cwd
+            400: _view(400, cwd="D:\\proj_c", session_uuid="d" * 32),  # diff cwd
+        }
+
+        captured: dict = {}
+        def _stub_activate(pid, **kw):
+            captured.update(kw)
+            captured["pid"] = pid
+            return True
+        monkeypatch.setattr(
+            "claude_island.platform_.terminals.windows_terminal._activate_windows",
+            _stub_activate,
+        )
+
+        adapter.focus(clicked_view, siblings=[100, 200, 300, 400])
+
+        assert captured["pid"] == 999
+        assert captured["expected_title"] == self.EXPECTED
+        # Only same-cwd siblings, deduped from the clicked view.
+        sibs = set(captured["sibling_sentinels"])
+        assert sibs == {f"ci:{'a' * 32}", f"ci:{'c' * 32}"}
+
+    def test_focus_with_uncached_sibling_pid_skipped(self, monkeypatch):
+        """Sibling pid not in cache (race: died between group() and
+        click) → silently skipped, no crash."""
+        from dataclasses import replace
+        from claude_island.core.capabilities import FocusGranularity
+        from claude_island.platform_.terminals.windows_terminal import (
+            WindowsTerminalAdapter,
+        )
+
+        adapter = WindowsTerminalAdapter()
+        adapter.name = "windows-terminal"
+
+        clicked_view = replace(
+            _view(999, cwd="D:\\x", session_uuid=self.UUID),
+            adapter_id=adapter.name,
+            focus_granularity=FocusGranularity.TAB,
+        )
+        adapter._view_cache = {999: clicked_view}  # no siblings cached
+
+        captured: dict = {}
+        def _stub_activate(pid, **kw):
+            captured.update(kw)
+            return True
+        monkeypatch.setattr(
+            "claude_island.platform_.terminals.windows_terminal._activate_windows",
+            _stub_activate,
+        )
+
+        adapter.focus(clicked_view, siblings=[111, 222])  # both uncached
+
+        assert captured["sibling_sentinels"] == ()
 
 
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────
