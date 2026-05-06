@@ -56,6 +56,15 @@ from typing import Protocol
 # leave on in production (one stderr line per wake per WT window).
 _DEBUG = os.environ.get("CLAUDE_ISLAND_FOCUS_DEBUG") == "1"
 
+# PowerShell on Windows defaults stderr to UTF-16 LE — when redirected
+# (`2> file.log`) the text comes out with U+0000 spacing every other
+# byte and is unreadable. Force stderr to UTF-8 so logs are usable.
+if _DEBUG and sys.platform == "win32":
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 
 def _dbg(msg: str) -> None:
     if _DEBUG:

@@ -528,121 +528,133 @@ class TestSelectAnyCiTab:
 # ---------------------------------------------------------------------------
 
 class TestEnumerateActiveTabSentinels:
+    """The new BFS algorithm: walk root's subtree, skip TabItem
+    children (tab strip labels, not pane content), collect Name=ci:*.
 
-    def _make_tab_with_termcontrols(
-        self, *, is_selected: bool, term_names: list[str],
-    ) -> object:
-        """Build a TabItemControl mock containing N TermControls."""
-        tab_item = MagicMock()
-        tab_item.ControlTypeName = "TabItemControl"
-        pattern = MagicMock()
-        pattern.IsSelected = is_selected
-        tab_item.GetSelectionItemPattern.return_value = pattern
+    Realistic WT UIA tree shape we're emulating:
+    ┌─ root (WT window)
+    │  ├─ TabControl (the tab strip)
+    │  │   └─ TabItem (label: Image + TextBlock + Button)  ← SKIPPED
+    │  │   └─ TabItem ...                                  ← SKIPPED
+    │  └─ ContentArea (content of active tab)
+    │      └─ Pane (split layout)
+    │          ├─ TermControl(Name="ci:build")
+    │          └─ TermControl(Name="ci:mini")
+    """
 
-        term_children = []
-        for name in term_names:
-            tc = MagicMock()
-            tc.ClassName = "TermControl"
-            tc.Name = name
-            tc.GetChildren.return_value = []  # no descent into TermControl
-            term_children.append(tc)
-        tab_item.GetChildren.return_value = term_children
-        return tab_item
+    def _term(self, name: str) -> MagicMock:
+        tc = MagicMock()
+        tc.ControlTypeName = "PaneControl"  # WT TermControl is Pane control type
+        tc.ClassName = "TermControl"
+        tc.Name = name
+        tc.GetChildren.return_value = []  # we skip TermControl subtree
+        return tc
 
-    def _make_root_with_tabs(self, *tab_items: object) -> tuple[MagicMock, MagicMock]:
-        """Build an auto module mock whose ControlFromHandle returns a
-        root with a TabControl whose GetChildren yields the given tabs."""
+    def _tab_strip_label(self, label_name: str) -> MagicMock:
+        """A TabItemControl in the tab strip — has Name (the tab
+        label) but its subtree is just label widgets, NOT panes."""
+        tab = MagicMock()
+        tab.ControlTypeName = "TabItemControl"
+        tab.ClassName = "TabViewItem"
+        tab.Name = label_name
+        # Children are label widgets — Image, TextBlock, Button.
+        # In real WT, TextBlock.Name == TabItem.Name (the same
+        # sentinel string). If our BFS descends into TabItem, it
+        # would collect this TextBlock as a false sentinel — which
+        # is exactly the bug the new "skip TabItem subtree" guards
+        # against.
+        textblock = MagicMock()
+        textblock.ControlTypeName = "TextControl"
+        textblock.ClassName = "TextBlock"
+        textblock.Name = label_name  # ← same string, would pollute
+        textblock.GetChildren.return_value = []
+        tab.GetChildren.return_value = [textblock]
+        return tab
+
+    def _wrapper(self, *children: object) -> MagicMock:
+        """A no-Name layout wrapper (ContentPresenter / Border /
+        Grid / Pane) — we descend through these."""
+        w = MagicMock()
+        w.ControlTypeName = "PaneControl"
+        w.ClassName = "ContentPresenter"
+        w.Name = ""
+        w.GetChildren.return_value = list(children)
+        return w
+
+    def _root(self, *children: object) -> tuple[MagicMock, MagicMock]:
         auto = MagicMock()
         root = MagicMock()
+        root.GetChildren.return_value = list(children)
         auto.ControlFromHandle.return_value = root
-        tab_control = MagicMock()
-        tab_control.Exists.return_value = True
-        tab_control.GetChildren.return_value = list(tab_items)
-        root.TabControl.return_value = tab_control
-        return auto, tab_control
+        return auto, root
 
-    def test_collects_sentinels_from_active_tab(self):
-        """One active tab containing 2 ci:* TermControls → both
-        returned as siblings."""
+    def test_collects_active_tab_panes(self):
+        """Active tab content area contains 2 panes → both collected."""
         from claude_island.platform_ import wt_uia
 
-        active = self._make_tab_with_termcontrols(
-            is_selected=True, term_names=["ci:build", "ci:mini"],
+        # Realistic shape: tab strip + content area as siblings.
+        tab_strip = self._wrapper(
+            self._tab_strip_label("ci:build"),
         )
-        auto, _ = self._make_root_with_tabs(active)
+        content = self._wrapper(
+            self._wrapper(  # split-pane container
+                self._term("ci:build"),
+                self._term("ci:mini"),
+            ),
+        )
+        auto, _ = self._root(tab_strip, content)
 
         with patch.dict("sys.modules", {"uiautomation": auto}):
             result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
 
         assert result == {"ci:build", "ci:mini"}
 
-    def test_skips_inactive_tabs(self):
-        """Inactive tabs' subtrees must NOT be enumerated — those
-        TermControls aren't present in real UIA (lazy-load) and we
-        don't want to be misled by mocks that return them."""
+    def test_skips_tab_strip_labels(self):
+        """The TabItem in the tab strip has Name=ci:build (same as
+        the active pane), but BFS must NOT descend into it. Otherwise
+        the label's child TextBlock with the same Name would be
+        collected as a false sentinel."""
         from claude_island.platform_ import wt_uia
 
-        inactive = self._make_tab_with_termcontrols(
-            is_selected=False, term_names=["ci:should_not_appear"],
+        tab_strip = self._wrapper(
+            self._tab_strip_label("ci:build"),
+            self._tab_strip_label("ci:other_tab"),  # inactive tab label
         )
-        active = self._make_tab_with_termcontrols(
-            is_selected=True, term_names=["ci:active_pane"],
-        )
-        # Order matters: inactive comes first to make sure we don't
-        # just stop at the first tab.
-        auto, _ = self._make_root_with_tabs(inactive, active)
+        # Content area: only build is here (other_tab's content is
+        # virtualized away).
+        content = self._wrapper(self._term("ci:build"))
+        auto, _ = self._root(tab_strip, content)
 
         with patch.dict("sys.modules", {"uiautomation": auto}):
             result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
 
-        assert result == {"ci:active_pane"}
-        assert "ci:should_not_appear" not in result
+        # Just build (from content area). other_tab's label name
+        # is in the strip but subtree is skipped. build's TabItem
+        # label is also skipped — only the TermControl in content
+        # contributes.
+        assert result == {"ci:build"}
 
-    def test_filters_non_ci_termcontrol_names(self):
-        """A TermControl whose Name doesn't start with ci: (e.g. a
-        non-claude shell, or a session whose sentinel write hasn't
-        happened yet) is ignored."""
+    def test_filters_non_ci_names(self):
+        """Pane Names that don't start with ci: are ignored."""
         from claude_island.platform_ import wt_uia
 
-        active = self._make_tab_with_termcontrols(
-            is_selected=True,
-            term_names=["ci:claude_a", "PowerShell", "ci:claude_b"],
+        content = self._wrapper(
+            self._term("ci:claude_a"),
+            self._term("PowerShell"),  # non-claude shell
+            self._term("ci:claude_b"),
         )
-        auto, _ = self._make_root_with_tabs(active)
+        auto, _ = self._root(content)
 
         with patch.dict("sys.modules", {"uiautomation": auto}):
             result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
 
         assert result == {"ci:claude_a", "ci:claude_b"}
 
-    def test_no_active_tab_returns_empty(self):
-        """If no TabItem reports IsSelected=True (degenerate UIA
-        state) — return empty, don't crash."""
-        from claude_island.platform_ import wt_uia
-
-        inactive_a = self._make_tab_with_termcontrols(
-            is_selected=False, term_names=["ci:x"],
-        )
-        inactive_b = self._make_tab_with_termcontrols(
-            is_selected=False, term_names=["ci:y"],
-        )
-        auto, _ = self._make_root_with_tabs(inactive_a, inactive_b)
-
-        with patch.dict("sys.modules", {"uiautomation": auto}):
-            result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
-
-        assert result == set()
-
-    def test_no_tab_control_returns_empty(self):
-        """Non-WT terminal (no TabControl in UIA tree)."""
+    def test_root_none_returns_empty(self):
         from claude_island.platform_ import wt_uia
 
         auto = MagicMock()
-        root = MagicMock()
-        auto.ControlFromHandle.return_value = root
-        tab_control = MagicMock()
-        tab_control.Exists.return_value = False
-        root.TabControl.return_value = tab_control
+        auto.ControlFromHandle.return_value = None
 
         with patch.dict("sys.modules", {"uiautomation": auto}):
             result = wt_uia.enumerate_active_tab_sentinels(hwnd=0xCAFE)
