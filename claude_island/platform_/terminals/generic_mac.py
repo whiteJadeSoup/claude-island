@@ -88,8 +88,19 @@ class GenericMacAdapter(_CapabilityProvider):
             return False
 
     @capability(Capability.LAUNCH)
-    def launch(self, *, cwd: Path, command: tuple[str, ...]) -> SpawnResult:
+    def launch(
+        self,
+        *,
+        cwd: Path,
+        command: tuple[str, ...],
+        session_uuid: str | None = None,
+    ) -> SpawnResult:
         """Spawn Terminal.app and run ``command`` in ``cwd``.
+
+        ``session_uuid`` is accepted for kwargs uniformity with the WT
+        adapter's Plan-L title-locking, but ignored — Terminal.app's
+        AppleScript dictionary doesn't expose a per-session stable id
+        we'd need to write to.
 
         Used by RecentsDrawer's Resume for macOS users who aren't on
         iTerm2 (iTerm2Adapter has its own LAUNCH). Terminal.app is
@@ -109,6 +120,7 @@ class GenericMacAdapter(_CapabilityProvider):
 
         Raises ``LauncherSpawnError`` if osascript itself fails to
         spawn (PATH stripped, user has it disabled). Caller toasts."""
+        del session_uuid  # ignored — Terminal.app has no Plan-L equivalent
         cmd_str = "cd " + shlex.quote(str(cwd)) + " && " + " ".join(
             shlex.quote(a) for a in command
         )

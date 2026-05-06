@@ -1100,7 +1100,10 @@ class RecentsDrawer(QWidget):
 
         try:
             result = self._dispatcher.launch(
-                adapter_name, cwd=d.cwd, command=command,
+                adapter_name,
+                cwd=d.cwd,
+                command=command,
+                session_uuid=d.session_uuid,
             )
         except LauncherSpawnError as e:
             self._show_toast(f"Failed to launch: {e}")

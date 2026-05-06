@@ -325,3 +325,89 @@ def test_collect_returns_none_when_enum_raises():
         result = wt_uia.collect_wt_tab_titles()
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# wait_for_tab_name — used after set_console_title to confirm WT
+# propagated the OSC update into TabItem.Name before we issue
+# select_tab_by_title.
+# ---------------------------------------------------------------------------
+
+class TestWaitForTabName:
+
+    def test_returns_true_immediately_when_already_present(self):
+        """Fast path: TabItem with the target Name already exists at
+        the first poll — return True without sleeping."""
+        from claude_island.platform_ import wt_uia
+
+        auto = _make_auto_mock(tab_item_exists=True)
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            ok = wt_uia.wait_for_tab_name(
+                hwnd=0xCAFE, name="ci:abc", timeout_ms=200,
+            )
+
+        assert ok is True
+
+    def test_returns_false_on_timeout(self):
+        """TabItem never appears within timeout → return False so the
+        caller can fall back (typically to plain SetForegroundWindow)."""
+        from claude_island.platform_ import wt_uia
+
+        auto = _make_auto_mock(tab_item_exists=False)
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            ok = wt_uia.wait_for_tab_name(
+                hwnd=0xCAFE, name="ci:abc",
+                timeout_ms=30, poll_ms=10,
+            )
+
+        assert ok is False
+
+    def test_empty_name_returns_false(self):
+        """Defensive: empty name would match no TabItem and would also
+        be a degraded sentinel path (uuid-less SessionView)."""
+        from claude_island.platform_ import wt_uia
+
+        ok = wt_uia.wait_for_tab_name(hwnd=0xCAFE, name="", timeout_ms=10)
+        assert ok is False
+
+    def test_uia_exception_does_not_bubble(self):
+        """ControlFromHandle / TabControl / TabItemControl raising mid
+        poll must not crash the caller — keep polling until deadline."""
+        from claude_island.platform_ import wt_uia
+
+        auto = MagicMock()
+        auto.ControlFromHandle.side_effect = RuntimeError("UIA hiccup")
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            ok = wt_uia.wait_for_tab_name(
+                hwnd=0xCAFE, name="ci:abc",
+                timeout_ms=20, poll_ms=10,
+            )
+
+        assert ok is False  # never found, but didn't raise
+
+    def test_eventual_appearance_returns_true(self):
+        """TabItem.Exists returns False initially, then True on a later
+        poll — should return True without waiting for the full timeout."""
+        from claude_island.platform_ import wt_uia
+
+        auto = MagicMock()
+        root = MagicMock()
+        auto.ControlFromHandle.return_value = root
+        tab_control = MagicMock()
+        tab_control.Exists.return_value = True
+        root.TabControl.return_value = tab_control
+
+        # First two calls → not found, third → found.
+        tab_item = MagicMock()
+        tab_item.Exists.side_effect = [False, False, True, True]
+        tab_control.TabItemControl.return_value = tab_item
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            ok = wt_uia.wait_for_tab_name(
+                hwnd=0xCAFE, name="ci:abc",
+                timeout_ms=200, poll_ms=10,
+            )
+
+        assert ok is True
+        assert tab_item.Exists.call_count >= 3

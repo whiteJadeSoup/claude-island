@@ -104,8 +104,8 @@ class WindowsTerminalAdapter(_CapabilityProvider):
     # ── group ───────────────────────────────────────────────────────────
 
     def group(self, views: list[SessionView]) -> list[SessionGroup]:
-        """Drop orphans, stamp adapter identity, emit one singleton
-        SessionGroup per view.
+        """Drop orphans, write the sentinel tab title for new sessions,
+        stamp adapter identity, emit one singleton SessionGroup per view.
 
         Why one-per-view (not tab-level grouping):
         WT's UIA tree only fully populates the *currently active* tab —
@@ -119,9 +119,25 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         See WT issues #5694, #1351 + WinUI3 issue #8719 for why a
         proper conpty→TabItem mapping is not feasible here.
 
+        Sentinel title (Plan O reconcile):
+        On first sight of a session (cache miss), we read its console
+        title; if it's not already our ``ci:{uuid}`` sentinel, we set
+        it. This is what lets ``select_tab_by_title`` find the right
+        tab on click — UIA mirrors console title to TabItem.Name, and
+        a uuid-derived title is globally unique so name match is
+        precise. Cache hits skip both probe and set: the session's
+        title is assumed stable. claude only rewrites the title on
+        topic-shift (rare); the click-time fallback in
+        ``_activate_windows`` re-asserts the sentinel on demand.
+
+        ``views`` are guaranteed to be claude sessions by upstream
+        ``can_handle`` + the dispatcher chain — so SetConsoleTitleW
+        only ever touches claude-attached consoles.
+
         Per-view work:
           1. AttachConsole probe (cached) to drop orphans (no console).
-          2. Stamp adapter identity, emit one SessionGroup per view.
+          2. On cache miss only: write sentinel title if drifted.
+          3. Stamp adapter identity, emit one SessionGroup per view.
 
         Drag-tab correctness still works without group() doing anything:
         ``_activate_windows`` re-runs ``walk_to_visible_host`` on every
@@ -130,6 +146,9 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         """
         from dataclasses import replace
         from claude_island.platform_ import win32_console
+        from claude_island.platform_.wt_session_title import (
+            is_sentinel, sentinel_title,
+        )
 
         # GC: drop cache entries for pids that left views (process
         # exited or was reassigned to a different adapter). Done before
@@ -148,10 +167,24 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 info = win32_console.get_console_info(pid)
                 if info is None:
                     continue
-                conpty_hwnd = info[0]
+                conpty_hwnd, current_title = info
                 if not conpty_hwnd:
                     continue
                 self._conpty_cache[pid] = conpty_hwnd
+                # First sight of this session — establish the sentinel
+                # title so click-time UIA Name match can find it. Skip
+                # if we have no uuid (degraded view) or if the title
+                # already matches our format (e.g. relaunched into a
+                # tab whose previous incarnation we'd already labeled,
+                # or this session was launched via Plan L which sets
+                # the title at WT spawn time).
+                expected = sentinel_title(v.session_uuid)
+                if expected and not is_sentinel(current_title):
+                    # Best-effort: silent fail when the user's profile
+                    # has suppressApplicationTitle=true. The click-time
+                    # fallback in _activate_windows handles that case
+                    # by degrading to plain SetForegroundWindow.
+                    win32_console.set_console_title(pid, expected)
             kept.append(v)
 
         # Tripwire: every view filtered → likely a race with our own
@@ -182,22 +215,30 @@ class WindowsTerminalAdapter(_CapabilityProvider):
     def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
         """Bring the WT window to foreground + select the matching tab.
 
-        ``siblings`` is the list of pids of other sessions in the same
-        SessionGroup (i.e. other panes in the same WT window+project).
-        Used as a fallback when the clicked row is an inactive split
-        pane: WT's UIA TabItem.Name only exposes the active pane's
-        title, so a click on an inactive pane has no matching tab title
-        — we then try each sibling's title in turn, and one of them
-        IS the active pane (whose title DOES match a tab). Without
-        this fallback, clicking an inactive pane only foregrounds the
-        WT window without switching tabs (the regression originally
-        fixed in commit 7daa451)."""
-        return _activate_windows(view.session.pid, list(siblings))
+        Passes ``expected_title = sentinel_title(view.session_uuid)`` to
+        ``_activate_windows`` so the click-time path can re-assert our
+        sentinel if claude or the user has clobbered it since group()
+        last reconciled. ``siblings`` is preserved for backward
+        compatibility but is always empty under singleton grouping —
+        the inactive-split-pane fallback path no longer fires."""
+        from claude_island.platform_.wt_session_title import sentinel_title
+        expected = sentinel_title(view.session_uuid)
+        return _activate_windows(
+            view.session.pid,
+            expected_title=expected,
+            sibling_pids=list(siblings),
+        )
 
     # ── LAUNCH ───────────────────────────────────────────────────────────
 
     @capability(Capability.LAUNCH)
-    def launch(self, *, cwd: Path, command: tuple[str, ...]) -> SpawnResult:
+    def launch(
+        self,
+        *,
+        cwd: Path,
+        command: tuple[str, ...],
+        session_uuid: str | None = None,
+    ) -> SpawnResult:
         """Spawn a new wt.exe window in ``cwd`` running ``command``.
 
         Used by RecentsDrawer's Resume click handler — the dormant
@@ -210,6 +251,16 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         Using DETACHED_PROCESS so the new window is independent of
         claude-island — closing the island doesn't kill the resumed
         claude session, and vice versa.
+
+        Plan L (sentinel title at spawn time):
+        When ``session_uuid`` is provided (Resume of a known dormant
+        session), we add ``--title "ci:{uuid}" --suppressApplicationTitle``
+        to lock the tab's title to our sentinel for life. WT's per-tab
+        ``--suppressApplicationTitle`` flag tells WT to ignore any
+        future OSC 0/2 / SetConsoleTitleW from the spawned process —
+        so unlike Plan O (foreign sessions, reconciled lazily), Plan L
+        tabs never need re-reconciling. Click-time UIA name match is
+        always exact.
 
         ``cmd.exe /k`` wrapper — *required*, not a convenience: WT
         spawns the new tab's process via ``CreateProcessW``, which
@@ -230,7 +281,18 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 "Windows Terminal (wt.exe) not found. Install from the "
                 "Microsoft Store: https://aka.ms/terminal"
             )
-        argv = ["wt.exe", "-d", str(cwd), "--", "cmd.exe", "/k", *command]
+        # Build wt.exe argv. The Plan-L title-lock flags must come
+        # *before* ``--`` (they configure the new-tab subcommand, not
+        # the spawned process). When uuid is missing (defensive — every
+        # Resume call should have one) we skip the flags and degrade
+        # to the same Plan-O reconcile as a foreign session.
+        from claude_island.platform_.wt_session_title import sentinel_title
+        title = sentinel_title(session_uuid) if session_uuid else None
+
+        argv: list[str] = ["wt.exe", "-d", str(cwd)]
+        if title:
+            argv += ["--title", title, "--suppressApplicationTitle"]
+        argv += ["--", "cmd.exe", "/k", *command]
         try:
             proc = subprocess.Popen(
                 argv,
@@ -250,16 +312,30 @@ class WindowsTerminalAdapter(_CapabilityProvider):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _activate_windows(pid: int, sibling_pids: list[int] | None = None) -> bool:
-    """Resolve console window → UIA tab select (with sibling fallback)
-    → SetForegroundWindow.
+def _activate_windows(
+    pid: int,
+    *,
+    expected_title: str | None = None,
+    sibling_pids: list[int] | None = None,
+) -> bool:
+    """Resolve console window → (re-assert sentinel title if needed)
+    → UIA tab select → SetForegroundWindow.
 
-    Sibling fallback handles the inactive split-pane case: when the
-    clicked row is an inactive pane, its own console title doesn't
-    appear in any TabItem.Name — WT only exposes the active pane's
-    title in the tab strip. Walking sibling pids tries each sibling's
-    console title; one of them IS the active pane in the same tab
-    and its title DOES match.
+    ``expected_title``: the ``ci:{uuid}`` sentinel for this session.
+    On click, we compare it against the current console title; if they
+    differ (claude topic-shifted since group() last reconciled, or this
+    is the very first click after the session appeared), we re-set the
+    title via ``set_console_title`` and poll the UIA tree until WT
+    mirrors the change into TabItem.Name (or 200ms times out — typical
+    when the user's profile has ``suppressApplicationTitle: true``).
+
+    ``sibling_pids``: kept for backward compatibility; under singleton
+    grouping it is always empty so the fallback path is dead. Will be
+    removed in a future cleanup commit.
+
+    Always returns whatever ``_force_foreground`` returns when we found
+    a host hwnd — even if the tab select failed, raising the WT window
+    is at least observable to the user (better than silently no-op).
     """
     try:
         import win32con
@@ -276,13 +352,24 @@ def _activate_windows(pid: int, sibling_pids: list[int] | None = None) -> bool:
     resolved = _resolve_console_window(pid, win32gui)
     hwnd: int | None = None
     if resolved is not None:
-        hwnd, title = resolved
-        from claude_island.platform_ import wt_uia
-        if not wt_uia.select_tab_by_title(hwnd, title) and sibling_pids:
-            # Fallback for inactive split-pane clicks — try each sibling's
-            # console title; one of them is the active pane and its title
-            # matches a tab. Reuses the AttachConsole helper from
-            # window_activator so the dance lives in one place.
+        hwnd, current_title = resolved
+        from claude_island.platform_ import win32_console, wt_uia
+
+        # Click-time reconcile: claude may have rewritten the title via
+        # OSC during a topic shift, or this session was just discovered
+        # by the scanner and group()'s reconcile hasn't run yet. Re-set
+        # then wait for WT's OSC pipeline to mirror it into TabItem.Name
+        # before we issue the select.
+        target_title = expected_title or current_title
+        if expected_title and current_title != expected_title:
+            win32_console.set_console_title(pid, expected_title)
+            # Poll up to 200ms. If WT silently dropped our set
+            # (suppressApplicationTitle profile), this returns False
+            # and the select_tab_by_title below will also fail — we
+            # still fall back to plain foreground at the end.
+            wt_uia.wait_for_tab_name(hwnd, expected_title, timeout_ms=200)
+
+        if not wt_uia.select_tab_by_title(hwnd, target_title) and sibling_pids:
             from claude_island.platform_.window_activator import _select_tab_via_siblings
             _select_tab_via_siblings(hwnd, sibling_pids)
     else:

@@ -207,14 +207,20 @@ class TerminalDispatcher:
         *,
         cwd: Path,
         command: tuple[str, ...],
+        session_uuid: str | None = None,
     ) -> SpawnResult:
         """View-less LAUNCH dispatch.
 
         Caller flow:
           1. ``cands = dispatcher.adapters_with(Capability.LAUNCH)``
           2. ``name, _ = cands[0]``    # or user-picked
-          3. ``result = dispatcher.launch(name, cwd=..., command=...)``
+          3. ``result = dispatcher.launch(name, cwd=..., command=..., session_uuid=...)``
           4. ``launch_intent.add(LaunchIntent(...result.terminal_pid...))``
+
+        ``session_uuid`` is forwarded to adapters that can use it for
+        Plan-L tab-title locking (currently only WT — see its
+        ``launch`` docstring). Adapters that don't take it accept it
+        as a no-op kwarg via ``**kwargs`` or by signature default.
 
         Raises ``LauncherSpawnError`` if (a) ``adapter_name`` is unknown,
         (b) the adapter doesn't implement LAUNCH, or (c) the underlying
@@ -235,7 +241,12 @@ class TerminalDispatcher:
             raise LauncherSpawnError(
                 f"adapter {adapter_name!r} does not implement LAUNCH"
             )
-        return adapter.launch(cwd=cwd, command=command)
+        # Only WT cares about session_uuid right now (Plan L). Other
+        # adapters take it as a kwarg they happily ignore (signature
+        # default = None) so we don't have to feature-detect here.
+        return adapter.launch(
+            cwd=cwd, command=command, session_uuid=session_uuid,
+        )
 
     # ── Internal ────────────────────────────────────────────────────────
 

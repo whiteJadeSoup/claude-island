@@ -1,6 +1,6 @@
 """Windows Terminal UI Automation operations.
 
-Single entry point for all UIA work in claude-island. Two public
+Single entry point for all UIA work in claude-island. Three public
 functions:
 
 - ``collect_wt_tab_titles`` — set of every visible TabItem.Name across
@@ -11,15 +11,20 @@ functions:
 - ``select_tab_by_title`` — within a specific WT window's UIA tree,
   bring the matching TabItem to the foreground. Used by WindowActivator
   on click.
+- ``wait_for_tab_name`` — poll the UIA tree until a TabItem with the
+  given Name appears. Used after ``set_console_title`` to confirm WT
+  picked up the OSC-propagated title change before we issue
+  ``select_tab_by_title``.
 
-Both functions accept and return primitives so future ConEmu / iTerm2
+All three accept and return primitives so future ConEmu / iTerm2
 backends can sit alongside without coupling to claude-island domain types.
-Both are fail-safe: any UIA failure returns the "unknown / no-op"
+All are fail-safe: any UIA failure returns the "unknown / no-op"
 sentinel (``None`` / ``False``) so callers can fall back gracefully.
 """
 from __future__ import annotations
 
 import sys
+import time
 
 # WT main window class. Same for stable, preview, and dev builds at the
 # time of writing; if Microsoft introduces a new variant we'll learn
@@ -162,3 +167,52 @@ def select_tab_by_title(hwnd: int, title: str) -> bool:
         print(f"[claude-island] wt_uia.select_tab_by_title: {exc}",
               file=_sys.stderr)
         return False
+
+
+def wait_for_tab_name(
+    hwnd: int, name: str, *, timeout_ms: int = 200, poll_ms: int = 10,
+) -> bool:
+    """Poll the UIA tree under *hwnd* until a TabItem with this exact Name
+    exists, or *timeout_ms* elapses.
+
+    Used after ``set_console_title`` to wait for WT's OSC pipeline
+    (kernel SetConsoleTitleW → conhost → conpty → WT XAML) to
+    propagate the new title into TabItem.Name. Empirically this takes
+    one to a few frames (~16–50 ms) on a quiet system; we use 10 ms
+    poll cadence and a 200 ms hard cap. The cap is what triggers the
+    silent-fail fallback when the target tab uses a profile with
+    ``suppressApplicationTitle: true`` (in which case WT discards the
+    propagated update and TabItem.Name will never become *name*).
+
+    Returns ``True`` once a matching TabItem is observed, ``False`` on
+    timeout or any UIA failure. Never raises.
+    """
+    if not name:
+        return False
+    if sys.platform != "win32":
+        return False
+    try:
+        import uiautomation as auto
+    except ImportError:
+        return False
+
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    poll_s = poll_ms / 1000.0
+    while True:
+        try:
+            root = auto.ControlFromHandle(hwnd)
+            if root is not None:
+                tab_control = root.TabControl(searchDepth=10)
+                if tab_control.Exists(0.0):
+                    tab_item = tab_control.TabItemControl(
+                        Name=name, searchDepth=2,
+                    )
+                    if tab_item.Exists(0.0):
+                        return True
+        except Exception:
+            # UIA hiccup mid-poll (tab being created, WT busy painting).
+            # Don't bail — give the deadline a chance.
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_s)

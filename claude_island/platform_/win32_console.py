@@ -73,3 +73,59 @@ def get_console_info(pid: int) -> tuple[int, str] | None:
                     pass
 
     return result
+
+
+def set_console_title(pid: int, title: str) -> bool:
+    """Set the console title for *pid*'s attached console.
+
+    AttachConsole + SetConsoleTitleW + FreeConsole, all under the same
+    module-level lock as ``get_console_info`` so the two callers don't
+    trample each other's transient console state.
+
+    Returns ``True`` on success, ``False`` on any failure (non-Windows,
+    AttachConsole fails, SetConsoleTitleW fails — the latter happens
+    silently when the target tab is in a profile with
+    ``suppressApplicationTitle: true``, since WT discards the
+    propagated OSC update without reporting back). Never raises.
+
+    Why this lives here rather than in window_activator: the
+    AttachConsole/FreeConsole + parent-console-restore dance is
+    identical to ``get_console_info``. Centralising both means there's
+    one place that knows the rules (UTF-16 buffer for titles,
+    pythonw "no parent console" handling, lock discipline).
+    """
+    if sys.platform != "win32":
+        return False
+    if title is None:
+        return False
+    try:
+        import ctypes
+    except ImportError:
+        return False
+
+    kernel32 = ctypes.windll.kernel32
+
+    with _lock:
+        original_console = kernel32.GetConsoleWindow()
+        kernel32.FreeConsole()
+        ok = False
+        try:
+            if kernel32.AttachConsole(pid):
+                try:
+                    # SetConsoleTitleW returns nonzero on success.
+                    # Note: success here means "the syscall accepted
+                    # the title", NOT "WT updated TabItem.Name". The
+                    # latter is async (OSC propagation) and silent
+                    # under suppressApplicationTitle. Caller polls
+                    # UIA separately if it needs to confirm.
+                    ok = bool(kernel32.SetConsoleTitleW(title))
+                finally:
+                    kernel32.FreeConsole()
+        finally:
+            if original_console:
+                try:
+                    kernel32.AttachConsole(_ATTACH_PARENT_PROCESS)
+                except Exception:
+                    pass
+
+    return ok

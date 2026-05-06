@@ -36,15 +36,19 @@ from claude_island.platform_.terminals.windows_terminal import (
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 
-def _session(pid: int = 1234, cwd: str = "C:\\proj") -> Session:
+def _session(
+    pid: int = 1234, cwd: str = "C:\\proj", session_uuid: str = "",
+) -> Session:
     return Session(
-        pid=pid, project_path=Path(cwd), session_uuid="",
+        pid=pid, project_path=Path(cwd), session_uuid=session_uuid,
         last_activity=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
     )
 
 
-def _view(pid: int = 1234, cwd: str = "C:\\proj") -> SessionView:
-    return _degraded_view(_session(pid, cwd))
+def _view(
+    pid: int = 1234, cwd: str = "C:\\proj", session_uuid: str = "",
+) -> SessionView:
+    return _degraded_view(_session(pid, cwd, session_uuid))
 
 
 @pytest.fixture
@@ -78,10 +82,17 @@ def patched(monkeypatch):
 
     get_console_info = mock.Mock()
     walk = mock.Mock(return_value=None)
+    # Default: pretend SetConsoleTitleW always succeeds. Tests that
+    # need to inspect the calls assert against this mock.
+    set_console_title = mock.Mock(return_value=True)
 
     monkeypatch.setattr(
         "claude_island.platform_.win32_console.get_console_info",
         get_console_info,
+    )
+    monkeypatch.setattr(
+        "claude_island.platform_.win32_console.set_console_title",
+        set_console_title,
     )
     monkeypatch.setattr(
         "claude_island.platform_.window_activator.walk_to_visible_host",
@@ -91,15 +102,34 @@ def patched(monkeypatch):
     class _Bag:
         def __init__(self):
             self.get_console_info = get_console_info
+            self.set_console_title = set_console_title
             self.walk = walk
 
-        def set_console(self, pid_to_conpty: dict[int, int | None]):
-            """Stage get_console_info(pid) → (conpty_hwnd, '') or None."""
+        def set_console(
+            self,
+            pid_to_conpty: dict[int, int | None],
+            *,
+            title: str = "title",
+        ):
+            """Stage get_console_info(pid) → (conpty_hwnd, title) or None.
+
+            Default title is non-sentinel so the reconcile path triggers
+            (set_console_title gets called). Pass ``title="ci:..."`` to
+            simulate a session whose tab is already labeled and reconcile
+            should skip.
+            """
             def _impl(pid):
                 conpty = pid_to_conpty.get(pid)
                 if conpty is None:
                     return None
-                return (conpty, "title")
+                return (conpty, title)
+            self.get_console_info.side_effect = _impl
+
+        def set_console_per_pid(self, pid_to_info: dict[int, tuple[int, str] | None]):
+            """Stage per-pid (conpty_hwnd, title) — for tests that want
+            different titles per session."""
+            def _impl(pid):
+                return pid_to_info.get(pid)
             self.get_console_info.side_effect = _impl
 
         def set_walk(self, conpty_to_wt: dict[int, int | None]):
@@ -286,6 +316,242 @@ class TestSingletonGrouping:
         assert len(groups) == 2
 
 
+# ── Plan O sentinel reconcile ─────────────────────────────────────────
+
+class TestSentinelReconcile:
+    """group() establishes a unique 'ci:{uuid}' tab title on first
+    sight of each session, so click-time UIA name match is precise.
+
+    Reconcile only fires on cache miss (first sight of a pid) — cache
+    hits skip the syscall. claude topic-shift recovery is the click-
+    time _activate_windows path, not group()."""
+
+    UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    EXPECTED = "ci:a1b2c3d4e5f67890abcdef1234567890"
+
+    def test_first_call_writes_sentinel_when_title_drifts(self, adapter, patched):
+        """Cache miss + non-sentinel current title → set_console_title
+        called with the uuid-derived sentinel."""
+        patched.set_console({1234: 0xAA}, title="Claude Code")
+
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+
+        patched.set_console_title.assert_called_once_with(1234, self.EXPECTED)
+
+    def test_first_call_skips_when_title_already_sentinel(self, adapter, patched):
+        """Cache miss but title already = our sentinel (e.g. session
+        was launched via Plan L which sets title at WT spawn time, or
+        we labeled it on a previous run that didn't outlive the
+        process). Skip the set_console_title syscall."""
+        patched.set_console({1234: 0xAA}, title=self.EXPECTED)
+
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+
+        patched.set_console_title.assert_not_called()
+
+    def test_skips_when_session_uuid_empty(self, adapter, patched):
+        """Degraded SessionView with no uuid (scanner caught process
+        before its JSONL was parsed) → no stable identity → skip."""
+        patched.set_console({1234: 0xAA}, title="Claude Code")
+
+        adapter.group([_view(1234, session_uuid="")])
+
+        patched.set_console_title.assert_not_called()
+
+    def test_cache_hit_does_not_re_reconcile(self, adapter, patched):
+        """Second tick on the same pid → cache hit → no AttachConsole,
+        no SetConsoleTitleW. claude topic-shift recovery is handled by
+        the click-time _activate_windows fallback, not by re-probing
+        every wake."""
+        patched.set_console({1234: 0xAA}, title="Claude Code")
+
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+
+        # First tick set, second tick must NOT.
+        assert patched.set_console_title.call_count == 1
+
+    def test_orphan_skips_reconcile(self, adapter, patched):
+        """Orphan pid (AttachConsole fails) is dropped before reconcile
+        — never SetConsoleTitleW on a pid we can't even attach to."""
+        patched.set_console({1234: None}, title="ignored")
+
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+
+        patched.set_console_title.assert_not_called()
+
+    def test_multi_pids_reconcile_independently(self, adapter, patched):
+        """Two new sessions: each gets its own sentinel set. Different
+        uuids → different sentinel titles."""
+        uuid_a = "a" * 32
+        uuid_b = "b" * 32
+        patched.set_console_per_pid({
+            100: (0xA0, "Claude Code"),
+            200: (0xB0, "Claude Code"),
+        })
+
+        adapter.group([
+            _view(100, session_uuid=uuid_a),
+            _view(200, session_uuid=uuid_b),
+        ])
+
+        assert patched.set_console_title.call_count == 2
+        calls = {
+            (c.args[0], c.args[1])
+            for c in patched.set_console_title.call_args_list
+        }
+        assert calls == {(100, f"ci:{uuid_a}"), (200, f"ci:{uuid_b}")}
+
+
+# ── _activate_windows click-time reconcile ────────────────────────────
+
+class TestActivateWindowsReconcile:
+    """The click-time fallback in module-level _activate_windows: if the
+    current console title doesn't match the expected sentinel (claude
+    topic-shift since last group() reconcile, or first click on a
+    just-discovered session), re-set it and wait for WT to mirror the
+    OSC update into TabItem.Name before issuing select_tab_by_title.
+
+    These tests exercise the module-level _activate_windows function in
+    windows_terminal.py — not the older WindowActivator class method
+    in window_activator.py (which is only kept around for legacy tests
+    of generic_windows-style ancestor-walk activation)."""
+
+    UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    EXPECTED = "ci:a1b2c3d4e5f67890abcdef1234567890"
+
+    @pytest.fixture
+    def patched_activate(self, monkeypatch):
+        """Patch every Win32/UIA touchpoint inside _activate_windows."""
+        # win32* modules — _activate_windows imports them lazily.
+        win32con = mock.MagicMock(name="win32con")
+        win32gui = mock.MagicMock(name="win32gui")
+        win32process = mock.MagicMock(name="win32process")
+        monkeypatch.setitem(__import__("sys").modules, "win32con", win32con)
+        monkeypatch.setitem(__import__("sys").modules, "win32gui", win32gui)
+        monkeypatch.setitem(__import__("sys").modules, "win32process", win32process)
+
+        # The pieces we want to inspect.
+        get_console_info = mock.Mock()
+        set_console_title = mock.Mock(return_value=True)
+        wait_for_tab_name = mock.Mock(return_value=True)
+        select_tab_by_title = mock.Mock(return_value=True)
+        force_foreground = mock.Mock(return_value=True)
+        walk_to_visible_host = mock.Mock(return_value=0xCAFE)  # WT hwnd
+
+        monkeypatch.setattr(
+            "claude_island.platform_.win32_console.get_console_info",
+            get_console_info,
+        )
+        monkeypatch.setattr(
+            "claude_island.platform_.win32_console.set_console_title",
+            set_console_title,
+        )
+        monkeypatch.setattr(
+            "claude_island.platform_.wt_uia.wait_for_tab_name",
+            wait_for_tab_name,
+        )
+        monkeypatch.setattr(
+            "claude_island.platform_.wt_uia.select_tab_by_title",
+            select_tab_by_title,
+        )
+        monkeypatch.setattr(
+            "claude_island.platform_.window_activator._force_foreground",
+            force_foreground,
+        )
+        monkeypatch.setattr(
+            "claude_island.platform_.window_activator.walk_to_visible_host",
+            walk_to_visible_host,
+        )
+
+        class _Bag:
+            pass
+        bag = _Bag()
+        bag.get_console_info = get_console_info
+        bag.set_console_title = set_console_title
+        bag.wait_for_tab_name = wait_for_tab_name
+        bag.select_tab_by_title = select_tab_by_title
+        bag.force_foreground = force_foreground
+        return bag
+
+    def test_no_reconcile_when_current_title_matches_expected(
+        self, patched_activate,
+    ):
+        """Common path: scanner already labeled the tab, current title
+        equals expected. Skip set + poll, go straight to select."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+
+        ok = _activate_windows(pid=999, expected_title=self.EXPECTED)
+
+        assert ok is True
+        patched_activate.set_console_title.assert_not_called()
+        patched_activate.wait_for_tab_name.assert_not_called()
+        patched_activate.select_tab_by_title.assert_called_once_with(
+            0xCAFE, self.EXPECTED,
+        )
+
+    def test_reconcile_when_title_drifted(self, patched_activate):
+        """claude topic-shifted: current title is "✳ memory", expected
+        is sentinel. Re-set, poll, then select using expected."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, "✳ memory")
+
+        ok = _activate_windows(pid=999, expected_title=self.EXPECTED)
+
+        assert ok is True
+        patched_activate.set_console_title.assert_called_once_with(
+            999, self.EXPECTED,
+        )
+        patched_activate.wait_for_tab_name.assert_called_once()
+        patched_activate.select_tab_by_title.assert_called_once_with(
+            0xCAFE, self.EXPECTED,
+        )
+
+    def test_force_foreground_called_even_when_select_fails(
+        self, patched_activate,
+    ):
+        """suppressApplicationTitle profile: set_console_title silently
+        no-ops, wait_for_tab_name times out, select_tab_by_title fails.
+        Still call _force_foreground so user at least sees WT come up."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, "Claude Code")
+        patched_activate.wait_for_tab_name.return_value = False
+        patched_activate.select_tab_by_title.return_value = False
+
+        ok = _activate_windows(pid=999, expected_title=self.EXPECTED)
+
+        # Returns whatever _force_foreground returns (True in this fixture).
+        assert ok is True
+        patched_activate.force_foreground.assert_called_once()
+
+    def test_no_expected_title_falls_back_to_current(self, patched_activate):
+        """Backward compat: caller didn't pass expected_title (degraded
+        SessionView with no uuid) → use whatever current title is, no
+        reconcile attempt."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, "some title")
+
+        _activate_windows(pid=999, expected_title=None)
+
+        patched_activate.set_console_title.assert_not_called()
+        patched_activate.select_tab_by_title.assert_called_once_with(
+            0xCAFE, "some title",
+        )
+
+
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────
 
 class TestWindowsTerminalLaunch:
@@ -379,3 +645,58 @@ class TestWindowsTerminalLaunch:
         ):
             with pytest.raises(LauncherSpawnError, match="permission denied"):
                 adapter.launch(cwd=Path("D:/x"), command=("claude",))
+
+    def test_launch_with_session_uuid_adds_plan_l_flags(self):
+        """Plan L: when session_uuid is provided (Resume of a known
+        dormant session), argv must include --title and
+        --suppressApplicationTitle BEFORE the ``--`` separator. This
+        locks the WT tab title to ``ci:{uuid}`` for life so click-time
+        UIA name match is always exact, with no Plan-O reconcile
+        needed for tabs we spawned."""
+        adapter = WindowsTerminalAdapter()
+        uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        expected_title = "ci:a1b2c3d4e5f67890abcdef1234567890"
+
+        with mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.shutil.which",
+            return_value="C:/wt.exe",
+        ), mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.subprocess.Popen",
+        ) as mock_popen:
+            mock_popen.return_value.pid = 1
+            adapter.launch(
+                cwd=Path("D:/x"),
+                command=("claude", "--resume", uuid),
+                session_uuid=uuid,
+            )
+
+        argv = mock_popen.call_args[0][0]
+        # Plan-L flags must come before "--" (they configure the
+        # new-tab subcommand, not the spawned process).
+        assert "--title" in argv
+        title_idx = argv.index("--title")
+        assert argv[title_idx + 1] == expected_title
+        assert "--suppressApplicationTitle" in argv
+        # Both flags before the separator.
+        sep_idx = argv.index("--")
+        assert title_idx < sep_idx
+        assert argv.index("--suppressApplicationTitle") < sep_idx
+
+    def test_launch_without_session_uuid_omits_plan_l_flags(self):
+        """Backward compat: caller didn't pass session_uuid (defensive
+        — every Resume call should, but don't hard-fail). Skip
+        Plan-L flags so the tab degrades to Plan-O reconcile (group()
+        sentinel write on first sight)."""
+        adapter = WindowsTerminalAdapter()
+        with mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.shutil.which",
+            return_value="C:/wt.exe",
+        ), mock.patch(
+            "claude_island.platform_.terminals.windows_terminal.subprocess.Popen",
+        ) as mock_popen:
+            mock_popen.return_value.pid = 1
+            adapter.launch(cwd=Path("D:/x"), command=("claude",))
+
+        argv = mock_popen.call_args[0][0]
+        assert "--title" not in argv
+        assert "--suppressApplicationTitle" not in argv

@@ -83,9 +83,12 @@ class _FakeDispatcher:
             return ()
         return tuple((n, mock.Mock()) for n in self.adapter_names)
 
-    def launch(self, adapter_name, *, cwd, command):
+    def launch(self, adapter_name, *, cwd, command, session_uuid=None):
         self.launch_calls.append({
-            "adapter_name": adapter_name, "cwd": cwd, "command": command,
+            "adapter_name": adapter_name,
+            "cwd": cwd,
+            "command": command,
+            "session_uuid": session_uuid,
         })
         if self._spawn_error is not None:
             raise self._spawn_error

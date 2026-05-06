@@ -232,10 +232,12 @@ class _FakeLaunchAdapter(_CapabilityProvider):
     def group(self, views): return []
 
     @capability(Capability.LAUNCH)
-    def launch(self, *, cwd, command):
+    def launch(self, *, cwd, command, session_uuid=None):
         from claude_island.core.capabilities import SpawnResult
         from datetime import datetime, timezone
-        self.calls.append({"cwd": cwd, "command": command})
+        self.calls.append(
+            {"cwd": cwd, "command": command, "session_uuid": session_uuid}
+        )
         return SpawnResult(
             terminal_name=self.name,
             terminal_pid=4242,
@@ -315,10 +317,30 @@ class TestDispatcherLaunch:
         )
         assert result.terminal_pid == 4242
         assert result.terminal_name == "fake-launcher"
+        # session_uuid defaults to None when caller doesn't pass it.
         assert ad.calls[0] == {
             "cwd": Path("D:/projects/a"),
             "command": ("claude", "--resume", "u1"),
+            "session_uuid": None,
         }
+
+    def test_launch_forwards_session_uuid(self):
+        """Plan L: dispatcher must pass session_uuid through to the
+        adapter so WT can use it as the --title sentinel."""
+        ad = _FakeLaunchAdapter()
+        disp = TerminalDispatcher(
+            terminals={ad.name: ad},
+            os_backend=StubOs(), app_backend=StubApp(),
+        )
+        disp.launch(
+            "fake-launcher",
+            cwd=Path("D:/projects/a"),
+            command=("claude", "--resume", "u1"),
+            session_uuid="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        )
+        assert ad.calls[0]["session_uuid"] == (
+            "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        )
 
     def test_launch_unknown_adapter_raises(self):
         from claude_island.core.capabilities import LauncherSpawnError
@@ -349,7 +371,7 @@ class TestDispatcherLaunch:
             def can_handle(self, s): return False
             def group(self, v): return []
             @capability(Capability.LAUNCH)
-            def launch(self, *, cwd, command):
+            def launch(self, *, cwd, command, session_uuid=None):
                 raise LauncherSpawnError("wt.exe not found")
 
         ad = _BoomAdapter()

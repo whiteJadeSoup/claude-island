@@ -273,7 +273,13 @@ class ITerm2Adapter(_CapabilityProvider):
     # ── LAUNCH ───────────────────────────────────────────────────────────
 
     @capability(Capability.LAUNCH)
-    def launch(self, *, cwd: Path, command: tuple[str, ...]) -> SpawnResult:
+    def launch(
+        self,
+        *,
+        cwd: Path,
+        command: tuple[str, ...],
+        session_uuid: str | None = None,
+    ) -> SpawnResult:
         """Spawn a new iTerm2 window in ``cwd`` running ``command``.
 
         Used by RecentsDrawer's Resume click — same contract as the
@@ -281,10 +287,17 @@ class ITerm2Adapter(_CapabilityProvider):
         AppleScript creates a new window with the default profile,
         then writes ``cd <cwd> && <command>`` into the new session.
 
+        ``session_uuid`` is accepted for kwargs uniformity with the
+        WT adapter's Plan-L title-locking, but ignored on macOS —
+        iTerm2's AppleScript dictionary already exposes per-session
+        ``tty`` as a stable PID-independent identifier, so we don't
+        need to inject one via the tab title.
+
         ``terminal_pid`` we report is the osascript pid (NOT iTerm2's —
         iTerm2 is a long-lived application; the spawn doesn't create
         a new app process). It's still a useful diagnostic anchor for
         the "couldn't detect new session" toast on timeout."""
+        del session_uuid  # ignored — see docstring
         cmd_str = "cd " + shlex.quote(str(cwd)) + " && " + " ".join(
             shlex.quote(a) for a in command
         )
