@@ -170,21 +170,28 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 conpty_hwnd, current_title = info
                 if not conpty_hwnd:
                     continue
-                self._conpty_cache[pid] = conpty_hwnd
                 # First sight of this session — establish the sentinel
                 # title so click-time UIA Name match can find it. Skip
-                # if we have no uuid (degraded view) or if the title
-                # already matches our format (e.g. relaunched into a
-                # tab whose previous incarnation we'd already labeled,
+                # the set if we have no uuid (degraded view) or if the
+                # title already matches our format (e.g. relaunched into
+                # a tab whose previous incarnation we'd already labeled,
                 # or this session was launched via Plan L which sets
                 # the title at WT spawn time).
+                #
+                # Cache discipline: only memoise the conpty_hwnd AFTER
+                # reconcile is done (set succeeded OR no set needed).
+                # If set silently fails — typically a profile with
+                # suppressApplicationTitle=true, but also transient WT
+                # busy — we leave the cache empty so the next wake
+                # re-probes the title and retries. AttachConsole is
+                # ~3ms; retrying every wake on a silent-fail pid is
+                # cheap insurance against permanently mislabeled tabs.
                 expected = sentinel_title(v.session_uuid)
+                set_ok = True
                 if expected and not is_sentinel(current_title):
-                    # Best-effort: silent fail when the user's profile
-                    # has suppressApplicationTitle=true. The click-time
-                    # fallback in _activate_windows handles that case
-                    # by degrading to plain SetForegroundWindow.
-                    win32_console.set_console_title(pid, expected)
+                    set_ok = win32_console.set_console_title(pid, expected)
+                if set_ok:
+                    self._conpty_cache[pid] = conpty_hwnd
             kept.append(v)
 
         # Tripwire: every view filtered → likely a race with our own
@@ -329,9 +336,26 @@ def _activate_windows(
     mirrors the change into TabItem.Name (or 200ms times out — typical
     when the user's profile has ``suppressApplicationTitle: true``).
 
-    ``sibling_pids``: kept for backward compatibility; under singleton
-    grouping it is always empty so the fallback path is dead. Will be
-    removed in a future cleanup commit.
+    Tab-select chain (3 fallbacks, increasingly imprecise):
+      1. ``select_tab_by_title(expected)`` — exact match. Hits when the
+         session is its tab's active pane (or sole pane).
+      2. ``select_tab_by_title(current_title)`` if we didn't reconcile
+         (no expected_title).
+      3. ``select_any_ci_tab(hwnd)`` — pick any ``ci:*`` tab in this WT
+         window. Hits when the click target is the *inactive pane* of a
+         split tab — its TabItem.Name reflects the active sibling
+         pane's sentinel, which is also a ``ci:*`` so it matches here.
+         User then presses Alt+arrow to focus the right pane within
+         the tab. See WT issue #5694 + WinUI3 lazy-load for why
+         per-pane focus from outside is impossible.
+      Last resort: plain ``_force_foreground`` so the user at least
+      sees the WT window come up.
+
+    ``sibling_pids``: kept for backward compatibility with the
+    WindowActivator class path used by other adapters; WT's singleton
+    grouping always passes an empty list, so the explicit
+    sibling-walk is dead for WT clicks. Don't remove the parameter
+    without also deleting the class method in ``window_activator.py``.
 
     Always returns whatever ``_force_foreground`` returns when we found
     a host hwnd — even if the tab select failed, raising the WT window
@@ -366,12 +390,18 @@ def _activate_windows(
             # Poll up to 200ms. If WT silently dropped our set
             # (suppressApplicationTitle profile), this returns False
             # and the select_tab_by_title below will also fail — we
-            # still fall back to plain foreground at the end.
+            # still fall back to ci:* match and then plain foreground.
             wt_uia.wait_for_tab_name(hwnd, expected_title, timeout_ms=200)
 
-        if not wt_uia.select_tab_by_title(hwnd, target_title) and sibling_pids:
-            from claude_island.platform_.window_activator import _select_tab_via_siblings
-            _select_tab_via_siblings(hwnd, sibling_pids)
+        if not wt_uia.select_tab_by_title(hwnd, target_title):
+            # Split-pane fallback: target is likely an inactive pane
+            # whose sentinel doesn't appear in any TabItem.Name (WT
+            # only mirrors the active pane's title). Settle for any
+            # ci:* tab in this WT window — usually the sibling pane's
+            # tab, which IS the right tab, just wrong pane.
+            if not wt_uia.select_any_ci_tab(hwnd) and sibling_pids:
+                from claude_island.platform_.window_activator import _select_tab_via_siblings
+                _select_tab_via_siblings(hwnd, sibling_pids)
     else:
         from claude_island.platform_.window_activator import _ancestor_pids, _find_window_for_pids
         candidate_pids = _ancestor_pids(pid)

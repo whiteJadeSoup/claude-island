@@ -411,3 +411,112 @@ class TestWaitForTabName:
 
         assert ok is True
         assert tab_item.Exists.call_count >= 3
+
+
+# ---------------------------------------------------------------------------
+# select_any_ci_tab — split-pane click fallback. Picks the first
+# TabItem under hwnd whose Name starts with "ci:" so WT lands on a
+# tab containing one of our sessions, even if not the exact pane.
+# ---------------------------------------------------------------------------
+
+class TestSelectAnyCiTab:
+
+    def _make_tabs_mock(self, *, tab_names: list[str], existing: bool = True):
+        """Build an auto mock with a TabControl whose children are
+        TabItemControls with the given Names."""
+        auto = MagicMock()
+        root = MagicMock()
+        auto.ControlFromHandle.return_value = root
+        tab_control = MagicMock()
+        tab_control.Exists.return_value = True
+        root.TabControl.return_value = tab_control
+
+        # GetChildren returns TabItemControl-typed mocks. Each one has
+        # a SelectionItemPattern we can inspect.
+        children = []
+        patterns = []
+        for name in tab_names:
+            child = MagicMock()
+            child.ControlTypeName = "TabItemControl"
+            child.Name = name
+            pattern = MagicMock()
+            pattern.IsSelected = False
+            child.GetSelectionItemPattern.return_value = pattern
+            children.append(child)
+            patterns.append(pattern)
+        tab_control.GetChildren.return_value = children
+
+        return auto, patterns
+
+    def test_selects_first_ci_prefix_tab(self):
+        """Common case: WT window with a Claude Code default tab and
+        a labeled ci:* tab. We pick the ci:* one."""
+        from claude_island.platform_ import wt_uia
+
+        auto, patterns = self._make_tabs_mock(
+            tab_names=["Claude Code", "ci:abc", "ci:def"],
+        )
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            ok = wt_uia.select_any_ci_tab(hwnd=0xCAFE)
+
+        assert ok is True
+        # Patterns list maps 1:1 to tab_names. The first ci:* is index 1.
+        patterns[0].Select.assert_not_called()
+        patterns[1].Select.assert_called_once()
+
+    def test_returns_true_no_op_when_already_selected(self):
+        """If the first ci:* tab is already the active one, no Select
+        call is needed — still success."""
+        from claude_island.platform_ import wt_uia
+
+        auto, patterns = self._make_tabs_mock(tab_names=["ci:abc"])
+        patterns[0].IsSelected = True
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            ok = wt_uia.select_any_ci_tab(hwnd=0xCAFE)
+
+        assert ok is True
+        patterns[0].Select.assert_not_called()
+
+    def test_returns_false_when_no_ci_tab(self):
+        """Window with no ci:* tabs (user closed all our sessions or
+        targeted a window that has none) — fallback fails so caller
+        can degrade to plain SetForegroundWindow."""
+        from claude_island.platform_ import wt_uia
+
+        auto, _ = self._make_tabs_mock(
+            tab_names=["Claude Code", "PowerShell"],
+        )
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            ok = wt_uia.select_any_ci_tab(hwnd=0xCAFE)
+
+        assert ok is False
+
+    def test_returns_false_when_no_tab_control(self):
+        """Non-WT terminal (conhost / cmd.exe stand-alone) — no
+        TabControl in the UIA tree."""
+        from claude_island.platform_ import wt_uia
+
+        auto = MagicMock()
+        root = MagicMock()
+        auto.ControlFromHandle.return_value = root
+        tab_control = MagicMock()
+        tab_control.Exists.return_value = False
+        root.TabControl.return_value = tab_control
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            ok = wt_uia.select_any_ci_tab(hwnd=0xCAFE)
+
+        assert ok is False
+
+    def test_uia_exception_returns_false(self):
+        """ControlFromHandle / GetChildren raising must not bubble."""
+        from claude_island.platform_ import wt_uia
+
+        auto = MagicMock()
+        auto.ControlFromHandle.side_effect = RuntimeError("UIA disconnected")
+
+        with patch.dict("sys.modules", {"uiautomation": auto}):
+            ok = wt_uia.select_any_ci_tab(hwnd=0xCAFE)
+
+        assert ok is False

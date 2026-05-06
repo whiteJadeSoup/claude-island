@@ -380,6 +380,48 @@ class TestSentinelReconcile:
 
         patched.set_console_title.assert_not_called()
 
+    def test_failed_set_does_not_pollute_cache(self, adapter, patched):
+        """Cache discipline: if set_console_title fails (silent fail
+        under suppressApplicationTitle profile, transient WT busy),
+        the conpty_hwnd MUST NOT be cached — otherwise the next wake's
+        cache hit would skip the retry forever and the tab would stay
+        un-labeled. AttachConsole on next wake costs ~3ms; cheap
+        insurance vs permanently mislabeled tabs."""
+        patched.set_console({1234: 0xAA}, title="Claude Code")
+        patched.set_console_title.return_value = False  # silent fail
+
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+
+        # set_console_title was attempted...
+        patched.set_console_title.assert_called_once()
+        # ...but cache must be empty so next tick retries.
+        assert adapter._conpty_cache == {}
+
+    def test_failed_set_retries_on_next_wake(self, adapter, patched):
+        """Direct consequence of cache discipline: a failed set on
+        tick 1 means tick 2 re-probes and re-attempts."""
+        patched.set_console({1234: 0xAA}, title="Claude Code")
+        patched.set_console_title.return_value = False
+
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+
+        # Both probe AND set called twice — no cache shortcut.
+        assert patched.get_console_info.call_count == 2
+        assert patched.set_console_title.call_count == 2
+
+    def test_already_sentinel_caches_without_set(self, adapter, patched):
+        """If title is already a sentinel (Plan-L launched, or we set
+        it on a previous run that survived), no set is attempted but
+        the cache IS populated — set_ok defaults to True when no set
+        was needed."""
+        patched.set_console({1234: 0xAA}, title=self.EXPECTED)
+
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+
+        patched.set_console_title.assert_not_called()
+        assert adapter._conpty_cache == {1234: 0xAA}
+
     def test_multi_pids_reconcile_independently(self, adapter, patched):
         """Two new sessions: each gets its own sentinel set. Different
         uuids → different sentinel titles."""
@@ -436,6 +478,7 @@ class TestActivateWindowsReconcile:
         set_console_title = mock.Mock(return_value=True)
         wait_for_tab_name = mock.Mock(return_value=True)
         select_tab_by_title = mock.Mock(return_value=True)
+        select_any_ci_tab = mock.Mock(return_value=False)
         force_foreground = mock.Mock(return_value=True)
         walk_to_visible_host = mock.Mock(return_value=0xCAFE)  # WT hwnd
 
@@ -456,6 +499,10 @@ class TestActivateWindowsReconcile:
             select_tab_by_title,
         )
         monkeypatch.setattr(
+            "claude_island.platform_.wt_uia.select_any_ci_tab",
+            select_any_ci_tab,
+        )
+        monkeypatch.setattr(
             "claude_island.platform_.window_activator._force_foreground",
             force_foreground,
         )
@@ -471,6 +518,7 @@ class TestActivateWindowsReconcile:
         bag.set_console_title = set_console_title
         bag.wait_for_tab_name = wait_for_tab_name
         bag.select_tab_by_title = select_tab_by_title
+        bag.select_any_ci_tab = select_any_ci_tab
         bag.force_foreground = force_foreground
         return bag
 
@@ -550,6 +598,47 @@ class TestActivateWindowsReconcile:
         patched_activate.select_tab_by_title.assert_called_once_with(
             0xCAFE, "some title",
         )
+
+    def test_select_failure_falls_back_to_select_any_ci_tab(
+        self, patched_activate,
+    ):
+        """Split-pane click: target session is the inactive pane of a
+        split tab; its sentinel doesn't match TabItem.Name (which
+        reflects the active sibling's sentinel). select_tab_by_title
+        returns False → fallback select_any_ci_tab catches the sibling
+        tab → user lands on the right tab, wrong pane (Alt+arrow to
+        finish)."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        patched_activate.select_tab_by_title.return_value = False
+        patched_activate.select_any_ci_tab.return_value = True
+
+        ok = _activate_windows(pid=999, expected_title=self.EXPECTED)
+
+        assert ok is True
+        patched_activate.select_tab_by_title.assert_called_once_with(
+            0xCAFE, self.EXPECTED,
+        )
+        patched_activate.select_any_ci_tab.assert_called_once_with(0xCAFE)
+        patched_activate.force_foreground.assert_called_once()
+
+    def test_select_any_ci_tab_not_called_when_primary_select_succeeds(
+        self, patched_activate,
+    ):
+        """Common path: select_tab_by_title hits → no fallback needed."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        patched_activate.select_tab_by_title.return_value = True
+
+        _activate_windows(pid=999, expected_title=self.EXPECTED)
+
+        patched_activate.select_any_ci_tab.assert_not_called()
 
 
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────

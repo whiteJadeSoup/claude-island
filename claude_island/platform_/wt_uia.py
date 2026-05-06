@@ -1,6 +1,6 @@
 """Windows Terminal UI Automation operations.
 
-Single entry point for all UIA work in claude-island. Three public
+Single entry point for all UIA work in claude-island. Four public
 functions:
 
 - ``collect_wt_tab_titles`` — set of every visible TabItem.Name across
@@ -11,6 +11,10 @@ functions:
 - ``select_tab_by_title`` — within a specific WT window's UIA tree,
   bring the matching TabItem to the foreground. Used by WindowActivator
   on click.
+- ``select_any_ci_tab`` — within a specific WT window's UIA tree,
+  select the first TabItem whose Name starts with ``ci:``. Used as a
+  fallback when ``select_tab_by_title`` misses on the inactive pane
+  of a split-tab (its TabItem.Name reflects the active sibling pane).
 - ``wait_for_tab_name`` — poll the UIA tree until a TabItem with the
   given Name appears. Used after ``set_console_title`` to confirm WT
   picked up the OSC-propagated title change before we issue
@@ -167,6 +171,89 @@ def select_tab_by_title(hwnd: int, title: str) -> bool:
         print(f"[claude-island] wt_uia.select_tab_by_title: {exc}",
               file=_sys.stderr)
         return False
+
+
+def select_any_ci_tab(hwnd: int) -> bool:
+    """Select the first TabItem under *hwnd* whose Name starts with
+    ``"ci:"`` — the sentinel-prefix fallback for split-pane click.
+
+    Why this exists: when two claude sessions share one WT tab as
+    split panes, ``TabItem.Name`` only reflects the *active pane*'s
+    console title (WinUI3 lazy-loads inactive panes' TermControls).
+    A click on the inactive-pane row in the panel runs
+    ``select_tab_by_title`` with the inactive pane's sentinel — which
+    matches no TabItem and fails. Falling back to "any ci:* tab"
+    selects the sibling tab that DOES carry our sentinel as its
+    active pane's title, so WT at least lands on the correct tab.
+    The user finishes by pressing Alt+arrow to focus the right pane.
+
+    Limitation: when the same WT window holds *multiple* tabs whose
+    active pane is one of our sessions (e.g. four sessions split
+    across two tabs), this picks whichever ``ci:*`` tab UIA returns
+    first — not necessarily the target session's tab. Disambiguating
+    that requires per-session wt_hwnd tracking on SessionView, which
+    is a larger refactor; this fallback is the "good in 70% of
+    cases, never silently no-op" minimum.
+
+    Returns ``True`` on successful select (including the no-op case
+    where the matching tab was already selected). Returns ``False``
+    on any failure: non-Windows, library absent, no TabControl, no
+    ``ci:`` tab, UIA pattern unavailable, or any exception.
+    Never raises.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import uiautomation as auto
+
+        root = auto.ControlFromHandle(hwnd)
+        if root is None:
+            return False
+        tab_control = root.TabControl(searchDepth=10)
+        if not tab_control.Exists(0.1):
+            return False
+
+        # WinUI3 wraps tab buttons in an inner ListControl; BFS down
+        # bounded depth (matches _collect_tab_names walk).
+        tab_item = _find_first_ci_tab(tab_control, max_depth=4)
+        if tab_item is None:
+            return False
+
+        pattern = tab_item.GetSelectionItemPattern()
+        if pattern is None:
+            return False
+        if pattern.IsSelected:
+            return True
+        pattern.Select()
+        return True
+    except Exception as exc:
+        import sys as _sys
+        print(f"[claude-island] wt_uia.select_any_ci_tab: {exc}",
+              file=_sys.stderr)
+        return False
+
+
+def _find_first_ci_tab(elem: object, *, max_depth: int) -> object | None:
+    """BFS the subtree under *elem* and return the first descendant
+    TabItemControl whose Name starts with ``"ci:"``."""
+    frontier: list[tuple[object, int]] = [(elem, 0)]
+    while frontier:
+        node, depth = frontier.pop(0)
+        try:
+            children = node.GetChildren()
+        except Exception:
+            continue
+        for child in children:
+            if getattr(child, "ControlTypeName", "") == "TabItemControl":
+                name = getattr(child, "Name", "") or ""
+                if name.startswith("ci:"):
+                    return child
+                # TabItemControl subtree is the tab's content (TermControl
+                # etc.), not more tabs — don't descend.
+                continue
+            if depth + 1 < max_depth:
+                frontier.append((child, depth + 1))
+    return None
 
 
 def wait_for_tab_name(
