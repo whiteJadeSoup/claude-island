@@ -76,14 +76,6 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # worker thread (reactivex EventLoopScheduler), so no lock.
         self._conpty_cache: dict[int, int] = {}
 
-        # Sibling-pane cache for split-tab disambiguation. Updated on
-        # every group() wake (passive, worker-thread); also refreshed
-        # fire-and-forget at click time when the cache turns out
-        # stale (active, background thread). See wt_pane_siblings.py
-        # for the full design rationale.
-        from claude_island.platform_.wt_pane_siblings import PaneSiblingTracker
-        self._sibling_tracker = PaneSiblingTracker()
-
     # ── can_handle ──────────────────────────────────────────────────────
 
     def can_handle(self, session: Session) -> bool:
@@ -112,31 +104,31 @@ class WindowsTerminalAdapter(_CapabilityProvider):
     # ── group ───────────────────────────────────────────────────────────
 
     def group(self, views: list[SessionView]) -> list[SessionGroup]:
-        """Drop orphans, write the sentinel tab title for new sessions,
-        stamp adapter identity, emit one singleton SessionGroup per view.
+        """Drop orphans, reconcile sentinel title for new sessions,
+        bucket views by wt_hwnd, emit one SessionGroup per WT window.
 
-        Why one-per-view (not tab-level grouping):
-        WT's UIA tree only fully populates the *currently active* tab —
-        WinUI3 lazy-loads inactive tab subtrees, so a conpty in an
-        inactive tab has no TermControl in the UIA tree we could match
-        against. The previous (wt_hwnd, normalized_cwd) approximation
-        merged any two tabs in the same WT window that shared a cwd
-        (the common case: two ``claude`` sessions launched from the
-        same project root) into one card; clicks on the inactive one
-        silently routed to the active sibling via the title fallback.
-        See WT issues #5694, #1351 + WinUI3 issue #8719 for why a
-        proper conpty→TabItem mapping is not feasible here.
+        Grouping by wt_hwnd (not singleton, not by-cwd):
+        Empirical UIA dump (scripts/dump_wt_uia.py) showed that WT's
+        UIA tree only exposes the *active pane* of the *active tab* —
+        every other pane (inactive panes within the active tab AND
+        anything in inactive tabs) is physically absent (WT calls
+        ``_tabContent.Children().Clear()`` on every tab switch in
+        TabManagement.cpp). So per-pane identification of inactive
+        panes is impossible from outside. We trade pane-precision for
+        UI grouping: same WT window → one card → click any session
+        in it does best-effort tab select (works when the target is
+        a tab's active pane / single-pane tab; falls back to plain
+        foreground for inactive panes in a split tab). User then uses
+        WT's own Alt+arrow to focus the right pane.
 
         Sentinel title (Plan O reconcile):
         On first sight of a session (cache miss), we read its console
         title; if it's not already our ``ci:{uuid}`` sentinel, we set
-        it. This is what lets ``select_tab_by_title`` find the right
-        tab on click — UIA mirrors console title to TabItem.Name, and
-        a uuid-derived title is globally unique so name match is
-        precise. Cache hits skip both probe and set: the session's
-        title is assumed stable. claude only rewrites the title on
-        topic-shift (rare); the click-time fallback in
-        ``_activate_windows`` re-asserts the sentinel on demand.
+        it via SetConsoleTitleW. WT mirrors that into TabItem.Name
+        (unless the tab was launched with ``--suppressApplicationTitle``
+        — Plan L — in which case the title was set at spawn). Either
+        way, ``select_tab_by_title`` can find the target tab by its
+        ``ci:{uuid32}`` Name. Cache hits skip the syscall.
 
         ``views`` are guaranteed to be claude sessions by upstream
         ``can_handle`` + the dispatcher chain — so SetConsoleTitleW
@@ -145,12 +137,14 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         Per-view work:
           1. AttachConsole probe (cached) to drop orphans (no console).
           2. On cache miss only: write sentinel title if drifted.
-          3. Stamp adapter identity, emit one SessionGroup per view.
+          3. Resolve wt_hwnd via walk_to_visible_host — used as the
+             group bucket key.
+          4. Bucket views by wt_hwnd. Views whose wt_hwnd doesn't
+             resolve become singleton groups (one card each).
 
-        Drag-tab correctness still works without group() doing anything:
-        ``_activate_windows`` re-runs ``walk_to_visible_host`` on every
-        focus click, so dragging a tab to another WT window is reflected
-        on the next click without group() needing to recompute.
+        Drag-tab correctness: a session moved to another WT window
+        will be re-bucketed on the next group() call, since
+        walk_to_visible_host re-resolves on every wake.
         """
         from dataclasses import replace
         from claude_island.platform_ import win32_console, window_activator
@@ -158,9 +152,9 @@ class WindowsTerminalAdapter(_CapabilityProvider):
             is_sentinel, sentinel_title,
         )
 
-        # win32gui needed for walk_to_visible_host (sibling-cache update
-        # path). None on import error → we skip the sibling refresh but
-        # don't crash the rest of group().
+        # win32gui needed for walk_to_visible_host. None on ImportError
+        # → all views fall through to singleton groups (we lose the
+        # window-grouping but rows still render).
         win32gui_mod = None
         try:
             import win32gui as _w32g
@@ -218,35 +212,42 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         if not kept:
             kept = list(views)
 
-        # Sibling-pane cache refresh: enumerate each WT window's
-        # currently active tab and record which sentinels share it.
-        # Click-time fallback uses these to land on the right tab when
-        # the clicked session is an inactive pane (its sentinel isn't
-        # in TabItem.Name; one of its siblings IS — see
-        # wt_pane_siblings.py for the rationale). We dedup wt_hwnd
-        # because all panes within one window resolve to the same
-        # hwnd; one walk per window is enough.
-        if win32gui_mod is not None:
-            from claude_island.platform_.wt_pane_siblings import _dbg as _focus_dbg
-            wt_hwnds: set[int] = set()
-            for v in kept:
+        # Bucket by wt_hwnd. Views whose hwnd resolves go into per-
+        # window groups; unresolvable views become singleton groups so
+        # they never silently disappear.
+        buckets: dict[int, list[SessionView]] = {}
+        singletons: list[SessionView] = []
+        for v in kept:
+            wt_hwnd: int | None = None
+            if win32gui_mod is not None:
                 conpty = self._conpty_cache.get(v.session.pid)
-                if not conpty:
-                    continue
-                wt_hwnd = window_activator.walk_to_visible_host(
-                    conpty, win32gui_mod,
-                )
-                if wt_hwnd:
-                    wt_hwnds.add(wt_hwnd)
-            _focus_dbg(
-                f"group() wt_hwnds={[hex(h) for h in wt_hwnds]} "
-                f"(kept={len(kept)} sessions)"
-            )
-            for wt_hwnd in wt_hwnds:
-                self._sibling_tracker.update_from_active_tab(wt_hwnd)
+                if conpty:
+                    wt_hwnd = window_activator.walk_to_visible_host(
+                        conpty, win32gui_mod,
+                    )
+            if wt_hwnd:
+                buckets.setdefault(wt_hwnd, []).append(v)
+            else:
+                singletons.append(v)
 
         result: list[SessionGroup] = []
-        for v in kept:
+        for wt_hwnd, batch in buckets.items():
+            stamped = tuple(
+                replace(
+                    v,
+                    adapter_id=self.name,
+                    focus_granularity=FocusGranularity.TAB,
+                    capabilities=type(self).capabilities,
+                )
+                for v in batch
+            )
+            result.append(SessionGroup(
+                group_id=f"wt:{wt_hwnd}",
+                title_hint=None,
+                adapter_id=self.name,
+                views=stamped,
+            ))
+        for v in singletons:
             stamped = replace(
                 v,
                 adapter_id=self.name,
@@ -254,7 +255,7 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 capabilities=type(self).capabilities,
             )
             result.append(SessionGroup(
-                group_id=f"wt:{stamped.pid}",
+                group_id=f"wt:singleton:{stamped.pid}",
                 title_hint=None,
                 adapter_id=self.name,
                 views=(stamped,),
@@ -272,31 +273,16 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         sentinel if claude or the user has clobbered it since group()
         last reconciled.
 
-        Also injects the cached sibling sentinels (sessions known to
-        share *this* session's tab) — used as the second fallback when
-        the click target is an inactive split-pane whose own sentinel
-        doesn't appear in any TabItem.Name. The tracker is forwarded
-        so ``_activate_windows`` can fire-and-forget a refresh when
-        every fallback misses.
-
-        ``siblings`` (pid list) is preserved for backward compatibility
-        with the dispatcher signature; under singleton grouping it is
-        always empty — the proper sibling info now flows through the
-        sentinel cache."""
+        ``siblings`` (pid list) is preserved for dispatcher kwargs
+        uniformity — ignored here since wt_hwnd-grouping doesn't need
+        it (UI groups same-window sessions visually; click on any of
+        them does best-effort tab select).
+        """
         from claude_island.platform_.wt_session_title import sentinel_title
         expected = sentinel_title(view.session_uuid)
-        sib_sentinels: tuple[str, ...] = ()
-        if expected:
-            # Snapshot the cache at click time. siblings_of returns a
-            # fresh copy, safe to iterate without holding the tracker
-            # lock during UIA select calls.
-            sib_sentinels = tuple(self._sibling_tracker.siblings_of(expected))
         return _activate_windows(
             view.session.pid,
             expected_title=expected,
-            sibling_sentinels=sib_sentinels,
-            sibling_pids=list(siblings),
-            sibling_tracker=self._sibling_tracker,
         )
 
     # ── LAUNCH ───────────────────────────────────────────────────────────
@@ -386,12 +372,9 @@ def _activate_windows(
     pid: int,
     *,
     expected_title: str | None = None,
-    sibling_sentinels: tuple[str, ...] | list[str] = (),
-    sibling_tracker: object | None = None,
-    sibling_pids: list[int] | None = None,
 ) -> bool:
     """Resolve console window → (re-assert sentinel title if needed)
-    → UIA tab select (with sibling-cache fallback) → SetForegroundWindow.
+    → UIA tab select → SetForegroundWindow.
 
     ``expected_title``: the ``ci:{uuid}`` sentinel for this session.
     On click, we compare it against the current console title; if they
@@ -401,33 +384,22 @@ def _activate_windows(
     mirrors the change into TabItem.Name (or 200ms times out — typical
     when the user's profile has ``suppressApplicationTitle: true``).
 
-    ``sibling_sentinels``: pre-computed snapshot of the
-    PaneSiblingTracker's cached siblings of expected_title. Used as
-    the second fallback when select(expected) misses — the click target
-    is likely an inactive pane in a split tab, and its sibling's
-    sentinel IS in TabItem.Name (the sibling is the active pane).
-
-    ``sibling_tracker``: PaneSiblingTracker instance. When all selects
-    miss, we ``schedule_update`` (fire-and-forget on a background
-    thread) so the cache is fresh for the next click. We do NOT block
-    this click waiting for the refresh — Qt event loop must stay
-    responsive.
-
-    Tab-select chain (no further fallbacks beyond ``_force_foreground``):
+    Tab-select chain:
       1. ``select_tab_by_title(expected)`` — exact match. Hits the
          active-pane / single-pane case.
-      2. ``select_tab_by_title(sib)`` for each sibling sentinel — hits
-         the inactive-pane-in-split-tab case via its active sibling.
-      3. ``schedule_update(hwnd)`` fire-and-forget — repairs cache for
-         the next click; this click does not retry (no Qt blocking).
-      4. ``_force_foreground(hwnd)`` — at minimum brings WT to the
-         foreground so the user gets visual feedback their click was
-         received.
+      2. ``_force_foreground(hwnd)`` — runs unconditionally after
+         step 1, so the user always gets visual feedback (WT window
+         comes to foreground) even if the precise tab select missed.
+         Inactive panes in split tabs land here: WT lands on whatever
+         tab is currently active in that window; the user uses
+         WT's own Alt+arrow to focus the right pane.
 
-    ``sibling_pids``: kept for backward compatibility with the
-    WindowActivator class path used by other adapters; WT's singleton
-    grouping always passes an empty list. Don't remove the parameter
-    without also deleting the class method in ``window_activator.py``.
+    Per-pane disambiguation of inactive split panes is impossible
+    from outside WT (TabItem.Name reflects only the active pane;
+    inactive panes have no UIA presence — see scripts/dump_wt_uia.py
+    output and TerminalApp/TabManagement.cpp's _UpdatedSelectedTab).
+    The UI compensates by visually grouping same-window sessions in
+    one card so users understand why the precise pane wasn't reached.
 
     Returns whatever ``_force_foreground`` returns when we found a
     host hwnd — even if the tab select failed, raising the WT window
@@ -445,60 +417,27 @@ def _activate_windows(
         )
         return False
 
-    from claude_island.platform_.wt_pane_siblings import _dbg
-
-    _dbg(
-        f"_activate_windows(pid={pid}, expected={expected_title!r}, "
-        f"siblings={list(sibling_sentinels)!r})"
-    )
     resolved = _resolve_console_window(pid, win32gui)
     hwnd: int | None = None
     if resolved is not None:
         hwnd, current_title = resolved
-        _dbg(f"  resolved → wt_hwnd={hex(hwnd)}, current_title={current_title!r}")
         from claude_island.platform_ import win32_console, wt_uia
 
-        # Click-time reconcile: claude may have rewritten the title via
-        # OSC during a topic shift, or this session was just discovered
-        # by the scanner and group()'s reconcile hasn't run yet. Re-set
-        # then wait for WT's OSC pipeline to mirror it into TabItem.Name
-        # before we issue the select.
+        # Click-time reconcile: claude may have rewritten the title
+        # via OSC during a topic shift, or this session was just
+        # discovered by the scanner and group()'s reconcile hasn't
+        # run yet. Re-set then wait for WT's OSC pipeline to mirror
+        # the change into TabItem.Name before we issue the select.
         target_title = expected_title or current_title
         if expected_title and current_title != expected_title:
-            ok = win32_console.set_console_title(pid, expected_title)
-            _dbg(f"  set_console_title → {ok}")
+            win32_console.set_console_title(pid, expected_title)
             # Poll up to 200ms. If WT silently dropped our set
             # (suppressApplicationTitle profile), this returns False
-            # and the select_tab_by_title below will also fail — we
-            # still fall back to siblings and then plain foreground.
-            wait_ok = wt_uia.wait_for_tab_name(hwnd, expected_title, timeout_ms=200)
-            _dbg(f"  wait_for_tab_name → {wait_ok}")
+            # and the select_tab_by_title below also fails — we
+            # still fall back to plain foreground at the end.
+            wt_uia.wait_for_tab_name(hwnd, expected_title, timeout_ms=200)
 
-        # Step 1: try our own sentinel.
-        hit = wt_uia.select_tab_by_title(hwnd, target_title)
-        _dbg(f"  step1 select_tab_by_title({target_title!r}) → {hit}")
-
-        # Step 2: try each cached sibling sentinel — covers
-        # inactive-pane-in-split-tab.
-        if not hit:
-            for sib in sibling_sentinels:
-                if sib and sib != target_title:
-                    sib_hit = wt_uia.select_tab_by_title(hwnd, sib)
-                    _dbg(f"  step2 select_tab_by_title({sib!r}) → {sib_hit}")
-                    if sib_hit:
-                        hit = True
-                        break
-
-        # Step 3: cache miss / stale. Fire async refresh for next
-        # click; don't block this one. Tracker has duck-typed
-        # ``schedule_update`` (object-typed parameter so this module
-        # doesn't need to import the concrete class).
-        if not hit and sibling_tracker is not None:
-            _dbg("  step3 fire schedule_update (cache miss / stale)")
-            try:
-                sibling_tracker.schedule_update(hwnd)
-            except Exception:
-                pass  # tracker is best-effort
+        wt_uia.select_tab_by_title(hwnd, target_title)
     else:
         from claude_island.platform_.window_activator import _ancestor_pids, _find_window_for_pids
         candidate_pids = _ancestor_pids(pid)
@@ -507,8 +446,6 @@ def _activate_windows(
 
     if hwnd is None:
         return False
-    # Step 4: foreground regardless — visual feedback that click was
-    # received, even if tab select failed.
     from claude_island.platform_.window_activator import _force_foreground
     return _force_foreground(hwnd, win32con, win32gui, win32process)
 

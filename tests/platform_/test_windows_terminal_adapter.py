@@ -261,62 +261,78 @@ class TestCacheGC:
 
 # ── Singleton-grouping invariant ──────────────────────────────────────
 
-class TestSingletonGrouping:
-    """Lock in the post-bug-fix contract: every view becomes its own
-    SessionGroup, regardless of cwd or any wt-window relationship.
+class TestWtHwndGrouping:
+    """Plan D: bucket views by wt_hwnd so the UI groups same-window
+    sessions in one card. Per-pane targeting of inactive split panes
+    is impossible from outside WT (verified via scripts/dump_wt_uia.py
+    — TermControl.Name is the live console title, not our sentinel,
+    and inactive panes are physically absent from the UIA tree).
+    Window-grouping makes the imprecision visible to users."""
 
-    This is the regression guard for the bug where two `claude` sessions
-    launched from the same project root in two tabs of the same WT window
-    were silently merged into one card, and the inactive tab's click
-    routed to its sibling. See group() docstring for the WinUI3 / UIA
-    rationale that forced singleton-only grouping on Windows."""
-
-    def test_each_view_is_its_own_group(self, adapter, patched):
-        """Two live views with the same cwd → two distinct groups."""
-        patched.set_console({1234: 0xAA, 5678: 0xBB})
-
-        groups = adapter.group([_view(1234, "C:\\proj"), _view(5678, "C:\\proj")])
-
-        assert len(groups) == 2
-        assert {g.group_id for g in groups} == {"wt:1234", "wt:5678"}
-        # Each group holds exactly one view.
-        for g in groups:
-            assert len(g.views) == 1
-
-    def test_same_cwd_does_not_merge_regression(self, adapter, patched):
-        """Regression: dev + dev2 in two tabs of the same WT window,
-        both cd'd to the same project. Pre-fix this collapsed into a
-        single 2-view group with title_hint set; click on inactive
-        tab routed to active tab via sibling fallback. Now: each
-        gets its own card, each focus click routes to its own pid."""
+    def test_two_sessions_in_same_window_share_one_group(self, adapter, patched):
+        """Both pids walk to the same wt_hwnd → one SessionGroup with
+        two views. UI renders this as one card."""
         patched.set_console({100: 0xA0, 200: 0xB0})
+        patched.set_walk({0xA0: 0x1111, 0xB0: 0x1111})  # same wt_hwnd
 
         groups = adapter.group([
-            _view(100, "D:\\coding projects\\claude-island"),
-            _view(200, "D:\\coding projects\\claude-island"),
+            _view(100, session_uuid="a" * 32),
+            _view(200, session_uuid="b" * 32),
         ])
 
-        # Two views, two groups, no merging.
-        assert len(groups) == 2
-        all_pids = {v.pid for g in groups for v in g.views}
+        assert len(groups) == 1
+        assert groups[0].group_id == f"wt:{0x1111}"
+        all_pids = {v.pid for v in groups[0].views}
         assert all_pids == {100, 200}
-        # No multi-view group with merged title hint.
-        for g in groups:
-            assert g.title_hint is None
-            assert len(g.views) == 1
 
-    def test_orphan_dropped_live_kept_as_singleton(self, adapter, patched):
-        """Orphan filter is preserved by singleton refactor: a pid
-        whose AttachConsole fails is dropped; surviving pids each
-        become their own group."""
-        patched.set_console({100: 0xA0, 200: None, 300: 0xC0})
+    def test_distinct_wt_windows_give_distinct_groups(self, adapter, patched):
+        """Two pids walking to different wt_hwnds → two groups, one
+        each. Two physical WT windows in the UI."""
+        patched.set_console({100: 0xA0, 200: 0xB0})
+        patched.set_walk({0xA0: 0x1111, 0xB0: 0x2222})
 
-        groups = adapter.group([_view(100), _view(200), _view(300)])
+        groups = adapter.group([
+            _view(100, session_uuid="a" * 32),
+            _view(200, session_uuid="b" * 32),
+        ])
+
+        assert len(groups) == 2
+        ids = {g.group_id for g in groups}
+        assert ids == {f"wt:{0x1111}", f"wt:{0x2222}"}
+
+    def test_unresolved_wt_hwnd_falls_back_to_singleton(self, adapter, patched):
+        """If walk_to_visible_host returns None (orphan WT, conpty in
+        flux), the view becomes a singleton group keyed by pid so it
+        never disappears from the UI."""
+        patched.set_console({100: 0xA0})
+        patched.set_walk({0xA0: None})  # walk fails
+
+        groups = adapter.group([_view(100, session_uuid="a" * 32)])
+
+        assert len(groups) == 1
+        assert groups[0].group_id == "wt:singleton:100"
+
+    def test_orphan_dropped_resolved_views_grouped(self, adapter, patched):
+        """Orphan filter still works: pid whose AttachConsole fails
+        is dropped; the rest are bucketed normally."""
+        patched.set_console_per_pid({
+            100: (0xA0, "Claude Code"),
+            200: None,                       # orphan
+            300: (0xC0, "Claude Code"),
+        })
+        patched.set_walk({0xA0: 0x1111, 0xC0: 0x1111})  # both in one window
+
+        groups = adapter.group([
+            _view(100, session_uuid="a" * 32),
+            _view(200, session_uuid="b" * 32),
+            _view(300, session_uuid="c" * 32),
+        ])
 
         kept_pids = {v.pid for g in groups for v in g.views}
-        assert kept_pids == {100, 300}
-        # Each survivor is its own singleton.
-        assert len(groups) == 2
+        assert kept_pids == {100, 300}  # 200 dropped
+        # Both survivors share one wt_hwnd → one group.
+        assert len(groups) == 1
+        assert groups[0].group_id == f"wt:{0x1111}"
 
 
 # ── Plan O sentinel reconcile ─────────────────────────────────────────
@@ -446,157 +462,6 @@ class TestSentinelReconcile:
             for c in patched.set_console_title.call_args_list
         }
         assert calls == {(100, f"ci:{uuid_a}"), (200, f"ci:{uuid_b}")}
-
-
-# ── Sibling tracker integration ───────────────────────────────────────
-
-class TestSiblingTrackerIntegration:
-    """group() must drive the PaneSiblingTracker so the click-time
-    fallback chain has fresh sibling info to work with.
-
-    These tests replace the adapter's tracker with a Mock so we can
-    assert the calls without running real UIA."""
-
-    UUID = "a1b2c3d4" + "0" * 24
-
-    def test_group_calls_update_for_each_unique_wt_hwnd(
-        self, adapter, patched,
-    ):
-        """One walk_to_visible_host per distinct wt_hwnd; tracker
-        update fires for each unique hwnd (not per-pid duplicates)."""
-        # Two sessions in same WT window (same wt_hwnd).
-        patched.set_console({100: 0xA0, 200: 0xB0})
-        patched.set_walk({0xA0: 0x1111, 0xB0: 0x1111})  # same wt_hwnd
-
-        tracker = mock.Mock()
-        adapter._sibling_tracker = tracker
-
-        adapter.group([
-            _view(100, session_uuid="a" * 32),
-            _view(200, session_uuid="b" * 32),
-        ])
-
-        # Both pids walked, but only one unique wt_hwnd → one update.
-        tracker.update_from_active_tab.assert_called_once_with(0x1111)
-
-    def test_group_update_called_per_distinct_wt_hwnd(
-        self, adapter, patched,
-    ):
-        """Two WT windows → two updates (one per window)."""
-        patched.set_console({100: 0xA0, 200: 0xB0})
-        patched.set_walk({0xA0: 0x1111, 0xB0: 0x2222})  # different wt_hwnds
-
-        tracker = mock.Mock()
-        adapter._sibling_tracker = tracker
-
-        adapter.group([
-            _view(100, session_uuid="a" * 32),
-            _view(200, session_uuid="b" * 32),
-        ])
-
-        assert tracker.update_from_active_tab.call_count == 2
-        called_hwnds = {
-            c.args[0] for c in tracker.update_from_active_tab.call_args_list
-        }
-        assert called_hwnds == {0x1111, 0x2222}
-
-    def test_group_skips_update_when_walk_returns_none(
-        self, adapter, patched,
-    ):
-        """If walk_to_visible_host can't resolve (orphan / WT gone),
-        tracker is not called for that pid."""
-        patched.set_console({100: 0xA0})
-        patched.set_walk({0xA0: None})  # walk fails
-
-        tracker = mock.Mock()
-        adapter._sibling_tracker = tracker
-
-        adapter.group([_view(100, session_uuid="a" * 32)])
-
-        tracker.update_from_active_tab.assert_not_called()
-
-
-class TestFocusPassesSiblingSentinels:
-    """focus() must read the tracker's cache for the clicked view's
-    sentinel and forward it to _activate_windows."""
-
-    UUID = "a" * 32
-    EXPECTED = f"ci:{UUID}"
-
-    def test_focus_forwards_cached_siblings(self, monkeypatch):
-        """tracker.siblings_of returns {ci:sib} → focus passes it
-        through as sibling_sentinels."""
-        from claude_island.core.capabilities import FocusGranularity
-        from claude_island.platform_.terminals.windows_terminal import (
-            WindowsTerminalAdapter,
-        )
-
-        adapter = WindowsTerminalAdapter()
-        adapter.name = "windows-terminal"
-        adapter._priority = 100
-
-        # Stub the tracker.
-        tracker = mock.Mock()
-        tracker.siblings_of.return_value = {"ci:sib_uuid"}
-        adapter._sibling_tracker = tracker
-
-        # Stub _activate_windows to capture the call.
-        captured: dict = {}
-        def _stub_activate(pid, **kwargs):
-            captured["pid"] = pid
-            captured.update(kwargs)
-            return True
-        monkeypatch.setattr(
-            "claude_island.platform_.terminals.windows_terminal._activate_windows",
-            _stub_activate,
-        )
-
-        view = _view(999, session_uuid=self.UUID)
-        # Stamp the FocusGranularity / adapter_id as group() would.
-        from dataclasses import replace
-        view = replace(
-            view,
-            adapter_id=adapter.name,
-            focus_granularity=FocusGranularity.TAB,
-        )
-
-        adapter.focus(view)
-
-        tracker.siblings_of.assert_called_once_with(self.EXPECTED)
-        assert captured["pid"] == 999
-        assert captured["expected_title"] == self.EXPECTED
-        assert set(captured["sibling_sentinels"]) == {"ci:sib_uuid"}
-        # tracker reference forwarded for fire-and-forget refresh.
-        assert captured["sibling_tracker"] is tracker
-
-    def test_focus_with_no_uuid_skips_sibling_lookup(self, monkeypatch):
-        """Degraded view (empty uuid) → no sentinel → no sibling
-        cache lookup."""
-        from claude_island.platform_.terminals.windows_terminal import (
-            WindowsTerminalAdapter,
-        )
-
-        adapter = WindowsTerminalAdapter()
-        adapter.name = "windows-terminal"
-        tracker = mock.Mock()
-        adapter._sibling_tracker = tracker
-
-        captured: dict = {}
-        def _stub_activate(pid, **kwargs):
-            captured.update(kwargs)
-            return True
-        monkeypatch.setattr(
-            "claude_island.platform_.terminals.windows_terminal._activate_windows",
-            _stub_activate,
-        )
-
-        view = _view(999, session_uuid="")
-        adapter.focus(view)
-
-        tracker.siblings_of.assert_not_called()
-        assert captured["expected_title"] is None
-        assert captured["sibling_sentinels"] == ()
-
 
 # ── _activate_windows click-time reconcile ────────────────────────────
 
@@ -745,146 +610,6 @@ class TestActivateWindowsReconcile:
         patched_activate.select_tab_by_title.assert_called_once_with(
             0xCAFE, "some title",
         )
-
-    def test_sibling_sentinel_tried_when_primary_select_fails(
-        self, patched_activate,
-    ):
-        """Split-pane click: select(my sentinel) fails → try cached
-        sibling sentinels in order → first one that hits wins."""
-        from claude_island.platform_.terminals.windows_terminal import (
-            _activate_windows,
-        )
-
-        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
-        # Primary select fails; first sibling fails too; second hits.
-        patched_activate.select_tab_by_title.side_effect = [
-            False,  # primary
-            False,  # sibling 1
-            True,   # sibling 2
-        ]
-
-        ok = _activate_windows(
-            pid=999,
-            expected_title=self.EXPECTED,
-            sibling_sentinels=("ci:sib1_uuid", "ci:sib2_uuid"),
-        )
-
-        assert ok is True
-        # 3 calls: primary + 2 siblings.
-        assert patched_activate.select_tab_by_title.call_count == 3
-        calls = [c.args for c in patched_activate.select_tab_by_title.call_args_list]
-        assert calls[0] == (0xCAFE, self.EXPECTED)
-        assert calls[1] == (0xCAFE, "ci:sib1_uuid")
-        assert calls[2] == (0xCAFE, "ci:sib2_uuid")
-        patched_activate.force_foreground.assert_called_once()
-
-    def test_sibling_sentinels_not_tried_when_primary_succeeds(
-        self, patched_activate,
-    ):
-        """Fast path: primary select hits → siblings never tried."""
-        from claude_island.platform_.terminals.windows_terminal import (
-            _activate_windows,
-        )
-
-        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
-        patched_activate.select_tab_by_title.return_value = True
-
-        _activate_windows(
-            pid=999,
-            expected_title=self.EXPECTED,
-            sibling_sentinels=("ci:sib_uuid",),
-        )
-
-        # Only the primary call.
-        assert patched_activate.select_tab_by_title.call_count == 1
-
-    def test_tracker_schedule_update_fires_on_full_miss(
-        self, patched_activate,
-    ):
-        """All select calls miss → tracker.schedule_update is fired
-        for next-click cache repair. force_foreground still called
-        for visual feedback."""
-        from claude_island.platform_.terminals.windows_terminal import (
-            _activate_windows,
-        )
-
-        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
-        patched_activate.select_tab_by_title.return_value = False
-
-        tracker = mock.Mock()
-
-        ok = _activate_windows(
-            pid=999,
-            expected_title=self.EXPECTED,
-            sibling_sentinels=("ci:sib_uuid",),
-            sibling_tracker=tracker,
-        )
-
-        assert ok is True  # force_foreground returned True
-        tracker.schedule_update.assert_called_once_with(0xCAFE)
-        patched_activate.force_foreground.assert_called_once()
-
-    def test_tracker_not_fired_when_primary_hits(self, patched_activate):
-        """Common path: primary hit → no schedule_update wasted."""
-        from claude_island.platform_.terminals.windows_terminal import (
-            _activate_windows,
-        )
-
-        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
-        patched_activate.select_tab_by_title.return_value = True
-
-        tracker = mock.Mock()
-
-        _activate_windows(
-            pid=999,
-            expected_title=self.EXPECTED,
-            sibling_tracker=tracker,
-        )
-
-        tracker.schedule_update.assert_not_called()
-
-    def test_tracker_not_fired_when_sibling_hits(self, patched_activate):
-        """A sibling hit means the cache was good — don't refresh."""
-        from claude_island.platform_.terminals.windows_terminal import (
-            _activate_windows,
-        )
-
-        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
-        patched_activate.select_tab_by_title.side_effect = [False, True]
-
-        tracker = mock.Mock()
-
-        _activate_windows(
-            pid=999,
-            expected_title=self.EXPECTED,
-            sibling_sentinels=("ci:sib_uuid",),
-            sibling_tracker=tracker,
-        )
-
-        tracker.schedule_update.assert_not_called()
-
-    def test_tracker_schedule_update_failure_does_not_raise(
-        self, patched_activate,
-    ):
-        """If schedule_update raises (degraded tracker), _activate_windows
-        must still return cleanly — tracker is best-effort."""
-        from claude_island.platform_.terminals.windows_terminal import (
-            _activate_windows,
-        )
-
-        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
-        patched_activate.select_tab_by_title.return_value = False
-
-        tracker = mock.Mock()
-        tracker.schedule_update.side_effect = RuntimeError("tracker died")
-
-        # Should not raise.
-        _activate_windows(
-            pid=999,
-            expected_title=self.EXPECTED,
-            sibling_tracker=tracker,
-        )
-        patched_activate.force_foreground.assert_called_once()
 
 
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────

@@ -1,6 +1,6 @@
 """Windows Terminal UI Automation operations.
 
-Single entry point for all UIA work in claude-island. Five public
+Single entry point for all UIA work in claude-island. Three public
 functions:
 
 - ``collect_wt_tab_titles`` — set of every visible TabItem.Name across
@@ -9,27 +9,29 @@ functions:
   in any visible WT tab is no longer rendered anywhere — it's an
   orphan, hide it).
 - ``select_tab_by_title`` — within a specific WT window's UIA tree,
-  bring the matching TabItem to the foreground. Used by WindowActivator
-  on click.
-- ``select_any_ci_tab`` — within a specific WT window's UIA tree,
-  select the first TabItem whose Name starts with ``ci:``. Used as a
-  fallback when ``select_tab_by_title`` misses on the inactive pane
-  of a split-tab (its TabItem.Name reflects the active sibling pane).
+  bring the matching TabItem to the foreground. Used by the WT
+  adapter's focus path on click.
 - ``wait_for_tab_name`` — poll the UIA tree until a TabItem with the
   given Name appears. Used after ``set_console_title`` to confirm WT
   picked up the OSC-propagated title change before we issue
   ``select_tab_by_title``.
-- ``enumerate_active_tab_sentinels`` — enumerate the ``ci:*`` Names
-  of every TermControl inside the active TabItem of *hwnd*. Powers
-  the sibling-pane cache that resolves the split-pane click problem
-  (only the active pane's sentinel reaches TabItem.Name; sibling
-  panes' sentinels live on their own TermControl.Name inside the
-  active tab's subtree, where WinUI3 does NOT virtualize them).
 
-All three accept and return primitives so future ConEmu / iTerm2
-backends can sit alongside without coupling to claude-island domain types.
+All accept and return primitives so future ConEmu / iTerm2 backends
+can sit alongside without coupling to claude-island domain types.
 All are fail-safe: any UIA failure returns the "unknown / no-op"
 sentinel (``None`` / ``False``) so callers can fall back gracefully.
+
+Removed in 2026-05: ``select_any_ci_tab`` and
+``enumerate_active_tab_sentinels`` (the sibling-cache machinery).
+End-to-end UIA dump (scripts/dump_wt_uia.py) showed that
+TermControl.Name never carries our sentinel — the ``--title`` arg
+sets the Tab's title, not the TermControl's StartingTitle — so
+sibling enumeration was structurally impossible. Inactive panes
+within an active tab are also physically absent from the UIA tree
+(WT clears tab content on switch via TabManagement.cpp), so no
+pane-level identification of inactive split panes is reachable from
+outside WT. The UI now groups same-window sessions visually
+instead of trying to disambiguate within a window.
 """
 from __future__ import annotations
 
@@ -177,234 +179,6 @@ def select_tab_by_title(hwnd: int, title: str) -> bool:
         print(f"[claude-island] wt_uia.select_tab_by_title: {exc}",
               file=_sys.stderr)
         return False
-
-
-def select_any_ci_tab(hwnd: int) -> bool:
-    """Select the first TabItem under *hwnd* whose Name starts with
-    ``"ci:"`` — the sentinel-prefix fallback for split-pane click.
-
-    Why this exists: when two claude sessions share one WT tab as
-    split panes, ``TabItem.Name`` only reflects the *active pane*'s
-    console title (WinUI3 lazy-loads inactive panes' TermControls).
-    A click on the inactive-pane row in the panel runs
-    ``select_tab_by_title`` with the inactive pane's sentinel — which
-    matches no TabItem and fails. Falling back to "any ci:* tab"
-    selects the sibling tab that DOES carry our sentinel as its
-    active pane's title, so WT at least lands on the correct tab.
-    The user finishes by pressing Alt+arrow to focus the right pane.
-
-    Limitation: when the same WT window holds *multiple* tabs whose
-    active pane is one of our sessions (e.g. four sessions split
-    across two tabs), this picks whichever ``ci:*`` tab UIA returns
-    first — not necessarily the target session's tab. Disambiguating
-    that requires per-session wt_hwnd tracking on SessionView, which
-    is a larger refactor; this fallback is the "good in 70% of
-    cases, never silently no-op" minimum.
-
-    Returns ``True`` on successful select (including the no-op case
-    where the matching tab was already selected). Returns ``False``
-    on any failure: non-Windows, library absent, no TabControl, no
-    ``ci:`` tab, UIA pattern unavailable, or any exception.
-    Never raises.
-    """
-    if sys.platform != "win32":
-        return False
-    try:
-        import uiautomation as auto
-
-        root = auto.ControlFromHandle(hwnd)
-        if root is None:
-            return False
-        tab_control = root.TabControl(searchDepth=10)
-        if not tab_control.Exists(0.1):
-            return False
-
-        # WinUI3 wraps tab buttons in an inner ListControl; BFS down
-        # bounded depth (matches _collect_tab_names walk).
-        tab_item = _find_first_ci_tab(tab_control, max_depth=4)
-        if tab_item is None:
-            return False
-
-        pattern = tab_item.GetSelectionItemPattern()
-        if pattern is None:
-            return False
-        if pattern.IsSelected:
-            return True
-        pattern.Select()
-        return True
-    except Exception as exc:
-        import sys as _sys
-        print(f"[claude-island] wt_uia.select_any_ci_tab: {exc}",
-              file=_sys.stderr)
-        return False
-
-
-def _find_first_ci_tab(elem: object, *, max_depth: int) -> object | None:
-    """BFS the subtree under *elem* and return the first descendant
-    TabItemControl whose Name starts with ``"ci:"``."""
-    frontier: list[tuple[object, int]] = [(elem, 0)]
-    while frontier:
-        node, depth = frontier.pop(0)
-        try:
-            children = node.GetChildren()
-        except Exception:
-            continue
-        for child in children:
-            if getattr(child, "ControlTypeName", "") == "TabItemControl":
-                name = getattr(child, "Name", "") or ""
-                if name.startswith("ci:"):
-                    return child
-                # TabItemControl subtree is the tab's content (TermControl
-                # etc.), not more tabs — don't descend.
-                continue
-            if depth + 1 < max_depth:
-                frontier.append((child, depth + 1))
-    return None
-
-
-def enumerate_active_tab_sentinels(hwnd: int) -> set[str]:
-    """Return the set of ``ci:*`` Names of every pane (TermControl)
-    in the active tab of *hwnd*.
-
-    Powers ``PaneSiblingTracker``: every sentinel returned here is a
-    pane in the same WT tab as every other sentinel returned (they
-    are observed siblings). The caller records the set so that future
-    clicks on any of these sentinels can fall back to the others.
-
-    Why "active tab" without explicitly finding the active TabItem:
-    WinUI3 TabView virtualizes inactive tab content. The TabItem
-    *labels* (in the tab strip) for every tab are present in the UIA
-    tree — but the TabItem subtree is just label widgets (Image +
-    TextBlock + close Button), NOT the tab's pane content. The
-    actual pane content lives in a sibling content area of the
-    TabControl, and lazy-load means only the *currently active*
-    tab's content is populated there. So a BFS over the WT window's
-    root that *skips TabItem subtrees* and matches Name=``ci:*`` will
-    naturally collect exactly the active tab's panes.
-
-    ``TermControl.Name`` is set to ``StartingTitle`` by
-    ``TermControlAutomationPeer::GetNameCore``; this equals our
-    ``--title ci:{uuid}`` arg from Plan-L spawn. For Plan-O sessions
-    (sentinel set via SetConsoleTitleW after spawn), StartingTitle
-    is empty so Name falls back to the live ``Title()`` — also our
-    sentinel. Either way Name carries ``ci:*`` for the sessions we
-    care about.
-
-    Returns empty set on any failure (non-Windows, library absent,
-    no panes found, UIA exception). Never raises.
-    """
-    if sys.platform != "win32":
-        return set()
-
-    from claude_island.platform_.wt_pane_siblings import _dbg
-
-    sentinels: set[str] = set()
-    try:
-        import uiautomation as auto
-
-        root = auto.ControlFromHandle(hwnd)
-        if root is None:
-            _dbg(f"enumerate({hex(hwnd)}): root is None")
-            return sentinels
-        _collect_pane_sentinels(root, sentinels, max_depth=20)
-        _dbg(f"enumerate({hex(hwnd)}): collected sentinels={sentinels!r}")
-        # Diagnostic: when we found nothing useful, dump the whole
-        # tree so we can see where TermControls actually live (if at
-        # all). Only fires under debug env var; safe to leave in.
-        if not sentinels:
-            from claude_island.platform_.wt_pane_siblings import _DEBUG
-            if _DEBUG:
-                _dbg(f"enumerate({hex(hwnd)}): NO SENTINELS — full tree dump:")
-                _dbg_dump_tree(root, max_depth=12)
-    except Exception as exc:
-        import sys as _sys
-        print(f"[claude-island] wt_uia.enumerate_active_tab_sentinels: {exc}",
-              file=_sys.stderr)
-    return sentinels
-
-
-def _dbg_dump_tree(elem: object, *, max_depth: int) -> None:
-    """Print the UIA subtree to stderr (debug only). Used when
-    enumerate fails to find sentinels — gives us the actual structure
-    so we can fix the BFS algorithm."""
-    from claude_island.platform_.wt_pane_siblings import _dbg
-
-    def _walk(node: object, depth: int) -> None:
-        if depth > max_depth:
-            _dbg(f"{'  ' * depth}<truncated at depth {max_depth}>")
-            return
-        try:
-            ctn = getattr(node, "ControlTypeName", "?") or "?"
-            cn = getattr(node, "ClassName", "") or ""
-            name = getattr(node, "Name", "") or ""
-            marker = "  ← ci:" if name.startswith("ci:") else ""
-            short_name = name if len(name) <= 60 else name[:57] + "..."
-            _dbg(f"{'  ' * depth}{ctn} class={cn!r} name={short_name!r}{marker}")
-        except Exception as e:
-            _dbg(f"{'  ' * depth}<read error: {e}>")
-            return
-        try:
-            children = node.GetChildren() or []
-        except Exception as e:
-            _dbg(f"{'  ' * (depth + 1)}<GetChildren failed: {e}>")
-            return
-        for child in children:
-            _walk(child, depth + 1)
-
-    _walk(elem, 0)
-
-
-def _collect_pane_sentinels(
-    root: object, sink: set[str], *, max_depth: int,
-) -> None:
-    """BFS *root*'s UIA subtree; collect Name of every ``ci:*``
-    element that is NOT a TabItemControl (those are tab strip labels,
-    not pane content — descending into them would collect the tab
-    label's inner TextBlock with the same Name and pollute the set).
-
-    WinUI3 tab virtualization means only the active tab's pane
-    subtree is populated under the root. So the collected set is
-    always "sentinels of panes in this window's active tab" — exactly
-    what PaneSiblingTracker needs.
-
-    BFS depth cap is generous (20) — WT layouts inside an active tab
-    can nest 10+ ContentPresenter / Border / Grid / Pane wrappers
-    before reaching the actual TermControl.
-    """
-    from claude_island.platform_.wt_pane_siblings import _dbg
-
-    frontier: list[tuple[object, int]] = [(root, 0)]
-    visited_classes: dict[str, int] = {}
-    while frontier:
-        node, depth = frontier.pop(0)
-        try:
-            children = node.GetChildren()
-        except Exception:
-            continue
-        for child in children:
-            ctn = getattr(child, "ControlTypeName", "") or ""
-            if ctn == "TabItemControl":
-                # Tab strip label — Name reflects the active pane's
-                # sentinel but the element IS NOT the pane. Skipping
-                # the subtree avoids re-collecting the same Name via
-                # the label's child TextBlock.
-                continue
-            class_name = getattr(child, "ClassName", "") or ""
-            visited_classes[class_name] = visited_classes.get(class_name, 0) + 1
-            name = getattr(child, "Name", "") or ""
-            if name.startswith("ci:"):
-                sink.add(name)
-                _dbg(
-                    f"  collect: matched name={name!r} "
-                    f"class={class_name!r} depth={depth + 1}"
-                )
-                # If it IS the TermControl, don't descend — its
-                # subtree is screen-reader text, not more sentinels.
-                if class_name == "TermControl":
-                    continue
-            if depth + 1 < max_depth:
-                frontier.append((child, depth + 1))
-    _dbg(f"  collect: visited classes (count) = {visited_classes!r}")
 
 
 def wait_for_tab_name(
