@@ -99,4 +99,5 @@ def build_registry() -> dict[str, TerminalAdapter]:
 from . import windows_terminal  # noqa: E402,F401
 from . import generic_windows   # noqa: E402,F401
 from . import iterm2            # noqa: E402,F401
+from . import terminal_app      # noqa: E402,F401
 from . import generic_mac       # noqa: E402,F401
