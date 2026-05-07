@@ -4714,18 +4714,27 @@ class ExpandedWindow(QWidget):
             if meta_label.styleSheet() != target_cost_style:
                 meta_label.setStyleSheet(target_cost_style)
 
-        # No row-level tooltip for the high-cost warning. The cost
-        # label itself is already yellow + bold via _STYLE_COST_HIGH
-        # (the YNAB/Mint pattern noted above) — that is the visible
-        # signal. A hover-anywhere tooltip on top added only a
-        # rephrased dollar amount + a vague "consider checking" line,
-        # while covering the row below the cursor (the bug the user
-        # reported in screenshot #18). Removing it follows NN/g's
-        # rule: "tooltips with obvious or redundant text are not
-        # beneficial". A future iteration can add an inline ⚠️ chip
-        # next to the cost if a stronger warning becomes warranted —
-        # the chip can carry its own tooltip without covering rows.
-        btn.setToolTip("")
+        # Row-level tooltip + cursor communicate whether click-to-focus
+        # is actually wired. By default no tooltip (high-cost is signalled
+        # via the yellow cost label, not a hover-anywhere tooltip — the
+        # latter covered rows below the cursor and reused the dollar
+        # amount, NN/g "obvious or redundant" rule). When the adapter
+        # has dropped FOCUS from this view's capabilities (typical for
+        # tmux/screen sessions whose daemonized server breaks the chain
+        # to a UI host), remove the pointer affordance and surface a
+        # tooltip explaining the no-op rather than letting the user
+        # click into the void.
+        focus_supported = Capability.FOCUS in view.capabilities
+        if focus_supported:
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip("")
+        else:
+            btn.setCursor(Qt.CursorShape.ArrowCursor)
+            btn.setToolTip(
+                "Click-to-focus unavailable — no host terminal app in "
+                "this session's process tree (typical for tmux/screen "
+                "sessions). Right-click for session details."
+            )
 
         # Model chip. Priority:
         #   1. ``latest_model`` — the model from the most recent

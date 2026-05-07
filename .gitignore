@@ -45,3 +45,10 @@ _*.py
 # with an underscore. Without this exception, every new sub-package's
 # __init__.py needs `git add -f` to stage.
 !__init__.py
+# Same exception for private-module files under the package /
+# tests trees. Underscore-prefixed module names are a legitimate
+# Python convention for "internal, not part of public API"; without
+# this rule, files like ``_macos_common.py`` would be silently
+# ignored by ``git add`` and flagged as untracked forever.
+!claude_island/**/_*.py
+!tests/**/_*.py

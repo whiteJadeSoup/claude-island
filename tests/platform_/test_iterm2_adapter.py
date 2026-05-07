@@ -317,35 +317,78 @@ class TestFocus:
             assert called_args[0] == "osascript"
             assert "/dev/ttys001" in called_args[2]
 
-    def test_focus_returns_false_when_iterm_doesnt_find_tty(self, adapter):
-        """osascript completes (returncode=0) but the script returns
-        "miss" because no iTerm2 session has that tty (e.g. session
-        closed between scan and click)."""
+    def test_focus_falls_back_to_app_frontmost_on_tty_miss(self, adapter):
+        """tty matched psutil but iTerm2's tree has no session for it
+        (tmux pty, pane closed between scan and click). The fallback
+        should raise iTerm2 to the front via the macos_common helper
+        rather than silently no-op the click — better-than-nothing UX
+        when pane precision is impossible."""
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
                        return_value=_proc_with_tty("/dev/ttys999")),
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="miss\n")),
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2.find_ui_app_ancestor",
+                return_value=12345,
+            ),
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2.frontmost_app",
+                return_value=True,
+            ) as fa,
+        ):
+            assert adapter.focus(v) is True
+            fa.assert_called_once_with(12345)
+
+    def test_focus_returns_false_when_tty_miss_and_no_ui_ancestor(self, adapter):
+        """tty miss AND no UI ancestor (tmux/screen with daemonized
+        server) — the fallback can't recover, focus returns False."""
+        v = _view(pid=10)
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty("/dev/ttys999")),
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="miss\n")),
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2.find_ui_app_ancestor",
+                return_value=None,
+            ),
         ):
             assert adapter.focus(v) is False
 
-    def test_focus_returns_false_on_osascript_error(self, adapter):
+    def test_focus_falls_back_when_psutil_terminal_missing(self, adapter):
+        """psutil returns no tty (process detached / non-controlling
+        terminal) — can't run the per-pane AppleScript, but the host
+        UI app fallback can still raise iTerm2."""
+        v = _view(pid=10)
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty(None)),
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2.find_ui_app_ancestor",
+                return_value=12345,
+            ),
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2.frontmost_app",
+                return_value=True,
+            ),
+        ):
+            assert adapter.focus(v) is True
+
+    def test_focus_returns_false_on_osascript_error_without_ancestor(self, adapter):
+        """osascript errored (returncode=1) AND no UI ancestor → False."""
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
                        return_value=_proc_with_tty("/dev/ttys001")),
             mock.patch("subprocess.run",
                        return_value=_mock_run(returncode=1)),
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2.find_ui_app_ancestor",
+                return_value=None,
+            ),
         ):
-            assert adapter.focus(v) is False
-
-    def test_focus_returns_false_when_psutil_terminal_missing(self, adapter):
-        """psutil returns no tty (process detached / non-controlling
-        terminal) — can't run the AppleScript at all."""
-        v = _view(pid=10)
-        with mock.patch("psutil.Process",
-                        return_value=_proc_with_tty(None)):
             assert adapter.focus(v) is False
 
     def test_focus_accepts_and_ignores_siblings_kwarg(self, adapter):
@@ -372,9 +415,17 @@ class TestFocus:
                        return_value=_proc_with_tty(weird_tty)),
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="miss\n")) as run,
+            # Stub the fallback so this test only asserts on the
+            # tty-path AppleScript shape, not the System Events call
+            # the new fallback would trigger after a "miss".
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2.find_ui_app_ancestor",
+                return_value=None,
+            ),
         ):
             adapter.focus(v)
-            script = run.call_args[0][0][2]
+            # First subprocess.run call is the tty AppleScript.
+            script = run.call_args_list[0][0][0][2]
             # Quote and backslash are escaped in the embedded literal
             assert '\\"' in script
             assert "\\\\" in script

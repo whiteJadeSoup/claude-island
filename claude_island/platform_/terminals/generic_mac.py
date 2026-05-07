@@ -23,6 +23,10 @@ from claude_island.core.capabilities import (
 from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
+from claude_island.platform_.terminals._macos_common import (
+    find_ui_app_ancestor,
+    frontmost_app,
+)
 from claude_island.platform_.terminals.iterm2 import _escape_applescript_string
 from claude_island.platform_.terminals.protocols import TerminalAdapter
 
@@ -44,15 +48,26 @@ class GenericMacAdapter(_CapabilityProvider):
 
     def group(self, views: list[SessionView]) -> list[SessionGroup]:
         """Each view becomes its own singleton group, stamped with the
-        generic-mac adapter identity. No re-resolution — the views are
-        already fully populated by the snapshotter."""
+        generic-mac adapter identity.
+
+        Drops :class:`Capability.FOCUS` from views whose process tree
+        has no UI-app ancestor — typically tmux/screen sessions whose
+        daemonized server severed the chain to the host terminal app.
+        We could keep FOCUS and have the click silently no-op, but
+        that's worse: the row looks clickable and the user gets no
+        feedback. Honest signal beats silent failure. UI gates the
+        cursor / pointer affordance on FOCUS membership, so dropping
+        it removes the "click me" cue."""
+        base_caps = type(self).capabilities
         groups: list[SessionGroup] = []
         for v in views:
+            ui_pid = find_ui_app_ancestor(v.session.pid)
+            caps = base_caps if ui_pid is not None else (base_caps - {Capability.FOCUS})
             stamped = replace(
                 v,
                 adapter_id=self.name,
                 focus_granularity=FocusGranularity.APP,
-                capabilities=type(self).capabilities,
+                capabilities=caps,
             )
             groups.append(SessionGroup(
                 group_id=f"mac:{stamped.pid}",
@@ -64,28 +79,27 @@ class GenericMacAdapter(_CapabilityProvider):
 
     @capability(Capability.FOCUS)
     def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
-        """Raise the host app to front via osascript.
+        """Raise the host UI app to front via System Events.
+
+        ``view.session.pid`` is the claude CLI pid. System Events'
+        ``process whose unix id is X`` does NOT enumerate CLI
+        processes — passing claude's pid directly returns error
+        ``-1719 Invalid index``. We must walk the parent chain to
+        find the UI app that owns the host terminal, then frontmost
+        that.
 
         Pane/tab-level focus requires a specific terminal adapter
-        (e.g. iTerm2 with AppleScript tty matching). This generic
-        fallback can only guarantee the app is frontmost.
+        (e.g. iTerm2 with AppleScript tty matching). This fallback
+        can only guarantee the host app is frontmost.
 
         ``siblings`` is accepted (and ignored) for dispatch-kwargs
         uniformity — see GenericWindowsAdapter.focus for the same
         rationale."""
         del siblings  # ignored — generic mac focus can't disambiguate panes
-        script = (
-            'tell application "System Events" to set frontmost of '
-            f'(first process whose unix id is {view.session.pid}) to true'
-        )
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, timeout=_TIMEOUT_S,
-            )
-            return result.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
+        ui_pid = find_ui_app_ancestor(view.session.pid)
+        if ui_pid is None:
             return False
+        return frontmost_app(ui_pid)
 
     @capability(Capability.LAUNCH)
     def launch(

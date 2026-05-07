@@ -66,6 +66,10 @@ from claude_island.core.capabilities import (
 from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
+from claude_island.platform_.terminals._macos_common import (
+    find_ui_app_ancestor,
+    frontmost_app,
+)
 from claude_island.platform_.terminals.protocols import TerminalAdapter
 
 # Process-ancestry detection. iTerm2 spawns shells whose parents
@@ -256,19 +260,28 @@ class ITerm2Adapter(_CapabilityProvider):
         directly via tty matching, so there's no need for a sibling
         fallback. Selecting the right pane + tab + activating the
         app is one round-trip.
+
+        Falls back to "raise iTerm2 to front" (no pane precision) on
+        any tty-match miss: psutil failure, no controlling terminal,
+        AppleScript error, or "miss" return. Common when the session
+        runs in tmux inside iTerm2 (the claude pid's tty is the tmux
+        pty, not in iTerm2's session tree) or when AppleScript
+        enumeration permission is denied for iTerm but not for System
+        Events. Without this fallback, those clicks were silent
+        no-ops; with it, the user at least gets the app raised.
         """
         del siblings
         try:
             import psutil
         except ImportError:
-            return False
+            return _focus_app_fallback(view)
         try:
             tty = psutil.Process(view.session.pid).terminal()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
-            return False
-        if not tty:
-            return False
-        return _focus_by_tty(tty)
+            return _focus_app_fallback(view)
+        if tty and _focus_by_tty(tty):
+            return True
+        return _focus_app_fallback(view)
 
     # ── LAUNCH ───────────────────────────────────────────────────────────
 
@@ -372,6 +385,16 @@ def _parse_enum_output(text: str) -> dict[str, tuple[int, int]]:
             continue
         out[tty] = (wid, tab)
     return out
+
+
+def _focus_app_fallback(view: SessionView) -> bool:
+    """Raise the host UI app to the front when pane-precision focus
+    fails. Used by :meth:`ITerm2Adapter.focus` after every tty-match
+    failure path so the click isn't a silent no-op."""
+    ui_pid = find_ui_app_ancestor(view.session.pid)
+    if ui_pid is None:
+        return False
+    return frontmost_app(ui_pid)
 
 
 def _focus_by_tty(tty: str) -> bool:

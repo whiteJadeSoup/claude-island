@@ -5,15 +5,175 @@ Terminal.app. Runs cross-platform (the adapter only registers on
 darwin, but the class is importable and callable everywhere)."""
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 import pytest
 
 from claude_island.core.capabilities import (
-    Capability, LauncherSpawnError, SpawnResult,
+    Capability, FocusGranularity, LauncherSpawnError, SpawnResult,
 )
+from claude_island.core.models import Session
+from claude_island.core.snapshot import SessionView, _degraded_view
 from claude_island.platform_.terminals.generic_mac import GenericMacAdapter
+
+
+def _session(pid: int = 1234, cwd: str = "/tmp/proj") -> Session:
+    return Session(
+        pid=pid, project_path=Path(cwd), session_uuid="",
+        last_activity=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+def _view(pid: int = 1234, cwd: str = "/tmp/proj") -> SessionView:
+    return _degraded_view(_session(pid, cwd))
+
+
+class TestGenericMacFocus:
+    """generic_mac.focus must walk to a UI ancestor and frontmost
+    that. Targeting the claude CLI pid directly errors -1719 in
+    System Events; the helper layer protects us from that."""
+
+    def test_focus_uses_ui_app_ancestor(self):
+        adapter = GenericMacAdapter()
+        v = _view(pid=10)
+        with (
+            mock.patch(
+                "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
+                return_value=5050,
+            ) as find,
+            mock.patch(
+                "claude_island.platform_.terminals.generic_mac.frontmost_app",
+                return_value=True,
+            ) as fa,
+        ):
+            assert adapter.focus(v) is True
+            find.assert_called_once_with(10)
+            fa.assert_called_once_with(5050)
+
+    def test_focus_returns_false_when_no_ui_ancestor(self):
+        """tmux/screen scenario: server detached → no UI app in chain.
+        We must NOT call frontmost_app with a None pid (would attempt
+        the broken CLI-pid AppleScript). focus returns False so the
+        dispatcher reports a failed click."""
+        adapter = GenericMacAdapter()
+        v = _view(pid=10)
+        with (
+            mock.patch(
+                "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
+                return_value=None,
+            ),
+            mock.patch(
+                "claude_island.platform_.terminals.generic_mac.frontmost_app",
+            ) as fa,
+        ):
+            assert adapter.focus(v) is False
+            fa.assert_not_called()
+
+    def test_focus_returns_false_when_frontmost_fails(self):
+        adapter = GenericMacAdapter()
+        v = _view(pid=10)
+        with (
+            mock.patch(
+                "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
+                return_value=5050,
+            ),
+            mock.patch(
+                "claude_island.platform_.terminals.generic_mac.frontmost_app",
+                return_value=False,
+            ),
+        ):
+            assert adapter.focus(v) is False
+
+    def test_focus_accepts_and_ignores_siblings_kwarg(self):
+        adapter = GenericMacAdapter()
+        v = _view(pid=10)
+        with (
+            mock.patch(
+                "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
+                return_value=5050,
+            ),
+            mock.patch(
+                "claude_island.platform_.terminals.generic_mac.frontmost_app",
+                return_value=True,
+            ),
+        ):
+            assert adapter.focus(v, siblings=[100, 200]) is True
+
+
+class TestGenericMacGroup:
+    """group() must be honest about FOCUS support per view: drop the
+    capability when the view's process tree can't reach a UI app."""
+
+    def test_singleton_per_view(self):
+        adapter = GenericMacAdapter()
+        adapter.name = "generic-mac"
+        v1 = _view(pid=10)
+        v2 = _view(pid=20)
+        with mock.patch(
+            "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
+            return_value=5050,
+        ):
+            groups = adapter.group([v1, v2])
+        assert len(groups) == 2
+        assert {g.group_id for g in groups} == {"mac:10", "mac:20"}
+        for g in groups:
+            assert len(g.views) == 1
+
+    def test_view_with_ui_ancestor_keeps_focus(self):
+        adapter = GenericMacAdapter()
+        adapter.name = "generic-mac"
+        v = _view(pid=10)
+        with mock.patch(
+            "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
+            return_value=5050,
+        ):
+            groups = adapter.group([v])
+        view = groups[0].views[0]
+        assert Capability.FOCUS in view.capabilities
+        assert view.adapter_id == "generic-mac"
+        assert view.focus_granularity is FocusGranularity.APP
+
+    def test_view_without_ui_ancestor_drops_focus(self):
+        """Honest signal: tmux/screen sessions whose chain can't reach
+        a UI app get FOCUS removed. The UI then disables the click
+        affordance instead of letting the user click into the void."""
+        adapter = GenericMacAdapter()
+        adapter.name = "generic-mac"
+        v = _view(pid=10)
+        with mock.patch(
+            "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
+            return_value=None,
+        ):
+            groups = adapter.group([v])
+        view = groups[0].views[0]
+        assert Capability.FOCUS not in view.capabilities
+        # Other capabilities the adapter advertises (e.g. LAUNCH for
+        # the class) should still be present where applicable —
+        # dropping FOCUS shouldn't cascade.
+        assert view.adapter_id == "generic-mac"
+
+    def test_per_view_decision_when_some_have_ui_some_dont(self):
+        """Two views in one group() call: one inside iTerm2 (UI
+        ancestor), one inside tmux (no ancestor). Each gets its own
+        capability set."""
+        adapter = GenericMacAdapter()
+        adapter.name = "generic-mac"
+        v_iterm = _view(pid=10)
+        v_tmux = _view(pid=20)
+
+        def _by_pid(pid):
+            return 5050 if pid == 10 else None
+
+        with mock.patch(
+            "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
+            side_effect=_by_pid,
+        ):
+            groups = adapter.group([v_iterm, v_tmux])
+        by_pid = {g.views[0].pid: g.views[0] for g in groups}
+        assert Capability.FOCUS in by_pid[10].capabilities
+        assert Capability.FOCUS not in by_pid[20].capabilities
 
 
 class TestGenericMacLaunch:
