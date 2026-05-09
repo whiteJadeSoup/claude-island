@@ -25,7 +25,7 @@ from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
 from claude_island.platform_.terminals._macos_common import (
     find_ui_app_ancestor,
-    frontmost_app,
+    focus_host_app,
 )
 from claude_island.platform_.terminals.iterm2 import _escape_applescript_string
 from claude_island.platform_.terminals.protocols import TerminalAdapter
@@ -96,10 +96,7 @@ class GenericMacAdapter(_CapabilityProvider):
         uniformity — see GenericWindowsAdapter.focus for the same
         rationale."""
         del siblings  # ignored — generic mac focus can't disambiguate panes
-        ui_pid = find_ui_app_ancestor(view.session.pid)
-        if ui_pid is None:
-            return False
-        return frontmost_app(ui_pid)
+        return focus_host_app(view.session.pid)
 
     @capability(Capability.LAUNCH)
     def launch(

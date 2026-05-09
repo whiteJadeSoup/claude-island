@@ -25,14 +25,32 @@ Cases this does NOT fix:
   claude never reaches the iTerm/Terminal that hosts the tmux client.
   ``find_ui_app_ancestor`` returns None; callers treat this as "FOCUS
   isn't supported for this view" and stamp accordingly.
+
+Failure semantics:
+
+When the System Events query fails (permission denied, osascript
+timeout, OSError), we deliberately do NOT cache the empty result. A
+naive write of ``frozenset()`` into the cache would freeze the
+"FOCUS unavailable for everyone" state for the full TTL — a single
+osascript hiccup (Spotlight indexing, System Events momentarily busy,
+permission toggle race) would cascade into the entire UI showing
+ArrowCursor + "unavailable" tooltip for 30 s. Instead we keep the
+last-known-good cached value (or empty if we've never succeeded) and
+let the next caller retry. Failure also logs a warning with the
+osascript stderr so the user can diagnose permission issues from
+``claude-island``'s stderr.
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
 import time
 
 import psutil
+
+
+log = logging.getLogger(__name__)
 
 
 # How far we'll walk the process tree looking for a UI ancestor.
@@ -47,7 +65,7 @@ _MAX_DEPTH = 12
 # Apple-Events daemon — first call after a long idle can be slow —
 # but short enough that a hung osascript doesn't freeze the snapshot
 # pipeline. 3 s mirrors the iterm2 enum timeout.
-_OSASCRIPT_TIMEOUT_S = 3.0
+OSASCRIPT_TIMEOUT_S = 3.0
 
 # UI-app-pids cache TTL. The pid set changes only when the user opens
 # or quits a UI application — typically several seconds to many
@@ -61,6 +79,10 @@ _UI_PIDS_CACHE_TTL_S = 30.0
 _cache_lock = threading.Lock()
 _cached_ui_pids: frozenset[int] | None = None
 _cached_at: float = 0.0
+# stderr from the most recent failed osascript run, kept once-per-
+# distinct-message so persistent permission denials log a single
+# warning instead of one per snapshot tick.
+_last_logged_stderr: str | None = None
 
 
 def find_ui_app_ancestor(pid: int, *, max_depth: int = _MAX_DEPTH) -> int | None:
@@ -73,7 +95,8 @@ def find_ui_app_ancestor(pid: int, *, max_depth: int = _MAX_DEPTH) -> int | None
 
     Returns ``None`` when:
       * The osascript that lists UI pids failed (permission denied,
-        timeout, System Events not running).
+        timeout, System Events not running) AND we have no
+        last-known-good cached value.
       * psutil can't open ``pid`` (process gone or access denied).
       * No ancestor within ``max_depth`` hops is a UI app — most
         commonly the tmux/screen daemonization case where the server
@@ -119,29 +142,94 @@ def frontmost_app(pid: int) -> bool:
                 f"(first process whose unix id is {int(pid)}) to true",
             ],
             capture_output=True,
-            timeout=_OSASCRIPT_TIMEOUT_S,
+            timeout=OSASCRIPT_TIMEOUT_S,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning("frontmost_app(%d): osascript failed: %s", pid, e)
         return False
-    return result.returncode == 0
+    if result.returncode != 0:
+        log.warning(
+            "frontmost_app(%d): osascript exit %d: %s",
+            pid, result.returncode,
+            result.stderr.decode("utf-8", errors="replace").strip()[:200],
+        )
+        return False
+    return True
+
+
+def focus_host_app(pid: int) -> bool:
+    """Raise the host UI app behind a CLI ``pid`` to the front.
+
+    Convenience wrapper: ``find_ui_app_ancestor`` then ``frontmost_app``.
+    Used as the per-adapter fallback when pane-precision focus fails
+    (tty mismatch, AppleScript miss, etc.) so a click is never silent.
+
+    Returns False when the chain has no UI ancestor (tmux/screen) or
+    when the System Events query failed and there's no cached fallback.
+    """
+    ui_pid = find_ui_app_ancestor(pid)
+    if ui_pid is None:
+        return False
+    return frontmost_app(ui_pid)
+
+
+def prewarm_ui_pid_cache() -> None:
+    """Populate the UI-pids cache from the worker thread.
+
+    Called by terminal adapters from inside ``group()`` (which runs
+    on the snapshotter's worker thread) so the cache is warm by the
+    time a UI-thread click triggers ``focus_host_app`` and the
+    fallback chain. Without this, an iterm2-only user whose first
+    click hits a tty-miss session pays a cold-cache osascript
+    (~270 ms) on top of the unavoidable focus AppleScript
+    (~290 ms) — back to back on the Qt main thread.
+
+    No-op when the cache is already warm (hits the TTL check). Safe
+    to call from any thread; cache writes use ``_cache_lock``."""
+    _ui_app_pids()
 
 
 def _ui_app_pids() -> frozenset[int]:
-    """Cached list of UI app pids. See module docstring for cache TTL
-    rationale."""
+    """Cached set of UI app pids. See module docstring for cache TTL
+    and failure-handling rationale.
+
+    On query failure: keeps the previous cached value (last-known-good)
+    rather than overwriting with an empty set. This prevents a single
+    osascript hiccup from cascading into a 30 s app-wide degradation.
+    """
     global _cached_ui_pids, _cached_at
     now = time.monotonic()
     with _cache_lock:
         if _cached_ui_pids is not None and now - _cached_at < _UI_PIDS_CACHE_TTL_S:
             return _cached_ui_pids
     pids = _query_ui_app_pids()
+    if pids is None:
+        # Query failed; do NOT poison the cache with an empty result.
+        # Return last-known-good (or empty if we never succeeded) and
+        # let the next caller retry on its own. The caller treats an
+        # empty return the same as a real-but-empty UI process list:
+        # find_ui_app_ancestor returns None, which the adapter handles
+        # gracefully (FOCUS dropped from caps / fallback returns False).
+        with _cache_lock:
+            return _cached_ui_pids if _cached_ui_pids is not None else frozenset()
     with _cache_lock:
         _cached_ui_pids = pids
         _cached_at = now
     return pids
 
 
-def _query_ui_app_pids() -> frozenset[int]:
+def _query_ui_app_pids() -> frozenset[int] | None:
+    """Run the System Events osascript that lists UI app pids.
+
+    Returns the parsed pid set on success, ``None`` on any failure —
+    timeout, OSError, non-zero exit. ``None`` is the signal callers
+    use to skip the cache write so a single failure doesn't freeze
+    the cache empty for a full TTL.
+
+    Failures log a warning once per distinct stderr message so a
+    persistent permission denial doesn't spam stderr on every tick.
+    """
+    global _last_logged_stderr
     try:
         result = subprocess.run(
             [
@@ -149,12 +237,25 @@ def _query_ui_app_pids() -> frozenset[int]:
                 "tell application \"System Events\" to get unix id of every process",
             ],
             capture_output=True,
-            timeout=_OSASCRIPT_TIMEOUT_S,
+            timeout=OSASCRIPT_TIMEOUT_S,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return frozenset()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning("ui_app_pids query failed: %s", e)
+        return None
     if result.returncode != 0:
-        return frozenset()
+        # System Events returns ``Not authorized to send Apple events
+        # (-1743)`` when the user has revoked Automation permission.
+        # Surface that exact string so the user can search for it +
+        # find Privacy & Security ▶ Automation in the docs.
+        stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
+        truncated = stderr_text[:200] or "(no stderr)"
+        if truncated != _last_logged_stderr:
+            log.warning(
+                "ui_app_pids query failed (osascript exit %d): %s",
+                result.returncode, truncated,
+            )
+            _last_logged_stderr = truncated
+        return None
     # capture_output without text=True returns bytes; decode the same
     # way iterm2._enumerate_panes does so the helper is safe across
     # any locale's stdout encoding.
@@ -163,17 +264,25 @@ def _query_ui_app_pids() -> frozenset[int]:
     # osascript returns "123, 456, 789" — comma-separated, sometimes
     # with extra whitespace. Splitting on commas + whitespace handles
     # both shapes; non-numeric tokens (shouldn't happen) are skipped.
+    skipped: list[str] = []
     for tok in text.replace(",", " ").split():
         tok = tok.strip()
         if tok.isdigit():
             out.add(int(tok))
+        elif tok:
+            skipped.append(tok)
+    if skipped:
+        # Should not happen — flag at debug so operators investigating
+        # weird empty / partial results have a breadcrumb.
+        log.debug("ui_app_pids: skipped non-numeric tokens: %r", skipped[:5])
     return frozenset(out)
 
 
 def _reset_cache_for_testing() -> None:
     """Tests call this between runs so a stub UI-pid set doesn't leak
     between cases."""
-    global _cached_ui_pids, _cached_at
+    global _cached_ui_pids, _cached_at, _last_logged_stderr
     with _cache_lock:
         _cached_ui_pids = None
         _cached_at = 0.0
+        _last_logged_stderr = None

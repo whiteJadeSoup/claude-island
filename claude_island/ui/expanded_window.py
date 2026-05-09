@@ -4730,10 +4730,23 @@ class ExpandedWindow(QWidget):
             btn.setToolTip("")
         else:
             btn.setCursor(Qt.CursorShape.ArrowCursor)
+            # FOCUS gets stripped at compose time when no UI app
+            # ancestor is reachable. Three real-world causes feed this
+            # path: (1) tmux/screen daemonization severs the chain,
+            # (2) Privacy & Security ▶ Automation has revoked the
+            # System Events permission, (3) osascript hit a transient
+            # timeout. Hint at all three so the user can self-diagnose
+            # rather than assume tmux. The exact failure reason is
+            # logged at WARNING by ``_macos_common`` — see stderr.
             btn.setToolTip(
-                "Click-to-focus unavailable — no host terminal app in "
-                "this session's process tree (typical for tmux/screen "
-                "sessions). Right-click for session details."
+                "Click-to-focus unavailable for this session.\n"
+                "Possible causes:\n"
+                "  • tmux/screen daemonization (host terminal not in "
+                "process tree)\n"
+                "  • System Events automation permission denied\n"
+                "    (System Settings ▶ Privacy & Security ▶ Automation)\n"
+                "  • Transient osascript failure (retry in 30s)\n"
+                "Right-click for session details."
             )
 
         # Model chip. Priority:

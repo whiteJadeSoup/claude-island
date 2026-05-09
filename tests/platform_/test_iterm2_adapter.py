@@ -320,9 +320,9 @@ class TestFocus:
     def test_focus_falls_back_to_app_frontmost_on_tty_miss(self, adapter):
         """tty matched psutil but iTerm2's tree has no session for it
         (tmux pty, pane closed between scan and click). The fallback
-        should raise iTerm2 to the front via the macos_common helper
-        rather than silently no-op the click — better-than-nothing UX
-        when pane precision is impossible."""
+        should raise iTerm2 to the front via ``focus_host_app`` rather
+        than silently no-op the click — better-than-nothing UX when
+        pane precision is impossible."""
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
@@ -330,16 +330,12 @@ class TestFocus:
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="miss\n")),
             mock.patch(
-                "claude_island.platform_.terminals.iterm2.find_ui_app_ancestor",
-                return_value=12345,
-            ),
-            mock.patch(
-                "claude_island.platform_.terminals.iterm2.frontmost_app",
+                "claude_island.platform_.terminals.iterm2.focus_host_app",
                 return_value=True,
-            ) as fa,
+            ) as fha,
         ):
             assert adapter.focus(v) is True
-            fa.assert_called_once_with(12345)
+            fha.assert_called_once_with(10)
 
     def test_focus_returns_false_when_tty_miss_and_no_ui_ancestor(self, adapter):
         """tty miss AND no UI ancestor (tmux/screen with daemonized
@@ -351,8 +347,8 @@ class TestFocus:
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="miss\n")),
             mock.patch(
-                "claude_island.platform_.terminals.iterm2.find_ui_app_ancestor",
-                return_value=None,
+                "claude_island.platform_.terminals.iterm2.focus_host_app",
+                return_value=False,
             ),
         ):
             assert adapter.focus(v) is False
@@ -366,11 +362,7 @@ class TestFocus:
             mock.patch("psutil.Process",
                        return_value=_proc_with_tty(None)),
             mock.patch(
-                "claude_island.platform_.terminals.iterm2.find_ui_app_ancestor",
-                return_value=12345,
-            ),
-            mock.patch(
-                "claude_island.platform_.terminals.iterm2.frontmost_app",
+                "claude_island.platform_.terminals.iterm2.focus_host_app",
                 return_value=True,
             ),
         ):
@@ -385,8 +377,8 @@ class TestFocus:
             mock.patch("subprocess.run",
                        return_value=_mock_run(returncode=1)),
             mock.patch(
-                "claude_island.platform_.terminals.iterm2.find_ui_app_ancestor",
-                return_value=None,
+                "claude_island.platform_.terminals.iterm2.focus_host_app",
+                return_value=False,
             ),
         ):
             assert adapter.focus(v) is False
@@ -419,8 +411,8 @@ class TestFocus:
             # tty-path AppleScript shape, not the System Events call
             # the new fallback would trigger after a "miss".
             mock.patch(
-                "claude_island.platform_.terminals.iterm2.find_ui_app_ancestor",
-                return_value=None,
+                "claude_island.platform_.terminals.iterm2.focus_host_app",
+                return_value=False,
             ),
         ):
             adapter.focus(v)

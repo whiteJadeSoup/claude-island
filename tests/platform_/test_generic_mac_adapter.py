@@ -35,69 +35,35 @@ class TestGenericMacFocus:
     that. Targeting the claude CLI pid directly errors -1719 in
     System Events; the helper layer protects us from that."""
 
-    def test_focus_uses_ui_app_ancestor(self):
+    def test_focus_uses_focus_host_app_helper(self):
+        """generic_mac delegates fully to ``focus_host_app(pid)`` — the
+        shared helper centralises the find-ancestor → frontmost chain
+        so all macOS adapters share one fix path."""
         adapter = GenericMacAdapter()
         v = _view(pid=10)
-        with (
-            mock.patch(
-                "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
-                return_value=5050,
-            ) as find,
-            mock.patch(
-                "claude_island.platform_.terminals.generic_mac.frontmost_app",
-                return_value=True,
-            ) as fa,
-        ):
+        with mock.patch(
+            "claude_island.platform_.terminals.generic_mac.focus_host_app",
+            return_value=True,
+        ) as fha:
             assert adapter.focus(v) is True
-            find.assert_called_once_with(10)
-            fa.assert_called_once_with(5050)
+            fha.assert_called_once_with(10)
 
-    def test_focus_returns_false_when_no_ui_ancestor(self):
-        """tmux/screen scenario: server detached → no UI app in chain.
-        We must NOT call frontmost_app with a None pid (would attempt
-        the broken CLI-pid AppleScript). focus returns False so the
-        dispatcher reports a failed click."""
+    def test_focus_returns_false_when_helper_fails(self):
+        """tmux/screen scenario: helper returns False → focus False."""
         adapter = GenericMacAdapter()
         v = _view(pid=10)
-        with (
-            mock.patch(
-                "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
-                return_value=None,
-            ),
-            mock.patch(
-                "claude_island.platform_.terminals.generic_mac.frontmost_app",
-            ) as fa,
-        ):
-            assert adapter.focus(v) is False
-            fa.assert_not_called()
-
-    def test_focus_returns_false_when_frontmost_fails(self):
-        adapter = GenericMacAdapter()
-        v = _view(pid=10)
-        with (
-            mock.patch(
-                "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
-                return_value=5050,
-            ),
-            mock.patch(
-                "claude_island.platform_.terminals.generic_mac.frontmost_app",
-                return_value=False,
-            ),
+        with mock.patch(
+            "claude_island.platform_.terminals.generic_mac.focus_host_app",
+            return_value=False,
         ):
             assert adapter.focus(v) is False
 
     def test_focus_accepts_and_ignores_siblings_kwarg(self):
         adapter = GenericMacAdapter()
         v = _view(pid=10)
-        with (
-            mock.patch(
-                "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
-                return_value=5050,
-            ),
-            mock.patch(
-                "claude_island.platform_.terminals.generic_mac.frontmost_app",
-                return_value=True,
-            ),
+        with mock.patch(
+            "claude_island.platform_.terminals.generic_mac.focus_host_app",
+            return_value=True,
         ):
             assert adapter.focus(v, siblings=[100, 200]) is True
 

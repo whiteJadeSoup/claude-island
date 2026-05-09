@@ -281,16 +281,12 @@ class TestFocus:
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="miss\n")),
             mock.patch(
-                "claude_island.platform_.terminals.terminal_app.find_ui_app_ancestor",
-                return_value=12345,
-            ),
-            mock.patch(
-                "claude_island.platform_.terminals.terminal_app.frontmost_app",
+                "claude_island.platform_.terminals.terminal_app.focus_host_app",
                 return_value=True,
-            ) as fa,
+            ) as fha,
         ):
             assert adapter.focus(v) is True
-            fa.assert_called_once_with(12345)
+            fha.assert_called_once_with(10)
 
     def test_focus_falls_back_when_psutil_terminal_missing(self, adapter):
         v = _view(pid=10)
@@ -298,11 +294,7 @@ class TestFocus:
             mock.patch("psutil.Process",
                        return_value=_proc_with_tty(None)),
             mock.patch(
-                "claude_island.platform_.terminals.terminal_app.find_ui_app_ancestor",
-                return_value=12345,
-            ),
-            mock.patch(
-                "claude_island.platform_.terminals.terminal_app.frontmost_app",
+                "claude_island.platform_.terminals.terminal_app.focus_host_app",
                 return_value=True,
             ),
         ):
@@ -316,8 +308,8 @@ class TestFocus:
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="miss\n")),
             mock.patch(
-                "claude_island.platform_.terminals.terminal_app.find_ui_app_ancestor",
-                return_value=None,
+                "claude_island.platform_.terminals.terminal_app.focus_host_app",
+                return_value=False,
             ),
         ):
             assert adapter.focus(v) is False
@@ -367,8 +359,8 @@ class TestFocus:
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="miss\n")) as run,
             mock.patch(
-                "claude_island.platform_.terminals.terminal_app.find_ui_app_ancestor",
-                return_value=None,
+                "claude_island.platform_.terminals.terminal_app.focus_host_app",
+                return_value=False,
             ),
         ):
             adapter.focus(v)

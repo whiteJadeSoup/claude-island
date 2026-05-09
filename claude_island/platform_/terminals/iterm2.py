@@ -67,8 +67,8 @@ from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
 from claude_island.platform_.terminals._macos_common import (
-    find_ui_app_ancestor,
-    frontmost_app,
+    focus_host_app,
+    prewarm_ui_pid_cache,
 )
 from claude_island.platform_.terminals.protocols import TerminalAdapter
 
@@ -210,6 +210,11 @@ class ITerm2Adapter(_CapabilityProvider):
         still render — FOCUS will then return False for them, and
         the user can fall back to manually finding the tab.
         """
+        # Prewarm the UI-pids cache while we're on the worker thread.
+        # When a click later triggers focus_host_app on the Qt main
+        # thread, the cache is warm and we save ~270 ms of osascript
+        # round-trip per click. No-op when cache is fresh.
+        prewarm_ui_pid_cache()
         try:
             import psutil
         except ImportError:
@@ -292,14 +297,14 @@ class ITerm2Adapter(_CapabilityProvider):
         try:
             import psutil
         except ImportError:
-            return _focus_app_fallback(view)
+            return focus_host_app(view.session.pid)
         try:
             tty = psutil.Process(view.session.pid).terminal()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
-            return _focus_app_fallback(view)
+            return focus_host_app(view.session.pid)
         if tty and _focus_by_tty(tty):
             return True
-        return _focus_app_fallback(view)
+        return focus_host_app(view.session.pid)
 
     # ── LAUNCH ───────────────────────────────────────────────────────────
 
@@ -403,16 +408,6 @@ def _parse_enum_output(text: str) -> dict[str, tuple[int, int]]:
             continue
         out[tty] = (wid, tab)
     return out
-
-
-def _focus_app_fallback(view: SessionView) -> bool:
-    """Raise the host UI app to the front when pane-precision focus
-    fails. Used by :meth:`ITerm2Adapter.focus` after every tty-match
-    failure path so the click isn't a silent no-op."""
-    ui_pid = find_ui_app_ancestor(view.session.pid)
-    if ui_pid is None:
-        return False
-    return frontmost_app(ui_pid)
 
 
 def _focus_by_tty(tty: str) -> bool:

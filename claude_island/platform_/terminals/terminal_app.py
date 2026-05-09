@@ -46,7 +46,6 @@ Failure modes seen in the wild
 """
 from __future__ import annotations
 
-import shlex
 import subprocess
 from dataclasses import replace
 from typing import ClassVar
@@ -61,11 +60,10 @@ from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
 from claude_island.platform_.terminals._macos_common import (
-    find_ui_app_ancestor,
-    frontmost_app,
+    focus_host_app,
+    prewarm_ui_pid_cache,
 )
 from claude_island.platform_.terminals.iterm2 import _escape_applescript_string
-from claude_island.platform_.terminals.protocols import TerminalAdapter
 
 # psutil reports Terminal.app's process name as plain ``Terminal``
 # (verified on macOS 14 — the binary is at
@@ -159,7 +157,20 @@ class TerminalAppAdapter(_CapabilityProvider):
     def can_handle(self, session: Session) -> bool:
         """True when Terminal.app appears in the session's ancestor
         chain. Walks up to ``_MAX_ANCESTOR_DEPTH`` parents looking for
-        a process whose lowercased name is exactly ``terminal``."""
+        a process whose lowercased name is exactly ``terminal``.
+
+        Asymmetry note: ``can_handle`` consults psutil's parent chain,
+        which is always available. ``focus``'s fallback path consults
+        System Events' UI-app pid set, which can be empty if osascript
+        failed or Automation permission was denied. The two answer
+        neighbouring questions and CAN disagree — ``can_handle=True``
+        (Terminal.app is in the chain per psutil) but
+        ``find_ui_app_ancestor=None`` (System Events query failed). In
+        that case the adapter claims the session and ``focus`` returns
+        False (handled gracefully — no crash, just a silent no-op for
+        that one click). When System Events recovers, focus starts
+        working again automatically.
+        """
         try:
             import psutil
         except ImportError:
@@ -190,6 +201,10 @@ class TerminalAppAdapter(_CapabilityProvider):
         Terminal's tree (race / closed mid-tick / process reparented
         away) become singletons stamped with this adapter so click
         retries the AppleScript and falls back gracefully."""
+        # Prewarm UI-pids cache on worker thread — see iterm2.group()
+        # for the same rationale: amortise the focus_host_app cost
+        # off the Qt main thread.
+        prewarm_ui_pid_cache()
         try:
             import psutil
         except ImportError:
@@ -259,14 +274,14 @@ class TerminalAppAdapter(_CapabilityProvider):
         try:
             import psutil
         except ImportError:
-            return _focus_app_fallback(view)
+            return focus_host_app(view.session.pid)
         try:
             tty = psutil.Process(view.session.pid).terminal()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
-            return _focus_app_fallback(view)
+            return focus_host_app(view.session.pid)
         if tty and _focus_by_tty(tty):
             return True
-        return _focus_app_fallback(view)
+        return focus_host_app(view.session.pid)
 
     # ── internal: osascript enumeration ─────────────────────────────────
 
@@ -333,14 +348,6 @@ def _focus_by_tty(tty: str) -> bool:
     return result.stdout.decode("utf-8", errors="replace").strip() == "ok"
 
 
-def _focus_app_fallback(view: SessionView) -> bool:
-    """Raise the host UI app to the front when per-tab focus fails.
-    Same shape as iterm2's fallback so behaviour is consistent across
-    the two macOS terminal adapters."""
-    ui_pid = find_ui_app_ancestor(view.session.pid)
-    if ui_pid is None:
-        return False
-    return frontmost_app(ui_pid)
 
 
 def _singletons(views: list[SessionView], adapter_name: str) -> list[SessionGroup]:
