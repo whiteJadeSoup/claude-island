@@ -248,7 +248,7 @@ def list_ci_tab_names(hwnd: int) -> set[str]:
 
 
 def wait_for_tab_name(
-    hwnd: int, name: str, *, timeout_ms: int = 200, poll_ms: int = 10,
+    hwnd: int, name: str, *, timeout_ms: int = 80, poll_ms: int = 10,
 ) -> bool:
     """Poll the UIA tree under *hwnd* until a TabItem with this exact Name
     exists, or *timeout_ms* elapses.
@@ -257,10 +257,16 @@ def wait_for_tab_name(
     (kernel SetConsoleTitleW → conhost → conpty → WT XAML) to
     propagate the new title into TabItem.Name. Empirically this takes
     one to a few frames (~16–50 ms) on a quiet system; we use 10 ms
-    poll cadence and a 200 ms hard cap. The cap is what triggers the
-    silent-fail fallback when the target tab uses a profile with
-    ``suppressApplicationTitle: true`` (in which case WT discards the
-    propagated update and TabItem.Name will never become *name*).
+    poll cadence and an 80 ms hard cap (was 200 ms; lowered in 2026-05
+    after Q-2 of the multi-agent review pointed out that
+    ``_activate_windows`` runs on the Qt main thread and a 200 ms
+    busy-poll was a perceptible UI hitch on every first click after a
+    title drift). 80 ms covers the empirical p99 of the propagation
+    window; the cap also triggers the silent-fail fallback when the
+    target tab uses a profile with ``suppressApplicationTitle: true``
+    (in which case WT discards the propagated update and TabItem.Name
+    will never become *name* anyway, so the longer cap was paying for
+    nothing).
 
     Returns ``True`` once a matching TabItem is observed, ``False`` on
     timeout or any UIA failure. Never raises.

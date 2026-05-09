@@ -609,14 +609,22 @@ def _activate_windows(
         # discovered by the scanner and group()'s reconcile hasn't
         # run yet. Re-set then wait for WT's OSC pipeline to mirror
         # the change into TabItem.Name before we issue the select.
+        #
+        # WARNING: this entire helper runs on the Qt main thread
+        # (called from the click handler). The wait_for_tab_name
+        # busy-poll is the dominant blocking source — kept under
+        # ~80 ms by its default cap (Q-2). If a future change adds a
+        # longer-poll variant or removes the cap, the click freezes
+        # the UI for that duration. Move the reconcile to a worker
+        # thread before going past ~100 ms.
         target_title = expected_title or current_title
         if expected_title and current_title != expected_title:
             win32_console.set_console_title(pid, expected_title)
-            # Poll up to 200ms. If WT silently dropped our set
-            # (suppressApplicationTitle profile), this returns False
-            # and the select_tab_by_title below also fails — we
-            # still fall back to plain foreground at the end.
-            wt_uia.wait_for_tab_name(hwnd, expected_title, timeout_ms=200)
+            # If WT silently dropped our set (suppressApplicationTitle
+            # profile), wait_for_tab_name times out and select_tab_by_title
+            # below also fails — we still fall back to plain foreground
+            # at the end.
+            wt_uia.wait_for_tab_name(hwnd, expected_title)
 
         if not wt_uia.select_tab_by_title(hwnd, target_title):
             # Inactive-pane fallback: try cwd-matched sibling

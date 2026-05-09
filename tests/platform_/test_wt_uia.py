@@ -387,6 +387,17 @@ class TestWaitForTabName:
 
         assert ok is False  # never found, but didn't raise
 
+    def test_default_timeout_pinned_at_80ms(self):
+        """Q-2: the default cap is the worst-case Qt-main-thread block
+        for every first-click-after-drift. Pinned at 80 ms. If anyone
+        bumps this >100 ms without moving the call off Qt main, the
+        click visibly freezes the panel."""
+        import inspect
+        from claude_island.platform_ import wt_uia
+
+        sig = inspect.signature(wt_uia.wait_for_tab_name)
+        assert sig.parameters["timeout_ms"].default == 80
+
     def test_eventual_appearance_returns_true(self):
         """TabItem.Exists returns False initially, then True on a later
         poll — should return True without waiting for the full timeout."""
