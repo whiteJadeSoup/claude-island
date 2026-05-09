@@ -1,6 +1,7 @@
 """Unit tests for wt_uia: select_tab_by_title (T1-T7) + collect_wt_tab_titles (U1-U3)."""
 from __future__ import annotations
 
+import logging
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -411,5 +412,55 @@ class TestWaitForTabName:
 
         assert ok is True
         assert tab_item.Exists.call_count >= 3
+
+
+# ---------------------------------------------------------------------------
+# Q-4: UIA failures route to module logger (not print to stderr)
+# ---------------------------------------------------------------------------
+
+class TestUiaFailureRoutesToLogger:
+    """list_ci_tab_names runs on the snapshotter wake hot path
+    (~5 Hz per multi-view bucket); print(..., file=stderr) on every
+    UIA hiccup floods the console. Both UIA-touching helpers route
+    failures through ``log.debug`` so operators can opt in via the
+    standard logging config without code edits."""
+
+    def test_list_ci_tab_names_uia_exception_logs_debug(self, caplog):
+        from claude_island.platform_ import wt_uia
+
+        auto = MagicMock()
+        auto.ControlFromHandle.side_effect = RuntimeError("UIA service down")
+        with (
+            patch.dict("sys.modules", {"uiautomation": auto}),
+            caplog.at_level(logging.DEBUG, logger="claude_island.platform_.wt_uia"),
+        ):
+            result = wt_uia.list_ci_tab_names(hwnd=0xCAFE)
+
+        assert result == set()
+        # Failure is logged at DEBUG, not WARN/ERROR — wake-driven
+        # transient failures aren't actionable per occurrence.
+        assert any(
+            "list_ci_tab_names" in r.message and r.levelno == logging.DEBUG
+            for r in caplog.records
+        )
+
+    def test_select_tab_by_title_uia_exception_logs_debug(self, caplog):
+        from claude_island.platform_ import wt_uia
+
+        class COMError(Exception):
+            pass
+
+        fake = _make_auto_mock(select_raises=COMError("rpc failed"))
+        with (
+            patch.dict("sys.modules", {"uiautomation": fake}),
+            caplog.at_level(logging.DEBUG, logger="claude_island.platform_.wt_uia"),
+        ):
+            result = wt_uia.select_tab_by_title(hwnd=0xCAFE, title="my-tab")
+
+        assert result is False
+        assert any(
+            "select_tab_by_title" in r.message and r.levelno == logging.DEBUG
+            for r in caplog.records
+        )
 
 

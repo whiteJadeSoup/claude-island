@@ -41,8 +41,11 @@ instead of trying to disambiguate within a window.
 """
 from __future__ import annotations
 
+import logging
 import sys
 import time
+
+log = logging.getLogger(__name__)
 
 # WT main window class. Same for stable, preview, and dev builds at the
 # time of writing; if Microsoft introduces a new variant we'll learn
@@ -181,9 +184,11 @@ def select_tab_by_title(hwnd: int, title: str) -> bool:
         pattern.Select()
         return True
     except Exception as exc:
-        import sys as _sys
-        print(f"[claude-island] wt_uia.select_tab_by_title: {exc}",
-              file=_sys.stderr)
+        # Click-driven (one call per click), so a debug-level line
+        # is enough — under-the-rug failures here become "click did
+        # nothing" which the user reports separately.
+        log.debug("select_tab_by_title(%s, %r) failed: %s",
+                  hex(hwnd), title, exc)
         return False
 
 
@@ -233,9 +238,12 @@ def list_ci_tab_names(hwnd: int) -> set[str]:
                 if depth + 1 < 4:
                     frontier.append((child, depth + 1))
     except Exception as exc:
-        import sys as _sys
-        print(f"[claude-island] wt_uia.list_ci_tab_names: {exc}",
-              file=_sys.stderr)
+        # Wake-driven hot path (~5 Hz per multi-view bucket). Using
+        # print(..., file=stderr) here would flood the console any time
+        # WT's UIA service is briefly unavailable (WT updating, focus
+        # stolen by another tool). debug() lets operators opt in via
+        # logging config without touching the call site.
+        log.debug("list_ci_tab_names(%s) failed: %s", hex(hwnd), exc)
     return out
 
 
