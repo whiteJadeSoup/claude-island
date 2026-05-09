@@ -99,7 +99,7 @@ class TestGenericMacFocus:
                 return_value=True,
             ),
         ):
-            assert adapter.focus(v, siblings=[100, 200]) is True
+            assert adapter.focus(v, siblings=[_view(pid=100), _view(pid=200)]) is True
 
 
 class TestGenericMacGroup:

@@ -375,7 +375,7 @@ class TestFocus:
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="ok\n")),
         ):
-            assert adapter.focus(v, siblings=[100, 200]) is True
+            assert adapter.focus(v, siblings=[_view(pid=100), _view(pid=200)]) is True
 
 
 # ── capability surface ────────────────────────────────────────────────

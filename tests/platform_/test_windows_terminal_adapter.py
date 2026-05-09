@@ -832,10 +832,15 @@ class TestActivateWindowsReconcile:
 # ── focus() cwd-filtered sibling sentinel computation ─────────────────
 
 class TestFocusCwdFilteredSiblings:
-    """focus(view, siblings=[pids]) translates pids → SessionViews via
-    _view_cache and filters to same-cwd siblings only. Cross-cwd
-    siblings are dropped because they're almost certainly separate
-    tabs (different projects, not split panes of the same tab)."""
+    """focus(view, siblings=[SessionView, ...]) filters to same-cwd
+    siblings only. Cross-cwd siblings are dropped because they're
+    almost certainly separate tabs (different projects, not split
+    panes of the same tab).
+
+    Q-3: siblings now arrive as full SessionViews (was: pids that
+    required an adapter-side _view_cache to rehydrate). The cache
+    mirrored a slice of WorldSnapshot and was deleted along with
+    the round-trip."""
 
     UUID = "a1b2c3d4" + "0" * 24
     EXPECTED = f"ci:{UUID}"
@@ -857,15 +862,12 @@ class TestFocusCwdFilteredSiblings:
             adapter_id=adapter.name,
             focus_granularity=FocusGranularity.TAB,
         )
-        # Pre-populate the cache as group() would. Mark same-cwd vs
-        # different-cwd siblings.
-        adapter._view_cache = {
-            999: clicked_view,
-            100: _view(100, cwd="D:\\proj_a", session_uuid="a" * 32),  # same cwd
-            200: _view(200, cwd="D:\\proj_b", session_uuid="b" * 32),  # diff cwd
-            300: _view(300, cwd="D:\\proj_a", session_uuid="c" * 32),  # same cwd
-            400: _view(400, cwd="D:\\proj_c", session_uuid="d" * 32),  # diff cwd
-        }
+        siblings = [
+            _view(100, cwd="D:\\proj_a", session_uuid="a" * 32),  # same cwd
+            _view(200, cwd="D:\\proj_b", session_uuid="b" * 32),  # diff cwd
+            _view(300, cwd="D:\\proj_a", session_uuid="c" * 32),  # same cwd
+            _view(400, cwd="D:\\proj_c", session_uuid="d" * 32),  # diff cwd
+        ]
 
         captured: dict = {}
         def _stub_activate(pid, **kw):
@@ -877,17 +879,16 @@ class TestFocusCwdFilteredSiblings:
             _stub_activate,
         )
 
-        adapter.focus(clicked_view, siblings=[100, 200, 300, 400])
+        adapter.focus(clicked_view, siblings=siblings)
 
         assert captured["pid"] == 999
         assert captured["expected_title"] == self.EXPECTED
-        # Only same-cwd siblings, deduped from the clicked view.
+        # Only same-cwd siblings.
         sibs = set(captured["sibling_sentinels"])
         assert sibs == {f"ci:{'a' * 32}", f"ci:{'c' * 32}"}
 
-    def test_focus_with_uncached_sibling_pid_skipped(self, monkeypatch):
-        """Sibling pid not in cache (race: died between group() and
-        click) → silently skipped, no crash."""
+    def test_focus_with_empty_siblings_passes_empty_tuple(self, monkeypatch):
+        """No siblings → sibling_sentinels=() reaches activate."""
         from dataclasses import replace
         from claude_island.core.capabilities import FocusGranularity
         from claude_island.platform_.terminals.windows_terminal import (
@@ -902,7 +903,6 @@ class TestFocusCwdFilteredSiblings:
             adapter_id=adapter.name,
             focus_granularity=FocusGranularity.TAB,
         )
-        adapter._view_cache = {999: clicked_view}  # no siblings cached
 
         captured: dict = {}
         def _stub_activate(pid, **kw):
@@ -913,9 +913,44 @@ class TestFocusCwdFilteredSiblings:
             _stub_activate,
         )
 
-        adapter.focus(clicked_view, siblings=[111, 222])  # both uncached
+        adapter.focus(clicked_view, siblings=())
 
         assert captured["sibling_sentinels"] == ()
+
+    def test_clicked_view_in_siblings_is_filtered(self, monkeypatch):
+        """Defensive: if the caller passes the clicked view as one of
+        its own siblings (UI bug, repeated entry), the sentinel for
+        the clicked view itself must not appear in sibling_sentinels —
+        otherwise the click-time path would try to select_tab_by_title
+        with the same sentinel that just failed to match a TabItem."""
+        from dataclasses import replace
+        from claude_island.core.capabilities import FocusGranularity
+        from claude_island.platform_.terminals.windows_terminal import (
+            WindowsTerminalAdapter,
+        )
+
+        adapter = WindowsTerminalAdapter()
+        adapter.name = "windows-terminal"
+
+        clicked_view = replace(
+            _view(999, cwd="D:\\x", session_uuid=self.UUID),
+            adapter_id=adapter.name,
+            focus_granularity=FocusGranularity.TAB,
+        )
+        sibling = _view(100, cwd="D:\\x", session_uuid="a" * 32)
+
+        captured: dict = {}
+        def _stub_activate(pid, **kw):
+            captured.update(kw)
+            return True
+        monkeypatch.setattr(
+            "claude_island.platform_.terminals.windows_terminal._activate_windows",
+            _stub_activate,
+        )
+
+        adapter.focus(clicked_view, siblings=[clicked_view, sibling])
+
+        assert captured["sibling_sentinels"] == (f"ci:{'a' * 32}",)
 
 
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────

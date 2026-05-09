@@ -23,7 +23,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Sequence
 
 from claude_island.core.capabilities import (
     Capability,
@@ -135,15 +135,6 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # stale group attribution doesn't break click correctness.
         self._wt_hwnd_cache: dict[int, int] = {}
         self._wt_window_signature: int = 0
-
-        # pid → SessionView. Populated in group() at every wake; read
-        # in focus() to compute cwd-matched sibling sentinels for the
-        # inactive-pane fallback. focus() runs on Qt main thread; the
-        # write in group() runs on the snapshotter worker — but
-        # dict assignment of full snapshot (`self._view_cache = {...}`)
-        # is atomic at the GIL level (single bytecode op), so no lock
-        # needed for this read/write pattern.
-        self._view_cache: dict[int, SessionView] = {}
 
     # ── can_handle ──────────────────────────────────────────────────────
 
@@ -391,20 +382,14 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 adapter_id=self.name,
                 views=(stamped,),
             ))
-
-        # Snapshot the view cache for click-time sibling lookup. Built
-        # from `kept` (orphan-filtered, post-reconcile) so focus() can
-        # translate sibling pids into SessionViews → cwd / session_uuid
-        # → cwd-matched sibling sentinels for the inactive-pane fallback.
-        # Atomic dict swap; no lock needed for the worker-write /
-        # Qt-main-read pattern.
-        self._view_cache = {v.session.pid: v for v in kept}
         return result
 
     # ── FOCUS ────────────────────────────────────────────────────────────
 
     @capability(Capability.FOCUS)
-    def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
+    def focus(
+        self, view: SessionView, *, siblings: Sequence[SessionView] = (),
+    ) -> bool:
         """Bring the WT window to foreground + select the matching tab.
 
         Passes ``expected_title = sentinel_title(view.session_uuid)`` to
@@ -426,13 +411,18 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         We ignore the cross-cwd siblings (same wt_hwnd but different
         cwd) — those are almost certainly separate tabs, so trying
         their sentinels would just take us to the wrong tab.
+
+        ``siblings`` arrives as the full SessionViews from the same
+        UI group (Q-3 of the multi-agent review: previously this was
+        a list of pids requiring an adapter-side ``_view_cache`` to
+        rehydrate. The cache mirrored a slice of WorldSnapshot and
+        violated the 'single source of truth' design principle).
         """
         from claude_island.core.snapshot import _normalize_project_path
         from claude_island.platform_.wt_session_title import sentinel_title
         expected = sentinel_title(view.session_uuid)
 
-        # Translate sibling pids → SessionViews via the cache built in
-        # group(). Filter to same-cwd siblings only (they're the
+        # Filter to same-cwd siblings only (they're the
         # likely-pane-mate candidates), compute their sentinels.
         # Normalize worktree paths back to their parent repo so e.g.
         # `D:\proj\.claude\worktrees\feat-x` matches `D:\proj` —
@@ -441,13 +431,12 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # worktree share a WT split tab).
         my_cwd = _normalize_project_path(view.project_path)
         sib_sentinels: list[str] = []
-        for sib_pid in siblings:
-            sib_view = self._view_cache.get(sib_pid)
-            if sib_view is None:
-                continue
-            if _normalize_project_path(sib_view.project_path) != my_cwd:
+        for sib in siblings:
+            if sib.session.pid == view.session.pid:
+                continue  # the clicked view itself, if caller didn't filter
+            if _normalize_project_path(sib.project_path) != my_cwd:
                 continue  # different project → almost certainly a different tab
-            sib_sentinel = sentinel_title(sib_view.session_uuid)
+            sib_sentinel = sentinel_title(sib.session_uuid)
             if sib_sentinel and sib_sentinel != expected:
                 sib_sentinels.append(sib_sentinel)
 

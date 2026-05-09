@@ -53,7 +53,7 @@ import subprocess
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Sequence
 
 from claude_island.core.capabilities import (
     Capability,
@@ -252,7 +252,9 @@ class ITerm2Adapter(_CapabilityProvider):
     # ── FOCUS ────────────────────────────────────────────────────────────
 
     @capability(Capability.FOCUS)
-    def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
+    def focus(
+        self, view: SessionView, *, siblings: Sequence[SessionView] = (),
+    ) -> bool:
         """Activate the iTerm2 pane whose tty matches this session.
 
         ``siblings`` is accepted for kwargs uniformity with the WT
