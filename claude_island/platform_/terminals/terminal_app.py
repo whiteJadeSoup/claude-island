@@ -216,7 +216,7 @@ class TerminalAppAdapter(_CapabilityProvider):
                 replace(
                     v,
                     adapter_id=self.name,
-                    focus_granularity=FocusGranularity.PANE,
+                    focus_granularity=FocusGranularity.TAB,
                     capabilities=type(self).capabilities,
                 )
                 for v in batch
@@ -343,7 +343,7 @@ def _singletons(views: list[SessionView], adapter_name: str) -> list[SessionGrou
         stamped = replace(
             v,
             adapter_id=adapter_name,
-            focus_granularity=FocusGranularity.PANE,
+            focus_granularity=FocusGranularity.TAB,
             capabilities=TerminalAppAdapter.capabilities,
         )
         result.append(SessionGroup(

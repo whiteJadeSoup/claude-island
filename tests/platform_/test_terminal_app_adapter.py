@@ -239,9 +239,12 @@ class TestGroup:
         assert "terminal-app:singleton:10" in ids
         assert "terminal-app:100:/dev/ttys002" in ids
 
-    def test_views_stamped_with_pane_granularity_and_caps(self, adapter):
-        """Sessions placed on a known tab get PANE granularity (we
-        can land precisely) and the adapter's full capability set."""
+    def test_views_stamped_with_tab_granularity_and_caps(self, adapter):
+        """Sessions placed on a known tab get TAB granularity per
+        the adapter's docstring (Terminal.app has no panes — each tab
+        is one tty / one session) and the adapter's full capability
+        set. Matches FocusGranularity.TAB's documented set in
+        capabilities.py: 'Windows Terminal, Terminal.app'."""
         v = _view(pid=10)
         ttys = {10: "/dev/ttys001"}
         enum_out = "100|/dev/ttys001\n"
@@ -253,7 +256,7 @@ class TestGroup:
             groups = adapter.group([v])
         view = groups[0].views[0]
         assert view.adapter_id == "terminal-app"
-        assert view.focus_granularity is FocusGranularity.PANE
+        assert view.focus_granularity is FocusGranularity.TAB
         assert Capability.FOCUS in view.capabilities
 
 
