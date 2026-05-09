@@ -462,34 +462,76 @@ class TestSentinelReconcile:
 
         patched.set_console_title.assert_not_called()
 
-    def test_failed_set_does_not_pollute_cache(self, adapter, patched):
-        """Cache discipline: if set_console_title fails (silent fail
-        under suppressApplicationTitle profile, transient WT busy),
-        the conpty_hwnd MUST NOT be cached — otherwise the next wake's
-        cache hit would skip the retry forever and the tab would stay
-        un-labeled. AttachConsole on next wake costs ~3ms; cheap
-        insurance vs permanently mislabeled tabs."""
+    def test_failed_set_still_caches_conpty(self, adapter, patched):
+        """B-1 cache contract: a failed (or silently-dropped) set
+        does NOT prevent caching the conPTY hwnd. The conPTY survives
+        for the pid lifetime regardless of whether WT picked up our
+        title; caching it here protects suppressApplicationTitle
+        profiles from a permanent AttachConsole re-probe loop
+        (5 Hz × N sessions under the global console lock)."""
         patched.set_console({1234: 0xAA}, title="Claude Code")
         patched.set_console_title.return_value = False  # silent fail
 
         adapter.group([_view(1234, session_uuid=self.UUID)])
 
-        # set_console_title was attempted...
+        # Set was attempted once (best-effort)...
         patched.set_console_title.assert_called_once()
-        # ...but cache must be empty so next tick retries.
-        assert adapter._conpty_cache == {}
+        # ...AND the conpty IS cached so we don't re-probe forever.
+        assert adapter._conpty_cache == {1234: 0xAA}
+        # Pid is recorded as 'already attempted' to gate retries.
+        assert 1234 in adapter._title_set_attempted
 
-    def test_failed_set_retries_on_next_wake(self, adapter, patched):
-        """Direct consequence of cache discipline: a failed set on
-        tick 1 means tick 2 re-probes and re-attempts."""
+    def test_failed_set_does_not_loop_on_subsequent_wakes(self, adapter, patched):
+        """Direct consequence of the new cache contract: tick 2 takes
+        the cache-hit path and skips both AttachConsole and the title
+        set, even though tick 1's set returned False. One attempt per
+        pid lifetime — this is the bug B-1 fixed (was: retry forever
+        and pin a syscall thread at 5 Hz)."""
         patched.set_console({1234: 0xAA}, title="Claude Code")
         patched.set_console_title.return_value = False
 
         adapter.group([_view(1234, session_uuid=self.UUID)])
         adapter.group([_view(1234, session_uuid=self.UUID)])
 
-        # Both probe AND set called twice — no cache shortcut.
-        assert patched.get_console_info.call_count == 2
+        # Cache hit on tick 2 → no re-probe and no re-set.
+        assert patched.get_console_info.call_count == 1
+        assert patched.set_console_title.call_count == 1
+
+    def test_stale_sentinel_overwritten_on_first_sight(self, adapter, patched):
+        """B-1 exact-match contract: when the inherited title looks
+        like our sentinel but encodes the WRONG uuid (pid recycle,
+        another island instance, manual `wt new-tab --title ci:...`
+        leftover), reconcile MUST overwrite it with the current
+        session's expected sentinel. The previous prefix-only
+        ``is_sentinel`` check incorrectly treated this as
+        already-labeled and left the tab pointing at OLD_UUID."""
+        old_uuid_title = "ci:" + ("0" * 32)  # NOT this view's expected
+        patched.set_console({1234: 0xAA}, title=old_uuid_title)
+
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+
+        patched.set_console_title.assert_called_once_with(1234, self.EXPECTED)
+
+    def test_pid_eviction_clears_title_set_attempted(self, adapter, patched):
+        """A pid that leaves views (process exited, or scanner moved
+        it to another adapter) must drop from BOTH _conpty_cache and
+        _title_set_attempted — otherwise a recycled pid would skip
+        its title-set forever, leaving the new session's tab
+        labeled with the previous occupant's sentinel."""
+        patched.set_console({1234: 0xAA}, title="Claude Code")
+
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+        assert 1234 in adapter._conpty_cache
+        assert 1234 in adapter._title_set_attempted
+
+        # pid leaves views entirely
+        adapter.group([])
+        assert 1234 not in adapter._conpty_cache
+        assert 1234 not in adapter._title_set_attempted
+
+        # pid returns (recycled by OS) → fresh attempt
+        adapter.group([_view(1234, session_uuid=self.UUID)])
+        # First call (tick 1) + reset by GC + tick 3 = 2 set calls total.
         assert patched.set_console_title.call_count == 2
 
     def test_already_sentinel_caches_without_set(self, adapter, patched):

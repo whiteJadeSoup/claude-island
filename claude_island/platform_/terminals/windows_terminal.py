@@ -60,19 +60,31 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # ~3 ms AttachConsole syscall (which holds a process-global lock)
         # on every wake after the first. The conPTY hwnd is allocated
         # by the OS at process start and freed when the pid dies, so
-        # it cannot change for the lifetime of pid.
+        # it cannot change for the lifetime of pid → cached
+        # unconditionally on first sight.
         #
-        # Negative results (orphan / race) are NOT cached — a brief
-        # race between process_scanner accepting a pid and our group()
-        # call finding its conPTY would otherwise permanently hide the
-        # session until process_scanner re-emits. Re-probing each tick
-        # costs one extra AttachConsole per orphan, and orphans are
-        # already filtered upstream in process_scanner, so this is
-        # rarely exercised.
+        # Negative results (orphan / race — ``info is None``) are NOT
+        # cached: process_scanner may accept a pid before its conPTY
+        # is ready, and we want the next wake to re-probe rather than
+        # permanently hide the session.
         #
         # Single-threaded access: group() only runs on the snapshotter's
         # worker thread (reactivex EventLoopScheduler), so no lock.
         self._conpty_cache: dict[int, int] = {}
+
+        # pids that have already received a SetConsoleTitleW attempt
+        # (success or silent-fail). Tracked SEPARATELY from
+        # _conpty_cache so that a profile with
+        # ``suppressApplicationTitle: true`` doesn't trap us in an
+        # infinite re-probe loop: SetConsoleTitleW returns True even
+        # when WT discards the OSC update, and even returning False
+        # only means "syscall failed", not "we should retry forever".
+        # One attempt per pid is enough — if WT really wanted the
+        # title it would have updated TabItem.Name; if not, the
+        # sentinel-presence detection in the bucketing phase is
+        # fail-safe (an absent sentinel keeps the bucket grouped,
+        # never permanently broken). GC'd alongside _conpty_cache.
+        self._title_set_attempted: set[int] = set()
 
         # pid → SessionView. Populated in group() at every wake; read
         # in focus() to compute cwd-matched sibling sentinels for the
@@ -155,9 +167,7 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         """
         from dataclasses import replace
         from claude_island.platform_ import win32_console, window_activator
-        from claude_island.platform_.wt_session_title import (
-            is_sentinel, sentinel_title,
-        )
+        from claude_island.platform_.wt_session_title import sentinel_title
 
         # win32gui needed for walk_to_visible_host. None on ImportError
         # → all views fall through to singleton groups (we lose the
@@ -172,11 +182,16 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # GC: drop cache entries for pids that left views (process
         # exited or was reassigned to a different adapter). Done before
         # the loop so the cache stays bounded by the live session count.
+        # Both caches GC'd together — a returning pid (recycled by the
+        # OS, or re-discovered after a transient orphan window) gets a
+        # fresh title-set attempt on its next first-sight.
         alive_pids = {v.session.pid for v in views}
         if self._conpty_cache:
             self._conpty_cache = {
                 p: h for p, h in self._conpty_cache.items() if p in alive_pids
             }
+        if self._title_set_attempted:
+            self._title_set_attempted &= alive_pids
 
         kept: list[SessionView] = []
         for v in views:
@@ -185,32 +200,39 @@ class WindowsTerminalAdapter(_CapabilityProvider):
             if conpty_hwnd is None:
                 info = win32_console.get_console_info(pid)
                 if info is None:
-                    continue
+                    continue  # orphan / no console — skip; next wake re-probes
                 conpty_hwnd, current_title = info
                 if not conpty_hwnd:
                     continue
-                # First sight of this session — establish the sentinel
-                # title so click-time UIA Name match can find it. Skip
-                # the set if we have no uuid (degraded view) or if the
-                # title already matches our format (e.g. relaunched into
-                # a tab whose previous incarnation we'd already labeled,
-                # or this session was launched via Plan L which sets
-                # the title at WT spawn time).
+                # conPTY survives for the pid lifetime — cache
+                # unconditionally, even if the title-set below fails.
+                # Caching here protects suppressApplicationTitle profiles
+                # from a permanent re-probe loop (5 Hz × 5 sessions =
+                # 25 AttachConsole/sec under the global console lock).
+                self._conpty_cache[pid] = conpty_hwnd
+
+                # Title set is best-effort and tried at most once per pid.
+                # We compare against the EXACT expected sentinel — using
+                # ``is_sentinel`` (prefix match) was a bug: an inherited
+                # ``ci:OLD_UUID`` (pid recycled, multiple island instances)
+                # would falsely look "already labeled" and the wrong
+                # sentinel would persist on the tab.
                 #
-                # Cache discipline: only memoise the conpty_hwnd AFTER
-                # reconcile is done (set succeeded OR no set needed).
-                # If set silently fails — typically a profile with
-                # suppressApplicationTitle=true, but also transient WT
-                # busy — we leave the cache empty so the next wake
-                # re-probes the title and retries. AttachConsole is
-                # ~3ms; retrying every wake on a silent-fail pid is
-                # cheap insurance against permanently mislabeled tabs.
+                # If WT silently drops the OSC update
+                # (suppressApplicationTitle profile), the sentinel never
+                # reaches TabItem.Name. The bucketing phase's
+                # sentinel-presence detection is fail-safe under that
+                # condition: an absent sentinel keeps the bucket grouped
+                # rather than demoting to singletons. Slightly imprecise
+                # grouping is preferable to the previous infinite retry.
                 expected = sentinel_title(v.session_uuid)
-                set_ok = True
-                if expected and not is_sentinel(current_title):
-                    set_ok = win32_console.set_console_title(pid, expected)
-                if set_ok:
-                    self._conpty_cache[pid] = conpty_hwnd
+                if (
+                    expected
+                    and current_title != expected
+                    and pid not in self._title_set_attempted
+                ):
+                    self._title_set_attempted.add(pid)
+                    win32_console.set_console_title(pid, expected)
             kept.append(v)
 
         # Tripwire: every view filtered → likely a race with our own
