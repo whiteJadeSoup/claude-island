@@ -176,56 +176,71 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         TabManagement.cpp). So per-pane identification of inactive
         panes is impossible from outside. We trade pane-precision for
         UI grouping: same WT window → one card → click any session
-        in it does best-effort tab select (works when the target is
-        a tab's active pane / single-pane tab; falls back to plain
-        foreground for inactive panes in a split tab). User then uses
-        WT's own Alt+arrow to focus the right pane.
+        in it does best-effort tab select. User then uses WT's own
+        Alt+arrow to focus the right pane.
 
         Sentinel title (Plan O reconcile):
-        On first sight of a session (cache miss), we read its console
-        title; if it's not already our ``ci:{uuid}`` sentinel, we set
-        it via SetConsoleTitleW. WT mirrors that into TabItem.Name
-        (unless the tab was launched with ``--suppressApplicationTitle``
-        — Plan L — in which case the title was set at spawn). Either
+        On first sight of a session, we read its console title; if
+        it's not already our ``ci:{uuid}`` sentinel, we set it via
+        SetConsoleTitleW. WT mirrors that into TabItem.Name (unless
+        the tab was launched with ``--suppressApplicationTitle`` —
+        Plan L — in which case the title was set at spawn). Either
         way, ``select_tab_by_title`` can find the target tab by its
-        ``ci:{uuid32}`` Name. Cache hits skip the syscall.
+        ``ci:{uuid32}`` Name.
 
         ``views`` are guaranteed to be claude sessions by upstream
         ``can_handle`` + the dispatcher chain — so SetConsoleTitleW
         only ever touches claude-attached consoles.
 
-        Per-view work:
-          1. AttachConsole probe (cached) to drop orphans (no console).
-          2. On cache miss only: write sentinel title if drifted.
-          3. Resolve wt_hwnd via walk_to_visible_host — used as the
-             group bucket key.
-          4. Bucket views by wt_hwnd. Views whose wt_hwnd doesn't
-             resolve become singleton groups (one card each).
-
         Drag-tab correctness: a session moved to another WT window
-        will be re-bucketed on the next group() call, since
-        walk_to_visible_host re-resolves on every wake.
+        is re-bucketed on the next signature change (see
+        ``_wt_window_signature``); the click-time path re-resolves
+        fresh either way.
         """
-        from dataclasses import replace
-        from claude_island.platform_ import win32_console, window_activator
+        win32gui_mod = self._import_win32gui()
+        kept = self._filter_orphans_and_reconcile(views, win32gui_mod)
+        buckets, singletons = self._bucket_views(kept, win32gui_mod)
+        buckets, singletons = self._demote_false_split_panes(
+            buckets, singletons,
+        )
+        return self._stamp_groups(buckets, singletons)
+
+    # ── group() phase helpers ──────────────────────────────────────────
+    # Pure structural extraction (S-1 of the multi-agent review). Each
+    # helper owns one phase of the pipeline and is independently
+    # testable. Behaviour is byte-identical to the pre-extraction
+    # implementation — see git history for the inline version.
+
+    @staticmethod
+    def _import_win32gui():
+        """Return the win32gui module, or ``None`` on non-Windows.
+
+        win32gui is needed for ``walk_to_visible_host`` and the
+        WT-window-set signature. None on ImportError → all views fall
+        through to singleton groups (we lose the window-grouping but
+        rows still render)."""
+        try:
+            import win32gui  # type: ignore[import-not-found]
+            return win32gui
+        except ImportError:
+            return None
+
+    def _filter_orphans_and_reconcile(
+        self, views: list[SessionView], win32gui_mod,
+    ) -> list[SessionView]:
+        """Phase 1: GC the per-pid caches, invalidate wt_hwnd cache on
+        WT-window-set change, then for each view: AttachConsole probe
+        (cached) to drop orphans + write sentinel title once on first
+        sight. Returns the kept views (orphans dropped); applies the
+        tripwire that restores the original list when every view was
+        filtered (likely a race with our own console state)."""
+        from claude_island.platform_ import win32_console
         from claude_island.platform_.wt_session_title import sentinel_title
 
-        # win32gui needed for walk_to_visible_host. None on ImportError
-        # → all views fall through to singleton groups (we lose the
-        # window-grouping but rows still render).
-        win32gui_mod = None
-        try:
-            import win32gui as _w32g
-            win32gui_mod = _w32g
-        except ImportError:
-            pass
-
-        # GC: drop cache entries for pids that left views (process
-        # exited or was reassigned to a different adapter). Done before
-        # the loop so the cache stays bounded by the live session count.
-        # All three caches GC'd together — a returning pid (recycled
-        # by the OS, or re-discovered after a transient orphan window)
-        # gets a fresh title-set attempt and a fresh wt_hwnd walk.
+        # GC: drop cache entries for pids that left views. All three
+        # caches GC'd together — a returning pid (OS recycle, transient
+        # orphan window) gets a fresh title-set attempt and a fresh
+        # wt_hwnd walk.
         alive_pids = {v.session.pid for v in views}
         if self._conpty_cache:
             self._conpty_cache = {
@@ -238,9 +253,7 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 p: h for p, h in self._wt_hwnd_cache.items() if p in alive_pids
             }
 
-        # Invalidate the wt_hwnd cache on WT-window-set change. Cheap
-        # win32 sweep — drops the per-pid GW_OWNER walks below to a
-        # cache hit in steady state.
+        # Invalidate the wt_hwnd cache on WT-window-set change.
         if win32gui_mod is not None:
             sig = _wt_window_signature(win32gui_mod)
             if sig != self._wt_window_signature:
@@ -259,26 +272,15 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 if not conpty_hwnd:
                     continue
                 # conPTY survives for the pid lifetime — cache
-                # unconditionally, even if the title-set below fails.
-                # Caching here protects suppressApplicationTitle profiles
-                # from a permanent re-probe loop (5 Hz × 5 sessions =
-                # 25 AttachConsole/sec under the global console lock).
+                # unconditionally, even if the title-set below fails
+                # (otherwise suppressApplicationTitle profiles trap us
+                # in a permanent AttachConsole re-probe loop).
                 self._conpty_cache[pid] = conpty_hwnd
 
-                # Title set is best-effort and tried at most once per pid.
-                # We compare against the EXACT expected sentinel — using
-                # ``is_sentinel`` (prefix match) was a bug: an inherited
-                # ``ci:OLD_UUID`` (pid recycled, multiple island instances)
-                # would falsely look "already labeled" and the wrong
-                # sentinel would persist on the tab.
-                #
-                # If WT silently drops the OSC update
-                # (suppressApplicationTitle profile), the sentinel never
-                # reaches TabItem.Name. The bucketing phase's
-                # sentinel-presence detection is fail-safe under that
-                # condition: an absent sentinel keeps the bucket grouped
-                # rather than demoting to singletons. Slightly imprecise
-                # grouping is preferable to the previous infinite retry.
+                # Title set is best-effort, one attempt per pid.
+                # EXACT-match against expected — prefix-match would
+                # leave a stale ``ci:OLD_UUID`` in place under pid
+                # recycle / multi-island scenarios.
                 expected = sentinel_title(v.session_uuid)
                 if (
                     expected
@@ -289,22 +291,29 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                     win32_console.set_console_title(pid, expected)
             kept.append(v)
 
-        # Tripwire: every view filtered → likely a race with our own
-        # console state. Keep originals so the user still sees rows
-        # (rather than a blank list).
+        # Tripwire: every view filtered → race with our own console
+        # state. Keep originals so the user still sees rows.
         if not kept:
             kept = list(views)
+        return kept
 
-        # Bucket by (wt_hwnd, normalized_cwd). Same WT window AND same
-        # project → likely split panes of one tab → group. Different
-        # cwd → certainly different tabs (panes of one tab share cwd
-        # by construction; they're started from `claude` in the same
-        # working dir). Worktree paths are normalised back to their
-        # parent repo (a subdirectory of the project), since
-        # claude-code split-pane between main repo + worktree is a
-        # common workflow.
+    def _bucket_views(
+        self, kept: list[SessionView], win32gui_mod,
+    ) -> tuple[dict[tuple, list[SessionView]], list[SessionView]]:
+        """Phase 2: bucket views by ``(wt_hwnd, normalized_cwd)``.
+
+        Same WT window AND same project → likely split panes of one
+        tab → group. Different cwd → certainly different tabs (panes
+        share cwd by construction). Worktree paths are normalised
+        back to their parent repo since claude-code split-pane
+        between main repo + worktree is a common workflow.
+
+        Views whose wt_hwnd doesn't resolve become singletons. Returns
+        ``(buckets, singletons)``; sentinel-presence demotion happens
+        in the next phase."""
         from claude_island.core.snapshot import _normalize_project_path
-        from claude_island.platform_ import wt_uia
+        from claude_island.platform_ import window_activator
+
         buckets: dict[tuple, list[SessionView]] = {}
         singletons: list[SessionView] = []
         for v in kept:
@@ -323,15 +332,25 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 buckets.setdefault(key, []).append(v)
             else:
                 singletons.append(v)
+        return buckets, singletons
 
-        # Sentinel-presence detection: for each multi-view bucket, check
-        # whether ALL views' sentinels appear in the wt_hwnd's
-        # TabItem.Names. If yes → these are separate tabs that happen
-        # to share cwd (each is its own active pane) → split into
-        # singletons. If at least one is missing → that view is an
-        # inactive pane → keep grouped (it's truly co-pane with the
-        # active sibling whose sentinel IS in TabItem.Name).
-        # Single UIA call per wt_hwnd (cached across buckets).
+    def _demote_false_split_panes(
+        self,
+        buckets: dict[tuple, list[SessionView]],
+        singletons: list[SessionView],
+    ) -> tuple[dict[tuple, list[SessionView]], list[SessionView]]:
+        """Phase 3: for each multi-view bucket, ask UIA which sentinels
+        currently appear as TabItem.Name. If ALL bucket sentinels are
+        present → these are separate tabs that happen to share cwd
+        (each is its own active pane) → demote to singletons. If at
+        least one is missing → some view is an inactive pane → keep
+        grouped. Single UIA call per wt_hwnd (cached across buckets).
+
+        Mutates the dicts in-place AND returns them, so callers can
+        chain or inspect either way."""
+        from claude_island.platform_ import wt_uia
+        from claude_island.platform_.wt_session_title import sentinel_title
+
         tab_names_by_hwnd: dict[int, set[str]] = {}
         for (wt_hwnd, _cwd), batch in list(buckets.items()):
             if len(batch) <= 1:
@@ -342,11 +361,22 @@ class WindowsTerminalAdapter(_CapabilityProvider):
             sentinels = {sentinel_title(v.session_uuid) for v in batch}
             sentinels.discard(None)
             if sentinels and sentinels.issubset(tab_names):
-                # All sessions are own-tab active panes — separate
-                # tabs that happen to share cwd. Demote to singletons.
                 key = (wt_hwnd, _cwd)
                 del buckets[key]
                 singletons.extend(batch)
+        return buckets, singletons
+
+    def _stamp_groups(
+        self,
+        buckets: dict[tuple, list[SessionView]],
+        singletons: list[SessionView],
+    ) -> list[SessionGroup]:
+        """Phase 4: stamp adapter identity / granularity / capabilities
+        on every view and emit one ``SessionGroup`` per bucket and per
+        singleton. ``group_id`` carries the wt_hwnd + normalised cwd
+        for buckets so the UI's per-group_id card cache survives wakes
+        and worktree → parent path normalisation doesn't churn ids."""
+        from dataclasses import replace
 
         result: list[SessionGroup] = []
         for (wt_hwnd, cwd_norm), batch in buckets.items():
@@ -359,10 +389,6 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 )
                 for v in batch
             )
-            # group_id includes a hash-stable suffix based on cwd so
-            # the UI's per-group_id card cache survives wakes. Use
-            # the normalised cwd so worktree → parent renames don't
-            # generate a new group_id mid-session.
             result.append(SessionGroup(
                 group_id=f"wt:{wt_hwnd}:{cwd_norm}",
                 title_hint=None,
