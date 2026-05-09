@@ -394,7 +394,7 @@ class TestFocus:
                        return_value=_mock_run(stdout="ok\n")),
         ):
             # Should accept siblings kwarg without TypeError.
-            assert adapter.focus(v, siblings=[100, 200]) is True
+            assert adapter.focus(v, siblings=[_view(pid=100), _view(pid=200)]) is True
 
     def test_focus_escapes_special_chars_in_tty(self, adapter):
         """Defence-in-depth: even if a tty path ever contained quotes

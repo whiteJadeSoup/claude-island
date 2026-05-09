@@ -41,8 +41,11 @@ instead of trying to disambiguate within a window.
 """
 from __future__ import annotations
 
+import logging
 import sys
 import time
+
+log = logging.getLogger(__name__)
 
 # WT main window class. Same for stable, preview, and dev builds at the
 # time of writing; if Microsoft introduces a new variant we'll learn
@@ -181,9 +184,11 @@ def select_tab_by_title(hwnd: int, title: str) -> bool:
         pattern.Select()
         return True
     except Exception as exc:
-        import sys as _sys
-        print(f"[claude-island] wt_uia.select_tab_by_title: {exc}",
-              file=_sys.stderr)
+        # Click-driven (one call per click), so a debug-level line
+        # is enough — under-the-rug failures here become "click did
+        # nothing" which the user reports separately.
+        log.debug("select_tab_by_title(%s, %r) failed: %s",
+                  hex(hwnd), title, exc)
         return False
 
 
@@ -233,14 +238,17 @@ def list_ci_tab_names(hwnd: int) -> set[str]:
                 if depth + 1 < 4:
                     frontier.append((child, depth + 1))
     except Exception as exc:
-        import sys as _sys
-        print(f"[claude-island] wt_uia.list_ci_tab_names: {exc}",
-              file=_sys.stderr)
+        # Wake-driven hot path (~5 Hz per multi-view bucket). Using
+        # print(..., file=stderr) here would flood the console any time
+        # WT's UIA service is briefly unavailable (WT updating, focus
+        # stolen by another tool). debug() lets operators opt in via
+        # logging config without touching the call site.
+        log.debug("list_ci_tab_names(%s) failed: %s", hex(hwnd), exc)
     return out
 
 
 def wait_for_tab_name(
-    hwnd: int, name: str, *, timeout_ms: int = 200, poll_ms: int = 10,
+    hwnd: int, name: str, *, timeout_ms: int = 80, poll_ms: int = 10,
 ) -> bool:
     """Poll the UIA tree under *hwnd* until a TabItem with this exact Name
     exists, or *timeout_ms* elapses.
@@ -249,10 +257,16 @@ def wait_for_tab_name(
     (kernel SetConsoleTitleW → conhost → conpty → WT XAML) to
     propagate the new title into TabItem.Name. Empirically this takes
     one to a few frames (~16–50 ms) on a quiet system; we use 10 ms
-    poll cadence and a 200 ms hard cap. The cap is what triggers the
-    silent-fail fallback when the target tab uses a profile with
-    ``suppressApplicationTitle: true`` (in which case WT discards the
-    propagated update and TabItem.Name will never become *name*).
+    poll cadence and an 80 ms hard cap (was 200 ms; lowered in 2026-05
+    after Q-2 of the multi-agent review pointed out that
+    ``_activate_windows`` runs on the Qt main thread and a 200 ms
+    busy-poll was a perceptible UI hitch on every first click after a
+    title drift). 80 ms covers the empirical p99 of the propagation
+    window; the cap also triggers the silent-fail fallback when the
+    target tab uses a profile with ``suppressApplicationTitle: true``
+    (in which case WT discards the propagated update and TabItem.Name
+    will never become *name* anyway, so the longer cap was paying for
+    nothing).
 
     Returns ``True`` once a matching TabItem is observed, ``False`` on
     timeout or any UIA failure. Never raises.

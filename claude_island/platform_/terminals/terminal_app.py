@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import replace
-from typing import ClassVar
+from typing import ClassVar, Sequence
 
 from claude_island.core.capabilities import (
     Capability,
@@ -241,7 +241,7 @@ class TerminalAppAdapter(_CapabilityProvider):
                 replace(
                     v,
                     adapter_id=self.name,
-                    focus_granularity=FocusGranularity.PANE,
+                    focus_granularity=FocusGranularity.TAB,
                     capabilities=type(self).capabilities,
                 )
                 for v in batch
@@ -263,7 +263,9 @@ class TerminalAppAdapter(_CapabilityProvider):
     # ── FOCUS ────────────────────────────────────────────────────────────
 
     @capability(Capability.FOCUS)
-    def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
+    def focus(
+        self, view: SessionView, *, siblings: Sequence[SessionView] = (),
+    ) -> bool:
         """Select the target tab and raise its window.
 
         Falls back to UI-ancestor frontmost on every miss path
@@ -360,7 +362,7 @@ def _singletons(views: list[SessionView], adapter_name: str) -> list[SessionGrou
         stamped = replace(
             v,
             adapter_id=adapter_name,
-            focus_granularity=FocusGranularity.PANE,
+            focus_granularity=FocusGranularity.TAB,
             capabilities=TerminalAppAdapter.capabilities,
         )
         result.append(SessionGroup(

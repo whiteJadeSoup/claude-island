@@ -14,7 +14,7 @@ import subprocess
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Sequence
 
 from claude_island.core.capabilities import (
     Capability, FocusGranularity, LauncherSpawnError, SpawnResult,
@@ -78,7 +78,9 @@ class GenericMacAdapter(_CapabilityProvider):
         return groups
 
     @capability(Capability.FOCUS)
-    def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
+    def focus(
+        self, view: SessionView, *, siblings: Sequence[SessionView] = (),
+    ) -> bool:
         """Raise the host UI app to front via System Events.
 
         ``view.session.pid`` is the claude CLI pid. System Events'

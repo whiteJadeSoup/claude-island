@@ -5052,13 +5052,12 @@ class ExpandedWindow(QWidget):
         # focus to the terminal app. SetForegroundWindow's foreground-
         # transfer rule is still satisfied: we ARE the foreground
         # process at the moment of dispatch, before focus shifts.
-        # Sibling pids are needed by WindowsTerminalAdapter for the
-        # inactive-split-pane case: when the clicked row's own console
-        # title isn't in any UIA TabItem.Name (only the active pane's
-        # title is exposed), we need to fall back to a sibling's title
-        # to actually switch the WT tab.
-        sibling_pids = [s.session.pid for s in siblings]
-        self._dispatch(view, Capability.FOCUS, siblings=sibling_pids)
+        # Siblings are forwarded as full SessionViews; WindowsTerminal-
+        # Adapter uses them for the inactive-split-pane case (when the
+        # clicked row's sentinel isn't in any UIA TabItem.Name, fall
+        # back to a same-cwd sibling's sentinel to switch the WT tab).
+        # Other adapters accept-and-ignore.
+        self._dispatch(view, Capability.FOCUS, siblings=siblings)
 
     def resizeEvent(self, event: object) -> None:  # type: ignore[override]
         """Recompute proportional bar fill widths after a layout resize.

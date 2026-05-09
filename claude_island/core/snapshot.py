@@ -92,10 +92,11 @@ class SessionView:
     latest_model: str | None        # None when no records yet
     status_word: str | None         # raw "busy" / "idle" / "waiting" / None
     # The original Session object the view was composed from. Carried
-    # along so UI callbacks that accept a Session (e.g. WindowActivator,
-    # the row's _siblings list) don't need to reconstruct one. Frozen
-    # like everything else here — once the snapshot is built, the
-    # ``session`` reference is stable for the lifetime of the snapshot.
+    # along so UI callbacks that accept a Session (e.g. row click
+    # dispatch, the row's _siblings list) don't need to reconstruct
+    # one. Frozen like everything else here — once the snapshot is
+    # built, the ``session`` reference is stable for the lifetime of
+    # the snapshot.
     session: Session
     # Resolved session UUID — sourced from ~/.claude/sessions/<pid>.json's
     # ``sessionId`` field with fallback to ``session.session_uuid``.

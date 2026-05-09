@@ -238,6 +238,10 @@ class TestResumeClick:
         assert call["command"] == (
             "claude", "--resume", "u1", "--dangerously-skip-permissions",
         )
+        # Plan-L: session_uuid forwarded so WT adapter can stamp the
+        # tab title at spawn time. Guards against accidental removal of
+        # the `session_uuid=d.session_uuid` kwarg in RecentsDrawer.
+        assert call["session_uuid"] == "u1"
         # Intent registered with terminal pid from spawn result
         snap = registry.snapshot()
         assert len(snap) == 1

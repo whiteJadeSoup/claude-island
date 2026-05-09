@@ -11,7 +11,7 @@ so no session falls through the cracks.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import ClassVar
+from typing import ClassVar, Sequence
 
 from claude_island.core.capabilities import (
     Capability, FocusGranularity, _CapabilityProvider, capability,
@@ -19,7 +19,6 @@ from claude_island.core.capabilities import (
 from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
-from claude_island.platform_.terminals.protocols import TerminalAdapter
 
 
 @adapter("generic-windows", priority=0, platform="win")
@@ -55,7 +54,9 @@ class GenericWindowsAdapter(_CapabilityProvider):
         return groups
 
     @capability(Capability.FOCUS)
-    def focus(self, view: SessionView, *, siblings: list[int] = ()) -> bool:
+    def focus(
+        self, view: SessionView, *, siblings: Sequence[SessionView] = (),
+    ) -> bool:
         """Activate via ancestor-pid EnumWindows walk.
 
         Won't select a specific tab — only brings the host window to
