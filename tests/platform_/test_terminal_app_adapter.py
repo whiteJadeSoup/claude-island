@@ -322,11 +322,13 @@ class TestFocus:
         ):
             assert adapter.focus(v) is False
 
-    def test_focus_script_selects_window_and_activates(self, adapter):
-        """Pin the AppleScript shape: select tab, then frontmost window,
-        then activate. Without the explicit window-frontmost step,
-        multi-window Terminal users would lose their target behind
-        whatever window Terminal had previously frontmost."""
+    def test_focus_script_uses_system_events_frontmost(self, adapter):
+        """Same root-cause fix as ITerm2Adapter: claude-island's panel
+        has WindowStaysOnTopHint so it's the macOS active app at
+        click time. ``tell Terminal to activate`` (NSApp activate
+        path) is blocked by AppKit's non-active-cannot-order-above
+        rule. Use System Events' set frontmost instead — it has the
+        accessibility privilege to bypass that rule."""
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
@@ -336,13 +338,23 @@ class TestFocus:
         ):
             adapter.focus(v)
             script = run.call_args[0][0][2]
+            assert 'tell application "System Events"' in script
+            assert 'set frontmost of process "Terminal"' in script
+            i_se = script.index('tell application "System Events"')
+            i_term = script.index('tell application "Terminal"')
+            assert i_se < i_term, (
+                "System Events frontmost must precede the Terminal "
+                "tell block so the privilege is in place when "
+                "the per-tab selection runs"
+            )
+            # Per-tab selection + per-window frontmost still required —
+            # raising Terminal to OS foreground doesn't pick a tab
+            # within its current window or a window across windows.
             assert "set selected of t to true" in script
             assert "set frontmost of w to true" in script
-            assert "activate" in script
             i_sel = script.index("set selected of t to true")
             i_w = script.index("set frontmost of w to true")
-            i_a = script.index("activate")
-            assert i_sel < i_w < i_a
+            assert i_sel < i_w
 
     def test_focus_escapes_special_chars_in_tty(self, adapter):
         """Defence-in-depth: even if a tty path ever contained quotes

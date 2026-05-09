@@ -106,18 +106,37 @@ end tell
 """
 
 # AppleScript for FOCUS — finds the iTerm2 pane whose tty matches the
-# clicked session, selects its window + tab + session, then activates
-# the app. Returns "ok" / "miss" via stdout so the Python side can
-# distinguish "tty wasn't in iTerm2's tree" (return False) from
-# osascript errors (subprocess returncode ≠ 0).
+# clicked session, selects its window + tab + session, then brings
+# iTerm2 to the front via System Events. Returns "ok" / "miss" via
+# stdout so the Python side can distinguish "tty wasn't in iTerm2's
+# tree" (return False) from osascript errors (subprocess returncode ≠ 0).
 #
-# ``select w`` is load-bearing for the multi-window case: ``activate``
-# raises iTerm2 to the OS foreground, but the window order *inside*
-# iTerm2 is independent — without ``select w`` the target pane lives
-# in whatever iTerm2 window happens to currently be frontmost in the
-# app's own z-order, which can leave the user staring at a different
+# Why ``System Events ▶ set frontmost`` instead of ``tell iTerm to
+# activate``: claude-island's panel uses Qt.WindowStaysOnTopHint and
+# is the macOS frontmost application at the moment the user clicks a
+# row. ``[NSApp activate]`` (what iTerm2's ``activate`` ultimately
+# calls) is governed by AppKit's "non-active app cannot order its
+# windows above the active app's windows" rule — it logs ``Window …
+# ordered front from a non-active application and may order beneath
+# the active application's windows`` and visually does nothing. The
+# user sees AppleScript return "ok" but no window switches.
+#
+# System Events' ``set frontmost of process "iTerm2" to true`` runs
+# with higher privilege via the accessibility API and bypasses that
+# rule, so the target window is actually surfaced. Verified live: the
+# AppKit warning disappears and the user-perceived "click does
+# nothing" symptom resolves.
+#
+# ``select w`` is still load-bearing for the multi-window case:
+# raising iTerm2 to the OS foreground doesn't pick which iTerm2
+# window inside the app is on top — without ``select w`` the target
+# pane lives in whatever window happens to be frontmost in iTerm2's
+# own z-order, which can leave the user staring at a different
 # window with the right pane hidden behind it.
 _FOCUS_SCRIPT_TEMPLATE = """\
+tell application "System Events"
+    set frontmost of process "iTerm2" to true
+end tell
 tell application "iTerm"
     repeat with w in windows
         repeat with t in tabs of w
@@ -126,7 +145,6 @@ tell application "iTerm"
                     select s
                     select t
                     select w
-                    activate
                     return "ok"
                 end if
             end repeat

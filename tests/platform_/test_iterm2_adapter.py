@@ -430,12 +430,16 @@ class TestFocus:
             assert '\\"' in script
             assert "\\\\" in script
 
-    def test_focus_script_selects_window_for_multi_window_case(self, adapter):
-        """When iTerm2 has multiple windows, ``activate`` alone raises
-        the app but leaves whichever window iTerm2 had frontmost in
-        its own z-order on top — so the target pane stays hidden
-        behind another window. ``select w`` is required to promote
-        the target's containing window inside iTerm2."""
+    def test_focus_script_brings_iterm2_frontmost_via_system_events(self, adapter):
+        """The AppleScript MUST raise iTerm2 via System Events, not
+        via ``tell iTerm to activate``. claude-island's panel has
+        Qt.WindowStaysOnTopHint and is the active app at click time;
+        the in-app activate path is gated by AppKit's "non-active
+        cannot order above active" rule and silently fails to surface
+        the target window — verified live via the AppKit log
+        message ``Window … ordered front from a non-active application
+        and may order beneath the active application's windows``.
+        System Events bypasses that rule via accessibility privilege."""
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
@@ -445,16 +449,28 @@ class TestFocus:
         ):
             adapter.focus(v)
             script = run.call_args[0][0][2]
-            # All three selects must be present, in the expected order:
-            # session → tab → window → activate.
+            # System Events frontmost must come BEFORE the iTerm tell
+            # block so the window-order privilege is in place when
+            # ``select w`` runs.
+            assert 'tell application "System Events"' in script
+            assert 'set frontmost of process "iTerm2"' in script
+            i_se = script.index('tell application "System Events"')
+            i_iterm = script.index('tell application "iTerm"')
+            assert i_se < i_iterm, (
+                "System Events frontmost must run before the iTerm "
+                "select block; otherwise the AppKit non-active rule "
+                "kicks in before we've escalated privilege"
+            )
+            # All three selects still required for multi-window case:
+            # raising iTerm2 to OS foreground doesn't pick which
+            # iTerm2 window is on top inside the app.
             assert "select s" in script
             assert "select t" in script
             assert "select w" in script
             i_s = script.index("select s")
             i_t = script.index("select t")
             i_w = script.index("select w")
-            i_a = script.index("activate")
-            assert i_s < i_t < i_w < i_a
+            assert i_s < i_t < i_w
 
 
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────

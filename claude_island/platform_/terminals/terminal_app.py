@@ -107,21 +107,31 @@ end tell
 
 # Focus AppleScript: locate the tab whose tty matches, select it,
 # raise its window inside Terminal's z-order, then bring Terminal
-# itself to the OS front.
+# itself to the OS front via System Events.
 #
-# ``set frontmost of w to true`` is load-bearing for the multi-window
-# case: ``activate`` only raises the app, not a specific window
-# inside it. Without setting frontmost on the target window first,
+# Why ``System Events ▶ set frontmost`` instead of ``tell Terminal to
+# activate``: same root cause as the iTerm2 adapter's matching script.
+# claude-island's panel uses Qt.WindowStaysOnTopHint so it's the macOS
+# active app at click time. ``[NSApp activate]`` is gated by AppKit's
+# "non-active app cannot order its windows above the active app's
+# windows" rule and silently fails to surface the target window.
+# System Events bypasses that rule via the accessibility API.
+#
+# ``set frontmost of w to true`` is still load-bearing for the
+# multi-window case: bringing Terminal to the OS foreground doesn't
+# pick which Terminal window is on top within the app — without this
 # the user's last-frontmost Terminal window stays on top and the
 # selected tab remains hidden.
 _FOCUS_SCRIPT_TEMPLATE = """\
+tell application "System Events"
+    set frontmost of process "Terminal" to true
+end tell
 tell application "Terminal"
     repeat with w in windows
         repeat with t in tabs of w
             if tty of t is "{tty}" then
                 set selected of t to true
                 set frontmost of w to true
-                activate
                 return "ok"
             end if
         end repeat
