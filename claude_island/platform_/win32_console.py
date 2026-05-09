@@ -7,8 +7,9 @@ pid's console. Two callers exercise this in claude-island:
 - ProcessScanner (scan thread, ~10s tick): pulls the title for every
   candidate claude.exe so the orphan filter can compare against the
   set of visible WT tab titles.
-- WindowActivator (Qt main thread, on click): resolves the visible
-  host window AND captures the console title for tab selection.
+- WindowsTerminalAdapter (Qt main thread, on click): resolves the
+  visible host window AND captures the console title for tab
+  selection.
 
 Both contend for a single OS-global resource. The module-level lock
 serialises the FreeConsole/AttachConsole/GetConsoleTitleW/FreeConsole

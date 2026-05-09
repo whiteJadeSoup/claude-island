@@ -1,140 +1,25 @@
+"""Win32 window-foreground helpers shared by the WT adapter.
+
+The legacy ``WindowActivator`` class that used to live here was the
+v1 entry point for click → foreground; it has been superseded by
+``WindowsTerminalAdapter._activate_windows`` (in
+``terminals/windows_terminal.py``), which does the same console
+resolve + tab select but uses sibling sentinels instead of console
+titles for the inactive-pane fallback.
+
+Only the module-level helpers remain — they are still imported by
+``windows_terminal._activate_windows`` and ``generic_windows`` for
+the foreground push.
+"""
 from __future__ import annotations
 
-import platform
-import subprocess
 import sys
 
 import psutil
 
-from claude_island.core.models import Session
-from claude_island.platform_ import win32_console, wt_uia
+from claude_island.platform_ import win32_console
 
 _MAX_ANCESTOR_DEPTH = 10
-
-
-class WindowActivator:
-    """Brings the terminal window that hosts a Claude Code session to the foreground.
-
-    Windows: EnumWindows → find HWND by PID → SetForegroundWindow.
-    macOS:   AppleScript → activate process by unix id (tab-level focus is v2).
-
-    Returns True if activation succeeded, False otherwise.
-    """
-
-    def activate(self, session: Session, siblings: list[Session] | None = None) -> bool:
-        """Bring the terminal hosting *session* to the foreground and switch
-        to the right WT tab.
-
-        ``siblings`` is the other sessions in the same UI group (same WT
-        window + same project_path). When the clicked session is an
-        inactive split pane, its console title doesn't appear in any
-        TabItem.Name; falling through to a sibling's title (which IS
-        the active pane's title — that's the one TabItem.Name reflects)
-        successfully selects the right tab.
-        """
-        sibling_pids: list[int] = []
-        if siblings:
-            sibling_pids = [s.pid for s in siblings]
-
-        os_name = platform.system()
-        if os_name == "Windows":
-            return self._activate_windows(session.pid, sibling_pids)
-        if os_name == "Darwin":
-            return self._activate_macos(session.pid)
-        return False
-
-    # ------------------------------------------------------------------
-    # Windows
-    # ------------------------------------------------------------------
-
-    def _activate_windows(self, pid: int, sibling_pids: list[int] | None = None) -> bool:
-        try:
-            import win32con
-            import win32gui
-            import win32process
-        except ImportError:
-            # pywin32 missing — surface this loudly so the user can fix it
-            # rather than silently failing every click.
-            print(
-                "[claude-island] pywin32 not installed; cannot activate windows. "
-                "Run: pip install pywin32",
-                file=sys.stderr,
-            )
-            return False
-
-        # Preferred: AttachConsole→GetConsoleWindow→walk GW_OWNER. This
-        # correctly distinguishes between multiple Windows Terminal windows
-        # under the same WT process — the parent-walk approach picks the
-        # topmost WT and surfaces the wrong one when the session lives in a
-        # different WT window.
-        resolved = _resolve_console_window(pid, win32gui)
-        hwnd: int | None = None
-        if resolved is not None:
-            hwnd, title = resolved
-            # Best-effort tab switch. If our own title doesn't match any
-            # TabItem.Name (the inactive-split-pane case — WT only exposes
-            # the active pane's title via UIA), try each sibling's title:
-            # one of them IS the tab's active pane and its title will
-            # match the TabItem. Foreground is the guaranteed fallback
-            # whether Select succeeds or not.
-            if not wt_uia.select_tab_by_title(hwnd, title) and sibling_pids:
-                _select_tab_via_siblings(hwnd, sibling_pids)
-        else:
-            # Fallback: ancestor-pid walk. Used when console detection
-            # fails (conhost, processes started without a console, etc.)
-            # or when the terminal isn't WT. No console title available
-            # here, so tab selection is skipped.
-            candidate_pids = _ancestor_pids(pid)
-            if candidate_pids:
-                hwnd = _find_window_for_pids(candidate_pids, win32gui, win32process)
-
-        if hwnd is None:
-            return False
-
-        return _force_foreground(hwnd, win32con, win32gui, win32process)
-
-    # ------------------------------------------------------------------
-    # macOS
-    # ------------------------------------------------------------------
-
-    def _activate_macos(self, pid: int) -> bool:
-        # Tab-level focus is not achievable without the terminal app's own
-        # AppleScript dictionary; this raises the host app window only (D5).
-        script = (
-            f'tell application "System Events" to set frontmost of '
-            f'(first process whose unix id is {pid}) to true'
-        )
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                timeout=3,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-
-
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
-
-def _select_tab_via_siblings(wt_hwnd: int, sibling_pids: list[int]) -> bool:
-    """Try ``wt_uia.select_tab_by_title`` with each sibling's console
-    title. Returns True on the first success.
-
-    Used when the clicked row is an inactive split pane — its own
-    console title doesn't appear in any TabItem.Name, but one of its
-    siblings (the active pane in the same tab) has a title that does.
-    """
-    for sib_pid in sibling_pids:
-        info = win32_console.get_console_info(sib_pid)
-        if info is None:
-            continue
-        _, sib_title = info
-        if sib_title and wt_uia.select_tab_by_title(wt_hwnd, sib_title):
-            return True
-    return False
 
 
 def walk_to_visible_host(conpty_hwnd: int, win32gui) -> int | None:
@@ -144,9 +29,9 @@ def walk_to_visible_host(conpty_hwnd: int, win32gui) -> int | None:
     Used in two places:
     - At click time: ``_resolve_console_window`` pairs this with the
       console title to drive tab selection + foreground.
-    - At scan time: ``ProcessScanner`` calls this to label each session
-      with its hosting wt_hwnd, so the UI can group same-tab sessions
-      visually.
+    - At scan time: ``WindowsTerminalAdapter.group()`` calls this to
+      label each session with its hosting wt_hwnd, so the UI can group
+      same-tab sessions visually.
 
     Returns ``None`` when the chain breaks before reaching a visible
     host within bounded depth (``_MAX_ANCESTOR_DEPTH`` = 10).

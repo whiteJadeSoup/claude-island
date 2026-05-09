@@ -36,14 +36,12 @@ from claude_island.core.capabilities import (
 from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
-from claude_island.platform_.terminals.protocols import TerminalAdapter
 
 # Internal Win32 helpers — import within methods so non-Windows import
 # of this module (via __init__.py adapter registry) doesn't trigger
 # ImportError. The @adapter decorator skips instantiation on non-win
 # platforms anyway.
 
-_WT_CLASS_PREFIX = "CASCADIA_HOSTING_WINDOW_CLASS"
 _MAX_ANCESTOR_DEPTH = 10
 
 
@@ -233,7 +231,6 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         from claude_island.platform_ import wt_uia
         buckets: dict[tuple, list[SessionView]] = {}
         singletons: list[SessionView] = []
-        view_wt_hwnd: dict[int, int] = {}  # pid → wt_hwnd, for sentinel-detect
         for v in kept:
             wt_hwnd: int | None = None
             if win32gui_mod is not None:
@@ -243,7 +240,6 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                         conpty, win32gui_mod,
                     )
             if wt_hwnd:
-                view_wt_hwnd[v.session.pid] = wt_hwnd
                 key = (wt_hwnd, _normalize_project_path(v.project_path))
                 buckets.setdefault(key, []).append(v)
             else:
