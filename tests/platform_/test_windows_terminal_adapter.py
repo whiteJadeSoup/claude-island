@@ -168,17 +168,17 @@ class TestConptyCache:
         """Cache hit on the same pid avoids the AttachConsole syscall —
         this is the whole point of the conpty cache."""
         patched.set_console({1234: 0xAA})
+        patched.set_walk({0xAA: 0x11})  # populate the wt_hwnd cache
 
         adapter.group([_view(1234)])
         adapter.group([_view(1234)])
 
         # AttachConsole is cached; only the first call probes.
         assert patched.get_console_info.call_count == 1
-        # walk_to_visible_host now runs every group() to feed the
-        # sibling tracker (one walk per cached pid per wake). So 2
-        # ticks × 1 pid = 2 walks. This is independent of the
-        # AttachConsole cache (walk reads the cached conpty_hwnd).
-        assert patched.walk.call_count == 2
+        # Q-6: wt_hwnd is cached across wakes (invalidated only on
+        # WT-window-set signature change). Tick 1 walks; tick 2 hits
+        # the cache.
+        assert patched.walk.call_count == 1
 
     def test_multiple_pids_cached_independently(self, adapter, patched):
         patched.set_console({1234: 0xAA, 5678: 0xBB})
@@ -511,6 +511,43 @@ class TestSentinelReconcile:
         adapter.group([_view(1234, session_uuid=self.UUID)])
 
         patched.set_console_title.assert_called_once_with(1234, self.EXPECTED)
+
+    def test_pid_eviction_clears_wt_hwnd_cache(self, adapter, patched):
+        """Q-6: a pid leaving views must drop from _wt_hwnd_cache too,
+        so a recycled pid doesn't get assigned a stale window."""
+        patched.set_console({1234: 0xAA})
+        patched.set_walk({0xAA: 0x11})
+
+        adapter.group([_view(1234)])
+        assert adapter._wt_hwnd_cache == {1234: 0x11}
+
+        adapter.group([])  # pid leaves
+        assert adapter._wt_hwnd_cache == {}
+
+    def test_wt_window_set_change_invalidates_wt_hwnd_cache(
+        self, adapter, patched, monkeypatch,
+    ):
+        """Q-6 invalidation: when the WT-window-set signature changes
+        (a WT process opened/closed a window between wakes), the cache
+        must be flushed and re-walked. The signature is computed from
+        the live EnumWindows result; we drive it via a stub that
+        returns different hwnd sets across calls."""
+        patched.set_console({1234: 0xAA})
+        patched.set_walk({0xAA: 0x11, 0xAA + 1: 0x22})  # 1st wt, 2nd wt
+
+        # Stub _wt_window_signature to return DIFFERENT hashes across
+        # the two ticks → cache must be invalidated → walk must run
+        # again on tick 2 even though pid is unchanged.
+        sigs = iter([1111, 2222])  # any two distinct ints
+        monkeypatch.setattr(
+            "claude_island.platform_.terminals.windows_terminal._wt_window_signature",
+            lambda _w: next(sigs),
+        )
+
+        adapter.group([_view(1234)])
+        adapter.group([_view(1234)])
+
+        assert patched.walk.call_count == 2  # cache was flushed by sig change
 
     def test_pid_eviction_clears_title_set_attempted(self, adapter, patched):
         """A pid that leaves views (process exited, or scanner moved

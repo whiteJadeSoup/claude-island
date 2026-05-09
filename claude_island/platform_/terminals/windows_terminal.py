@@ -44,6 +44,44 @@ from claude_island.platform_.terminals import adapter
 
 _MAX_ANCESTOR_DEPTH = 10
 
+# WT main window class. Same on stable / preview / dev. Used as the
+# coarse cache-invalidation signal for ``_wt_hwnd_cache`` — see
+# ``_wt_window_signature`` below.
+_WT_CLASS_PREFIX = "CASCADIA_HOSTING_WINDOW_CLASS"
+
+
+def _wt_window_signature(win32gui_mod) -> int:
+    """Hash the current set of WT top-level HWNDs.
+
+    Cheap (~1 ms): one EnumWindows pass + a GetClassName per top-level
+    window. Hash CHANGES when a WT window is created or destroyed —
+    the only invalidation event that affects per-pid wt_hwnd
+    correctness across wakes. (Tab-drag within an unchanged window
+    set is the known blind spot — see ``_wt_hwnd_cache`` doc on
+    ``WindowsTerminalAdapter``.)
+
+    Returns 0 on any failure; callers treat 0 as "always invalidate"
+    by comparing against the previous stored signature (also 0 when
+    win32gui is missing or first-call), so caching simply degrades to
+    no-op without bugging out.
+    """
+    hwnds: list[int] = []
+
+    def _cb(hwnd: int, _arg: object) -> bool:
+        try:
+            cls = win32gui_mod.GetClassName(hwnd)
+            if cls.startswith(_WT_CLASS_PREFIX):
+                hwnds.append(hwnd)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui_mod.EnumWindows(_cb, None)
+    except Exception:
+        return 0
+    return hash(frozenset(hwnds))
+
 
 @adapter("windows-terminal", priority=100, platform="win")
 class WindowsTerminalAdapter(_CapabilityProvider):
@@ -85,6 +123,18 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # fail-safe (an absent sentinel keeps the bucket grouped,
         # never permanently broken). GC'd alongside _conpty_cache.
         self._title_set_attempted: set[int] = set()
+
+        # pid → wt_hwnd. Avoid running ``walk_to_visible_host`` (10
+        # win32gui calls per pid) on every wake. Invalidated wholesale
+        # whenever the WT-window-set signature changes (cheap
+        # EnumWindows + class filter, ~1 ms per wake) — that captures
+        # process restart and new-window cases. Tab-drag WITHIN the
+        # existing WT window set is the known blind spot; it self-heals
+        # on the next signature change and the click-time path
+        # (``_resolve_console_window``) re-walks fresh anyway, so a
+        # stale group attribution doesn't break click correctness.
+        self._wt_hwnd_cache: dict[int, int] = {}
+        self._wt_window_signature: int = 0
 
         # pid → SessionView. Populated in group() at every wake; read
         # in focus() to compute cwd-matched sibling sentinels for the
@@ -182,9 +232,9 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         # GC: drop cache entries for pids that left views (process
         # exited or was reassigned to a different adapter). Done before
         # the loop so the cache stays bounded by the live session count.
-        # Both caches GC'd together — a returning pid (recycled by the
-        # OS, or re-discovered after a transient orphan window) gets a
-        # fresh title-set attempt on its next first-sight.
+        # All three caches GC'd together — a returning pid (recycled
+        # by the OS, or re-discovered after a transient orphan window)
+        # gets a fresh title-set attempt and a fresh wt_hwnd walk.
         alive_pids = {v.session.pid for v in views}
         if self._conpty_cache:
             self._conpty_cache = {
@@ -192,6 +242,19 @@ class WindowsTerminalAdapter(_CapabilityProvider):
             }
         if self._title_set_attempted:
             self._title_set_attempted &= alive_pids
+        if self._wt_hwnd_cache:
+            self._wt_hwnd_cache = {
+                p: h for p, h in self._wt_hwnd_cache.items() if p in alive_pids
+            }
+
+        # Invalidate the wt_hwnd cache on WT-window-set change. Cheap
+        # win32 sweep — drops the per-pid GW_OWNER walks below to a
+        # cache hit in steady state.
+        if win32gui_mod is not None:
+            sig = _wt_window_signature(win32gui_mod)
+            if sig != self._wt_window_signature:
+                self._wt_hwnd_cache = {}
+                self._wt_window_signature = sig
 
         kept: list[SessionView] = []
         for v in views:
@@ -254,13 +317,16 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         buckets: dict[tuple, list[SessionView]] = {}
         singletons: list[SessionView] = []
         for v in kept:
-            wt_hwnd: int | None = None
-            if win32gui_mod is not None:
-                conpty = self._conpty_cache.get(v.session.pid)
+            pid = v.session.pid
+            wt_hwnd: int | None = self._wt_hwnd_cache.get(pid)
+            if wt_hwnd is None and win32gui_mod is not None:
+                conpty = self._conpty_cache.get(pid)
                 if conpty:
                     wt_hwnd = window_activator.walk_to_visible_host(
                         conpty, win32gui_mod,
                     )
+                    if wt_hwnd:
+                        self._wt_hwnd_cache[pid] = wt_hwnd
             if wt_hwnd:
                 key = (wt_hwnd, _normalize_project_path(v.project_path))
                 buckets.setdefault(key, []).append(v)
