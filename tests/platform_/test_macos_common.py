@@ -268,14 +268,17 @@ class TestFindUiAppAncestor:
         ):
             assert _macos_common.find_ui_app_ancestor(10) is None
 
-    def test_returns_none_when_psutil_no_such_process(self):
+    def test_returns_process_gone_when_psutil_no_such_process(self):
+        # Process raced out between scanner and snapshot build.
+        # PROCESS_GONE (not None) lets callers keep FOCUS rather than
+        # permanently disabling it for what is just a timing gap.
         with (
             mock.patch.object(_macos_common, "_ui_app_pids",
                               return_value=frozenset({100})),
             mock.patch("psutil.Process",
                        side_effect=psutil.NoSuchProcess(pid=10)),
         ):
-            assert _macos_common.find_ui_app_ancestor(10) is None
+            assert _macos_common.find_ui_app_ancestor(10) is _macos_common.PROCESS_GONE
 
     def test_returns_none_when_query_returned_empty(self):
         # If osascript permission is denied (System Events) we get an

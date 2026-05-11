@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from unittest import mock
 
+import psutil
 import pytest
 
 from claude_island.core.capabilities import (
@@ -16,6 +17,7 @@ from claude_island.core.capabilities import (
 )
 from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionView, _degraded_view
+from claude_island.platform_.terminals import _macos_common
 from claude_island.platform_.terminals.generic_mac import GenericMacAdapter
 
 
@@ -140,6 +142,24 @@ class TestGenericMacGroup:
         by_pid = {g.views[0].pid: g.views[0] for g in groups}
         assert Capability.FOCUS in by_pid[10].capabilities
         assert Capability.FOCUS not in by_pid[20].capabilities
+
+    def test_stale_pid_keeps_focus(self):
+        """Race: process exited between ProcessScanner tick and snapshot
+        build. find_ui_app_ancestor returns PROCESS_GONE. group() must
+        keep FOCUS — the row is about to disappear anyway and going dark
+        with a "click unavailable" tooltip in that brief window is
+        confusing. Previously the adapter treated PROCESS_GONE the same
+        as the tmux/screen case and stripped FOCUS incorrectly."""
+        adapter = GenericMacAdapter()
+        adapter.name = "generic-mac"
+        v = _view(pid=9999)
+        with mock.patch(
+            "claude_island.platform_.terminals.generic_mac.find_ui_app_ancestor",
+            return_value=_macos_common.PROCESS_GONE,
+        ):
+            groups = adapter.group([v])
+        view = groups[0].views[0]
+        assert Capability.FOCUS in view.capabilities
 
 
 class TestGenericMacLaunch:

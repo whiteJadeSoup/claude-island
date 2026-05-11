@@ -53,6 +53,16 @@ import psutil
 log = logging.getLogger(__name__)
 
 
+# Sentinel returned by find_ui_app_ancestor when the target pid no longer
+# exists. Callers that want to distinguish "process gone (race)" from "process
+# exists but has no UI app ancestor (tmux/screen)" can check against this.
+# generic_mac.group() uses it to keep FOCUS on views whose pid raced out —
+# the row will disappear on the next ProcessScanner tick anyway, but until
+# then the button should remain clickable rather than going dark with no
+# feedback.
+PROCESS_GONE: object = object()
+
+
 # How far we'll walk the process tree looking for a UI ancestor.
 # Real-world chains top out at ~5 hops (claude → zsh → login →
 # ShellLauncher → iTermServer → iTerm2). 12 leaves slack for
@@ -85,7 +95,7 @@ _cached_at: float = 0.0
 _last_logged_stderr: str | None = None
 
 
-def find_ui_app_ancestor(pid: int, *, max_depth: int = _MAX_DEPTH) -> int | None:
+def find_ui_app_ancestor(pid: int, *, max_depth: int = _MAX_DEPTH) -> "int | None | object":
     """Walk the parent chain from ``pid``; return the first pid that
     is a UI application (visible to System Events).
 
@@ -93,17 +103,19 @@ def find_ui_app_ancestor(pid: int, *, max_depth: int = _MAX_DEPTH) -> int | None
     UI app, that pid is returned. Otherwise we follow ``parent()`` up
     to ``max_depth`` hops.
 
-    Returns ``None`` when:
-      * The osascript that lists UI pids failed (permission denied,
-        timeout, System Events not running) AND we have no
-        last-known-good cached value.
-      * psutil can't open ``pid`` (process gone or access denied).
-      * No ancestor within ``max_depth`` hops is a UI app — most
-        commonly the tmux/screen daemonization case where the server
-        was reparented to launchd, severing the link to the host
-        terminal application.
+    Return values:
+      * ``int``  — the UI-app ancestor pid found in the chain.
+      * ``None`` — process exists and chain was fully walked, but no
+        ancestor is a UI app (tmux/screen daemonization case) OR the
+        osascript query failed and there is no cached value.
+      * :data:`PROCESS_GONE` — psutil couldn't open ``pid`` because it
+        no longer exists. Distinct from ``None`` so callers can treat
+        a ProcessScanner race gracefully (keep FOCUS) instead of
+        permanently disabling it as they would for tmux/screen.
 
     The caller treats None as "FOCUS isn't supported for this view".
+    PROCESS_GONE is a softer signal: the view is about to disappear
+    from the snapshot anyway; don't disable the button prematurely.
     """
     ui_pids = _ui_app_pids()
     if not ui_pids:
@@ -111,7 +123,7 @@ def find_ui_app_ancestor(pid: int, *, max_depth: int = _MAX_DEPTH) -> int | None
     try:
         proc = psutil.Process(pid)
     except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return None
+        return PROCESS_GONE
     for _ in range(max_depth):
         if proc.pid in ui_pids:
             return proc.pid

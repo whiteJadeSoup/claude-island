@@ -24,6 +24,7 @@ from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals import adapter
 from claude_island.platform_.terminals._macos_common import (
+    PROCESS_GONE,
     find_ui_app_ancestor,
     focus_host_app,
 )
@@ -57,12 +58,21 @@ class GenericMacAdapter(_CapabilityProvider):
         that's worse: the row looks clickable and the user gets no
         feedback. Honest signal beats silent failure. UI gates the
         cursor / pointer affordance on FOCUS membership, so dropping
-        it removes the "click me" cue."""
+        it removes the "click me" cue.
+
+        Exception: when :data:`~_macos_common.PROCESS_GONE` is returned
+        the pid raced out between the ProcessScanner tick and this
+        build. The session row is about to disappear on the next tick;
+        keep FOCUS so the row doesn't go dark with a confusing tooltip
+        in the brief window before the scanner catches up."""
         base_caps = type(self).capabilities
         groups: list[SessionGroup] = []
         for v in views:
-            ui_pid = find_ui_app_ancestor(v.session.pid)
-            caps = base_caps if ui_pid is not None else (base_caps - {Capability.FOCUS})
+            result = find_ui_app_ancestor(v.session.pid)
+            # Strip FOCUS only when the process *exists* but has no UI
+            # ancestor (tmux/screen). Keep it when we found an ancestor
+            # (result is int) or when the pid raced out (PROCESS_GONE).
+            caps = (base_caps - {Capability.FOCUS}) if result is None else base_caps
             stamped = replace(
                 v,
                 adapter_id=self.name,
