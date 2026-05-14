@@ -17,7 +17,9 @@ from typing import Any
 
 import pytest
 
+from claude_island.core.hook_events import SessionLiveState
 from claude_island.core.models import Session, UsageTotals
+from claude_island.core.session_phase import SessionPhase
 from claude_island.core.snapshot import (
     HIGH_COST_USD_THRESHOLD,
     SessionView,
@@ -327,6 +329,103 @@ class TestComposeSessionView:
         # state-derived fields gone, but the view exists.
         assert view.status_word is None
         assert view.is_high_cost is False
+
+
+class TestHookLivePhaseIdleOverride:
+    """Phase resolution cross-references pid.json against hook live_state.
+
+    Regression: the hook chain occasionally loses its closing event
+    (PostToolUse / Stop POST timeout, app restart between Pre and Post,
+    an API socket error mid-turn that prevents Stop from firing). With
+    no override, the state machine stays pinned at THINKING / TOOL_USE
+    indefinitely and the capsule keeps showing "running" forever. When
+    pid.json (which claude writes on every status transition) says
+    "idle", trust it and downgrade the rendered phase to IDLE.
+    """
+
+    @staticmethod
+    def _live(phase, uuid="uuid-1", tool=None):
+        return SessionLiveState(
+            session_uuid=uuid,
+            phase=phase,
+            cwd=Path("/proj"),
+            started_at=datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc),
+            last_hook_at=datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc),
+            current_tool=tool,
+        )
+
+    def _compose(self, *, live, pid_status):
+        sess = Session(
+            pid=1,
+            project_path=Path("/proj"),
+            session_uuid="uuid-1",
+            last_activity=datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc),
+        )
+        return compose_session_view(
+            sess,
+            state_reader=FakeStateReader({
+                1: {"sessionId": "uuid-1", "status": pid_status},
+            }),
+            metadata_provider=FakeMetadataProvider(),
+            usage_registry=FakeUsageRegistry(),
+            names_store=FakeNamesStore(),
+            live_state_reader=lambda _uuid: live,
+        )
+
+    def test_hook_tool_use_with_pid_idle_renders_as_idle(self):
+        live = self._live(SessionPhase.TOOL_USE, tool="Bash")
+        view = self._compose(live=live, pid_status="idle")
+        assert view.phase == SessionPhase.IDLE
+        assert view.current_tool is None
+
+    def test_hook_thinking_with_pid_idle_renders_as_idle(self):
+        live = self._live(SessionPhase.THINKING)
+        view = self._compose(live=live, pid_status="idle")
+        assert view.phase == SessionPhase.IDLE
+
+    def test_hook_waiting_with_pid_idle_renders_as_idle(self):
+        live = SessionLiveState(
+            session_uuid="uuid-1",
+            phase=SessionPhase.WAITING_APPROVAL,
+            cwd=Path("/proj"),
+            started_at=datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc),
+            last_hook_at=datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc),
+            pending_permission_tool="Bash",
+        )
+        view = self._compose(live=live, pid_status="idle")
+        assert view.phase == SessionPhase.IDLE
+
+    def test_hook_tool_use_with_pid_busy_preserves_tool_use(self):
+        live = self._live(SessionPhase.TOOL_USE, tool="Bash")
+        view = self._compose(live=live, pid_status="busy")
+        assert view.phase == SessionPhase.TOOL_USE
+        assert view.current_tool == "Bash"
+
+    def test_hook_idle_with_pid_busy_stays_idle(self):
+        # Hook fresher than pid.json — keep hook's IDLE without override.
+        live = self._live(SessionPhase.IDLE)
+        view = self._compose(live=live, pid_status="busy")
+        assert view.phase == SessionPhase.IDLE
+
+    def test_hook_tool_use_with_no_pid_status_preserves_tool_use(self):
+        # No pid.json status field — no override signal; trust hook.
+        live = self._live(SessionPhase.TOOL_USE, tool="Bash")
+        sess = Session(
+            pid=1,
+            project_path=Path("/proj"),
+            session_uuid="uuid-1",
+            last_activity=datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc),
+        )
+        view = compose_session_view(
+            sess,
+            state_reader=FakeStateReader({1: {"sessionId": "uuid-1"}}),
+            metadata_provider=FakeMetadataProvider(),
+            usage_registry=FakeUsageRegistry(),
+            names_store=FakeNamesStore(),
+            live_state_reader=lambda _uuid: live,
+        )
+        assert view.phase == SessionPhase.TOOL_USE
+        assert view.current_tool == "Bash"
 
 
 class TestComposeLastActivityFromMeta:

@@ -536,8 +536,21 @@ def compose_session_view(
     # ── phase resolution: hook > pid.json > activity heuristic ──
     live = _safe(live_state_reader, sess_uuid) if sess_uuid else None
     if live is not None and live.phase != SessionPhase.ENDED:
-        phase = live.phase
-        current_tool = live.current_tool
+        # Cross-reference with pid.json: if claude itself reports the
+        # session as idle, trust that over a potentially-stale active
+        # hook phase. The hook chain can lose its closing event
+        # (PostToolUse / Stop dropped after a POST timeout, app restart
+        # between Pre and Post, an API error mid-turn that prevents
+        # Stop from firing), which would otherwise pin the phase at
+        # THINKING / TOOL_USE / WAITING_APPROVAL forever. pid.json is
+        # written by claude on every status transition, so an "idle"
+        # reading is authoritative — fall back to a clean IDLE view.
+        if status_word == "idle" and live.phase != SessionPhase.IDLE:
+            phase = SessionPhase.IDLE
+            current_tool = None
+        else:
+            phase = live.phase
+            current_tool = live.current_tool
         last_prompt = live.last_prompt
         last_assistant_message = live.last_assistant_message
         jump_target = live.jump_target
