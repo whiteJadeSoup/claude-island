@@ -51,6 +51,8 @@ from .capabilities import Capability, FocusGranularity
 from .hook_events import JumpTarget, LiveStateProto, SessionLiveState
 from .launch_intent import LaunchIntent
 from .models import DormantSession, QuotaSnapshot, Session
+from .notify import NotifyEvent
+from .pending_decisions import PendingDecisionView
 from .session_phase import SessionPhase
 
 log = logging.getLogger(__name__)
@@ -246,6 +248,17 @@ class WorldSnapshot:
     # discards on upgrade-to-live or on timeout. UI renders these as
     # disabled rows with a ⏳ Launching… affordance.
     launching_sessions: tuple[LaunchIntent, ...] = ()
+    # Bidirectional-hook payloads (Bidirectional Hooks v1, 2026-05-14).
+    # ``pending_decisions`` is a snapshot of the PendingDecisionRegistry
+    # — what the user must approve / review. Empty tuple = nothing to
+    # decide. UI renders ApprovalCard (PRE_TOOL_USE) /
+    # PromptReviewCard (USER_PROMPT_SUBMIT) per item.
+    pending_decisions: tuple[PendingDecisionView, ...] = ()
+    # ``notify_events`` is a 60 s rolling window of fired notifications
+    # — Stop / StopFailure mostly. Rolling (not consume-and-clear) so a
+    # snapshot rebuild race can't drop a notification mid-flight; the
+    # NotificationDispatcher dedups via its own _dispatched_ids set.
+    notify_events: tuple[NotifyEvent, ...] = ()
 
     @classmethod
     def empty(cls) -> "WorldSnapshot":
@@ -261,6 +274,8 @@ class WorldSnapshot:
             session_groups=(),
             dormant_sessions=(),
             launching_sessions=(),
+            pending_decisions=(),
+            notify_events=(),
         )
 
     # ``render_key`` removed (F4): UI dedup is now per-surface — each
@@ -394,6 +409,22 @@ class _LaunchIntentProto(Protocol):
 
     def reconcile(self, *, live_uuids: set[str], now: datetime) -> None: ...
     def snapshot(self) -> tuple[LaunchIntent, ...]: ...
+
+
+class _PendingDecisionProto(Protocol):
+    """Snapshotter reads ``snapshot()`` to drop the current pending
+    decisions into WorldSnapshot. Production wires in
+    PendingDecisionRegistry; tests pass any object with this shape or
+    leave it None to disable the feature."""
+
+    def snapshot(self) -> tuple[PendingDecisionView, ...]: ...
+
+
+class _NotifyQueueProto(Protocol):
+    """Snapshotter reads ``snapshot()`` for the rolling 60 s window of
+    notify events to publish in WorldSnapshot.notify_events."""
+
+    def snapshot(self) -> tuple[NotifyEvent, ...]: ...
 
 
 def _default_group_sessions(views: list["SessionView"]) -> list["SessionGroup"]:
@@ -674,6 +705,44 @@ def _degraded_view(session: Session) -> SessionView:
     )
 
 
+def _dedup_views_by_session_uuid(views: list[SessionView]) -> list[SessionView]:
+    """Collapse duplicates that share a non-empty ``session_uuid``.
+
+    Two pids both attached to the same Claude session — typically when
+    the user ran ``claude --resume <uuid>`` in two terminals — each get
+    their own ``Session`` from ProcessScanner. ``compose_session_view``
+    then resolves ``session_uuid`` from per-pid ``pid.json``, so both
+    SessionViews point at the same logical session and render as
+    identical rows. The UI's identity is the session, not the OS pid,
+    so collapse to one row per uuid.
+
+    Selection rule: highest ``last_activity`` wins; tie-break on higher
+    ``pid`` (newer processes hand out larger pids). Views with empty
+    ``session_uuid`` pass through — they're either hook placeholders or
+    sessions whose transcript hasn't been observed yet, and we have no
+    merge key for them.
+
+    Order is preserved: a winner inherits the slot of the first
+    occurrence of its uuid, keeping the UI's row order stable across
+    snapshots.
+    """
+    seen_idx: dict[str, int] = {}
+    result: list[SessionView] = []
+    for v in views:
+        if not v.session_uuid:
+            result.append(v)
+            continue
+        idx = seen_idx.get(v.session_uuid)
+        if idx is None:
+            seen_idx[v.session_uuid] = len(result)
+            result.append(v)
+            continue
+        existing = result[idx]
+        if (v.last_activity, v.pid) > (existing.last_activity, existing.pid):
+            result[idx] = v
+    return result
+
+
 def _normalize_project_path(path: Path) -> str:
     """Collapse Claude Code worktree paths back to their parent project.
 
@@ -748,6 +817,12 @@ class Snapshotter:
         # snapshot stay empty.
         dormant_source: "_DormantSourceProto | None" = None,
         launch_intent: "_LaunchIntentProto | None" = None,
+        # Bidirectional Hooks v1 sources (2026-05-14). Both default to
+        # None — when None, the corresponding WorldSnapshot fields stay
+        # empty. Production injects PendingDecisionRegistry +
+        # NotifyEventQueue.
+        pending_decisions: "_PendingDecisionProto | None" = None,
+        notify_queue: "_NotifyQueueProto | None" = None,
         debounce_window_s: float = 0.1,
         throttle_first_window_s: float = 0.2,
     ) -> None:
@@ -780,6 +855,9 @@ class Snapshotter:
         # (snapshot's dormant_sessions / launching_sessions stay empty).
         self._dormant_source = dormant_source
         self._launch_intent = launch_intent
+        # Bidirectional Hooks v1 sources. None ⇒ field stays empty tuple.
+        self._pending_decisions = pending_decisions
+        self._notify_queue = notify_queue
         self._debounce_window_s = debounce_window_s
         self._throttle_first_window_s = throttle_first_window_s
 
@@ -918,6 +996,11 @@ class Snapshotter:
                 )
                 views.append(_degraded_view(s))
 
+        # Two pids attached to the same `claude --resume <uuid>` would
+        # otherwise render as two identical-looking rows. Keep one row
+        # per session_uuid (the most recently active pid).
+        views = _dedup_views_by_session_uuid(views)
+
         # Adapter-driven grouping (dispatcher → chain → sessions bucketed
         # into SessionGroups). If the grouper raises (bug in an adapter),
         # fall back to singleton grouping — every session is its own
@@ -991,6 +1074,25 @@ class Snapshotter:
         else:
             dormant = ()
 
+        # ── Bidirectional Hooks v1 reads ──────────────────────────
+        if self._pending_decisions is not None:
+            try:
+                pending = self._pending_decisions.snapshot()
+            except Exception:
+                log.exception("pending_decisions.snapshot raised; treating as empty")
+                pending = ()
+        else:
+            pending = ()
+
+        if self._notify_queue is not None:
+            try:
+                notify_evts = self._notify_queue.snapshot()
+            except Exception:
+                log.exception("notify_queue.snapshot raised; treating as empty")
+                notify_evts = ()
+        else:
+            notify_evts = ()
+
         return WorldSnapshot(
             today_cost_usd=today_cost,
             quota=quota,
@@ -1000,6 +1102,8 @@ class Snapshotter:
             session_groups=tuple(groups),
             dormant_sessions=dormant,
             launching_sessions=launching,
+            pending_decisions=pending,
+            notify_events=notify_evts,
         )
 
     def _safe_list_sessions(self) -> list[Session]:

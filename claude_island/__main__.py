@@ -510,6 +510,36 @@ def _delete_provider_settings(name: str) -> None:
     _del(name)
 
 
+# ── Bidirectional Hooks v1 (2026-05-14) ──────────────────────────────
+# Constructed BEFORE ExpandedWindow + HookServer so both can be injected
+# with the same registry / cache / queue instances. Snapshotter is built
+# AFTER ExpandedWindow (line ~700), so on_change uses lazy lookup so an
+# early mutation (extremely unlikely at this point in boot) doesn't
+# NameError on a not-yet-bound snapshotter.
+from claude_island.core.notify import NotifyEventQueue
+from claude_island.core.pending_decisions import PendingDecisionRegistry
+from claude_island.core.session_permissions import SessionPermissionCache
+
+def _wake_if_ready() -> None:
+    snap = globals().get("snapshotter")
+    if snap is not None:
+        snap.wake()
+
+pending_registry = PendingDecisionRegistry(on_change=_wake_if_ready)
+permission_cache = SessionPermissionCache(on_change=_wake_if_ready)
+notify_queue = NotifyEventQueue(on_change=_wake_if_ready)
+
+
+def _resolve_pending_decision(decision_id: str, decision: object) -> bool:
+    """Bridge from ApprovalCard / PromptReviewCard click → registry.
+
+    The registry resolve sets a threading.Event the HookServer thread
+    is blocked on (in PreToolUse / UserPromptSubmit handlers). The
+    server then encodes the directive in the HTTP response body,
+    Claude Code reads stdout, and the tool / prompt proceeds."""
+    return pending_registry.resolve(decision_id, decision)  # type: ignore[arg-type]
+
+
 expanded = ExpandedWindow(
     capsule=capsule,
     controller=controller,
@@ -530,6 +560,12 @@ expanded = ExpandedWindow(
     list_configurable_providers=_list_configurable_providers,
     save_provider_settings=_save_provider_settings,
     delete_provider_settings=_delete_provider_settings,
+    # Bidirectional Hooks v1: ApprovalCard / PromptReviewCard clicks
+    # route through the registry (sets the Event the HookServer thread
+    # is blocked on); SessionDetailPopup's "Review prompts" toggle
+    # writes to the permission cache.
+    resolve_decision=_resolve_pending_decision,
+    set_review_mode=permission_cache.set_review,
 )
 
 # ---------------------------------------------------------------------------
@@ -656,8 +692,13 @@ try:
         )
         # Continue anyway — listener still works if user pre-installed hooks
 
-    # Step 4: start the HTTP listener.
-    hook_server = HookServer(state_machine)
+    # Step 4: start the HTTP listener with bidirectional deps.
+    hook_server = HookServer(
+        state_machine,
+        pending_registry=pending_registry,
+        permission_cache=permission_cache,
+        notify_queue=notify_queue,
+    )
     try:
         bound_port = hook_server.start()
         _safe_stderr_write(
@@ -697,6 +738,8 @@ snapshotter = Snapshotter(
     group_sessions=_dispatcher.group_sessions,
     dormant_source=dormant_source,
     launch_intent=launch_intent,
+    pending_decisions=pending_registry,
+    notify_queue=notify_queue,
     debounce_window_s=0.1,
     throttle_first_window_s=0.2,
 )
@@ -820,6 +863,63 @@ _recents_subscription = (
         ),
     )
 )
+
+# ── Bidirectional Hooks v1: NotificationDispatcher ─────────────────────
+# Subscribed to world.observable like every other UI surface; the dedup
+# key is the sequence of notify_event ids so a snap that doesn't add /
+# remove an event doesn't re-deliver. Backend is chosen per-platform.
+from claude_island.ui.notification_dispatcher import NotificationDispatcher
+from claude_island.platform_.notify import (
+    MacOsNotifyBackend,
+    NoopNotifyBackend,
+    WindowsNotifyBackend,
+)
+
+if sys.platform == "darwin":
+    _notify_backend = MacOsNotifyBackend()
+elif sys.platform == "win32":
+    # tray_icon=None ⇒ no tray fallback (we don't have a tray yet).
+    # When winrt isn't installed, the dispatcher silently drops with
+    # one warn. The user adds winsdk to their pip install to enable.
+    _notify_backend = WindowsNotifyBackend(tray_icon=None)
+else:
+    _notify_backend = NoopNotifyBackend()
+
+_notification_dispatcher = NotificationDispatcher(backend=_notify_backend)
+
+_notify_subscription = (
+    world.observable()
+    .pipe(
+        ops.distinct_until_changed(
+            key_mapper=lambda s: tuple(e.id for e in s.notify_events),
+        ),
+    )
+    .subscribe(
+        on_next=_safe_render("notify", _notification_dispatcher.on_snapshot),
+        on_error=lambda e: _safe_stderr_write(
+            f"[claude-island] notify pipeline died: {e}"
+        ),
+    )
+)
+
+# Periodic eviction (60 s) for stale grants + expired pending decisions.
+# Runs on Qt main thread via QTimer; both registry methods are thread-safe.
+from PySide6.QtCore import QTimer as _QTimer
+_evict_timer = _QTimer()
+_evict_timer.setInterval(60_000)
+def _periodic_evict() -> None:
+    try:
+        n_perm = permission_cache.evict_expired()
+        n_pending = pending_registry.evict_expired()
+        if (n_perm + n_pending) > 0:
+            _safe_stderr_write(
+                f"[claude-island] evicted {n_perm} grants + "
+                f"{n_pending} stale pending decisions"
+            )
+    except Exception as e:
+        _safe_stderr_write(f"[claude-island] periodic evict raised: {e!r}")
+_evict_timer.timeout.connect(_periodic_evict)
+_evict_timer.start()
 
 # Ctrl+H toggles the drawer. Parented on `expanded` so the shortcut
 # context follows the panel; the WindowShortcut hint means Qt fires it

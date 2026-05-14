@@ -48,6 +48,19 @@ from claude_island.core.hook_events import (
     ToolStarted,
     TurnCompleted,
 )
+from claude_island.core.notify import (
+    NotifyEventQueue,
+    make_turn_complete,
+)
+from claude_island.core.pending_decisions import (
+    DecisionKind,
+    DecisionResult,
+    PendingDecisionRegistry,
+    RegistryFull,
+    WAIT_TIMEOUT_SAFETY_S,
+    build_request,
+)
+from claude_island.core.session_permissions import SessionPermissionCache
 from claude_island.core.session_state_machine import SessionStateMachine
 
 log = logging.getLogger(__name__)
@@ -64,6 +77,19 @@ _DEFAULT_HOST = "127.0.0.1"
 _PROMPT_MAX = 200
 _ASSISTANT_MAX = 300
 _TOOL_INPUT_MAX = 200
+
+# Bidirectional-hook timeouts (Bidirectional Hooks v1, 2026-05-14).
+#
+# Claude Code's command-hook timeout defaults to 600 s. We wait that
+# minus a 2 s safety buffer so an expiring entry can write a defer
+# directive before the hook process gives up. See
+# core/pending_decisions.WAIT_TIMEOUT_SAFETY_S.
+_BLOCKING_HOOK_TIMEOUT_S = 600.0 - WAIT_TIMEOUT_SAFETY_S
+# Preview length for tool_input shown on ApprovalCard. ≤ 300 chars per
+# Detail Design §2 PendingDecisionView.
+_PRETOOLUSE_INPUT_PREVIEW_MAX = 300
+# Preview length for prompt shown on PromptReviewCard. ≤ 500 per design.
+_USERPROMPTSUBMIT_PROMPT_PREVIEW_MAX = 500
 
 
 class HookServerStartError(RuntimeError):
@@ -96,6 +122,13 @@ class HookServer:
         preferred_port: int = 50777,
         port_file: Path = _DEFAULT_PORT_FILE,
         host: str = _DEFAULT_HOST,
+        # Bidirectional-hook deps. All three are optional kwargs so that
+        # tests + boot paths that pre-date this feature still construct
+        # a working HookServer (it just falls back to today's behaviour:
+        # always reply "{}", never block, no notifications).
+        pending_registry: PendingDecisionRegistry | None = None,
+        permission_cache: SessionPermissionCache | None = None,
+        notify_queue: NotifyEventQueue | None = None,
     ) -> None:
         self._sm = state_machine
         self._preferred_port = preferred_port
@@ -109,6 +142,12 @@ class HookServer:
         # listener doesn't grow without limit.
         self._recent: deque[RecentEventRecord] = deque(maxlen=_RECENT_EVENTS_RING_SIZE)
         self._recent_lock = threading.Lock()
+        # Bidirectional dependencies. None ⇒ feature disabled; the
+        # corresponding hook event paths fall through to the legacy
+        # "respond {}" behaviour.
+        self._pending = pending_registry
+        self._perm = permission_cache
+        self._notify = notify_queue
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -198,9 +237,22 @@ class HookServer:
 
     # ── internal: called by the handler ──────────────────────────────────
 
-    def _handle_post(self, raw_body: bytes) -> None:
-        """Parse + apply. Raises ParseError on malformed input.
-        Other exceptions propagate (handler converts to 500)."""
+    def _handle_post(self, raw_body: bytes) -> bytes:
+        """Parse + apply + decide. Returns the JSON body to write to
+        the hook response (which Claude Code reads from stdout).
+
+        Raises ParseError on malformed input. Other exceptions
+        propagate (handler converts to 500).
+
+        Bidirectional flow (Bidirectional Hooks v1):
+          - PreToolUse: cache pre-check; on miss, register + wait for
+            UI decision; encode permissionDecision JSON
+          - UserPromptSubmit: review-mode pre-check; on True, register
+            + wait for UI decision; encode block / inject directive
+          - Stop / StopFailure: push NotifyEvent to queue, reply {}
+          - SessionEnd: evict permission grants for this uuid, reply {}
+          - everything else: state-machine apply, reply {}
+        """
         try:
             payload = json.loads(raw_body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -209,19 +261,223 @@ class HookServer:
             raise ParseError("hook payload must be a JSON object")
 
         event = parse_claude_payload(payload)
-        if event is None:
-            # Unknown hook_event_name — we don't crash, just ignore.
-            log.debug("dropping unknown hook event: %r", payload.get("hook_event_name"))
+        if event is not None:
+            with self._recent_lock:
+                self._recent.append(RecentEventRecord(
+                    received_at=event.at,
+                    event_name=type(event).__name__,
+                    session_uuid=event.session_uuid,
+                ))
+            # Apply to state machine BEFORE bidirectional routing so the
+            # UI sees "phase=TOOL_USE" + "current_tool=Bash" alongside
+            # any approval card we render.
+            self._sm.apply(event)
+        else:
+            log.debug(
+                "dropping unknown hook event: %r",
+                payload.get("hook_event_name"),
+            )
+
+        hook_name = payload.get("hook_event_name")
+        # Bidirectional event routing. Each branch returns its own body;
+        # the catch-all default falls through to "{}" for legacy clients.
+        if hook_name == "PreToolUse":
+            return self._handle_pre_tool_use(payload)
+        if hook_name == "UserPromptSubmit":
+            return self._handle_user_prompt_submit(payload)
+        if hook_name in ("Stop", "StopFailure"):
+            self._handle_stop(payload)
+            return b"{}"
+        if hook_name == "SessionEnd":
+            self._handle_session_end(payload)
+            return b"{}"
+        return b"{}"
+
+    # ── bidirectional handlers ──────────────────────────────────────────
+
+    def _handle_pre_tool_use(self, payload: dict) -> bytes:
+        """Decide allow / deny for a PreToolUse event.
+
+        Order:
+          1. session_perm_cache hit ⇒ encode allow immediately (fast path)
+          2. cache miss + bidirectional disabled ⇒ "{}" (legacy path)
+          3. cache miss + bidirectional enabled ⇒ register pending +
+             block until UI resolves or wait timeout fires
+          4. RegistryFull ⇒ encode defer (Claude falls back to its own
+             permission rules)
+        """
+        if self._pending is None or self._perm is None:
+            return b"{}"
+        uuid = _safe_str(payload.get("session_id"))
+        tool_name = _safe_str(payload.get("tool_name"))
+        if not uuid or not tool_name:
+            return b"{}"
+
+        # Fast path — granted earlier this session.
+        if self._perm.check(uuid, tool_name):
+            return _encode_pretooluse(
+                "allow", reason="auto-allowed (this session)",
+            )
+
+        cwd = _safe_path(payload.get("cwd"))
+        session_name = self._resolve_session_name(uuid, cwd)
+        preview = _extract_tool_input_preview(payload.get("tool_input"))
+
+        try:
+            req = build_request(
+                kind=DecisionKind.PRE_TOOL_USE,
+                session_uuid=uuid,
+                session_name=session_name,
+                cwd=cwd,
+                hook_event="PreToolUse",
+                timeout_s=_BLOCKING_HOOK_TIMEOUT_S,
+                tool_name=tool_name,
+                tool_input_preview=_truncate(
+                    preview or "", _PRETOOLUSE_INPUT_PREVIEW_MAX,
+                ) or None,
+            )
+            decision_id = self._pending.register(req)
+        except RegistryFull:
+            log.warning(
+                "pending registry full; deferring PreToolUse(%s)", tool_name,
+            )
+            return _encode_pretooluse(
+                "defer", reason="claude-island queue full",
+            )
+
+        decision = self._pending.wait(
+            decision_id, timeout_s=_BLOCKING_HOOK_TIMEOUT_S,
+        )
+        if decision is None:
+            log.info(
+                "PreToolUse(%s) decision wait timed out — defer", tool_name,
+            )
+            return _encode_pretooluse(
+                "defer", reason="user did not respond in time",
+            )
+
+        # Side effect: if user ticked "remember", grant the cache so
+        # future PreToolUse hits the fast path.
+        if decision.remember and decision.result is DecisionResult.ALLOW:
+            self._perm.grant(uuid, tool_name)
+
+        if decision.result is DecisionResult.ALLOW:
+            return _encode_pretooluse("allow")
+        if decision.result is DecisionResult.DENY:
+            return _encode_pretooluse(
+                "deny", reason=decision.reason or "denied by user",
+            )
+        # Defensive: BLOCK / INJECT shouldn't appear for PreToolUse;
+        # treat as defer rather than crashing.
+        log.warning(
+            "unexpected decision result for PreToolUse: %s", decision.result,
+        )
+        return _encode_pretooluse(
+            "defer", reason=f"unexpected decision: {decision.result.value}",
+        )
+
+    def _handle_user_prompt_submit(self, payload: dict) -> bytes:
+        """Decide allow / block / inject for a UserPromptSubmit event.
+
+        v1 default: review mode is OFF per session ⇒ fast-path "{}"
+        and let the prompt through. ON ⇒ register pending + wait.
+        """
+        if self._pending is None or self._perm is None:
+            return b"{}"
+        uuid = _safe_str(payload.get("session_id"))
+        if not uuid:
+            return b"{}"
+        if not self._perm.is_review(uuid):
+            # Default OFF — the user hasn't opted in to reviewing prompts.
+            return b"{}"
+
+        cwd = _safe_path(payload.get("cwd"))
+        session_name = self._resolve_session_name(uuid, cwd)
+        prompt = _safe_str(payload.get("prompt"))
+        try:
+            req = build_request(
+                kind=DecisionKind.USER_PROMPT_SUBMIT,
+                session_uuid=uuid,
+                session_name=session_name,
+                cwd=cwd,
+                hook_event="UserPromptSubmit",
+                timeout_s=_BLOCKING_HOOK_TIMEOUT_S,
+                prompt_preview=_truncate(
+                    prompt, _USERPROMPTSUBMIT_PROMPT_PREVIEW_MAX,
+                ) or "",
+            )
+            decision_id = self._pending.register(req)
+        except RegistryFull:
+            log.warning(
+                "pending registry full; passing through UserPromptSubmit",
+            )
+            return b"{}"
+
+        decision = self._pending.wait(
+            decision_id, timeout_s=_BLOCKING_HOOK_TIMEOUT_S,
+        )
+        if decision is None:
+            log.info("UserPromptSubmit wait timed out — passing prompt through")
+            return b"{}"
+
+        if decision.result is DecisionResult.ALLOW:
+            return b"{}"
+        if decision.result is DecisionResult.BLOCK:
+            return _encode_userpromptsubmit_block(
+                decision.reason or "blocked by user",
+            )
+        if decision.result is DecisionResult.INJECT:
+            return _encode_userpromptsubmit_inject(
+                decision.additional_context or "",
+            )
+        log.warning(
+            "unexpected decision result for UserPromptSubmit: %s",
+            decision.result,
+        )
+        return b"{}"
+
+    def _handle_stop(self, payload: dict) -> None:
+        """Push a NotifyEvent for Stop / StopFailure. Non-blocking;
+        caller writes "{}" immediately so Claude Code never waits on
+        the notification path."""
+        if self._notify is None:
             return
+        uuid = _safe_str(payload.get("session_id"))
+        if not uuid:
+            return
+        cwd = _safe_path(payload.get("cwd"))
+        is_failure = payload.get("hook_event_name") == "StopFailure"
+        self._notify.push(make_turn_complete(
+            session_uuid=uuid,
+            session_name=self._resolve_session_name(uuid, cwd),
+            cwd_basename=cwd.name or "session",
+            is_failure=is_failure,
+        ))
 
-        with self._recent_lock:
-            self._recent.append(RecentEventRecord(
-                received_at=event.at,
-                event_name=type(event).__name__,
-                session_uuid=event.session_uuid,
-            ))
+    def _handle_session_end(self, payload: dict) -> None:
+        """Evict the SessionPermissionCache entries for the ending session.
+        Cap is 4 h TTL otherwise; this is the precise eviction signal."""
+        if self._perm is None:
+            return
+        uuid = _safe_str(payload.get("session_id"))
+        if not uuid:
+            return
+        self._perm.evict_session(uuid)
 
-        self._sm.apply(event)
+    # ── helpers ─────────────────────────────────────────────────────────
+
+    def _resolve_session_name(self, uuid: str, cwd: Path) -> str:
+        """Best-effort name for use in PendingDecisionView / NotifyEvent.
+
+        Future iteration can plumb in SessionRegistry / NamesStore for
+        the user-facing name; v1 falls back to cwd.name or uuid prefix
+        which is good enough for the approval-card heading.
+        """
+        if cwd and cwd.name:
+            return cwd.name
+        if uuid:
+            return uuid[:8]
+        return "session"
 
     def _handle_health(self) -> dict[str, Any]:
         """Returns a dict serialized as the /health response."""
@@ -397,12 +653,69 @@ def _str_or_none(v: Any) -> str | None:
     return v if isinstance(v, str) and v else None
 
 
+def _safe_str(v: Any) -> str:
+    """Return v if it's a non-empty string, else empty string. Defensive
+    helper for hook payload extraction (Claude may send null fields)."""
+    return v if isinstance(v, str) else ""
+
+
+def _safe_path(v: Any) -> Path:
+    """Return v as Path if possible, else Path('.') as a benign default."""
+    if isinstance(v, str) and v:
+        return Path(v)
+    return Path(".")
+
+
 def _truncate(s: str, max_len: int) -> str:
     """Truncate with an ellipsis when needed. Preserves the first
     max_len-1 characters so the result is exactly max_len chars."""
     if len(s) <= max_len:
         return s
     return s[: max_len - 1] + "…"
+
+
+# ---------------------------------------------------------------------------
+# Hook directive encoders
+#
+# Mirror Claude Code's hook output schema (see
+# https://code.claude.com/docs/en/hooks). We dump these as compact JSON
+# (no indentation) — every byte over the wire is a byte the hook script
+# has to forward to claude.exe.
+# ---------------------------------------------------------------------------
+
+
+def _encode_pretooluse(
+    permission: str, *, reason: str | None = None,
+) -> bytes:
+    """PreToolUse directive: ``permissionDecision`` ∈
+    {"allow", "deny", "ask", "defer"} inside ``hookSpecificOutput``.
+    See Claude Code spec §PreToolUse decision control."""
+    inner: dict = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": permission,
+    }
+    if reason:
+        inner["permissionDecisionReason"] = reason
+    return json.dumps({"hookSpecificOutput": inner}).encode("utf-8")
+
+
+def _encode_userpromptsubmit_block(reason: str) -> bytes:
+    """UserPromptSubmit block directive: top-level ``decision: "block"``
+    with required reason. Claude shows the reason to the user and erases
+    the prompt from the transcript."""
+    return json.dumps({"decision": "block", "reason": reason}).encode("utf-8")
+
+
+def _encode_userpromptsubmit_inject(context: str) -> bytes:
+    """UserPromptSubmit inject directive: ``additionalContext`` inside
+    ``hookSpecificOutput``. Claude appends this to the model's context
+    alongside the user's prompt."""
+    return json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": context,
+        },
+    }).encode("utf-8")
 
 
 def _extract_tool_input_preview(tool_input: Any) -> str | None:
@@ -456,7 +769,11 @@ def _make_handler_class(server: HookServer) -> type[BaseHTTPRequestHandler]:
                 return
             raw = self.rfile.read(length)
             try:
-                server._handle_post(raw)
+                # Bidirectional Hooks v1: _handle_post returns the JSON
+                # body to write back. May block for blocking events
+                # (PreToolUse, UserPromptSubmit) up to ~600 s while
+                # waiting for the UI to resolve the pending decision.
+                body = server._handle_post(raw)
             except ParseError as e:
                 log.debug("parse error: %s", e)
                 self.send_response(400)
@@ -467,7 +784,8 @@ def _make_handler_class(server: HookServer) -> type[BaseHTTPRequestHandler]:
                 self.send_response(500)
                 self.end_headers()
                 return
-            body = b"{}"
+            if not body:
+                body = b"{}"
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

@@ -1663,6 +1663,14 @@ class SessionDetailPopup(QFrame):
         on_open_folder: "Callable[[], bool] | None" = None,
         on_open_transcript: "Callable[[], bool] | None" = None,
         on_strip_thinking: "Callable[[], bool] | None" = None,
+        # Bidirectional Hooks v1 (G8): per-session "Review prompts" toggle.
+        # When set, the popup renders a checkbox row reflecting current
+        # review-mode state and lets the user toggle it. None ⇒ feature
+        # disabled (no checkbox shown). The wiring layer injects:
+        #   get_review_mode  → SessionPermissionCache.is_review
+        #   set_review_mode  → SessionPermissionCache.set_review
+        get_review_mode: "Callable[[str], bool] | None" = None,
+        set_review_mode: "Callable[[str, bool], None] | None" = None,
     ) -> None:
         super().__init__(parent)
         # Frameless + Popup = "I behave like a context menu":
@@ -1689,6 +1697,8 @@ class SessionDetailPopup(QFrame):
         self._on_open_folder_cb = on_open_folder
         self._on_open_transcript_cb = on_open_transcript
         self._on_strip_thinking_cb = on_strip_thinking
+        self._get_review_mode = get_review_mode
+        self._set_review_mode = set_review_mode
         # Inline rename state — only populated while the user is editing.
         self._name_label: QLabel | None = None
         self._name_edit: "QLineEdit | None" = None
@@ -1728,6 +1738,10 @@ class SessionDetailPopup(QFrame):
         if prompt_section is not None:
             root.addWidget(self._divider())
             root.addWidget(prompt_section)
+        review_section = self._build_review_section()
+        if review_section is not None:
+            root.addWidget(self._divider())
+            root.addWidget(review_section)
         # Status feedback line — hidden at rest, shown after any
         # action (copy / open / reset). Lives at the very bottom so
         # it doesn't shift the layout above when it appears.
@@ -2189,6 +2203,70 @@ class SessionDetailPopup(QFrame):
         # against the popup's fixed width.
         v.addWidget(tokens)
         return row
+
+    def _build_review_section(self) -> QWidget | None:
+        """Per-session "Review prompts before send" toggle (G8).
+
+        Returns None when the wiring layer didn't inject the
+        review-mode getter/setter — the toggle is hidden entirely so
+        users in tests / unwired paths see exactly today's UI.
+        """
+        if self._get_review_mode is None or self._set_review_mode is None:
+            return None
+        sess_uuid = self._effective_uuid()
+        if not sess_uuid:
+            return None
+        from PySide6.QtWidgets import QCheckBox, QLabel
+        wrap = QFrame()
+        wrap.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        title = QLabel("PROMPT REVIEW")
+        title.setStyleSheet(
+            "QLabel { color: #6b7280; font-size: 10px; font-weight: 600; "
+            "letter-spacing: 0.5px; }"
+        )
+        layout.addWidget(title)
+        cb = QCheckBox("Review prompts before sending to Claude")
+        cb.setStyleSheet(
+            f"QCheckBox {{ color: #cdd2d8; font-size: 12px; "
+            f"font-family: {UI_FONT_STACK}; }}"
+        )
+        try:
+            cb.setChecked(bool(self._get_review_mode(sess_uuid)))
+        except Exception:
+            cb.setChecked(False)
+        # Snap the closure to a captured uuid so subsequent toggles after
+        # a popup-reuse don't accidentally apply to a different session.
+        captured_uuid = sess_uuid
+        cb.toggled.connect(
+            lambda enabled: self._on_review_toggled(captured_uuid, enabled)
+        )
+        layout.addWidget(cb)
+        hint = QLabel(
+            "When ON, claude-island shows a card on every prompt for "
+            "Allow / Block / Inject context."
+        )
+        hint.setStyleSheet(
+            "QLabel { color: #6b7280; font-size: 10px; padding-top: 2px; }"
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        return wrap
+
+    def _on_review_toggled(self, sess_uuid: str, enabled: bool) -> None:
+        """Persist the toggle change. The setter is the single place where
+        SessionPermissionCache.set_review is called from the UI."""
+        if self._set_review_mode is None:
+            return
+        try:
+            self._set_review_mode(sess_uuid, enabled)
+        except Exception:
+            # Swallow — the next click will retry. Failure here is
+            # cosmetic (UI checkbox state already changed); the worst
+            # case is a single missed event the user can re-trigger.
+            pass
 
     def _build_prompt_section(self) -> QWidget | None:
         """LAST PROMPT — delegates to the shared LastPromptSection widget
@@ -2830,6 +2908,14 @@ class ExpandedWindow(QWidget):
         list_configurable_providers: "Callable[[], list[tuple[str, dict]]] | None" = None,
         save_provider_settings: "Callable[[str, dict], None] | None" = None,
         delete_provider_settings: "Callable[[str], None] | None" = None,
+        # Bidirectional Hooks v1 (2026-05-14): callbacks injected by the
+        # wiring layer for the ApprovalCard / PromptReviewCard list. None
+        # ⇒ the cards are still rendered (so existing UI tests don't break)
+        # but the click is a no-op (registry resolve never called). In
+        # production, ``resolve_decision`` points at
+        # ``PendingDecisionRegistry.resolve``.
+        resolve_decision: "Callable[[str, object], bool] | None" = None,
+        set_review_mode: "Callable[[str, bool], None] | None" = None,
     ) -> None:
         super().__init__()
         self._capsule = capsule
@@ -2888,6 +2974,13 @@ class ExpandedWindow(QWidget):
         self._list_configurable_providers = list_configurable_providers
         self._save_provider_settings = save_provider_settings
         self._delete_provider_settings = delete_provider_settings
+        # Bidirectional Hooks v1 — see ctor docstring above for None semantics.
+        self._resolve_decision = resolve_decision
+        self._set_review_mode = set_review_mode
+        # Per-decision-id widget cache so a render(snap) tick that just
+        # adds/removes one card doesn't tear down the others (preserves
+        # in-progress text input on PromptReviewCard).
+        self._decision_cards: dict[str, QWidget] = {}
         self._provider_btns: dict[str, QPushButton] = {}
         # Hold a reference to the active add-provider dialog so Qt's
         # GC doesn't tear it down before the user can interact with it.
@@ -3119,6 +3212,18 @@ class ExpandedWindow(QWidget):
         # Toggle slot — wired from __main__.py via set_recents_toggle().
         self._recents_toggle: Callable[[], None] | None = None
         self._recents_chip.clicked.connect(self._on_recents_chip_clicked)
+        # ── Pending decisions section (Bidirectional Hooks v1) ─────
+        # Sits ABOVE the sessions header so any approval/review card the
+        # user must act on is the first thing visible when the panel
+        # expands. Hidden when there are zero pending decisions.
+        self._pending_container = QWidget()
+        self._pending_container.setObjectName("pendingDecisionsContainer")
+        self._pending_layout = QVBoxLayout(self._pending_container)
+        self._pending_layout.setContentsMargins(0, 0, 0, 8)
+        self._pending_layout.setSpacing(6)
+        self._pending_container.setVisible(False)
+        root.addWidget(self._pending_container)
+
         sessions_header = QHBoxLayout()
         sessions_header.setContentsMargins(0, 0, 0, 0)
         sessions_header.setSpacing(6)
@@ -3264,6 +3369,7 @@ class ExpandedWindow(QWidget):
         chain has already grouped them. UI just renders one card per
         group, one row per view."""
         self._latest_snap = snap
+        self._render_pending_decisions(snap.pending_decisions)
         self._render_session_groups(snap.session_groups)
         self._render_cards()
         # Update history chip from dormant + launching counts (resume-offline
@@ -3272,6 +3378,106 @@ class ExpandedWindow(QWidget):
         self.update_recents_count(
             len(snap.dormant_sessions) + len(snap.launching_sessions)
         )
+
+    # ── Pending-decision rendering (Bidirectional Hooks v1) ─────────
+
+    # Cap visible cards. Beyond cap, footer label says "+N more pending".
+    # Picked at 5 in Detail Design §1 — fits the panel without scrolling
+    # in the common case while still surfacing the existence of overflow.
+    _PENDING_VISIBLE_CAP = 5
+
+    def _render_pending_decisions(self, decisions: tuple) -> None:
+        """Diff-rebuild the pending section. Cached per-id so an existing
+        card whose decision is still in the snapshot keeps its widget
+        instance (preserves text-input state on PromptReviewCard)."""
+        # Lazy import — avoids the UI module pulling pending_decisions at
+        # import time when this feature isn't wired (test fixtures).
+        from claude_island.ui.approval_card import ApprovalCard
+        from claude_island.ui.prompt_review_card import PromptReviewCard
+        from claude_island.core.pending_decisions import DecisionKind
+
+        # Empty fast path — hide container.
+        if not decisions:
+            for widget in self._decision_cards.values():
+                widget.setParent(None)
+                widget.deleteLater()
+            self._decision_cards.clear()
+            # Drop any "+N more" footer label too.
+            self._clear_pending_overflow_label()
+            self._pending_container.setVisible(False)
+            return
+
+        visible = decisions[: self._PENDING_VISIBLE_CAP]
+        overflow = len(decisions) - len(visible)
+        live_ids = {d.id for d in visible}
+
+        # Drop cards no longer present (resolved or expired).
+        for did in list(self._decision_cards.keys()):
+            if did not in live_ids:
+                w = self._decision_cards.pop(did)
+                w.setParent(None)
+                w.deleteLater()
+
+        # Add / re-order cards for what's now visible.
+        # Strategy: ensure self._pending_layout contains exactly the
+        # visible cards in order. Cheaper than full teardown — diff-add.
+        for index, view in enumerate(visible):
+            card = self._decision_cards.get(view.id)
+            if card is None:
+                if view.kind is DecisionKind.PRE_TOOL_USE:
+                    card = ApprovalCard(view, on_resolve=self._on_decision_resolved)
+                else:
+                    card = PromptReviewCard(view, on_resolve=self._on_decision_resolved)
+                self._decision_cards[view.id] = card
+            # Position card at index — insertWidget tolerates re-insertion.
+            self._pending_layout.insertWidget(index, card)
+
+        # Footer overflow label.
+        self._update_pending_overflow_label(overflow)
+        self._pending_container.setVisible(True)
+
+    def _update_pending_overflow_label(self, overflow: int) -> None:
+        if overflow <= 0:
+            self._clear_pending_overflow_label()
+            return
+        if not hasattr(self, "_pending_overflow_label") or self._pending_overflow_label is None:
+            from PySide6.QtWidgets import QLabel
+            lbl = QLabel()
+            lbl.setObjectName("pendingOverflowLabel")
+            lbl.setStyleSheet(
+                "QLabel#pendingOverflowLabel { color: #999; font-size: 10px; "
+                "padding: 2px 4px; }"
+            )
+            self._pending_overflow_label = lbl
+        self._pending_overflow_label.setText(
+            f"+{overflow} more pending"
+        )
+        self._pending_layout.addWidget(self._pending_overflow_label)
+
+    def _clear_pending_overflow_label(self) -> None:
+        if hasattr(self, "_pending_overflow_label") and self._pending_overflow_label is not None:
+            self._pending_overflow_label.setParent(None)
+            self._pending_overflow_label.deleteLater()
+            self._pending_overflow_label = None
+
+    def _on_decision_resolved(self, decision_id: str, decision: object) -> None:
+        """Card click handler — routes to the injected resolve callback.
+
+        No-op when ``resolve_decision`` is not wired (default for tests).
+        Production wires this to ``PendingDecisionRegistry.resolve``,
+        which sets the threading.Event the HookServer thread is waiting
+        on, unblocking it to write the directive in the HTTP response.
+        """
+        if self._resolve_decision is None:
+            return
+        try:
+            self._resolve_decision(decision_id, decision)
+        except Exception:
+            # Silent swallow — no logger module-wide here. Failure mode:
+            # registry resolve raises ⇒ user click does nothing visible
+            # ⇒ the hook server thread hits its 600 s wait timeout ⇒
+            # Claude proceeds via fail-open (defer). Acceptable.
+            pass
 
     # ── History chip integration ────────────────────────────────────────
 

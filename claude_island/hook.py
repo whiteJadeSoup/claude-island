@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-__version__ = "3"
+__version__ = "4"
 """Stable schema version of this hook script.
 
 When ``hook_installer.sync_hook_script`` runs at boot it compares this
@@ -53,10 +53,42 @@ v3 (2026-05-14): on SessionStart, proactively SetConsoleTitleW the
 mirrors it into TabItem.Name before Claude's OSC overwrite has a
 chance to race. Eliminates the click-time fallback diagnostic in the
 common (non-suppressApplicationTitle) case.
+
+v4 (2026-05-14): per-event POST timeout. ``PreToolUse`` and
+``UserPromptSubmit`` may block on the listener for up to 600 s waiting
+for the user to approve / inject context (Bidirectional Hooks v1
+design). Other events keep the 5 s timeout — they're pure
+fire-and-forget and the longer wait would just mask listener bugs.
+Fail-open contract preserved: any timeout (5 s or 600 s) still results
+in stdout="{}" and exit 0 so Claude never hangs on us.
 """
 
 _DEFAULT_PORT = 50777
-_POST_TIMEOUT_S = 5.0    # bounded so Claude doesn't hang if listener stalls
+
+# Default timeout for fire-and-forget hook events (Stop, PostToolUse,
+# SessionStart, …). Bounded so Claude doesn't hang if the listener
+# stalls or has a bug — the listener would normally reply within ms.
+_POST_TIMEOUT_FAST_S = 5.0
+
+# Timeout for events that may legitimately block on a human decision
+# (PreToolUse approval, UserPromptSubmit review). Matches Claude Code's
+# default command-hook timeout so the hook process still exits 0
+# within Claude's own deadline. The listener uses a slightly shorter
+# wait (598 s — see core/pending_decisions.WAIT_TIMEOUT_SAFETY_S) so
+# a defer directive still squeaks in before this hard cap.
+_POST_TIMEOUT_BLOCKING_S = 600.0
+
+# Hook events that may legitimately block on a human in the loop. All
+# others use _POST_TIMEOUT_FAST_S.
+_BLOCKING_HOOK_EVENTS = frozenset({
+    "PreToolUse",
+    "UserPromptSubmit",
+})
+
+# Back-compat alias — older tests + external scripts reference the
+# constant. Resolve to the FAST timeout to preserve the previous
+# semantics (no blocking events existed in v3).
+_POST_TIMEOUT_S = _POST_TIMEOUT_FAST_S
 
 
 def _port_file() -> Path:
@@ -137,9 +169,11 @@ def run() -> None:
 
     # ── v2 enrichment: inject jump_target before forwarding ──────────
     enriched = raw
+    payload: dict | None = None  # bind for v4 timeout dispatch below
     try:
-        payload = json.loads(raw)
-        if isinstance(payload, dict):
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            payload = parsed
             jt = _build_jump_target()
             if jt:
                 payload["jump_target"] = jt
@@ -168,6 +202,22 @@ def run() -> None:
 
     port = _read_port()
 
+    # v4: per-event timeout. PreToolUse / UserPromptSubmit may block on
+    # the listener for up to 600 s while the user approves; everything
+    # else is pure fire-and-forget at 5 s. Falling back to FAST when the
+    # hook_event_name couldn't be parsed is safe — those events don't
+    # legitimately block.
+    hook_event = payload.get("hook_event_name") if payload else None
+    # Use ``_POST_TIMEOUT_S`` for the fast path (not ``_POST_TIMEOUT_FAST_S``)
+    # so existing tests that monkeypatch ``_POST_TIMEOUT_S`` still control
+    # the effective timeout. The two constants point at the same value
+    # by default; tests pin the patchable one.
+    timeout = (
+        _POST_TIMEOUT_BLOCKING_S
+        if hook_event in _BLOCKING_HOOK_EVENTS
+        else _POST_TIMEOUT_S
+    )
+
     # Forward to listener. ANY error → fall back to silent {} stdout.
     body = b"{}"
     try:
@@ -177,7 +227,7 @@ def run() -> None:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=_POST_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read() or b"{}"
     except (urllib.error.URLError, ConnectionRefusedError, OSError, TimeoutError) as e:
         # Listener absent / unreachable / slow. Don't log — this is the

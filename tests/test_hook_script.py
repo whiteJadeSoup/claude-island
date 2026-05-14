@@ -190,6 +190,105 @@ def test_t5_3_run_timeout_clean_exit(monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Hook v4 — per-event timeout
+# ---------------------------------------------------------------------------
+
+
+def test_v4_blocking_event_uses_long_timeout(monkeypatch, capsys):
+    """PreToolUse / UserPromptSubmit must use the long blocking timeout
+    (not the 5 s fast-event default). Verified by patching the urlopen
+    call to capture the timeout argument."""
+    captured_timeouts: list[float] = []
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return b'{}'
+
+    def fake_urlopen(req, *, timeout):
+        captured_timeouts.append(timeout)
+        return _FakeResp()
+
+    monkeypatch.setattr(hook_module, "_read_port", lambda: 50777)
+    monkeypatch.setattr(
+        hook_module.urllib.request, "urlopen", fake_urlopen,
+    )
+
+    # Drive PreToolUse → expect blocking timeout (~600 s).
+    raw = b'{"hook_event_name":"PreToolUse","session_id":"u1","tool_name":"Bash"}'
+    stdin_buf = io.BytesIO(raw)
+    monkeypatch.setattr(sys, "stdin",
+                        type("F", (), {"buffer": stdin_buf, "read": lambda self=None: ""})())
+    hook_module.run()
+
+    assert len(captured_timeouts) == 1
+    # Should be the BLOCKING constant (600 s), well above the 5 s fast.
+    assert captured_timeouts[0] >= 60.0, (
+        f"PreToolUse should use blocking timeout, got {captured_timeouts[0]}"
+    )
+
+
+def test_v4_fast_event_uses_short_timeout(monkeypatch, capsys):
+    captured_timeouts: list[float] = []
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return b'{}'
+
+    def fake_urlopen(req, *, timeout):
+        captured_timeouts.append(timeout)
+        return _FakeResp()
+
+    monkeypatch.setattr(hook_module, "_read_port", lambda: 50777)
+    monkeypatch.setattr(
+        hook_module.urllib.request, "urlopen", fake_urlopen,
+    )
+
+    # Stop is fire-and-forget → fast timeout.
+    raw = b'{"hook_event_name":"Stop","session_id":"u1"}'
+    stdin_buf = io.BytesIO(raw)
+    monkeypatch.setattr(sys, "stdin",
+                        type("F", (), {"buffer": stdin_buf, "read": lambda self=None: ""})())
+    hook_module.run()
+
+    assert len(captured_timeouts) == 1
+    assert captured_timeouts[0] <= 10.0, (
+        f"Stop should use fast timeout, got {captured_timeouts[0]}"
+    )
+
+
+def test_v4_userpromptsubmit_uses_long_timeout(monkeypatch, capsys):
+    captured_timeouts: list[float] = []
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return b'{}'
+
+    def fake_urlopen(req, *, timeout):
+        captured_timeouts.append(timeout)
+        return _FakeResp()
+
+    monkeypatch.setattr(hook_module, "_read_port", lambda: 50777)
+    monkeypatch.setattr(
+        hook_module.urllib.request, "urlopen", fake_urlopen,
+    )
+
+    raw = b'{"hook_event_name":"UserPromptSubmit","session_id":"u1","prompt":"hi"}'
+    stdin_buf = io.BytesIO(raw)
+    monkeypatch.setattr(sys, "stdin",
+                        type("F", (), {"buffer": stdin_buf, "read": lambda self=None: ""})())
+    hook_module.run()
+
+    assert captured_timeouts[0] >= 60.0
+
+
+def test_v4_version_bumped():
+    assert hook_module.__version__ == "4"
+
+
+# ---------------------------------------------------------------------------
 # T5.4 — port.txt missing → fallback to _DEFAULT_PORT
 # ---------------------------------------------------------------------------
 

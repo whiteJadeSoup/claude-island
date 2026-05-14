@@ -23,6 +23,7 @@ from claude_island.core.snapshot import (
     SessionView,
     Snapshotter,
     WorldSnapshot,
+    _dedup_views_by_session_uuid,
     _phase_from_pid_json,
     compose_session_view,
 )
@@ -411,6 +412,93 @@ class TestComposeLastActivityFromMeta:
 
 
 # ---------------------------------------------------------------------------
+# _dedup_views_by_session_uuid
+# ---------------------------------------------------------------------------
+
+def _view(
+    *,
+    pid: int,
+    uuid: str,
+    last_activity: datetime,
+    cwd: str = "/tmp",
+) -> SessionView:
+    """Minimal SessionView for dedup tests — only the fields the dedup
+    helper touches matter (pid, session_uuid, last_activity)."""
+    sess = Session(
+        pid=pid,
+        project_path=Path(cwd),
+        session_uuid=uuid,
+        last_activity=last_activity,
+    )
+    return SessionView(
+        pid=pid,
+        name=f"pid-{pid}",
+        project_path=sess.project_path,
+        project_basename=sess.project_path.name,
+        last_activity=last_activity,
+        cost_usd=0.0,
+        is_high_cost=False,
+        latest_model=None,
+        status_word=None,
+        session=sess,
+        session_uuid=uuid,
+    )
+
+
+class TestDedupViewsBySessionUuid:
+    """Two pids attached to the same `claude --resume <uuid>` produce
+    two SessionViews that share session_uuid. The dedup helper collapses
+    them so the UI renders one row per logical session."""
+
+    def test_same_uuid_keeps_one(self):
+        t_old = datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc)
+        t_new = datetime(2026, 5, 14, 11, 0, tzinfo=timezone.utc)
+        older = _view(pid=100, uuid="abc", last_activity=t_old)
+        newer = _view(pid=200, uuid="abc", last_activity=t_new)
+        result = _dedup_views_by_session_uuid([older, newer])
+        assert len(result) == 1
+        assert result[0].pid == 200
+        assert result[0].last_activity == t_new
+
+    def test_different_uuids_both_kept(self):
+        t = datetime(2026, 5, 14, 11, 0, tzinfo=timezone.utc)
+        a = _view(pid=1, uuid="aaa", last_activity=t)
+        b = _view(pid=2, uuid="bbb", last_activity=t)
+        result = _dedup_views_by_session_uuid([a, b])
+        assert len(result) == 2
+        assert {v.session_uuid for v in result} == {"aaa", "bbb"}
+
+    def test_empty_uuid_passes_through(self):
+        t = datetime(2026, 5, 14, 11, 0, tzinfo=timezone.utc)
+        v1 = _view(pid=1, uuid="", last_activity=t)
+        v2 = _view(pid=2, uuid="", last_activity=t)
+        # Both kept — empty uuid has no merge key.
+        result = _dedup_views_by_session_uuid([v1, v2])
+        assert len(result) == 2
+
+    def test_tie_on_last_activity_higher_pid_wins(self):
+        t = datetime(2026, 5, 14, 11, 0, tzinfo=timezone.utc)
+        low = _view(pid=100, uuid="abc", last_activity=t)
+        high = _view(pid=999, uuid="abc", last_activity=t)
+        result = _dedup_views_by_session_uuid([low, high])
+        assert len(result) == 1
+        assert result[0].pid == 999
+
+    def test_order_preserved_with_first_occurrence_slot(self):
+        t_old = datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc)
+        t_new = datetime(2026, 5, 14, 11, 0, tzinfo=timezone.utc)
+        # Order: A, B(old), C, B(new) — B's winner inherits A→B slot.
+        a = _view(pid=1, uuid="A", last_activity=t_new)
+        b_old = _view(pid=2, uuid="B", last_activity=t_old)
+        c = _view(pid=3, uuid="C", last_activity=t_new)
+        b_new = _view(pid=4, uuid="B", last_activity=t_new)
+        result = _dedup_views_by_session_uuid([a, b_old, c, b_new])
+        assert [v.session_uuid for v in result] == ["A", "B", "C"]
+        # The B slot now holds the newer pid.
+        assert result[1].pid == 4
+
+
+# ---------------------------------------------------------------------------
 # Snapshotter
 # ---------------------------------------------------------------------------
 
@@ -421,6 +509,9 @@ def _make_snapshotter(
     debounce_window_s: float = 0.05,  # short for fast tests
     throttle_first_window_s: float = 0.0,  # disabled by default
     today_cost: float = 0.0,
+    state_reader: "FakeStateReader | None" = None,
+    metadata_provider: "FakeMetadataProvider | None" = None,
+    usage_registry: "FakeUsageRegistry | None" = None,
 ) -> tuple[Snapshotter, list[WorldSnapshot]]:
     """Build a Snapshotter wired with fakes; return (snapshotter,
     received_snapshots_list). The publish callback appends to the
@@ -428,9 +519,9 @@ def _make_snapshotter(
     received: list[WorldSnapshot] = []
     snap = Snapshotter(
         session_source=FakeSessionSource(sessions or []),
-        state_reader=FakeStateReader(),
-        metadata_provider=FakeMetadataProvider(),
-        usage_registry=FakeUsageRegistry(today_cost=today_cost),
+        state_reader=state_reader or FakeStateReader(),
+        metadata_provider=metadata_provider or FakeMetadataProvider(),
+        usage_registry=usage_registry or FakeUsageRegistry(today_cost=today_cost),
         names_store=FakeNamesStore(),
         get_quota=lambda: None,
         get_available_providers=lambda: [],
@@ -468,6 +559,33 @@ class TestSnapshotterBuildNow:
         snap, received = _make_snapshotter()
         snap.build_now()
         assert received == []  # build_now is synchronous, returns; no push
+
+    def test_two_pids_sharing_session_uuid_collapse_to_one_view(self):
+        """Regression: two `claude --resume <uuid>` processes write the
+        same sessionId into their respective pid.json. The composer
+        resolves both to the same session_uuid; the snapshot pipeline
+        must collapse them so the UI renders one row per session, not
+        per pid."""
+        t_old = datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc)
+        t_new = datetime(2026, 5, 14, 11, 0, tzinfo=timezone.utc)
+        cwd = "/Users/x/proj"
+        older = _session(pid=100, cwd=cwd, last_activity=t_old)
+        newer = _session(pid=200, cwd=cwd, last_activity=t_new)
+        # Both pid.json files point at the same sessionId.
+        state = FakeStateReader({
+            100: {"sessionId": "shared-uuid"},
+            200: {"sessionId": "shared-uuid"},
+        })
+        snap, _ = _make_snapshotter(
+            sessions=[older, newer],
+            state_reader=state,
+        )
+        result = snap.build_now()
+        flat = [v for g in result.session_groups for v in g.views]
+        assert len(flat) == 1
+        # Newer pid (more recent last_activity) wins.
+        assert flat[0].pid == 200
+        assert flat[0].session_uuid == "shared-uuid"
 
 
 class TestSnapshotterPipeline:
