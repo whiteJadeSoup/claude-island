@@ -48,8 +48,10 @@ from reactivex.scheduler import EventLoopScheduler
 from reactivex.subject import BehaviorSubject, Subject
 
 from .capabilities import Capability, FocusGranularity
+from .hook_events import JumpTarget, LiveStateProto, SessionLiveState
 from .launch_intent import LaunchIntent
 from .models import DormantSession, QuotaSnapshot, Session
+from .session_phase import SessionPhase
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +81,20 @@ class SessionView:
     ``frozen=True`` makes ``__eq__`` structural — two SessionViews are
     equal iff every field is equal — which lets ``distinct_until_changed``
     skip no-op snapshots without us writing any custom comparison.
+
+    ``phase`` is the single source of truth for "what is this session
+    doing right now". When the hook pipeline is connected, phase comes
+    directly from ``SessionStateMachine.read(uuid).phase``. When the
+    hook pipeline is offline (session started before the listener was
+    bound, or no listener at all), phase is derived from the pid.json
+    ``status`` field + a 30-second activity heuristic. UI MUST treat
+    the two sources identically — no "degraded" badge or visual hint
+    is shown.
+
+    ``is_running`` is kept as a backwards-compat ``@property`` derived
+    from phase so existing UI code that reads ``view.is_running``
+    continues to work without churn. New UI code should switch on
+    ``phase`` directly.
     """
 
     pid: int
@@ -86,7 +102,6 @@ class SessionView:
     project_path: Path
     project_basename: str           # convenience for sort keys
     last_activity: datetime         # tz-aware UTC
-    is_running: bool                # already resolved (status priority > heuristic)
     cost_usd: float                 # >= 0
     is_high_cost: bool              # == (cost_usd >= HIGH_COST_USD_THRESHOLD)
     latest_model: str | None        # None when no records yet
@@ -129,6 +144,23 @@ class SessionView:
     # "iterm2", "generic-mac"). Empty default exists so tests that
     # construct a SessionView without an adapter still validate.
     adapter_id: str = ""
+    # ── Hook-derived state (Step 7) ─────────────────────────────────
+    # Phase — the live activity state. Default IDLE for backward compat
+    # with old tests that construct SessionView without specifying phase.
+    phase: SessionPhase = SessionPhase.IDLE
+    # Tool currently in use (only when phase == TOOL_USE, otherwise None).
+    # Populated from SessionLiveState.current_tool.
+    current_tool: str | None = None
+    # Latest user prompt seen on this session (truncated to 200 chars at
+    # the hook boundary). UI uses this as the row preview text.
+    last_prompt: str | None = None
+    # Latest assistant message — set when phase transitions IDLE via
+    # TurnCompleted. UI uses for tooltip / detail popup.
+    last_assistant_message: str | None = None
+    # Terminal-identifying metadata captured at hook time (open-vibe-island
+    # JumpTarget pattern). None when no hook coverage or capture failed.
+    # The WT click handler uses this to skip syscalls at click time.
+    jump_target: JumpTarget | None = None
 
     def __post_init__(self) -> None:
         # Self-consistency invariant — guards against the UI and the
@@ -137,6 +169,18 @@ class SessionView:
             f"SessionView invariant violated: cost_usd={self.cost_usd}, "
             f"is_high_cost={self.is_high_cost}"
         )
+
+    @property
+    def is_running(self) -> bool:
+        """Derived: True iff phase is any active state.
+
+        Backwards-compat shim — UI code that pre-dates the phase field
+        keeps reading ``view.is_running`` and gets a sensible answer.
+        New UI code should switch on ``phase`` directly to render
+        finer-grained states (TOOL_USE → show tool chip; THINKING →
+        spinner; etc.).
+        """
+        return self.phase.is_active()
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +419,13 @@ def _default_group_sessions(views: list["SessionView"]) -> list["SessionGroup"]:
 # compose_session_view — moved from __main__._build_session_details
 # ---------------------------------------------------------------------------
 
+def _noop_live_state(_: str) -> SessionLiveState | None:
+    """Default live_state_reader for tests and boot before hook pipeline.
+    Always returns None → phase resolution falls through to pid.json
+    + activity heuristic."""
+    return None
+
+
 def compose_session_view(
     session: Session,
     *,
@@ -382,25 +433,28 @@ def compose_session_view(
     metadata_provider: _MetadataProviderProto,
     usage_registry: _UsageRegistryProto,
     names_store: _NamesStoreProto,
+    live_state_reader: LiveStateProto = _noop_live_state,
     high_cost_threshold: float = HIGH_COST_USD_THRESHOLD,
     active_threshold_s: float = ACTIVE_THRESHOLD_SECONDS,
 ) -> SessionView:
     """Compose a fully-resolved ``SessionView`` from one ``Session`` plus
-    the four data sources.
+    the data sources.
 
-    This is the moved/renamed version of ``__main__._build_session_details``
-    with two changes:
+    Phase resolution is layered (most precise first):
 
-      1. Returns ``SessionView`` (UI-renderable) instead of
-         ``SessionDetails`` (loose tuple of fields). The is_running and
-         is_high_cost priority chains are pre-resolved here so render
-         code has no policy logic.
-      2. Dependencies are explicit parameters, not module-level singletons.
-         Tests inject fakes; the wiring layer injects the real ones.
+      1. ``live_state_reader(uuid)`` returns a non-None SessionLiveState
+         whose phase is not ENDED → use hook-derived phase + overlays
+         (current_tool / last_prompt / last_assistant_message).
+      2. Falls back to ``pid.json`` ``status`` field mapped via
+         ``_phase_from_pid_json`` (busy→THINKING, waiting→WAITING_APPROVAL,
+         idle→IDLE).
+      3. Falls back to activity-timestamp heuristic (last_activity within
+         ``active_threshold_s`` → THINKING, else IDLE).
 
-    Thread-safe: every dependency is internally serialised (StateReader
-    has a lock + 5 s TTL cache, JsonlParser metadata reads use a lock,
-    UsageRegistry uses a lock, NamesStore reads disk under a lock).
+    UI receives identical SessionPhase values from all three sources —
+    no "degraded" marker. The internal layering exists so a session
+    that started before claude-island was running (no hook events) still
+    renders something reasonable.
 
     Never raises — all dependency exceptions are caught per-source so a
     single corrupted JSON file or transient read error degrades a single
@@ -448,11 +502,27 @@ def compose_session_view(
         else session.last_activity
     )
 
-    is_running = _resolve_is_running(
-        status_word=status_word,
-        last_activity=last_activity,
-        active_threshold_s=active_threshold_s,
-    )
+    # ── phase resolution: hook > pid.json > activity heuristic ──
+    live = _safe(live_state_reader, sess_uuid) if sess_uuid else None
+    if live is not None and live.phase != SessionPhase.ENDED:
+        phase = live.phase
+        current_tool = live.current_tool
+        last_prompt = live.last_prompt
+        last_assistant_message = live.last_assistant_message
+        jump_target = live.jump_target
+    else:
+        phase = _phase_from_pid_json(
+            status_word=status_word,
+            last_activity=last_activity,
+            active_threshold_s=active_threshold_s,
+        )
+        current_tool = None
+        last_prompt = None
+        last_assistant_message = None
+        # Even for ENDED sessions, preserve jump_target so the UI can
+        # display the terminal context (helpful for "this session was
+        # in WT, last seen at ...").
+        jump_target = live.jump_target if live is not None else None
 
     return SessionView(
         pid=session.pid,
@@ -460,48 +530,98 @@ def compose_session_view(
         project_path=session.project_path,
         project_basename=session.project_path.name or str(session.project_path),
         last_activity=last_activity,
-        is_running=is_running,
         cost_usd=float(cost),
         is_high_cost=float(cost) >= high_cost_threshold,
         latest_model=latest_model,
         status_word=status_word.lower() if status_word else None,
         session_uuid=sess_uuid or "",
         session=session,
+        phase=phase,
+        current_tool=current_tool,
+        last_prompt=last_prompt,
+        last_assistant_message=last_assistant_message,
+        jump_target=jump_target,
     )
 
 
-def _resolve_is_running(
+# pid.json status flips to "busy" on every turn but Claude doesn't
+# always flip it back to "idle" when the turn ends (process killed,
+# crash, signal mishandled). Without a freshness gate, a session that
+# was "busy" 6 hours ago shows as running indefinitely in the UI.
+# Require activity within 5 minutes to TRUST a busy/waiting status
+# word; otherwise fall through to IDLE.
+#
+# 5 minutes is generous enough to cover slow tools (long Bash runs
+# don't write JSONL during execution) but tight enough to catch
+# truly stale state — measured against real-world observation that
+# a Claude session idle for >5min has clearly finished its turn.
+_PID_JSON_FRESHNESS_S = 300.0
+
+
+def _phase_from_pid_json(
     *,
     status_word: str | None,
     last_activity: datetime,
     active_threshold_s: float,
-) -> bool:
-    """Single-source-of-truth for the running/idle priority chain.
+) -> SessionPhase:
+    """Degraded-path phase derivation when no hook live_state is available.
 
-    Priority (matches the chain that used to be duplicated in
-    capsule._active_sessions and expanded._update_row):
+    Mapping (F-4, with freshness gate added for Bug B 2026-05-13):
+      status="busy"    + recent activity (<5min)  → THINKING
+      status="busy"    + stale activity           → IDLE (status considered stale)
+      status="waiting" + recent activity          → WAITING_APPROVAL
+      status="waiting" + stale activity           → IDLE
+      status="idle"                               → IDLE
+      no status + recent activity (<30s)          → THINKING
+      no status + stale                           → IDLE
 
-      1. status_word == "busy" / "waiting" → True (authoritative)
-      2. status_word == "idle" → False (authoritative; overrides
-         the heuristic so synthetic JSONL bumps after /compact don't
-         falsely mark an idle session as running)
-      3. status_word unknown → fall back to: last_activity within
-         active_threshold_s seconds of now → True
+    Why the freshness gate: pid.json is what Claude Code itself writes
+    to track session state. It updates on every turn boundary but Claude
+    doesn't always flip it back to "idle" when the turn ends (process
+    killed, crash, signal mishandled). Without this gate, a session
+    that went "busy" hours ago shows as running indefinitely.
+
+    Note: ``waiting`` maps to WAITING_APPROVAL but this is rough; pid.json
+    doesn't tell us which tool is awaiting approval, so the resulting
+    SessionLiveState would violate ``WAITING_APPROVAL ⇔ pending tool set``.
+    Since we don't construct a SessionLiveState on this path (we just
+    pick a SessionView phase), the invariant doesn't apply here.
     """
+    seconds_since = _seconds_since(last_activity)
+
     if status_word:
         sw = status_word.lower()
-        if sw in ("busy", "waiting"):
-            return True
         if sw == "idle":
-            return False
+            return SessionPhase.IDLE
+        if sw in ("busy", "waiting"):
+            # Freshness gate — pid.json status alone is not authoritative.
+            if seconds_since is None or seconds_since > _PID_JSON_FRESHNESS_S:
+                return SessionPhase.IDLE
+            return (
+                SessionPhase.THINKING
+                if sw == "busy"
+                else SessionPhase.WAITING_APPROVAL
+            )
+
+    # No status word — heuristic on activity time
+    if seconds_since is None:
+        return SessionPhase.IDLE
+    return (
+        SessionPhase.THINKING
+        if seconds_since < active_threshold_s
+        else SessionPhase.IDLE
+    )
+
+
+def _seconds_since(t: datetime) -> float | None:
+    """Wall-clock seconds since ``t``, or None if t isn't a valid
+    tz-aware datetime."""
     try:
-        seconds_since = (
-            datetime.now(timezone.utc)
-            - last_activity.astimezone(timezone.utc)
+        return (
+            datetime.now(timezone.utc) - t.astimezone(timezone.utc)
         ).total_seconds()
     except (TypeError, ValueError, AttributeError):
-        return False
-    return seconds_since < active_threshold_s
+        return None
 
 
 def _safe(func: Callable, *args, **kwargs):
@@ -540,12 +660,12 @@ def _degraded_view(session: Session) -> SessionView:
         project_path=session.project_path,
         project_basename=name,
         last_activity=session.last_activity,
-        is_running=False,
         cost_usd=0.0,
         is_high_cost=False,
         latest_model=None,
         status_word=None,
         session=session,
+        # phase defaults to IDLE; is_running property gives False
         # Propagate whatever uuid the Session already carries — usually
         # empty (ProcessScanner doesn't read transcripts) but tests
         # construct Sessions with explicit uuids and rely on the
@@ -618,10 +738,14 @@ class Snapshotter:
         get_selected_provider: Callable[[], str | None],
         publish: Callable[[WorldSnapshot], None],
         group_sessions: _GroupSessionsProto = _default_group_sessions,
-        # New keyword-only deps for the resume-offline feature. Both
-        # default to None so existing tests / boot paths that don't use
-        # the History drawer still work — when None, dormant_sessions
-        # and launching_sessions in the published snapshot stay empty.
+        # Live state lookup from the hook pipeline. Defaults to "no live
+        # state" so legacy tests / boot paths that pre-date the hook
+        # work unchanged. Production injects ``SessionStateMachine.read``.
+        live_state_reader: LiveStateProto = _noop_live_state,
+        # Resume-offline sources. Both default to None so existing
+        # tests that don't use the History drawer still work — when None,
+        # dormant_sessions and launching_sessions in the published
+        # snapshot stay empty.
         dormant_source: "_DormantSourceProto | None" = None,
         launch_intent: "_LaunchIntentProto | None" = None,
         debounce_window_s: float = 0.1,
@@ -641,6 +765,7 @@ class Snapshotter:
         self._metadata_provider = metadata_provider
         self._usage_registry = usage_registry
         self._names_store = names_store
+        self._live_state_reader = live_state_reader
         self._get_quota = get_quota
         self._get_available_providers = get_available_providers
         self._get_selected_provider = get_selected_provider
@@ -783,6 +908,7 @@ class Snapshotter:
                         metadata_provider=self._metadata_provider,
                         usage_registry=self._usage_registry,
                         names_store=self._names_store,
+                        live_state_reader=self._live_state_reader,
                     )
                 )
             except Exception:

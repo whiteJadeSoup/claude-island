@@ -50,7 +50,6 @@ def _session_view(s: Session) -> SessionView:
         project_path=s.project_path,
         project_basename=s.project_path.name or "test",
         last_activity=s.last_activity,
-        is_running=False,
         cost_usd=0.0,
         is_high_cost=False,
         latest_model=None,
@@ -2409,6 +2408,159 @@ class TestRowStatusText:
         text = _row_status_text(view)
         assert text == "active now"
 
+    # ── 2026-05-14: open-vibe-island parity — phase-aware status ──
+
+    def test_tool_use_phase_shows_running_tool_name(self):
+        """When phase=TOOL_USE, the row status line shows the current
+        tool being used (e.g. 'Running Bash'). Mirrors
+        open-vibe-island's session.summary='Running Bash' rendering."""
+        from claude_island.ui.expanded_window import _row_status_text
+        from claude_island.core.snapshot import _degraded_view
+        from claude_island.core.session_phase import SessionPhase
+        from dataclasses import replace as _replace
+        v = _replace(
+            _degraded_view(_session(1, "/a", ago_minutes=0)),
+            phase=SessionPhase.TOOL_USE,
+            current_tool="Bash",
+        )
+        assert _row_status_text(v) == "Running Bash"
+
+    def test_tool_use_phase_with_unknown_tool_falls_back_generic(self):
+        """If current_tool is somehow missing (shouldn't happen given
+        the invariant, but defensive), render generic 'Running tool'."""
+        from claude_island.ui.expanded_window import _row_status_text
+        from claude_island.core.snapshot import _degraded_view
+        from claude_island.core.session_phase import SessionPhase
+        from dataclasses import replace as _replace
+        # Construct a view with TOOL_USE phase but no current_tool.
+        # Note: SessionLiveState's invariant requires current_tool when
+        # phase=TOOL_USE, but SessionView itself doesn't enforce that
+        # (phase is set independently). Test the renderer's defense.
+        v = _replace(
+            _degraded_view(_session(1, "/a", ago_minutes=0)),
+            phase=SessionPhase.TOOL_USE,
+            current_tool="",
+        )
+        assert _row_status_text(v) == "Running tool"
+
+    def test_thinking_phase_shows_thinking(self):
+        from claude_island.ui.expanded_window import _row_status_text
+        from claude_island.core.snapshot import _degraded_view
+        from claude_island.core.session_phase import SessionPhase
+        from dataclasses import replace as _replace
+        v = _replace(
+            _degraded_view(_session(1, "/a", ago_minutes=0)),
+            phase=SessionPhase.THINKING,
+        )
+        assert "Thinking" in _row_status_text(v)
+
+    def test_waiting_approval_phase_shows_needs_approval(self):
+        from claude_island.ui.expanded_window import _row_status_text
+        from claude_island.core.snapshot import _degraded_view
+        from claude_island.core.session_phase import SessionPhase
+        from dataclasses import replace as _replace
+        v = _replace(
+            _degraded_view(_session(1, "/a", ago_minutes=0)),
+            phase=SessionPhase.WAITING_APPROVAL,
+        )
+        assert _row_status_text(v) == "Needs approval"
+
+    def test_compacting_phase_shows_compacting(self):
+        from claude_island.ui.expanded_window import _row_status_text
+        from claude_island.core.snapshot import _degraded_view
+        from claude_island.core.session_phase import SessionPhase
+        from dataclasses import replace as _replace
+        v = _replace(
+            _degraded_view(_session(1, "/a", ago_minutes=0)),
+            phase=SessionPhase.COMPACTING,
+        )
+        assert "Compacting" in _row_status_text(v)
+
+    def test_ended_phase_shows_ended(self):
+        from claude_island.ui.expanded_window import _row_status_text
+        from claude_island.core.snapshot import _degraded_view
+        from claude_island.core.session_phase import SessionPhase
+        from dataclasses import replace as _replace
+        v = _replace(
+            _degraded_view(_session(1, "/a", ago_minutes=0)),
+            phase=SessionPhase.ENDED,
+        )
+        assert _row_status_text(v) == "Ended"
+
+    def test_idle_phase_uses_legacy_activity_text(self):
+        """IDLE is the default state — preserves the original 'active X
+        ago' format so existing UX/screenshots for idle sessions are
+        unchanged."""
+        from claude_island.ui.expanded_window import _row_status_text
+        from claude_island.core.snapshot import _degraded_view
+        from claude_island.core.session_phase import SessionPhase
+        from dataclasses import replace as _replace
+        v = _replace(
+            _degraded_view(_session(1, "/a", ago_minutes=5)),
+            phase=SessionPhase.IDLE,
+        )
+        text = _row_status_text(v)
+        assert text.startswith("active ")
+
+
+class TestRowTooltip:
+    """Per-row hover tooltip carries hook-captured context:
+    last prompt + last response + terminal app. Open-vibe-island
+    parity (2026-05-14)."""
+
+    def test_empty_view_no_tooltip(self):
+        """A SessionView without hook data → empty tooltip (caller
+        treats "" as 'no tooltip set')."""
+        from claude_island.ui.expanded_window import _row_tooltip
+        from claude_island.core.snapshot import _degraded_view
+        v = _degraded_view(_session(1, "/a", ago_minutes=0))
+        assert _row_tooltip(v) == ""
+
+    def test_view_with_last_prompt_shows_prompt(self):
+        from claude_island.ui.expanded_window import _row_tooltip
+        from claude_island.core.snapshot import _degraded_view
+        from dataclasses import replace as _replace
+        v = _replace(
+            _degraded_view(_session(1, "/a", ago_minutes=0)),
+            last_prompt="explain the new hook pipeline",
+        )
+        tt = _row_tooltip(v)
+        assert "Prompt: explain the new hook pipeline" in tt
+
+    def test_view_with_jump_target_shows_terminal(self):
+        from claude_island.ui.expanded_window import _row_tooltip
+        from claude_island.core.snapshot import _degraded_view
+        from claude_island.core.hook_events import JumpTarget
+        from dataclasses import replace as _replace
+        v = _replace(
+            _degraded_view(_session(1, "/a", ago_minutes=0)),
+            jump_target=JumpTarget(
+                terminal_app="WindowsTerminal",
+                wt_session_guid="b2d0e4f0-1234-5678-90ab-cdef12345678",
+            ),
+        )
+        tt = _row_tooltip(v)
+        assert "Terminal: WindowsTerminal" in tt
+        assert "b2d0e4f0" in tt
+
+    def test_long_prompt_is_truncated(self):
+        """Defensive: even if SessionLiveState's 200-char cap relaxes
+        later, the tooltip truncates to 180 chars + ellipsis."""
+        from claude_island.ui.expanded_window import _row_tooltip
+        from claude_island.core.snapshot import _degraded_view
+        from dataclasses import replace as _replace
+        v = _replace(
+            _degraded_view(_session(1, "/a", ago_minutes=0)),
+            last_prompt="x" * 500,
+        )
+        tt = _row_tooltip(v)
+        # Prompt line is "Prompt: xxx...xxx…" — 177 'x' chars + ellipsis
+        prompt_line = [l for l in tt.splitlines() if l.startswith("Prompt:")][0]
+        # Content (without "Prompt: " prefix) is 178 chars (177 + ellipsis)
+        content = prompt_line[len("Prompt: "):]
+        assert len(content) == 178
+        assert content.endswith("…")
+
 
 # ============================================================================
 # Summary card (P1.1) — top focus area with today $ + 5h quota bar
@@ -2576,7 +2728,31 @@ class TestHighCostRowAlert:
             get_session_details=details
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
-        p._render_sessions([_session(1, "/a", ago_minutes=10)])
+        # Build the SessionView with phase=THINKING directly — the
+        # row code now reads view.is_running (== phase.is_active())
+        # instead of re-deriving from details.status. The test seeder
+        # _render_sessions uses _degraded_view (phase=IDLE), so we
+        # bypass it and call _render_session_groups with a custom view.
+        from dataclasses import replace as _replace
+        from claude_island.core.snapshot import (
+            SessionGroup as _SG, _degraded_view as _dv,
+        )
+        from claude_island.core.session_phase import SessionPhase
+        from claude_island.core.capabilities import (
+            Capability as _Cap, FocusGranularity as _FG,
+        )
+        sess = _session(1, "/a", ago_minutes=0)
+        view = _replace(
+            _dv(sess),
+            phase=SessionPhase.THINKING,
+            adapter_id="test",
+            focus_granularity=_FG.APP,
+            capabilities=frozenset({_Cap.FOCUS}),
+        )
+        p._render_session_groups((_SG(
+            group_id="test:1", title_hint=None,
+            adapter_id="test", views=(view,),
+        ),))
         btn = p._rows[1]
         # Left runs the equalizer; right colours the cost yellow.
         assert btn._status_glyph.state() == _RowStatusGlyph.STATE_RUNNING

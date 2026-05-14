@@ -179,19 +179,20 @@ def _build_popup_with_long_session(qtbot) -> SessionDetailPopup:
         sidechain_count=3,
         original_name=_LONG_NAME,
     )
+    from claude_island.core.session_phase import SessionPhase
     view = SessionView(
         pid=s.pid,
         name=_LONG_NAME,
         project_path=s.project_path,
         project_basename=s.project_path.name or "x",
         last_activity=s.last_activity,
-        is_running=True,
         cost_usd=12.34,
         is_high_cost=False,
         latest_model="claude-opus-4-7",
         status_word="busy",
         session=s,
         session_uuid=s.session_uuid,
+        phase=SessionPhase.THINKING,
     )
     popup = SessionDetailPopup(details, view)
     qtbot.addWidget(popup)

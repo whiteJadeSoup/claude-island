@@ -52,16 +52,17 @@ def _view(
         pid=pid, project_path=Path("/tmp"), session_uuid="",
         last_activity=datetime.now(timezone.utc),
     )
+    from claude_island.core.session_phase import SessionPhase
     return SessionView(
         pid=pid, name=name, project_path=Path("/tmp"),
         project_basename="tmp",
         last_activity=sess.last_activity,
-        is_running=is_running,
         cost_usd=cost_usd,
         is_high_cost=cost_usd >= HIGH_COST_USD_THRESHOLD,
         latest_model="claude-opus-4-7",
         status_word="busy" if is_running else "idle",
         session=sess,
+        phase=SessionPhase.THINKING if is_running else SessionPhase.IDLE,
     )
 
 

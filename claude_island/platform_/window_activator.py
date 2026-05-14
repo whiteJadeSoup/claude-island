@@ -91,7 +91,15 @@ def _ancestor_pids(pid: int) -> list[int]:
 
     Order is significant: the original pid comes first so callers prefer the
     most specific match when they walk the list looking for a window owner.
+
+    Returns an empty list for non-positive pids (PLACEHOLDER_PID=-1 entries
+    inserted by HookSessionBridge before the scanner has confirmed a real
+    process). psutil raises ValueError on negative pid; without this early
+    return that ValueError propagated up to focus() and silently no-op'd
+    the user's click — see Bug A from live-run testing 2026-05-13.
     """
+    if pid <= 0:
+        return []
     pids: list[int] = []
     try:
         proc: psutil.Process | None = psutil.Process(pid)
@@ -100,7 +108,7 @@ def _ancestor_pids(pid: int) -> list[int]:
                 break
             pids.append(proc.pid)
             proc = proc.parent()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
+    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
         pass
     return pids
 

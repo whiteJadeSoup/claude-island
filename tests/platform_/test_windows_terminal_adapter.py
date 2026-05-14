@@ -61,6 +61,28 @@ def adapter() -> WindowsTerminalAdapter:
     return a
 
 
+# ── can_handle: defensive against placeholder pids ────────────────────
+
+
+def test_can_handle_rejects_placeholder_pid(adapter):
+    """Hook-bridge placeholders carry pid=-1 (PLACEHOLDER_PID) until
+    the scanner sees a real claude.exe. can_handle must not call into
+    psutil for these — psutil raises ValueError on negative pids and
+    would tank the entire grouping pass.
+
+    This regression came out of live-run testing of the hook pipeline
+    (Step 10 of Detail Design v2 §5)."""
+    placeholder = _session(pid=-1)
+    assert adapter.can_handle(placeholder) is False
+
+
+def test_can_handle_rejects_zero_pid(adapter):
+    """Defense-in-depth: pid=0 (unlikely but possible) should also fail
+    fast without trying psutil."""
+    s = _session(pid=0)
+    assert adapter.can_handle(s) is False
+
+
 @pytest.fixture
 def patched(monkeypatch):
     """Patch the two trust-boundary helpers and return their mocks
@@ -322,9 +344,12 @@ class TestWtHwndGrouping:
         ])
 
         # Demoted to singletons — two independent cards.
+        # Singleton group_id prefers session_uuid over pid (2026-05-14:
+        # placeholder pid=-1 would otherwise collide across hook-before-
+        # scanner views).
         assert len(groups) == 2
         assert {g.group_id for g in groups} == {
-            "wt:singleton:100", "wt:singleton:200",
+            f"wt:singleton:{'a' * 32}", f"wt:singleton:{'b' * 32}",
         }
 
     def test_distinct_wt_windows_give_distinct_groups(self, adapter, patched):
@@ -372,7 +397,9 @@ class TestWtHwndGrouping:
         groups = adapter.group([_view(100, session_uuid="a" * 32)])
 
         assert len(groups) == 1
-        assert groups[0].group_id == "wt:singleton:100"
+        # group_id prefers session_uuid (2026-05-14: placeholder pid=-1
+        # would collide otherwise).
+        assert groups[0].group_id == f"wt:singleton:{'a' * 32}"
 
     def test_orphan_dropped_resolved_views_grouped(self, adapter, patched):
         """Orphan filter still works: pid whose AttachConsole fails
@@ -638,6 +665,9 @@ class TestActivateWindowsReconcile:
         set_console_title = mock.Mock(return_value=True)
         wait_for_tab_name = mock.Mock(return_value=True)
         select_tab_by_title = mock.Mock(return_value=True)
+        # By default no other ci:* tabs visible → sibling fallback eligible
+        # (matches the legacy/inactive-pane case the existing tests exercise).
+        list_ci_tab_names = mock.Mock(return_value=set())
         force_foreground = mock.Mock(return_value=True)
         walk_to_visible_host = mock.Mock(return_value=0xCAFE)  # WT hwnd
 
@@ -658,6 +688,10 @@ class TestActivateWindowsReconcile:
             select_tab_by_title,
         )
         monkeypatch.setattr(
+            "claude_island.platform_.wt_uia.list_ci_tab_names",
+            list_ci_tab_names,
+        )
+        monkeypatch.setattr(
             "claude_island.platform_.window_activator._force_foreground",
             force_foreground,
         )
@@ -673,14 +707,21 @@ class TestActivateWindowsReconcile:
         bag.set_console_title = set_console_title
         bag.wait_for_tab_name = wait_for_tab_name
         bag.select_tab_by_title = select_tab_by_title
+        bag.list_ci_tab_names = list_ci_tab_names
         bag.force_foreground = force_foreground
         return bag
 
-    def test_no_reconcile_when_current_title_matches_expected(
+    def test_fast_path_skips_reset_when_title_already_matches(
         self, patched_activate,
     ):
-        """Common path: scanner already labeled the tab, current title
-        equals expected. Skip set + poll, go straight to select."""
+        """When the kernel console title already matches our expected
+        sentinel, skip the SetConsoleTitleW round-trip and go directly
+        to UIA Select. Common case finishes in <50ms (single UIA call).
+
+        Earlier 'always re-set' approach (Bug C) ran SetConsoleTitleW
+        unconditionally; that wasted ~50ms when the title was already
+        correct, making fast-path clicks feel slow (2.8s observed
+        2026-05-13 with retry loop)."""
         from claude_island.platform_.terminals.windows_terminal import (
             _activate_windows,
         )
@@ -690,20 +731,31 @@ class TestActivateWindowsReconcile:
         ok = _activate_windows(pid=999, expected_title=self.EXPECTED)
 
         assert ok is True
+        # Fast path: no SetConsoleTitleW, no wait_for_tab_name.
         patched_activate.set_console_title.assert_not_called()
         patched_activate.wait_for_tab_name.assert_not_called()
+        # Single select call.
         patched_activate.select_tab_by_title.assert_called_once_with(
             0xCAFE, self.EXPECTED,
         )
 
-    def test_reconcile_when_title_drifted(self, patched_activate):
-        """claude topic-shifted: current title is "✳ memory", expected
-        is sentinel. Re-set, poll, then select using expected."""
+    def test_reconcile_when_title_drifted_and_first_select_fails(
+        self, patched_activate,
+    ):
+        """Claude topic-shifted: current console title is "✳ memory",
+        expected is sentinel. New contract (2026-05-14): try select
+        first (optimistic); only re-set on select failure. This makes
+        the simpler 'WT still has our title even though kernel drifted'
+        case fast, and only pays the AttachConsole cost when truly
+        needed."""
         from claude_island.platform_.terminals.windows_terminal import (
             _activate_windows,
         )
 
         patched_activate.get_console_info.return_value = (0xAA, "✳ memory")
+        # First select fails (WT doesn't have expected); second after
+        # re-set succeeds.
+        patched_activate.select_tab_by_title.side_effect = [False, True]
 
         ok = _activate_windows(pid=999, expected_title=self.EXPECTED)
 
@@ -712,6 +764,30 @@ class TestActivateWindowsReconcile:
             999, self.EXPECTED,
         )
         patched_activate.wait_for_tab_name.assert_called_once()
+        # 2 selects: optimistic + post-reset.
+        assert patched_activate.select_tab_by_title.call_count == 2
+
+    def test_no_reset_when_first_select_succeeds_despite_title_drift(
+        self, patched_activate,
+    ):
+        """Even if kernel title has drifted, if WT's TabItem.Name still
+        has our sentinel, the first select succeeds and we skip the
+        ~80ms re-set+wait round-trip. This is the common case where
+        Claude's OSC race hasn't propagated to WT yet."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, "✳ memory")
+        # Optimistic select succeeds first try.
+        patched_activate.select_tab_by_title.return_value = True
+
+        ok = _activate_windows(pid=999, expected_title=self.EXPECTED)
+
+        assert ok is True
+        # No re-set, no wait.
+        patched_activate.set_console_title.assert_not_called()
+        patched_activate.wait_for_tab_name.assert_not_called()
         patched_activate.select_tab_by_title.assert_called_once_with(
             0xCAFE, self.EXPECTED,
         )
@@ -756,21 +832,27 @@ class TestActivateWindowsReconcile:
     def test_inactive_pane_falls_back_to_sibling_sentinel(self, patched_activate):
         """The build-mini-cc bug: target session's sentinel doesn't
         match any TabItem.Name (it's the inactive pane in a split tab).
-        Step 1 select misses; step 2 tries each cwd-matched sibling
-        sentinel — first hit wins. The matching sibling IS the active
-        pane of the click target's tab, so WT switches to the right
-        tab. User uses Alt+arrow inside WT to focus the target pane."""
+        Retry loop fails (wait_for_tab_name returns False — WT never
+        mirrors our title because our pane is the inactive one). After
+        the retry loop, fallback chain: select by target_title once (fails),
+        then iterate sibling sentinels — first sibling hits (it's the
+        active pane of the click target's tab). User uses Alt+arrow
+        inside WT to focus the target pane."""
         from claude_island.platform_.terminals.windows_terminal import (
             _activate_windows,
         )
 
         patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
-        # Primary select misses (inactive pane).
-        # First sibling also misses (different tab).
-        # Second sibling hits (same tab — active pane sibling).
+        # Inactive-pane case: wait_for_tab_name returns False on every
+        # retry attempt because WT's TabItem.Name only surfaces the
+        # ACTIVE pane's title.
+        patched_activate.wait_for_tab_name.return_value = False
+        # Fallback: primary fails, first sibling fails, second sibling hits.
         patched_activate.select_tab_by_title.side_effect = [
             False, False, True,
         ]
+        # Single ci:* tab visible (active pane) → sibling fallback eligible.
+        patched_activate.list_ci_tab_names.return_value = {"ci:active_pane"}
 
         ok = _activate_windows(
             pid=999,
@@ -779,7 +861,8 @@ class TestActivateWindowsReconcile:
         )
 
         assert ok is True
-        # 3 select calls: primary + 2 siblings.
+        # 3 select calls: primary fallback + 2 siblings (the retry loop
+        # never calls select because wait_for_tab_name returned False).
         assert patched_activate.select_tab_by_title.call_count == 3
         calls = [c.args for c in patched_activate.select_tab_by_title.call_args_list]
         assert calls[0] == (0xCAFE, self.EXPECTED)
@@ -806,16 +889,215 @@ class TestActivateWindowsReconcile:
         # Only the primary call.
         assert patched_activate.select_tab_by_title.call_count == 1
 
-    def test_sibling_loop_skips_self_sentinel(self, patched_activate):
-        """If a sibling sentinel happens to equal target_title (defensive
-        — caller should already filter, but double-check), skip without
-        an extra UIA roundtrip."""
+    def test_sibling_fallback_skipped_when_multiple_ci_tabs_visible(
+        self, patched_activate,
+    ):
+        """Bug C (2026-05-13): two separate claude sessions in the same
+        WT window + same cwd. One's sentinel got OSC-clobbered by Claude.
+        select_tab_by_title for OUR sentinel fails. The OLD code would
+        fall back to a sibling sentinel — but the sibling is a DIFFERENT
+        session's tab, so the click would land on the wrong tab.
+
+        New behaviour: when WT shows 2+ ci:* tabs, the missing sentinel
+        is almost certainly OSC-clobbered (not a hidden inactive pane;
+        that case shows at most 1 ci:* tab). Skip the sibling fallback
+        and just force-foreground the window — keeping the user on
+        whatever tab is currently active rather than navigating to a
+        wrong tab."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (
+            0xAA, "⠐ Claude Code",  # Claude OSC overwrote our sentinel
+        )
+        # wait_for_tab_name times out for every retry attempt
+        # (suppressApplicationTitle profile or Claude OSC racing too fast).
+        patched_activate.wait_for_tab_name.return_value = False
+        # Primary select misses — our title isn't visible to UIA
+        patched_activate.select_tab_by_title.return_value = False
+        # But WT has MULTIPLE ci:* tabs visible (other sessions' sentinels)
+        patched_activate.list_ci_tab_names.return_value = {
+            "ci:other_session_1", "ci:other_session_2",
+        }
+
+        _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_sentinels=("ci:sib_a",),
+        )
+
+        # With the optimistic-first flow (2026-05-14): one optimistic
+        # select(expected) attempt. After it returns False, slow path
+        # runs (set+wait) but wait_for_tab_name returns False so no
+        # post-set select. Sibling fallback then skipped because
+        # multiple ci:* tabs visible (don't navigate to wrong tab).
+        # Net: 1 select_tab_by_title call (the optimistic one).
+        assert patched_activate.select_tab_by_title.call_count == 1
+        # Window still brought to foreground.
+        patched_activate.force_foreground.assert_called_once()
+
+    def test_smart_guess_selects_lone_candidate(self, patched_activate, monkeypatch):
+        """Bug C deep-fix (2026-05-13): when WT shows multiple ci:* tabs
+        AND our target's sentinel is suppressed (suppressApplicationTitle
+        profile), the smart-guess identifies tabs whose Name is NOT a
+        known sentinel. If EXACTLY ONE such candidate exists, select it
+        — almost certainly our target.
+
+        Tests the smart-guess path by mocking UIA enumeration."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, "Windows PowerShell")
+        patched_activate.wait_for_tab_name.return_value = False
+        patched_activate.select_tab_by_title.return_value = False
+        # 2 ci:* tabs visible — triggers smart-guess path
+        patched_activate.list_ci_tab_names.return_value = {
+            "ci:sib_a", "ci:agent_self",
+        }
+
+        # Mock the UIA enumeration inside _try_smart_guess_select.
+        # 3 TabItems: 2 are known sentinels (excluded), 1 is the
+        # candidate (a 'Windows PowerShell' tab with suppressed sentinel).
+        from unittest.mock import MagicMock
+        import uiautomation as auto
+
+        # Build mock TabItem objects
+        def make_tab(name, selected=False):
+            t = MagicMock()
+            t.Name = name
+            t.ControlTypeName = "TabItemControl"
+            sel = MagicMock()
+            sel.IsSelected = selected
+            sel.Select = MagicMock(return_value=None)
+            t.GetSelectionItemPattern = MagicMock(return_value=sel)
+            return t, sel
+
+        tab_a, sel_a = make_tab("ci:sib_a")
+        tab_b, sel_b = make_tab("ci:agent_self")
+        tab_c, sel_c = make_tab("Windows PowerShell")  # the candidate
+
+        list_ctrl = MagicMock()
+        list_ctrl.ControlTypeName = "ListControl"
+        list_ctrl.GetChildren.return_value = [tab_a, tab_b, tab_c]
+
+        tab_control = MagicMock()
+        tab_control.GetChildren.return_value = [list_ctrl]
+        tab_control.Exists = MagicMock(return_value=True)
+
+        root = MagicMock()
+        root.TabControl = MagicMock(return_value=tab_control)
+
+        monkeypatch.setattr(auto, "ControlFromHandle", lambda h: root)
+
+        # expected_title=None: skips the retry loop. The smart_guess
+        # path runs and finds tab_c as the lone candidate.
+        _activate_windows(
+            pid=999,
+            expected_title=None,
+            sibling_sentinels=("ci:sib_a", "ci:agent_self"),
+        )
+
+        # The lone candidate (tab_c) was selected.
+        sel_c.Select.assert_called_once()
+        # The known sentinels were NOT selected.
+        sel_a.Select.assert_not_called()
+        sel_b.Select.assert_not_called()
+
+    def test_smart_guess_abstains_when_multiple_candidates(
+        self, patched_activate, monkeypatch,
+    ):
+        """When 2+ tabs are candidates (e.g. user has multiple
+        non-ci:* PowerShell tabs), we can't disambiguate. Abstain
+        to avoid selecting the wrong tab — fall through to just
+        force-foreground the window."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, "Windows PowerShell")
+        patched_activate.wait_for_tab_name.return_value = False
+        patched_activate.select_tab_by_title.return_value = False
+        patched_activate.list_ci_tab_names.return_value = {
+            "ci:sib_a", "ci:agent_self",
+        }
+
+        from unittest.mock import MagicMock
+        import uiautomation as auto
+
+        def make_tab(name):
+            t = MagicMock()
+            t.Name = name
+            t.ControlTypeName = "TabItemControl"
+            sel = MagicMock()
+            sel.Select = MagicMock()
+            t.GetSelectionItemPattern = MagicMock(return_value=sel)
+            return t, sel
+
+        ta, sa = make_tab("ci:sib_a")
+        tb, sb = make_tab("Windows PowerShell")
+        tc, sc = make_tab("Windows PowerShell")  # second candidate — ambiguous!
+
+        list_ctrl = MagicMock()
+        list_ctrl.ControlTypeName = "ListControl"
+        list_ctrl.GetChildren.return_value = [ta, tb, tc]
+        tab_control = MagicMock()
+        tab_control.GetChildren.return_value = [list_ctrl]
+        tab_control.Exists = MagicMock(return_value=True)
+        root = MagicMock()
+        root.TabControl = MagicMock(return_value=tab_control)
+        monkeypatch.setattr(auto, "ControlFromHandle", lambda h: root)
+
+        _activate_windows(
+            pid=999,
+            expected_title=None,
+            sibling_sentinels=("ci:sib_a",),
+        )
+
+        # Neither candidate selected — abstained.
+        sb.Select.assert_not_called()
+        sc.Select.assert_not_called()
+
+    def test_sibling_fallback_still_used_when_only_one_ci_tab(
+        self, patched_activate,
+    ):
+        """Inactive-pane case preserved: when ≤1 ci:* tab is visible
+        (active pane only) AND select misses, the sibling fallback IS
+        used. This is the original build-mini-cc split-pane scenario."""
         from claude_island.platform_.terminals.windows_terminal import (
             _activate_windows,
         )
 
         patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        # Primary misses (inactive pane), first sibling hits.
         patched_activate.select_tab_by_title.side_effect = [False, True]
+        # Only 1 ci:* tab visible — likely active pane of split tab.
+        patched_activate.list_ci_tab_names.return_value = {"ci:active_pane"}
+
+        _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_sentinels=("ci:our_tab_uuid",),
+        )
+
+        # Primary + 1 sibling = 2 calls
+        assert patched_activate.select_tab_by_title.call_count == 2
+
+    def test_sibling_loop_skips_self_sentinel(self, patched_activate):
+        """If a sibling sentinel happens to equal target_title (defensive
+        — caller should already filter, but double-check), skip without
+        an extra UIA roundtrip. wait_for_tab_name=False so the retry
+        loop bails out and the fallback chain runs."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, self.EXPECTED)
+        patched_activate.wait_for_tab_name.return_value = False
+        patched_activate.select_tab_by_title.side_effect = [False, True]
+        # ≤1 ci:* tab → fallback sibling iteration eligible
+        patched_activate.list_ci_tab_names.return_value = set()
 
         _activate_windows(
             pid=999,

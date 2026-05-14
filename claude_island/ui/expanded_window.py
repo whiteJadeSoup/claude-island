@@ -999,22 +999,85 @@ _STYLE_MODEL_CHIP = (
 _STYLE_STATUS = "color: #9ca3af; font-size: 10px;"
 
 
+def _row_tooltip(view: "SessionView") -> str:
+    """Compose the hover tooltip for a session row.
+
+    Mirrors open-vibe-island's session-detail summary: shows last
+    prompt + last assistant response + terminal context when those
+    fields are populated by the hook pipeline. Returns "" when there's
+    nothing interesting to show (caller treats "" as "no tooltip").
+
+    Format:
+        Prompt: explain the new hook pipeline
+        Last response: We refactored compose_session_view...
+        Terminal: Windows Terminal (pane b2d0e4f0)
+    """
+    last_prompt = getattr(view, "last_prompt", None) or ""
+    last_resp = getattr(view, "last_assistant_message", None) or ""
+    jt = getattr(view, "jump_target", None)
+
+    lines: list[str] = []
+    if last_prompt:
+        # Truncate display — the underlying SessionLiveState already
+        # has 200-char cap from the hook boundary, but defensive
+        # truncate here so future relaxation doesn't blow up the tooltip.
+        clipped = last_prompt if len(last_prompt) <= 180 else last_prompt[:177] + "…"
+        lines.append(f"Prompt: {clipped}")
+    if last_resp:
+        clipped = last_resp if len(last_resp) <= 180 else last_resp[:177] + "…"
+        lines.append(f"Last response: {clipped}")
+    if jt is not None:
+        ta = (jt.terminal_app or "").strip()
+        guid = (jt.wt_session_guid or "").strip()
+        if ta:
+            if guid:
+                # Show first 8 chars of guid — full is too long for tooltip
+                lines.append(f"Terminal: {ta} (pane {guid[:8]})")
+            else:
+                lines.append(f"Terminal: {ta}")
+    return "\n".join(lines)
+
+
 def _row_status_text(
     view: "SessionView",
 ) -> str:
     """Compose the bottom-line text for a row.
 
-    Renders the *last activity* time as ``"active <relative>"``. The
-    "active" prefix disambiguates this from the popup's "Created
-    <relative>" line — both used to format as plain ``"<N>m ago"``,
-    making it look (incorrectly) like the same field had two values
-    when the JSONL just got written ("now") on a session that started
-    46m ago. Now: list row reads "active now" / "active 5m ago"; popup
-    keeps "Created" + the absolute timestamp.
+    Open-vibe-island parity (2026-05-14): when hook data is present we
+    show what Claude is actually *doing right now* (Bash, Read, etc.)
+    instead of just the last_activity age. This mirrors their
+    ``AgentSession.summary`` which renders things like "Running Bash"
+    or "Needs approval".
 
-    The running state itself is conveyed by the row's left-edge pulse
-    animation + the dot's pulse, so the literal word "running" / "idle"
-    was redundant and got dropped earlier."""
+    Phase-to-text mapping:
+      * TOOL_USE + current_tool → ``"Running {tool}"``
+      * WAITING_APPROVAL → ``"Needs approval"``  (+ tool name when known)
+      * THINKING → ``"Thinking..."``
+      * COMPACTING → ``"Compacting context"``
+      * ENDED → ``"Ended"``
+      * IDLE / unknown → ``"active <relative>"`` (legacy text)
+
+    The "active" prefix on the legacy text disambiguates this from
+    the popup's "Created <relative>" line.
+    """
+    # Lazy import to avoid making this module depend on session_phase
+    # at import time (UI tests construct SessionView via _degraded_view
+    # which doesn't always go through phase resolution).
+    from claude_island.core.session_phase import SessionPhase
+
+    phase = getattr(view, "phase", None)
+    if phase == SessionPhase.TOOL_USE:
+        tool = (getattr(view, "current_tool", None) or "").strip()
+        return f"Running {tool}" if tool else "Running tool"
+    if phase == SessionPhase.WAITING_APPROVAL:
+        return "Needs approval"
+    if phase == SessionPhase.THINKING:
+        return "Thinking…"
+    if phase == SessionPhase.COMPACTING:
+        return "Compacting context"
+    if phase == SessionPhase.ENDED:
+        return "Ended"
+    # IDLE or any unrecognized value falls back to the legacy text.
     return f"active {_fmt_started(view.last_activity)}"
 _STYLE_PERIOD_BTN = """
     QPushButton {
@@ -4649,31 +4712,18 @@ class ExpandedWindow(QWidget):
         high_cost = (
             details is not None and details.cost_usd >= _HIGH_COST_USD_THRESHOLD
         )
-        # "Currently running" detection. Same priority chain as the
-        # capsule:
-        #   1. SessionDetails.status — authoritative when present.
-        #      "busy"/"waiting" ⇒ running, "idle" ⇒ NOT running
-        #      (overrides the heuristic so synthetic-only sessions
-        #      whose JSONL just got a /compact summary don't read
-        #      as live).
-        #   2. Activity heuristic when status is unknown — falls
-        #      back to last_activity for providers without a state file.
-        status_word: str | None = None
-        if details is not None and isinstance(details.status, str):
-            status_word = details.status.lower()
-        if status_word in ("busy", "waiting"):
-            running = True
-        elif status_word == "idle":
-            running = False
-        else:
-            try:
-                seconds_since = (
-                    datetime.now(timezone.utc)
-                    - view.last_activity.astimezone(timezone.utc)
-                ).total_seconds()
-            except (TypeError, ValueError):
-                seconds_since = 1e9
-            running = seconds_since < _ROW_ACTIVE_THRESHOLD_SECONDS
+        # "Currently running" detection. Read directly from
+        # ``view.is_running`` (the @property derived from view.phase, which
+        # itself is resolved by compose_session_view via the hook ↔
+        # pid.json ↔ activity heuristic priority chain).
+        #
+        # This used to be a per-row priority chain over details.status —
+        # but that BYPASSED compose_session_view's pid.json freshness
+        # gate (Bug B fix). The capsule reads view.is_running too; using
+        # the same field here keeps capsule and row in lockstep, so a
+        # stale "busy" no longer makes the row show running while the
+        # capsule (correctly) doesn't.
+        running = view.is_running
 
         # Two independent signal channels:
         #   - Leftmost slot (glyph + running accent bar) → liveness.
@@ -4727,7 +4777,11 @@ class ExpandedWindow(QWidget):
         focus_supported = Capability.FOCUS in view.capabilities
         if focus_supported:
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip("")
+            # Open-vibe-island parity (2026-05-14): when hook-captured
+            # data is available, surface it as a hover tooltip — last
+            # prompt, current tool, terminal app. This mirrors their
+            # session row showing summary text + tool icon.
+            btn.setToolTip(_row_tooltip(view))
         else:
             btn.setCursor(Qt.CursorShape.ArrowCursor)
             # FOCUS gets stripped at compose time when no UI app

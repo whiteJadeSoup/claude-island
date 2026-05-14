@@ -23,7 +23,7 @@ from claude_island.core.snapshot import (
     SessionView,
     Snapshotter,
     WorldSnapshot,
-    _resolve_is_running,
+    _phase_from_pid_json,
     compose_session_view,
 )
 
@@ -105,72 +105,119 @@ class FakeSessionSource:
 
 
 # ---------------------------------------------------------------------------
-# _resolve_is_running — the priority chain
+# _phase_from_pid_json — pid.json fallback (used when hook live_state absent)
 # ---------------------------------------------------------------------------
 
-class TestResolveIsRunning:
-    def test_busy_status_wins(self):
-        # Old activity but status=busy → running
-        old = datetime.now(timezone.utc) - timedelta(hours=1)
-        assert _resolve_is_running(
-            status_word="busy", last_activity=old, active_threshold_s=30,
-        ) is True
+class TestPhaseFromPidJson:
+    """T6.x family: the degraded-path phase mapping that fires when
+    hook live_state is None (session pre-dates the listener / no
+    listener at all). Maps Claude's status word + activity timestamp
+    to a SessionPhase."""
 
-    def test_waiting_status_wins(self):
+    def test_busy_status_with_recent_activity_maps_to_thinking(self):
+        from claude_island.core.session_phase import SessionPhase
+        recent = datetime.now(timezone.utc) - timedelta(seconds=10)
+        assert _phase_from_pid_json(
+            status_word="busy", last_activity=recent, active_threshold_s=30,
+        ) is SessionPhase.THINKING
+
+    def test_busy_status_with_stale_activity_falls_through_to_idle(self):
+        """Bug B (2026-05-13): pid.json status='busy' must NOT mark a
+        6h-stale session as running. Claude doesn't always flip status
+        back to idle on crash/kill, so we require recent activity to
+        trust the status word."""
+        from claude_island.core.session_phase import SessionPhase
+        very_old = datetime.now(timezone.utc) - timedelta(hours=6)
+        assert _phase_from_pid_json(
+            status_word="busy", last_activity=very_old, active_threshold_s=30,
+        ) is SessionPhase.IDLE
+
+    def test_waiting_status_with_recent_activity_maps_to_waiting_approval(self):
+        from claude_island.core.session_phase import SessionPhase
+        recent = datetime.now(timezone.utc) - timedelta(seconds=30)
+        assert _phase_from_pid_json(
+            status_word="waiting", last_activity=recent, active_threshold_s=30,
+        ) is SessionPhase.WAITING_APPROVAL
+
+    def test_waiting_status_stale_falls_to_idle(self):
+        from claude_island.core.session_phase import SessionPhase
         old = datetime.now(timezone.utc) - timedelta(hours=1)
-        assert _resolve_is_running(
+        assert _phase_from_pid_json(
             status_word="waiting", last_activity=old, active_threshold_s=30,
-        ) is True
+        ) is SessionPhase.IDLE
+
+    def test_busy_within_5min_threshold(self):
+        """Boundary: 4min59s old activity + busy status should still
+        be THINKING (within the 5-minute freshness window)."""
+        from claude_island.core.session_phase import SessionPhase
+        from claude_island.core.snapshot import _PID_JSON_FRESHNESS_S
+        just_inside = datetime.now(timezone.utc) - timedelta(
+            seconds=_PID_JSON_FRESHNESS_S - 60,
+        )
+        assert _phase_from_pid_json(
+            status_word="busy", last_activity=just_inside, active_threshold_s=30,
+        ) is SessionPhase.THINKING
+
+    def test_busy_just_past_5min_threshold(self):
+        """Boundary: 5min1s old activity + busy → IDLE."""
+        from claude_island.core.session_phase import SessionPhase
+        from claude_island.core.snapshot import _PID_JSON_FRESHNESS_S
+        just_outside = datetime.now(timezone.utc) - timedelta(
+            seconds=_PID_JSON_FRESHNESS_S + 60,
+        )
+        assert _phase_from_pid_json(
+            status_word="busy", last_activity=just_outside, active_threshold_s=30,
+        ) is SessionPhase.IDLE
 
     def test_idle_status_blocks_heuristic(self):
-        # This is the bug-fix property: even with very recent activity,
-        # idle status → NOT running.
+        # Even with very recent activity, idle status → IDLE (no escalation).
+        from claude_island.core.session_phase import SessionPhase
         recent = datetime.now(timezone.utc)
-        assert _resolve_is_running(
+        assert _phase_from_pid_json(
             status_word="idle", last_activity=recent, active_threshold_s=30,
-        ) is False
+        ) is SessionPhase.IDLE
 
-    def test_idle_status_case_insensitive(self):
+    def test_status_case_insensitive(self):
+        from claude_island.core.session_phase import SessionPhase
         recent = datetime.now(timezone.utc)
-        assert _resolve_is_running(
+        assert _phase_from_pid_json(
             status_word="IDLE", last_activity=recent, active_threshold_s=30,
-        ) is False
-        assert _resolve_is_running(
+        ) is SessionPhase.IDLE
+        assert _phase_from_pid_json(
             status_word="Busy", last_activity=recent, active_threshold_s=30,
-        ) is True
+        ) is SessionPhase.THINKING
 
-    def test_unknown_status_uses_heuristic_recent(self):
+    def test_no_status_recent_activity_thinking(self):
+        from claude_island.core.session_phase import SessionPhase
         recent = datetime.now(timezone.utc) - timedelta(seconds=5)
-        assert _resolve_is_running(
+        assert _phase_from_pid_json(
             status_word=None, last_activity=recent, active_threshold_s=30,
-        ) is True
+        ) is SessionPhase.THINKING
 
-    def test_unknown_status_uses_heuristic_old(self):
+    def test_no_status_stale_activity_idle(self):
+        from claude_island.core.session_phase import SessionPhase
         old = datetime.now(timezone.utc) - timedelta(minutes=5)
-        assert _resolve_is_running(
+        assert _phase_from_pid_json(
             status_word=None, last_activity=old, active_threshold_s=30,
-        ) is False
+        ) is SessionPhase.IDLE
 
     def test_garbage_status_falls_through_to_heuristic(self):
-        # An unrecognised status string ≠ idle/busy/waiting should
-        # not silently mark the session as running — fall through to
-        # heuristic.
+        from claude_island.core.session_phase import SessionPhase
         recent = datetime.now(timezone.utc)
         old = datetime.now(timezone.utc) - timedelta(minutes=5)
-        assert _resolve_is_running(
+        assert _phase_from_pid_json(
             status_word="garbage", last_activity=recent, active_threshold_s=30,
-        ) is True
-        assert _resolve_is_running(
+        ) is SessionPhase.THINKING
+        assert _phase_from_pid_json(
             status_word="garbage", last_activity=old, active_threshold_s=30,
-        ) is False
+        ) is SessionPhase.IDLE
 
-    def test_invalid_last_activity_returns_false(self):
-        # If last_activity is not a real datetime, treat as "not running"
-        # rather than letting an exception propagate.
-        assert _resolve_is_running(
+    def test_invalid_last_activity_returns_idle(self):
+        from claude_island.core.session_phase import SessionPhase
+        assert _phase_from_pid_json(
             status_word=None, last_activity=None,  # type: ignore[arg-type]
             active_threshold_s=30,
-        ) is False
+        ) is SessionPhase.IDLE
 
 
 # ---------------------------------------------------------------------------

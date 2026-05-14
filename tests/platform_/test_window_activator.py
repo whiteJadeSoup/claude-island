@@ -17,6 +17,32 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from claude_island.platform_.window_activator import _ancestor_pids
+
+
+# ── _ancestor_pids defensive behaviour (cross-platform: pure Python) ──
+
+
+def test_ancestor_pids_placeholder_pid_returns_empty():
+    """PLACEHOLDER_PID (-1) inserted by HookSessionBridge must not blow
+    up _ancestor_pids — psutil raises ValueError on negative pid which
+    would propagate up to focus() and silently no-op user clicks
+    (Bug A from live-run testing 2026-05-13)."""
+    assert _ancestor_pids(-1) == []
+
+
+def test_ancestor_pids_zero_pid_returns_empty():
+    """pid=0 is the System Idle Process on Windows; treat as invalid."""
+    assert _ancestor_pids(0) == []
+
+
+def test_ancestor_pids_nonexistent_pid_returns_empty():
+    """High pid that doesn't exist → psutil.NoSuchProcess → []."""
+    # Use a very large pid unlikely to exist
+    result = _ancestor_pids(2**30)
+    assert result == []
+
+
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32", reason="Windows-only API surface"
 )

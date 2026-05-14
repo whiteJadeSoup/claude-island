@@ -18,12 +18,15 @@ Helpers it leans on:
 """
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar, Sequence
+
+log = logging.getLogger(__name__)
 
 from claude_island.core.capabilities import (
     Capability,
@@ -144,7 +147,16 @@ class WindowsTerminalAdapter(_CapabilityProvider):
 
         Walks ancestors via psutil. On Windows every claude session is
         inside *some* terminal (WT, conhost, or a bundled app); we
-        only claim WT-hosted sessions, generic_windows claims the rest."""
+        only claim WT-hosted sessions, generic_windows claims the rest.
+
+        Returns False for placeholder sessions (pid<=0) — those are
+        SessionRegistry entries created by HookSessionBridge before the
+        scanner has confirmed a real pid; with no pid we cannot walk
+        ancestors. Such sessions render via the singleton fallback group
+        until the scanner catches up and pid becomes positive.
+        """
+        if session.pid <= 0:
+            return False
         import psutil
         try:
             proc = psutil.Process(session.pid)
@@ -154,7 +166,7 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 if p is None: break
                 ancestors.append(p)
                 proc = p
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
             return False
         return any(
             a.name().lower() in {"windowsterminal.exe", "wt.exe"}
@@ -263,6 +275,18 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         kept: list[SessionView] = []
         for v in views:
             pid = v.session.pid
+            # Placeholder pid (hook arrived before scanner) with a
+            # jump_target shortcut: trust the hook capture, skip the
+            # AttachConsole probe entirely (pid<=0 makes get_console_info
+            # raise). conhost_hwnd will drive _bucket_views below. This
+            # is the open-vibe-island fast path — the in-process hook
+            # already proved the session is real.
+            if pid <= 0:
+                if v.jump_target is not None and v.jump_target.conhost_hwnd:
+                    kept.append(v)
+                # else: no identifying info, drop. Next wake will retry
+                # when scanner has caught up.
+                continue
             conpty_hwnd = self._conpty_cache.get(pid)
             if conpty_hwnd is None:
                 info = win32_console.get_console_info(pid)
@@ -318,15 +342,26 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         singletons: list[SessionView] = []
         for v in kept:
             pid = v.session.pid
-            wt_hwnd: int | None = self._wt_hwnd_cache.get(pid)
-            if wt_hwnd is None and win32gui_mod is not None:
-                conpty = self._conpty_cache.get(pid)
-                if conpty:
+            wt_hwnd: int | None = None
+            # Placeholder views: walk from jump_target.conhost_hwnd to
+            # the WT host (no pid → no _conpty_cache entry → can't take
+            # the legacy path). The conhost_hwnd was captured inside the
+            # claude.exe process by the hook, so it's authoritative.
+            if pid <= 0 and v.jump_target is not None and v.jump_target.conhost_hwnd:
+                if win32gui_mod is not None:
                     wt_hwnd = window_activator.walk_to_visible_host(
-                        conpty, win32gui_mod,
+                        v.jump_target.conhost_hwnd, win32gui_mod,
                     )
-                    if wt_hwnd:
-                        self._wt_hwnd_cache[pid] = wt_hwnd
+            else:
+                wt_hwnd = self._wt_hwnd_cache.get(pid)
+                if wt_hwnd is None and win32gui_mod is not None:
+                    conpty = self._conpty_cache.get(pid)
+                    if conpty:
+                        wt_hwnd = window_activator.walk_to_visible_host(
+                            conpty, win32gui_mod,
+                        )
+                        if wt_hwnd:
+                            self._wt_hwnd_cache[pid] = wt_hwnd
             if wt_hwnd:
                 key = (wt_hwnd, _normalize_project_path(v.project_path))
                 buckets.setdefault(key, []).append(v)
@@ -402,8 +437,13 @@ class WindowsTerminalAdapter(_CapabilityProvider):
                 focus_granularity=FocusGranularity.TAB,
                 capabilities=type(self).capabilities,
             )
+            # group_id must be unique. Placeholder pid (-1) is shared
+            # across all hook-before-scanner views, so prefer session_uuid
+            # which is always set by the hook. Pid fallback handles older
+            # SessionView construction paths in tests.
+            uid = stamped.session_uuid or str(stamped.pid)
             result.append(SessionGroup(
-                group_id=f"wt:singleton:{stamped.pid}",
+                group_id=f"wt:singleton:{uid}",
                 title_hint=None,
                 adapter_id=self.name,
                 views=(stamped,),
@@ -466,10 +506,26 @@ class WindowsTerminalAdapter(_CapabilityProvider):
             if sib_sentinel and sib_sentinel != expected:
                 sib_sentinels.append(sib_sentinel)
 
+        # Open-vibe-island pattern (2026-05-14): if the hook captured
+        # a JumpTarget at SessionStart, pass its conhost_hwnd as a
+        # shortcut so _activate_windows skips the ~50ms AttachConsole
+        # round-trip. For real pids we validate host_pid match (defends
+        # against pid recycle); for placeholder pids (hook arrived
+        # before scanner, session.pid==-1) we trust the hook capture
+        # unconditionally — that's the whole point of the hook stream.
+        prehook_conhost: int = 0
+        if view.jump_target is not None and view.jump_target.conhost_hwnd:
+            if (
+                view.session.pid <= 0
+                or view.jump_target.host_pid == view.session.pid
+            ):
+                prehook_conhost = view.jump_target.conhost_hwnd
+
         return _activate_windows(
             view.session.pid,
             expected_title=expected,
             sibling_sentinels=tuple(sib_sentinels),
+            prehook_conhost_hwnd=prehook_conhost,
         )
 
     # ── LAUNCH ───────────────────────────────────────────────────────────
@@ -560,6 +616,7 @@ def _activate_windows(
     *,
     expected_title: str | None = None,
     sibling_sentinels: tuple[str, ...] = (),
+    prehook_conhost_hwnd: int = 0,
 ) -> bool:
     """Resolve console window → (re-assert sentinel title if needed)
     → UIA tab select → SetForegroundWindow.
@@ -613,44 +670,118 @@ def _activate_windows(
         )
         return False
 
-    resolved = _resolve_console_window(pid, win32gui)
+    # Open-vibe-island shortcut (2026-05-14): when the hook gave us a
+    # captured conhost_hwnd at SessionStart, walk to wt_hwnd directly
+    # from it. Saves the AttachConsole/FreeConsole round-trip
+    # (~50ms) that _resolve_console_window pays via get_console_info.
+    resolved = _resolve_console_window_fast(
+        pid, win32gui, prehook_conhost_hwnd,
+    )
     hwnd: int | None = None
     if resolved is not None:
         hwnd, current_title = resolved
         from claude_island.platform_ import win32_console, wt_uia
 
-        # Click-time reconcile: claude may have rewritten the title
-        # via OSC during a topic shift, or this session was just
-        # discovered by the scanner and group()'s reconcile hasn't
-        # run yet. Re-set then wait for WT's OSC pipeline to mirror
-        # the change into TabItem.Name before we issue the select.
+        # Click-time reconcile: race against Claude OSC overwrites.
+        # WT's TabItem.Name can diverge from the kernel title because
+        # Claude continuously writes OSC titles. We retry set+wait+select
+        # several times in a tight loop to catch the brief window where
+        # WT has just mirrored our sentinel before Claude OSCs again.
         #
         # WARNING: this entire helper runs on the Qt main thread
-        # (called from the click handler). The wait_for_tab_name
-        # busy-poll is the dominant blocking source — kept under
-        # ~80 ms by its default cap (Q-2). If a future change adds a
-        # longer-poll variant or removes the cap, the click freezes
-        # the UI for that duration. Move the reconcile to a worker
-        # thread before going past ~100 ms.
+        # (called from the click handler). Total time budget capped
+        # at ~150 ms (5 attempts × ~30 ms each) so a click never feels
+        # unresponsive.
+        #
+        # Profile incompatibility: if the WT profile has
+        # suppressApplicationTitle:true, NO amount of retry helps —
+        # WT silently discards every kernel-set title. The fallback
+        # block below gracefully degrades (no wrong-tab navigation).
         target_title = expected_title or current_title
-        if expected_title and current_title != expected_title:
-            win32_console.set_console_title(pid, expected_title)
-            # If WT silently dropped our set (suppressApplicationTitle
-            # profile), wait_for_tab_name times out and select_tab_by_title
-            # below also fails — we still fall back to plain foreground
-            # at the end.
-            wt_uia.wait_for_tab_name(hwnd, expected_title)
+        selected = False
+        if expected_title:
+            # Fast path: try select_tab_by_title(expected) directly.
+            # Works in the common case (sentinel set correctly + WT
+            # mirrored it to TabItem.Name). When called via the
+            # JumpTarget shortcut the current_title isn't known, so we
+            # rely on this attempt to detect whether WT has the title.
+            if wt_uia.select_tab_by_title(hwnd, expected_title):
+                selected = True
+            elif current_title != expected_title:
+                # Title drift / Claude OSC clobbered our sentinel.
+                # Worth one re-set + wait + select. (When current_title
+                # is "" — JumpTarget shortcut — we conservatively try
+                # this path; one extra AttachConsole is fine since the
+                # fast select above already failed.)
+                win32_console.set_console_title(pid, expected_title)
+                if wt_uia.wait_for_tab_name(
+                    hwnd, expected_title, timeout_ms=80,
+                ) and wt_uia.select_tab_by_title(hwnd, expected_title):
+                    selected = True
+            # else: current_title == expected_title (we knew it via
+            # slow path) AND select failed → WT silently discarding
+            # title (suppressApplicationTitle). No point re-setting.
+        else:
+            # No expected_title (degraded SessionView). Best we can do
+            # is try current_title.
+            if wt_uia.select_tab_by_title(hwnd, target_title):
+                selected = True
 
-        if not wt_uia.select_tab_by_title(hwnd, target_title):
-            # Inactive-pane fallback: try cwd-matched sibling
-            # sentinels (caller-filtered to same-cwd same-wt-window).
-            # One of them is likely the active pane of the click
-            # target's tab — selecting its sentinel switches WT to
-            # the right tab.
-            for sib_name in sibling_sentinels:
-                if sib_name and sib_name != target_title and \
-                        wt_uia.select_tab_by_title(hwnd, sib_name):
-                    break
+        if not selected:
+            # The target's sentinel isn't visible as a TabItem.Name.
+            # Three distinct scenarios produce this:
+            #   (a) Inactive pane of a split tab — sentinel is set on
+            #       the inactive pane's conpty but UIA only surfaces
+            #       the ACTIVE pane's title.
+            #   (b) Claude OSC overwrote our sentinel after the retry
+            #       loop above couldn't win the race in 150ms.
+            #   (c) WT profile has suppressApplicationTitle:true and
+            #       silently drops every kernel-set title.
+            #
+            # Strategy: a "smart guess" using the tab list.
+            visible_ci_tabs = wt_uia.list_ci_tab_names(hwnd)
+
+            # Case (a): only 1 ci:* tab visible → likely active pane of
+            # the split tab. Sibling fallback is correct here.
+            if len(visible_ci_tabs) <= 1:
+                for sib_name in sibling_sentinels:
+                    if sib_name and sib_name != target_title and \
+                            wt_uia.select_tab_by_title(hwnd, sib_name):
+                        break
+            else:
+                # Case (b)/(c): multiple ci:* tabs visible (= sentinels
+                # WT respects). Try smart guess: enumerate ALL TabItems
+                # and find ones whose Name is NOT a known sentinel
+                # (= candidates for our suppressed target). If EXACTLY
+                # one candidate exists, Select it — it's almost
+                # certainly our target. If 0 or 2+, abstain (force
+                # foreground only).
+                known = set(visible_ci_tabs) | set(sibling_sentinels)
+                # Our own expected_title belongs in candidates too —
+                # remove only OTHER sentinels.
+                if expected_title:
+                    known.discard(expected_title)
+
+                # Try smart_guess: lone non-sentinel candidate → Select
+                # it (instant, no cycling). For multi-candidate cases
+                # (user has 2+ tabs with non-claude names), we ABSTAIN
+                # rather than cycle visibly — bring WT to foreground
+                # and let user pick the tab themselves.
+                #
+                # The earlier `content_match` approach cycled visibly
+                # through candidates reading each tab's terminal text.
+                # User correctly identified this as bad UX (2026-05-13).
+                # Per open-vibe-island's architecture: hooks should
+                # capture terminal-identifying info at SessionStart and
+                # click uses it directly. For WT specifically, no
+                # outside-process API maps conpty hwnd → UIA TabItem
+                # reliably, so for ambiguous cases we surface a clear
+                # diagnostic and fall back to force_foreground.
+                if not _try_smart_guess_select(hwnd, exclude_names=known):
+                    if expected_title:
+                        _emit_suppress_title_diagnostic(
+                            expected_title.removeprefix("ci:"),
+                        )
     else:
         from claude_island.platform_.window_activator import _ancestor_pids, _find_window_for_pids
         candidate_pids = _ancestor_pids(pid)
@@ -663,7 +794,153 @@ def _activate_windows(
     return _force_foreground(hwnd, win32con, win32gui, win32process)
 
 
+def _try_smart_guess_select(hwnd: int, *, exclude_names: set[str]) -> bool:
+    """Smart guess for the suppressApplicationTitle case (Bug C deep
+    fix, 2026-05-13).
+
+    When our sentinel can't be matched via TabItem.Name (because the
+    target's WT profile suppresses application titles), enumerate all
+    TabItems and identify "candidates": tabs whose Name is NOT a known
+    other-session sentinel. If EXACTLY one candidate exists, it's
+    almost certainly our target — select it.
+
+    If 0 candidates or 2+ candidates exist, abstain: a wrong-tab
+    selection is worse than no-op (user can still see the WT window
+    via the subsequent _force_foreground call). The caller is
+    expected to emit a one-time diagnostic explaining WT's profile
+    limitation.
+
+    Returns True if a candidate was selected, False otherwise.
+    """
+    try:
+        import uiautomation as auto
+        root = auto.ControlFromHandle(hwnd)
+        if root is None:
+            return False
+        tab_control = root.TabControl(searchDepth=10)
+        if not tab_control.Exists(0.1):
+            return False
+
+        # Find the ListControl wrapping all TabItems (WinUI3 TabView).
+        list_ctrl = None
+        for c in tab_control.GetChildren():
+            if getattr(c, "ControlTypeName", "") == "ListControl":
+                list_ctrl = c
+                break
+        if list_ctrl is None:
+            return False
+
+        candidates = []
+        for item in list_ctrl.GetChildren():
+            if getattr(item, "ControlTypeName", "") != "TabItemControl":
+                continue
+            name = getattr(item, "Name", "") or ""
+            if name in exclude_names:
+                continue
+            candidates.append(item)
+
+        if len(candidates) != 1:
+            return False
+
+        candidate = candidates[0]
+        try:
+            sel = candidate.GetSelectionItemPattern()
+            if sel is None:
+                return False
+            sel.Select()
+            return True
+        except Exception:
+            return False
+    except Exception as exc:
+        log.debug("_try_smart_guess_select failed: %s", exc)
+        return False
+
+
+# Module-level: emit the suppressed-title diagnostic at most once per
+# process lifetime. Spam to stderr on every click would be obnoxious;
+# the user only needs to see it once to know what's going on.
+_suppress_title_warning_emitted = False
+
+
+def _emit_suppress_title_diagnostic(target_uuid: str) -> None:
+    """Write a one-time stderr message explaining why click couldn't
+    navigate when WT's profile suppresses application titles.
+
+    Detection heuristic: we got here because multiple TabItems with
+    names NOT in our sentinel set existed (smart_guess abstained).
+    The classic cause is ``suppressApplicationTitle: true`` in one or
+    more WT profiles. Surface that diagnosis to the user so they
+    understand the click no-op and have a clear path to fix it
+    (edit WT settings).
+
+    Idempotent — only emits once per process. Subsequent calls no-op
+    so the user's stderr isn't spammed by repeated clicks.
+    """
+    global _suppress_title_warning_emitted
+    if _suppress_title_warning_emitted:
+        return
+    _suppress_title_warning_emitted = True
+
+    # Probe WT's settings.json to confirm or deny our suspicion.
+    settings_path = (
+        Path.home()
+        / "AppData/Local/Packages"
+        / "Microsoft.WindowsTerminal_8wekyb3d8bbwe"
+        / "LocalState" / "settings.json"
+    )
+    suppressed_profiles: list[str] = []
+    try:
+        import json
+        text = settings_path.read_text(encoding="utf-8")
+        data = json.loads(text)
+        profiles = data.get("profiles", {})
+        if isinstance(profiles, dict):
+            for plist in (profiles.get("list", []), profiles.get("defaults", {})):
+                if isinstance(plist, list):
+                    for p in plist:
+                        if isinstance(p, dict) and p.get("suppressApplicationTitle"):
+                            suppressed_profiles.append(
+                                p.get("name", "?") or "?"
+                            )
+                elif isinstance(plist, dict):
+                    if plist.get("suppressApplicationTitle"):
+                        suppressed_profiles.append("<defaults>")
+    except (OSError, ValueError, KeyError):
+        pass
+
+    # Tone: this is a one-time informational hint, not an error. WT
+    # was brought to foreground successfully; only the tab-switch
+    # couldn't auto-target because of a WT profile limitation outside
+    # our control. Phrase it accordingly so the user doesn't think
+    # something crashed.
+    if suppressed_profiles:
+        print(
+            f"[claude-island] note: tab auto-switch unavailable — your WT "
+            f"profile(s) {suppressed_profiles} have `suppressApplicationTitle: "
+            f"true`, which prevents external tab identification. To enable "
+            f"click-to-tab, set that option to false in WT settings.json. "
+            f"Sessions started via the Resume drawer (claude-island spawns "
+            f"the WT tab) are unaffected and navigate cleanly.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[claude-island] note: tab auto-switch unavailable for this "
+            f"session — Claude's terminal title overrides our sentinel before "
+            f"WT mirrors it. WT window is in foreground; click the tab once "
+            f"manually. Future sessions started via the Resume drawer skip "
+            f"this limitation.",
+            file=sys.stderr,
+        )
+
+
 def _resolve_console_window(pid: int, win32gui) -> tuple[int, str] | None:
+    # Placeholder pid (hook arrived before scanner) cannot be resolved
+    # via get_console_info — that path needs a real OS handle. Caller
+    # is expected to take the fast path (prehook_conhost_hwnd) instead;
+    # this guard just prevents a crash if the fast path also missed.
+    if pid <= 0:
+        return None
     from claude_island.platform_ import win32_console
     from claude_island.platform_.window_activator import walk_to_visible_host
     info = win32_console.get_console_info(pid)
@@ -676,3 +953,44 @@ def _resolve_console_window(pid: int, win32gui) -> tuple[int, str] | None:
     if host is None:
         return None
     return (host, console_title)
+
+
+def _resolve_console_window_fast(
+    pid: int,
+    win32gui,
+    prehook_conhost_hwnd: int,
+) -> tuple[int, str] | None:
+    """Open-vibe-island JumpTarget shortcut (2026-05-14).
+
+    When ``prehook_conhost_hwnd`` is non-zero, the hook captured the
+    conhost hwnd at SessionStart and shipped it via JumpTarget. We
+    walk straight to the WT host without an AttachConsole round-trip.
+
+    Trade-off: we can't read the current console title without
+    AttachConsole (verified: ``GetWindowText`` on conhost returns ""
+    even when the kernel title is set). So we return ``""`` for
+    title — the caller's tab-select chain handles this by trying
+    select_tab_by_title(expected) optimistically before deciding
+    whether to enter the slow set+wait+select branch.
+
+    Falls through to the slow ``_resolve_console_window`` when:
+      * prehook_conhost_hwnd is 0 (no hook coverage / capture failed)
+      * the hwnd is no longer valid (pid recycle / exit)
+      * the walk from the pre-hook hwnd fails
+
+    Returns ``(wt_host_hwnd, console_title_or_empty)``.
+    """
+    from claude_island.platform_.window_activator import walk_to_visible_host
+
+    if prehook_conhost_hwnd > 0:
+        try:
+            if not win32gui.IsWindow(prehook_conhost_hwnd):
+                return _resolve_console_window(pid, win32gui)
+        except Exception:
+            return _resolve_console_window(pid, win32gui)
+
+        host = walk_to_visible_host(prehook_conhost_hwnd, win32gui)
+        if host is not None:
+            return (host, "")  # Title unknown — caller handles.
+
+    return _resolve_console_window(pid, win32gui)

@@ -589,12 +589,105 @@ dormant_source = DormantSessionSource(
 )
 launch_intent = LaunchIntentRegistry()
 
+# ── Hook pipeline (Step 8) ────────────────────────────────────────────────
+# Hooks complement the scanner: scanner = discovery + liveness fallback;
+# hooks = real-time phase / tool / prompt push. See Detail Design v2.
+#
+# Boot order:
+#   1. sync_hook_script: copy bundled hook.py to ~/.claude-island/hook.py
+#      so settings.json's command points at a stable absolute path.
+#   2. install_if_needed: idempotently merge our hook entries into
+#      ~/.claude/settings.json, preserving user's existing hooks.
+#   3. Build SessionStateMachine (pure reducer).
+#   4. Start HookServer on 127.0.0.1:<port>. If listener bind fails
+#      across the retry range we degrade to scanner-only — Claude
+#      hooks will fail-open and the UI continues working off pid.json.
+#   5. Build HookSessionBridge to wire state_machine ↔ session_registry
+#      (placeholder upsert for race + tombstone for crashed processes).
+#   6. Wire state_machine.live_state_changed → snapshotter.wake (done
+#      AFTER Snapshotter is constructed below).
+from importlib import resources
+
+from claude_island.core.session_state_machine import SessionStateMachine
+from claude_island.platform_ import hook_installer
+from claude_island.platform_.hook_server import HookServer, HookServerStartError
+from claude_island.platform_.hook_session_bridge import HookSessionBridge
+
+state_machine = SessionStateMachine()
+hook_server: HookServer | None = None
+hook_bridge: HookSessionBridge | None = None
+
+try:
+    # Step 1: sync the bundled hook script to ~/.claude-island/hook.py
+    with resources.as_file(
+        resources.files("claude_island") / "hook.py"
+    ) as bundled_hook:
+        dest_hook = Path.home() / ".claude-island" / "hook.py"
+        try:
+            hook_installer.sync_hook_script(
+                bundled_script=Path(bundled_hook), dest=dest_hook,
+            )
+        except OSError as e:
+            _safe_stderr_write(
+                f"[claude-island] could not sync hook.py to {dest_hook}: {e}; "
+                f"hooks disabled this session"
+            )
+            raise
+
+    # Step 2: write our hook entries into ~/.claude/settings.json
+    hook_command = hook_installer.build_hook_command(
+        python_exe=sys.executable,
+        hook_script=dest_hook,
+    )
+    try:
+        result = hook_installer.install_if_needed(
+            settings_path=Path.home() / ".claude" / "settings.json",
+            hook_command=hook_command,
+        )
+        if result.changed:
+            _safe_stderr_write(
+                f"[claude-island] installed Claude Code hooks "
+                f"({len(result.installed_events)} events); "
+                f"preserved {result.user_hooks_preserved} user hook(s)"
+            )
+    except hook_installer.InstallError as e:
+        _safe_stderr_write(
+            f"[claude-island] could not install hooks in settings.json: {e}"
+        )
+        # Continue anyway — listener still works if user pre-installed hooks
+
+    # Step 4: start the HTTP listener.
+    hook_server = HookServer(state_machine)
+    try:
+        bound_port = hook_server.start()
+        _safe_stderr_write(
+            f"[claude-island] hook listener bound on 127.0.0.1:{bound_port}"
+        )
+    except HookServerStartError as e:
+        _safe_stderr_write(
+            f"[claude-island] hook listener failed to start: {e}; "
+            f"degrading to scanner-only (phase will come from pid.json)"
+        )
+        hook_server = None
+
+    # Step 5: wire registry ↔ state_machine via the bridge.
+    hook_bridge = HookSessionBridge(
+        registry=session_registry, state_machine=state_machine,
+    )
+except Exception as e:
+    # Catastrophic boot failure of the hook subsystem — degrade gracefully.
+    _safe_stderr_write(
+        f"[claude-island] hook subsystem failed to initialize ({e!r}); "
+        f"running scanner-only"
+    )
+
 snapshotter = Snapshotter(
     session_source=session_registry,
     state_reader=session_state_reader,
     metadata_provider=jsonl_parser,
     usage_registry=usage_registry,
     names_store=session_names_store,
+    live_state_reader=state_machine.read,
     get_quota=_get_quota_snapshot,
     get_available_providers=_resolve_available_providers,
     get_selected_provider=lambda: (
@@ -606,6 +699,16 @@ snapshotter = Snapshotter(
     launch_intent=launch_intent,
     debounce_window_s=0.1,
     throttle_first_window_s=0.2,
+)
+
+# Step 6: hook events drive snapshotter wakes. live_state_changed fires
+# on the HookServer worker thread; snapshotter.wake() is thread-safe
+# (BehaviorSubject mutex) and debounces internally.
+state_machine.live_state_changed.subscribe(
+    on_next=lambda _: snapshotter.wake(),
+    on_error=lambda e: _safe_stderr_write(
+        f"[claude-island] live_state_changed subscription died: {e!r}"
+    ),
 )
 
 def _safe_render(target_name: str, render_fn):

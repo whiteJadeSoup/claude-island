@@ -64,18 +64,21 @@ def _view(
         session_uuid="",
         last_activity=_FIXED_TS,
     )
+    from claude_island.core.session_phase import SessionPhase
     return SessionView(
         pid=1234,
         name="test",
         project_path=Path("/tmp/test"),
         project_basename="test",
         last_activity=_FIXED_TS,
-        is_running=is_running,
         cost_usd=cost_usd,
         is_high_cost=is_high_cost,
         latest_model="claude-opus-4-7",
         status_word="idle",
         session=sess,
+        # Map legacy is_running kwarg → phase. THINKING when active so
+        # phase.is_active() returns True (= old is_running semantics).
+        phase=SessionPhase.THINKING if is_running else SessionPhase.IDLE,
     )
 
 
@@ -175,7 +178,7 @@ class TestWorldSnapshot:
             pid=99, name="b", project_path=Path("/b"),
             project_basename="b",
             last_activity=datetime.now(timezone.utc),
-            is_running=False, cost_usd=1.0, is_high_cost=False,
+            cost_usd=1.0, is_high_cost=False,
             latest_model=None, status_word=None, session=b_sess,
         )
         ts = datetime.now(timezone.utc)

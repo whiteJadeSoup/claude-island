@@ -120,10 +120,12 @@ class TestGroupSessions:
         ad = FakeTerminalAdapter(handle={10, 20})
         d = TerminalDispatcher(terminals={ad.name: ad}, os_backend=StubOs(), app_backend=StubApp())
         groups = d.group_sessions([view_a, view_b])
-        assert len(groups) == 1
-        g = groups[0]
-        assert len(g.views) == 2
-        assert g.adapter_id == "fake-terminal"
+        # Open-vibe-island alignment (2026-05-14): dispatcher explodes
+        # multi-view groups into singletons. Adapter still produced one
+        # group internally; dispatcher flattened it to two.
+        assert len(groups) == 2
+        assert all(len(g.views) == 1 for g in groups)
+        assert {g.adapter_id for g in groups} == {"fake-terminal"}
 
     def test_os_app_caps_merged_into_views(self, view_a):
         ad = FakeTerminalAdapter(handle={10})

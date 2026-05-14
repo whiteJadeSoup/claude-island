@@ -42,10 +42,11 @@ def test_project_hash_preserves_dots_underscores_alphanumeric():
 # Emit semantics: skip no-op updates, fire on real changes.
 # --------------------------------------------------------------------------
 
-def test_update_with_identical_sessions_emits_only_once():
-    """Scanner ticks every ~10s with usually identical content. The redundant
-    emits force every UI subscriber to re-diff; skipping them at the source
-    is a free win."""
+def test_update_emits_every_tick_even_when_unchanged():
+    """update() emits sessions_changed on every call so HookSessionBridge
+    can advance its scanner-miss counter when the session list isn't
+    shape-changing. The Snapshotter pipeline downstream dedupes via
+    distinct_until_changed on WorldSnapshot."""
     reg = SessionRegistry()
     s = _session(pid=1, cwd="/home/x",
                  started=datetime(2025, 1, 1, 9, 0, tzinfo=timezone.utc))
@@ -57,7 +58,8 @@ def test_update_with_identical_sessions_emits_only_once():
     reg.update([s])
     reg.update([s])
 
-    assert len(received) == 1
+    # Three calls → three emits
+    assert len(received) == 3
 
 
 def test_update_emits_when_session_added():

@@ -12,6 +12,18 @@ claims sessions produces groups; remaining unclaimed sessions fall to
 the next adapter. OS + APP capabilities are merged into every emitted
 view (union of what the terminal provides + what the backend provides).
 
+Adapter routing — open-vibe-island alignment (2026-05-14):
+When ``view.jump_target.terminal_app`` is set (the hook captured the
+host terminal at SessionStart time), routing skips the ``can_handle``
+psutil walk and goes straight to the matching adapter via the
+``_TERMINAL_APP_TO_ADAPTER`` map. This is the same model open-vibe-island
+uses: the hook running INSIDE the claude.exe knows exactly which
+terminal hosts it (WT_SESSION → WindowsTerminal, TERM_PROGRAM=iTerm.app
+→ iterm2, etc.), so click-time disambiguation degrades to a string
+lookup. Sessions without a jump_target (pre-hook-install, hook capture
+failed, or older hook.py versions) fall through to the legacy
+``can_handle`` chain — full backward compatibility.
+
 dispatch picks the target by scope (TERMINAL → adapter_id lookup;
 OS → os_backend; APP → app_backend) and delegates. Returns False on
 any failure without raising.
@@ -37,6 +49,27 @@ from claude_island.core.snapshot import SessionGroup, SessionView
 from claude_island.platform_.terminals.protocols import TerminalAdapter
 
 log = logging.getLogger(__name__)
+
+
+# ── Hook terminal_app string → adapter name mapping ────────────────────────
+# Mirrors open-vibe-island's inferTerminalApp + per-adapter routing. The
+# hook captures TERM_PROGRAM / WT_SESSION inside the claude.exe process
+# (see claude_island/hook.py::_build_jump_target) and normalizes them to
+# one of these tokens. At click/group time we route directly without
+# walking psutil ancestors.
+#
+# Unknown terminal_app strings (rare 3rd-party terminals) fall through
+# to the legacy can_handle chain — that path still works, this map is
+# strictly additive.
+_TERMINAL_APP_TO_ADAPTER: dict[str, str] = {
+    # Windows side
+    "WindowsTerminal": "windows-terminal",
+    "ConsoleHost": "generic-windows",
+    # macOS side — match what TERM_PROGRAM literally reports
+    "iTerm.app": "iterm2",
+    "Apple_Terminal": "terminal-app",
+    "Terminal": "terminal-app",
+}
 
 
 class _AdapterState:
@@ -104,10 +137,73 @@ class TerminalDispatcher:
         Adapters MUST NOT re-run compose_session_view — that path is
         the snapshotter's exclusive responsibility, with the real
         registries; re-running it inside an adapter would either drop
-        real data (if null sources are passed) or duplicate the cost."""
+        real data (if null sources are passed) or duplicate the cost.
+
+        Routing priority (open-vibe-island alignment, 2026-05-14):
+          1. ``view.jump_target.terminal_app`` known in
+             ``_TERMINAL_APP_TO_ADAPTER`` → route directly to that adapter.
+             Skips the ``can_handle`` psutil walk and works for views
+             with placeholder pid (hook arrived before scanner).
+          2. Legacy ``can_handle`` chain — fallback for views with no
+             jump_target (pre-hook session, capture failed, older hook.py).
+
+        Group flattening (open-vibe-island alignment, 2026-05-14):
+        At return time every multi-view SessionGroup is exploded into N
+        singleton groups so the UI renders "one session per row" instead
+        of cards. Adapters still group internally for orphan-filter +
+        sentinel-write side effects in WT's case; flattening happens
+        AFTER those side effects run.
+        """
+        # Phase 1: route by jump_target.terminal_app first, then by
+        # legacy can_handle. Bucket views per adapter so each adapter's
+        # group() is called exactly once with all its claimed views.
+        buckets: dict[str, list[SessionView]] = {}
+        remaining: list[SessionView] = []
+        for v in views:
+            target_name = self._route_by_jump_target(v)
+            if target_name and target_name in self._terminals:
+                buckets.setdefault(target_name, []).append(v)
+            else:
+                remaining.append(v)
+
         groups: list[SessionGroup] = []
-        remaining = list(views)
+
+        # Phase 1a: invoke each adapter once with its jump_target-routed
+        # views. Walk in chain order so degraded adapters are skipped.
         for st in self._chain:
+            if st.is_degraded():
+                continue
+            claimed = buckets.pop(st.adapter.name, None)
+            if not claimed:
+                continue
+            try:
+                raw = st.adapter.group(claimed)
+            except Exception as e:
+                log.warning(
+                    "TerminalAdapter %r raised in group() [jump_target route]: %s",
+                    st.adapter.name, e,
+                )
+                st.note_failure()
+                # Push these views back into remaining so the legacy
+                # chain can take a swing.
+                remaining.extend(claimed)
+                continue
+            for g in raw:
+                merged_views = tuple(
+                    _merge_caps(v, self._merged_caps) for v in g.views
+                )
+                groups.append(_replace_views(g, merged_views))
+
+        # Any leftover bucket entries (adapter not in chain, e.g. ran
+        # on the wrong platform) fall back to legacy can_handle below.
+        for leftover in buckets.values():
+            remaining.extend(leftover)
+
+        # Phase 1b: legacy can_handle chain for views without a valid
+        # jump_target route (older hook, ConsoleHost fallthrough, etc).
+        for st in self._chain:
+            if not remaining:
+                break
             if st.is_degraded():
                 continue
             taken = [v for v in remaining if st.adapter.can_handle(v.session)]
@@ -116,7 +212,10 @@ class TerminalDispatcher:
             try:
                 raw = st.adapter.group(taken)
             except Exception as e:
-                log.warning("TerminalAdapter %r raised in group(): %s", st.adapter.name, e)
+                log.warning(
+                    "TerminalAdapter %r raised in group() [legacy route]: %s",
+                    st.adapter.name, e,
+                )
                 st.note_failure()
                 continue
             for g in raw:
@@ -125,9 +224,23 @@ class TerminalDispatcher:
                 )
                 groups.append(_replace_views(g, merged_views))
             remaining = [v for v in remaining if v not in taken]
-            if not remaining:
-                break
-        return groups
+
+        # Phase 2: explode multi-view groups into singletons (user
+        # decision 2026-05-14: "每个会话展示一行").
+        return _explode_to_singletons(groups)
+
+    @staticmethod
+    def _route_by_jump_target(view: SessionView) -> str | None:
+        """Return the adapter name dictated by ``view.jump_target``, or
+        None if the view has no jump_target / unknown terminal_app.
+
+        Pure lookup — no syscalls, no psutil. Returns the adapter ``name``
+        token that matches ``@adapter("name", ...)`` registration.
+        """
+        jt = view.jump_target
+        if jt is None:
+            return None
+        return _TERMINAL_APP_TO_ADAPTER.get(jt.terminal_app or "")
 
     # ── Control flow ────────────────────────────────────────────────────
 
@@ -276,3 +389,40 @@ def _merge_caps(view: SessionView, extra: frozenset[Capability]) -> SessionView:
 def _replace_views(group: SessionGroup, views: tuple[SessionView, ...]) -> SessionGroup:
     from dataclasses import replace
     return replace(group, views=views)
+
+
+def _explode_to_singletons(groups: list[SessionGroup]) -> list[SessionGroup]:
+    """Flatten every multi-view ``SessionGroup`` into multiple singleton
+    groups so the UI renders one row per session.
+
+    Why: open-vibe-island doesn't visually group sessions (each row is
+    one AgentSession). User opted in to the same convention here
+    (2026-05-14). Done at dispatcher level rather than adapter level so
+    adapter-internal grouping (e.g. WT's wt_hwnd bucketing for sentinel
+    reconciliation) still happens — we just don't expose the bucket
+    structure to the UI.
+
+    Singleton groups pass through untouched. Multi-view groups are
+    replaced by N singletons; each singleton inherits adapter_id and
+    title_hint from the parent, and gets a unique ``group_id`` derived
+    from the parent's id + session uuid/pid (the parent's id is
+    typically the wt_hwnd or similar shared identifier, so suffixing
+    keeps uniqueness without losing the parent's diagnostic value)."""
+    from dataclasses import replace
+    flat: list[SessionGroup] = []
+    for g in groups:
+        if len(g.views) <= 1:
+            flat.append(g)
+            continue
+        for v in g.views:
+            # Stable per-view id: prefer session_uuid (real identity),
+            # fall back to pid (uuid not yet resolved). Empty string
+            # safety: pid alone is enough since adapters set adapter_id
+            # uniquely per view.
+            suffix = v.session_uuid or str(v.session.pid)
+            flat.append(replace(
+                g,
+                group_id=f"{g.group_id}:{suffix}",
+                views=(v,),
+            ))
+    return flat
