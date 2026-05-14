@@ -183,15 +183,41 @@ class TestRegister:
         assert snap[0].prompt_preview is None
 
     def test_snapshot_sorted_by_created_at(self, registry: PendingDecisionRegistry):
-        a = _req()
-        b = _req()  # built second → later created_at (or equal — tolerate)
+        # Pin created_at explicitly — datetime.now() resolution on Windows
+        # is ~15 ms by default, so two back-to-back _req() calls can land
+        # on the same timestamp. With ties, snapshot's sort is stable and
+        # returns registration order (b, a), but the test wants to prove
+        # the sort happens by created_at, not by registration order — so
+        # force a < b in time and register them in the opposite order.
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        a = build_request(
+            kind=DecisionKind.PRE_TOOL_USE,
+            session_uuid="u1",
+            session_name="s",
+            cwd=Path("/tmp/proj"),
+            hook_event="PreToolUse",
+            timeout_s=5.0,
+            now=now,
+            tool_name="Bash",
+            tool_input_preview="ls",
+        )
+        b = build_request(
+            kind=DecisionKind.PRE_TOOL_USE,
+            session_uuid="u1",
+            session_name="s",
+            cwd=Path("/tmp/proj"),
+            hook_event="PreToolUse",
+            timeout_s=5.0,
+            now=now + timedelta(milliseconds=50),  # strictly later
+            tool_name="Bash",
+            tool_input_preview="ls",
+        )
         registry.register(b)
         registry.register(a)
         snap = registry.snapshot()
-        assert [v.id for v in snap] == sorted(
-            [a.id, b.id],
-            key=lambda i: a.created_at if i == a.id else b.created_at,
-        )
+        # Sorted by created_at asc → a (earlier) first, then b.
+        assert [v.id for v in snap] == [a.id, b.id]
 
     def test_full_raises_RegistryFull(self, registry: PendingDecisionRegistry):
         for _ in range(MAX_PENDING_DECISIONS):

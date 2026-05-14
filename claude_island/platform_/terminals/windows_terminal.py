@@ -727,6 +727,36 @@ def _activate_windows(
             if wt_uia.select_tab_by_title(hwnd, target_title):
                 selected = True
 
+        # Race-loser fallback (Bug 2026-05-14, mini-cc-opus-dev): when
+        # Claude's OSC writes win the race against our SetConsoleTitleW,
+        # WT mirrors Claude's title to TabItem.Name (just not our
+        # sentinel). ``current_title`` was just read from the kernel
+        # for THIS pid, so it IS what WT shows for this conpty's tab.
+        # One cheap UIA select before falling to the smart_guess
+        # heuristic. Almost always hits because WT happily mirrors
+        # Claude's titles — only ours lose the race.
+        #
+        # Confirmed by scripts/probe_focus.py: pid 82508 had
+        # current_title='⠂ Claude Code' which WAS in the WT window's
+        # tab_titles list. Sentinel select would've kept missing forever
+        # because Claude rewrites its OSC every internal turn.
+        #
+        # Caveat: when N tabs share the same kernel title (e.g. several
+        # Claude sessions all currently on '⠂ Claude Code'),
+        # select_tab_by_title picks the first match — which may be a
+        # sibling rather than our exact target. Still strictly better
+        # than the previous behaviour (no navigation at all): the user
+        # lands on a Claude tab in the same WT window instead of
+        # whatever was previously frontmost.
+        if (
+            not selected
+            and expected_title
+            and current_title
+            and current_title != expected_title
+            and wt_uia.select_tab_by_title(hwnd, current_title)
+        ):
+            selected = True
+
         if not selected:
             # The target's sentinel isn't visible as a TabItem.Name.
             # Three distinct scenarios produce this:

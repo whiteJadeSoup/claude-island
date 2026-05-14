@@ -792,6 +792,54 @@ class TestActivateWindowsReconcile:
             0xCAFE, self.EXPECTED,
         )
 
+    def test_falls_back_to_current_title_when_claude_won_osc_race(
+        self, patched_activate,
+    ):
+        """Bug 2026-05-14 (live-run, mini-cc-opus-dev): Claude
+        continuously writes its own console title via OSC ('⠂ Claude
+        Code', '✳ status…') and wins the race against our
+        SetConsoleTitleW. WT happily mirrors Claude's titles into
+        TabItem.Name — just not OUR sentinel writes — so the kernel
+        console title we just read for this pid (``current_title``)
+        IS the live TabItem.Name.
+
+        Pre-fix: sentinel select missed twice, smart_guess abstained
+        with multiple non-sentinel candidates → diagnostic + plain
+        force_foreground (UI feels 'click did nothing'). Post-fix: try
+        ``select_tab_by_title(current_title)`` between the sentinel
+        retry and the smart_guess heuristic — cheap UIA call that
+        hits whenever Claude's title made it through. Confirmed by
+        scripts/probe_focus.py: pid 82508 had current_title='⠂ Claude
+        Code' which appears in tab_titles for the WT window."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        # Live state: kernel title is Claude's OSC write, not our sentinel.
+        patched_activate.get_console_info.return_value = (
+            0xAA, "⠂ Claude Code",
+        )
+        # Sentinel selects fail (WT TabItem.Name has Claude's title,
+        # not ours). Third select uses current_title and HITS.
+        patched_activate.select_tab_by_title.side_effect = [
+            False,  # 1st: select(expected) — sentinel not in TabItem.Name
+            False,  # 2nd: select(expected) after re-set+wait — Claude
+                    #      overwrote again before we could select
+            True,   # 3rd: select(current_title) — Claude's title IS
+                    #      mirrored, this hits
+        ]
+
+        ok = _activate_windows(pid=999, expected_title=self.EXPECTED)
+
+        assert ok is True
+        # Three selects total. Last one is by current_title.
+        assert patched_activate.select_tab_by_title.call_count == 3
+        last_call = patched_activate.select_tab_by_title.call_args_list[-1]
+        assert last_call.args == (0xCAFE, "⠂ Claude Code")
+        # Smart-guess must NOT have been consulted — current_title
+        # fallback is cheaper and more precise.
+        patched_activate.list_ci_tab_names.assert_not_called()
+
     def test_force_foreground_called_even_when_select_fails(
         self, patched_activate,
     ):
@@ -927,13 +975,20 @@ class TestActivateWindowsReconcile:
             sibling_sentinels=("ci:sib_a",),
         )
 
-        # With the optimistic-first flow (2026-05-14): one optimistic
-        # select(expected) attempt. After it returns False, slow path
-        # runs (set+wait) but wait_for_tab_name returns False so no
-        # post-set select. Sibling fallback then skipped because
-        # multiple ci:* tabs visible (don't navigate to wrong tab).
-        # Net: 1 select_tab_by_title call (the optimistic one).
-        assert patched_activate.select_tab_by_title.call_count == 1
+        # With the optimistic-first flow (2026-05-14) + current_title
+        # race-loser fallback (2026-05-14, mini-cc-opus-dev fix):
+        #   1. select(expected) → False (sentinel not in TabItem.Name)
+        #   2. set_console_title + wait_for_tab_name → False (timeout)
+        #      → no post-set select
+        #   3. select(current_title='⠐ Claude Code') → False (mock; in
+        #      production this often hits because WT mirrors Claude's
+        #      titles, but the mock represents a case where even
+        #      current_title isn't there yet)
+        #   4. smart_guess + force_foreground
+        # Net: 2 select_tab_by_title calls. Neither navigated, since
+        # the mock returns False for everything — that's the test's
+        # safety: NO wrong-sibling navigation.
+        assert patched_activate.select_tab_by_title.call_count == 2
         # Window still brought to foreground.
         patched_activate.force_foreground.assert_called_once()
 
