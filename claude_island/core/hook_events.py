@@ -172,11 +172,12 @@ class SessionEnded:
 
 @dataclass(frozen=True, slots=True)
 class PermissionRequested:
-    """Claude Code's ``PermissionRequest`` hook. v1 does NOT block on
-    this — the hook server returns ``{}`` immediately so Claude falls
-    back to its built-in terminal-based prompt. We surface the state
-    in the UI but the user resolves it in the terminal as before.
-    v2 will let the user resolve from island."""
+    """Claude Code's ``PermissionRequest`` hook. **v1 BLOCKS** on this
+    after the v5 swap (see ``hook.py`` __version__): the hook server
+    registers a pending decision and waits up to ~600 s for the user
+    to allow / deny via the inline approval card. Fail-open: timeout
+    returns ``defer`` and Claude falls back to its built-in terminal
+    prompt. See ``hook_server._handle_permission_request``."""
     session_uuid: str
     tool_name: str | None
     at: datetime

@@ -340,6 +340,98 @@ class TestInlineUnderSession:
         assert "d1" not in panel._decision_cards
 
 
+class TestComputeIncludesPendingDecisions:
+    """A-001 regression: ExpandedWindow.compute() — the key_mapper feeding
+    distinct_until_changed in __main__.py — must include pending_decisions
+    so a snap whose ONLY change is a new approval card still reaches
+    render(snap). Otherwise the new feature silently fails for idle
+    sessions (its most common case)."""
+
+    def test_compute_changes_when_pending_decisions_change(self, panel):
+        group = _session_group(uuid="u1", pid=42)
+        snap_empty = _snap(pending=(), groups=(group,))
+        v = _view(id_="d-new", kind=DecisionKind.PRE_TOOL_USE)
+        snap_with = _snap(pending=(v,), groups=(group,))
+        key_empty = panel.compute(snap_empty)
+        key_with = panel.compute(snap_with)
+        assert key_empty != key_with, (
+            "compute() must project pending_decisions; otherwise "
+            "distinct_until_changed drops the snap and the approval "
+            "card never reaches render() — A-001."
+        )
+
+    def test_compute_stable_across_unrelated_decision_resolves(self, panel):
+        """Two different decision IDs → distinct compute keys. Same
+        decision id across snaps → identical key (no spurious render)."""
+        group = _session_group(uuid="u1", pid=42)
+        v1 = _view(id_="d-1", kind=DecisionKind.PRE_TOOL_USE)
+        v2 = _view(id_="d-2", kind=DecisionKind.PRE_TOOL_USE)
+        snap_a = _snap(pending=(v1,), groups=(group,))
+        snap_a2 = _snap(pending=(v1,), groups=(group,))
+        snap_b = _snap(pending=(v2,), groups=(group,))
+        assert panel.compute(snap_a) == panel.compute(snap_a2), (
+            "identical pending_decisions must produce identical key — "
+            "otherwise dedup is defeated and we re-render every snap"
+        )
+        assert panel.compute(snap_a) != panel.compute(snap_b), (
+            "different decision IDs must produce different keys"
+        )
+
+    def test_compute_distinguishes_pending_session_uuid(self, panel):
+        """Decision id alone isn't enough — same id but different
+        session_uuid would route to a different inline group, so the
+        key must distinguish them."""
+        group = _session_group(uuid="u1", pid=42)
+        v_for_u1 = _view(id_="d-x", kind=DecisionKind.PRE_TOOL_USE)
+        # Same id, different session_uuid (orphan vs matched bucket).
+        v_for_u2 = PendingDecisionView(
+            id="d-x",
+            kind=DecisionKind.PRE_TOOL_USE,
+            session_uuid="u2",  # NOT u1
+            session_name="other",
+            cwd_basename="other",
+            expires_at=v_for_u1.expires_at,
+            risk_level=v_for_u1.risk_level,
+            tool_name="Bash",
+            tool_input_preview="ls",
+        )
+        snap_u1 = _snap(pending=(v_for_u1,), groups=(group,))
+        snap_u2 = _snap(pending=(v_for_u2,), groups=(group,))
+        assert panel.compute(snap_u1) != panel.compute(snap_u2)
+
+
+class TestComputeReachesRender:
+    """End-to-end via the actual rx pipeline shape used in __main__:
+    distinct_until_changed(key_mapper=panel.compute) → render. Catches
+    A-001-class regressions that unit-key-comparison tests would miss
+    if compute() ever drifts from the actual subscription wiring."""
+
+    def test_pending_decision_reaches_render_through_dedup(self, panel):
+        import reactivex as rx
+        import reactivex.operators as ops
+        group = _session_group(uuid="u1", pid=42)
+        snap_empty = _snap(pending=(), groups=(group,))
+        v = _view(id_="d-realpath", kind=DecisionKind.PRE_TOOL_USE)
+        snap_with = _snap(pending=(v,), groups=(group,))
+        # Emit the same shape the production wiring does.
+        rendered: list = []
+        sub = (
+            rx.from_iterable([snap_empty, snap_with])
+            .pipe(ops.distinct_until_changed(key_mapper=panel.compute))
+            .subscribe(on_next=rendered.append)
+        )
+        sub.dispose()
+        # Both snaps should pass dedup → render gets called twice.
+        assert len(rendered) == 2, (
+            f"distinct_until_changed dropped the second snap "
+            f"(saw {len(rendered)} rendered, expected 2). compute() is "
+            f"not picking up pending_decisions — A-001."
+        )
+        # And panel.render(snap_with) should mount the card.
+        panel.render(snap_with)
+        assert "d-realpath" in panel._decision_cards
+
+
 def _is_descendant_of_layout(widget, layout) -> bool:
     """True when ``widget`` is somewhere in the parent chain of
     ``layout``'s container — used by the inline-render tests to assert

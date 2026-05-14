@@ -5,6 +5,40 @@
 
 ---
 
+## v5 Amendment (2026-05-14, commit 61a5ab5)
+
+The blocking-hook source moved from `PreToolUse` → `PermissionRequest`.
+All references to `PreToolUse` in the sections below (G1, the core
+flow diagrams, the cache-hit / cache-miss flows, the hook-install
+table, T3.x test matrix) should be read as `PermissionRequest`.
+
+**Why the swap:** `PreToolUse` fires for every tool call regardless
+of whether Claude itself would have prompted the user (it skips its
+own permission UI in `bypassPermissions` setups, in `auto` mode, and
+when the user has `skipAutoPermissionPrompt` configured). The hook
+payload's `permission_mode` field catches the explicit-bypass case
+but not the user-config one, so the v1 design over-intercepted and
+made claude-island pop approval cards Claude itself never asked for.
+
+`PermissionRequest` is the hook Claude fires only when it actually
+intends to ask the user. The blocking flow (register + wait + encode)
+moved there; `PreToolUse` went back to a fire-and-forget state-machine
+ping. The redundant `_BYPASS_PERMISSION_MODES` / `_ACCEPT_EDITS_TOOLS`
+filters fell out — Claude does the gating itself before sending
+`PermissionRequest`.
+
+**UI co-change:** approval cards moved from a top-of-panel container
+into per-session-row inline placement. Cards now sit immediately
+below the row whose session_uuid the decision belongs to (matched
+bucket); decisions for unknown / placeholder uuids fall through to
+the global `_pending_container` (orphan bucket).
+
+The decision-output JSON schema is the same on both wire formats
+(`{"hookSpecificOutput": {"hookEventName": ..., "permissionDecision":
+"allow|deny|ask|defer"}}`) — only the triggering hook name changed.
+
+---
+
 ## Part 1: Overview Design
 
 ### 1. Problem & Goals

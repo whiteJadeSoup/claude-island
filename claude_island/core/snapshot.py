@@ -545,7 +545,26 @@ def compose_session_view(
         # THINKING / TOOL_USE / WAITING_APPROVAL forever. pid.json is
         # written by claude on every status transition, so an "idle"
         # reading is authoritative — fall back to a clean IDLE view.
-        if status_word == "idle" and live.phase != SessionPhase.IDLE:
+        #
+        # COMPACTING is intentionally EXCLUDED from this override
+        # (B-001/C-003): compaction's closing event is SessionStart
+        # (source='compact'), which is reliably delivered, so the
+        # staleness motivation doesn't apply. Whether claude writes
+        # status='idle' or 'busy' during /compact is undocumented; the
+        # safe default is to trust the live phase for COMPACTING and
+        # let the SessionStart event do the IDLE transition.
+        _idle_override_phases = (
+            SessionPhase.THINKING,
+            SessionPhase.TOOL_USE,
+            SessionPhase.WAITING_APPROVAL,
+        )
+        if status_word == "idle" and live.phase in _idle_override_phases:
+            log.info(
+                "idle-override: live.phase=%s → IDLE for uuid=%s "
+                "(pid.json reports idle; assume hook chain dropped "
+                "its closing event)",
+                live.phase.value, sess_uuid[:8],
+            )
             phase = SessionPhase.IDLE
             current_tool = None
         else:

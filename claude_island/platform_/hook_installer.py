@@ -55,8 +55,8 @@ class HookEventSpec:
     entirely (which is the right shape for session-lifecycle hooks).
 
     ``timeout_seconds``: written as the hook's ``timeout`` field. None
-    omits (Claude uses its default). PermissionRequest's short timeout
-    is the only one we set — see comment on the constant table.
+    omits (Claude uses its default). PermissionRequest's 600 s blocking
+    timeout is the only one we set — see comment on the constant table.
     """
     name: str
     matcher: str | None

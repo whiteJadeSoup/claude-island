@@ -54,13 +54,14 @@ mirrors it into TabItem.Name before Claude's OSC overwrite has a
 chance to race. Eliminates the click-time fallback diagnostic in the
 common (non-suppressApplicationTitle) case.
 
-v4 (2026-05-14): per-event POST timeout. ``PreToolUse`` and
-``UserPromptSubmit`` may block on the listener for up to 600 s waiting
-for the user to approve / inject context (Bidirectional Hooks v1
-design). Other events keep the 5 s timeout — they're pure
-fire-and-forget and the longer wait would just mask listener bugs.
-Fail-open contract preserved: any timeout (5 s or 600 s) still results
-in stdout="{}" and exit 0 so Claude never hangs on us.
+v4 (2026-05-14): per-event POST timeout. The blocking-event set
+(``UserPromptSubmit`` plus, originally, ``PreToolUse`` — see v5 for
+the swap) may block on the listener for up to 600 s waiting for the
+user to approve / inject context (Bidirectional Hooks v1 design).
+Other events keep the 5 s timeout — they're pure fire-and-forget and
+the longer wait would just mask listener bugs. Fail-open contract
+preserved: any timeout (5 s or 600 s) still results in stdout="{}"
+and exit 0 so Claude never hangs on us.
 
 v5 (2026-05-14): swap PreToolUse → PermissionRequest in the blocking
 set. PreToolUse fires for every tool call regardless of whether Claude
@@ -78,11 +79,12 @@ _DEFAULT_PORT = 50777
 _POST_TIMEOUT_FAST_S = 5.0
 
 # Timeout for events that may legitimately block on a human decision
-# (PreToolUse approval, UserPromptSubmit review). Matches Claude Code's
-# default command-hook timeout so the hook process still exits 0
-# within Claude's own deadline. The listener uses a slightly shorter
-# wait (598 s — see core/pending_decisions.WAIT_TIMEOUT_SAFETY_S) so
-# a defer directive still squeaks in before this hard cap.
+# (PermissionRequest approval, UserPromptSubmit review — see
+# _BLOCKING_HOOK_EVENTS below). Matches Claude Code's default command-
+# hook timeout so the hook process still exits 0 within Claude's own
+# deadline. The listener uses a slightly shorter wait (598 s — see
+# core/pending_decisions.WAIT_TIMEOUT_SAFETY_S) so a defer directive
+# still squeaks in before this hard cap.
 _POST_TIMEOUT_BLOCKING_S = 600.0
 
 # Hook events that may legitimately block on a human in the loop. All
