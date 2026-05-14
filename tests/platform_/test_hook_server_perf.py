@@ -87,6 +87,55 @@ def _post_with_resolver(port: int, registry: PendingDecisionRegistry, *, resolve
 # ── G6 perf gate ─────────────────────────────────────────────────────
 
 
+def test_b001_stop_returns_quickly_with_blocked_handlers(tmp_path):
+    """B-001 regression: HookServer.stop() must NOT join in-flight handler
+    threads that are parked in pending.wait(). Without daemon_threads=True
+    + block_on_close=False, stop() would join the wait thread for up to
+    598 s (the bidirectional wait timeout)."""
+    sm = SessionStateMachine()
+    pr = PendingDecisionRegistry()
+    pc = SessionPermissionCache()
+    nq = NotifyEventQueue()
+    srv = HookServer(
+        sm, preferred_port=0, port_file=tmp_path / "p.txt",
+        pending_registry=pr, permission_cache=pc, notify_queue=nq,
+    )
+    port = srv.start()
+
+    # Fire a PreToolUse — the server thread will block in pending.wait().
+    body_bytes = json.dumps({
+        "hook_event_name": "PreToolUse",
+        "session_id": "u",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+        "cwd": "/tmp",
+    }).encode("utf-8")
+
+    def _fire():
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                f"http://127.0.0.1:{port}/hook",
+                data=body_bytes, method="POST",
+            ), timeout=5.0).read()
+        except Exception:
+            pass  # connection drop on stop is fine — fail-open contract
+
+    fire_thread = threading.Thread(target=_fire, daemon=True)
+    fire_thread.start()
+    # Let the request reach pending.wait()
+    time.sleep(0.3)
+    assert len(pr) >= 1, "PreToolUse didn't reach the registry"
+
+    # Stop should NOT block on the in-flight handler.
+    t0 = time.monotonic()
+    srv.stop()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0, (
+        f"stop() blocked for {elapsed:.1f}s; expected <2s. "
+        "ThreadingMixIn defaults are joining the in-flight handler."
+    )
+
+
 @pytest.mark.perf
 def test_g6_click_to_resume_p95_under_200ms(server):
     """Drive 100 iterations; assert p95 < 200 ms.

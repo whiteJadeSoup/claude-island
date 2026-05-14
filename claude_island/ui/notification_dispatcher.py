@@ -49,9 +49,11 @@ _KIND_TO_HINT: dict[NotifyKind, NotifyKindHint] = {
 }
 
 
-# Rolling window for both _dispatched_ids and _records. Matches
-# core.notify._RETENTION_S — events older than this fall off both
-# WorldSnapshot.notify_events and our dedup set.
+# Rolling window for our _records (per-session dispatch history). Must
+# be ≥ core.notify._RETENTION_S (currently 60 s) so that a queue-resident
+# event never re-fires after we forget it. We pad to 120 s so a backed-
+# up Qt thread that lags ~1 minute behind a snap rebuild still dedups
+# correctly. (Comment fixed in code review C-002.)
 _DEDUP_WINDOW_S = 120.0
 
 

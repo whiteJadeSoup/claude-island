@@ -85,10 +85,11 @@ _TOOL_INPUT_MAX = 200
 # directive before the hook process gives up. See
 # core/pending_decisions.WAIT_TIMEOUT_SAFETY_S.
 _BLOCKING_HOOK_TIMEOUT_S = 600.0 - WAIT_TIMEOUT_SAFETY_S
-# Preview length for tool_input shown on ApprovalCard. ≤ 300 chars per
-# Detail Design §2 PendingDecisionView.
-_PRETOOLUSE_INPUT_PREVIEW_MAX = 300
-# Preview length for prompt shown on PromptReviewCard. ≤ 500 per design.
+# Preview length for prompt shown on PromptReviewCard. ≤ 500 per Detail
+# Design §2. (No separate cap for PreToolUse tool_input — the upstream
+# extractor already caps at _TOOL_INPUT_MAX = 200, so a second truncate
+# would be a no-op. Removed dead _PRETOOLUSE_INPUT_PREVIEW_MAX in code
+# review A-005.)
 _USERPROMPTSUBMIT_PROMPT_PREVIEW_MAX = 500
 
 # Permission modes in which the user has globally opted out of any
@@ -205,6 +206,16 @@ class HookServer:
                 last_err = e
                 continue
             self._server = server
+            # ThreadingMixIn defaults: daemon_threads=False + block_on_close=True.
+            # That makes server_close() join every in-flight handler thread —
+            # but our bidirectional handlers can be parked in
+            # pending.wait(timeout=598s), so a normal stop() would block
+            # for up to ~10 minutes. Hook contract is fail-open already
+            # (hook.py treats any non-2xx as listener-broken and exits 0),
+            # so abandoning a long-poll handler at shutdown is benign.
+            # Fixed in code review B-001.
+            server.daemon_threads = True
+            server.block_on_close = False
             # Read the ACTUALLY-bound port from the socket — when
             # preferred_port=0 (ephemeral, tests) the OS picks the port
             # and `candidate` (0) is the wrong value to expose.
@@ -312,8 +323,16 @@ class HookServer:
         hook_name = payload.get("hook_event_name")
         # Bidirectional event routing. Each branch returns its own body;
         # the catch-all default falls through to "{}" for legacy clients.
-        if hook_name == "PreToolUse":
-            return self._handle_pre_tool_use(payload)
+        #
+        # PreToolUse is intentionally state-machine-only: we used to register
+        # an approval card on every tool call, but Claude Code fires
+        # PreToolUse unconditionally — including in bypassPermissions /
+        # ``skipAutoPermissionPrompt: true`` setups where Claude itself
+        # would never have prompted. That over-intercepted, so the
+        # approval flow now lives under PermissionRequest, which Claude
+        # fires only when it actually intends to ask the user.
+        if hook_name == "PermissionRequest":
+            return self._handle_permission_request(payload)
         if hook_name == "UserPromptSubmit":
             return self._handle_user_prompt_submit(payload)
         if hook_name in ("Stop", "StopFailure"):
@@ -376,9 +395,9 @@ class HookServer:
                 hook_event="PreToolUse",
                 timeout_s=_BLOCKING_HOOK_TIMEOUT_S,
                 tool_name=tool_name,
-                tool_input_preview=_truncate(
-                    preview or "", _PRETOOLUSE_INPUT_PREVIEW_MAX,
-                ) or None,
+                # _extract_tool_input_preview already truncates to
+                # _TOOL_INPUT_MAX upstream; no second cap needed.
+                tool_input_preview=preview or None,
             )
             decision_id = self._pending.register(req)
         except RegistryFull:

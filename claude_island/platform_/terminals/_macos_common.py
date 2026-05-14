@@ -181,11 +181,19 @@ def focus_host_app(pid: int) -> bool:
     Used as the per-adapter fallback when pane-precision focus fails
     (tty mismatch, AppleScript miss, etc.) so a click is never silent.
 
-    Returns False when the chain has no UI ancestor (tmux/screen) or
-    when the System Events query failed and there's no cached fallback.
+    Returns False when:
+      * the chain has no UI ancestor (tmux/screen),
+      * System Events query failed with no cached fallback,
+      * pid<=0 or process raced out (PROCESS_GONE sentinel).
+    The PROCESS_GONE branch previously fell through to
+    ``frontmost_app(<sentinel>)`` and triggered a silent ``TypeError``
+    via ``int(<object>)`` — caught by the dispatcher's broad
+    ``except Exception`` so behaviour was OK end-to-end, but the
+    misleading log line + reliance on an unintended exception path
+    were a real maintainability hazard. Fixed in code review A-001.
     """
     ui_pid = find_ui_app_ancestor(pid)
-    if ui_pid is None:
+    if ui_pid is None or ui_pid is PROCESS_GONE:
         return False
     return frontmost_app(ui_pid)
 

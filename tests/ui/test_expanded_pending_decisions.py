@@ -242,3 +242,85 @@ class TestNoResolver:
         btns = {b.objectName(): b for b in card.findChildren(QPushButton)}
         # Should not raise.
         btns["approvalAllow"].click()
+
+
+class TestG8ReviewToggleWiring:
+    """C-001 regression: ExpandedWindow must accept get_review_mode AND
+    forward both getter+setter to SessionDetailPopup, otherwise the G8
+    "Review prompts" checkbox is unreachable in production."""
+
+    def test_expanded_window_accepts_get_review_mode(self, qtbot):
+        """The kwarg must exist on the constructor signature."""
+        from claude_island.ui.capsule_window import CapsuleWindow
+        from claude_island.ui.expanded_window import ExpandedWindow
+        ctrl = IslandController()
+        capsule = CapsuleWindow(ctrl)
+        qtbot.addWidget(capsule)
+        # Should not raise TypeError("unexpected keyword argument").
+        pw = ExpandedWindow(
+            capsule=capsule,
+            controller=ctrl,
+            get_usage_totals=_empty_totals,
+            get_review_mode=lambda uuid: False,
+            set_review_mode=lambda uuid, on: None,
+        )
+        qtbot.addWidget(pw)
+        # And the wiring should have stored both for the popup to read.
+        assert pw._get_review_mode is not None
+        assert pw._set_review_mode is not None
+
+    def test_session_detail_popup_receives_both_callbacks(self, qtbot):
+        """When ExpandedWindow opens a SessionDetailPopup, both review-
+        mode callbacks must be passed through. Without this the popup's
+        _build_review_section returns None and the toggle row never
+        renders."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        from claude_island.core.capabilities import (
+            Capability,
+            FocusGranularity,
+        )
+        from claude_island.core.models import Session
+        from claude_island.core.snapshot import (
+            SessionGroup,
+            SessionView,
+            _degraded_view,
+        )
+        from claude_island.ui.capsule_window import CapsuleWindow
+        from claude_island.ui.expanded_window import ExpandedWindow
+
+        ctrl = IslandController()
+        capsule = CapsuleWindow(ctrl)
+        qtbot.addWidget(capsule)
+        captured_review: dict = {}
+        pw = ExpandedWindow(
+            capsule=capsule, controller=ctrl,
+            get_usage_totals=_empty_totals,
+            get_review_mode=lambda uuid: True,
+            set_review_mode=lambda uuid, on: captured_review.setdefault(uuid, on),
+        )
+        qtbot.addWidget(pw)
+
+        # Drive _show_detail_popup with a stub button carrying the view
+        # as its '_session' property (mirrors how rows are constructed).
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QPushButton
+
+        sess = Session(
+            pid=1, project_path=Path("/tmp/proj"),
+            session_uuid="u-popup-test",
+            last_activity=datetime.now(timezone.utc),
+        )
+        view = _degraded_view(sess)
+        anchor = QPushButton(parent=pw)
+        anchor.setProperty("_session", view)
+        pw._show_detail_popup(anchor, QPoint(0, 0))
+        popup = pw._active_detail_popup
+        assert popup is not None
+        # Verify both callbacks landed on the popup.
+        assert popup._get_review_mode is not None, (
+            "C-001: SessionDetailPopup must receive get_review_mode "
+            "from ExpandedWindow — without it the toggle row hides."
+        )
+        assert popup._set_review_mode is not None

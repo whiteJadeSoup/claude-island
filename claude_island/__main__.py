@@ -565,6 +565,7 @@ expanded = ExpandedWindow(
     # is blocked on); SessionDetailPopup's "Review prompts" toggle
     # writes to the permission cache.
     resolve_decision=_resolve_pending_decision,
+    get_review_mode=permission_cache.is_review,
     set_review_mode=permission_cache.set_review,
 )
 
@@ -1097,6 +1098,17 @@ exit_code = app.exec()
 snapshotter.stop()
 _capsule_subscription.dispose()
 _expanded_subscription.dispose()
+
+# Bidirectional Hooks v1: tear down hook subsystem before the registries
+# / snapshotter pipeline so late on_change callbacks don't fire into a
+# disposed Subject. hook_server.stop() requires daemon_threads=True
+# (set in start()) so blocked PreToolUse handlers don't pin shutdown
+# for the full 598 s wait window. Fixed in code review B-001 + B-002.
+if hook_server is not None:
+    hook_server.stop()
+_evict_timer.stop()
+if hook_bridge is not None:
+    hook_bridge.stop()
 
 session_discovery.stop()
 file_watcher.stop()

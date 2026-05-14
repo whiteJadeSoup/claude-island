@@ -2915,6 +2915,11 @@ class ExpandedWindow(QWidget):
         # production, ``resolve_decision`` points at
         # ``PendingDecisionRegistry.resolve``.
         resolve_decision: "Callable[[str, object], bool] | None" = None,
+        # G8 per-session "Review prompts before send" toggle: getter +
+        # setter passed straight through to SessionDetailPopup so the
+        # checkbox row reflects + persists state. Both default None ⇒
+        # popup hides the row entirely (matches v0 behavior + tests).
+        get_review_mode: "Callable[[str], bool] | None" = None,
         set_review_mode: "Callable[[str, bool], None] | None" = None,
     ) -> None:
         super().__init__()
@@ -2976,6 +2981,7 @@ class ExpandedWindow(QWidget):
         self._delete_provider_settings = delete_provider_settings
         # Bidirectional Hooks v1 — see ctor docstring above for None semantics.
         self._resolve_decision = resolve_decision
+        self._get_review_mode = get_review_mode
         self._set_review_mode = set_review_mode
         # Per-decision-id widget cache so a render(snap) tick that just
         # adds/removes one card doesn't tear down the others (preserves
@@ -5281,6 +5287,11 @@ class ExpandedWindow(QWidget):
             on_open_folder=_do_open_folder,
             on_open_transcript=_do_open_transcript,
             on_strip_thinking=_do_strip_thinking,
+            # G8 — without these the "Review prompts" checkbox row is
+            # hidden and the entire UserPromptSubmit-intercept flow is
+            # unreachable in production (regression caught in code review C-001).
+            get_review_mode=self._get_review_mode,
+            set_review_mode=self._set_review_mode,
         )
         # Force a layout activation BEFORE move + show so the popup's
         # sizeHint reflects the actual content height. Without this,

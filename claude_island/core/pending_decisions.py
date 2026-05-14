@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Callable
 
 log = logging.getLogger(__name__)
 
