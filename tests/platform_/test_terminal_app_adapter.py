@@ -136,6 +136,14 @@ class TestCanHandle:
         with mock.patch("psutil.Process", return_value=leaf):
             assert adapter.can_handle(s) is False
 
+    def test_placeholder_pid_returns_false_without_calling_psutil(self, adapter):
+        """Mirrors the iterm2 / windows_terminal guard: a session with
+        PLACEHOLDER_PID (-1) must short-circuit before psutil.Process(-1)
+        raises ValueError into the dispatcher's list comprehension."""
+        with mock.patch("psutil.Process") as p:
+            assert adapter.can_handle(_session(pid=-1)) is False
+            p.assert_not_called()
+
     def test_psutil_no_such_process_returns_false(self, adapter):
         import psutil
         with mock.patch("psutil.Process",
@@ -219,6 +227,20 @@ class TestGroup:
         assert len(groups) == 1
         assert groups[0].group_id.startswith("terminal-app:singleton:")
 
+    def test_placeholder_pid_becomes_singleton_without_psutil_call(self, adapter):
+        """A view with PLACEHOLDER_PID (-1) routed here via jump_target
+        must skip psutil.Process(-1) and bucket as a singleton."""
+        v = _view(pid=-1)
+        enum_out = "100|/dev/ttys001\n"
+        with (
+            mock.patch("subprocess.run", return_value=_mock_run(enum_out)),
+            mock.patch("psutil.Process") as p,
+        ):
+            groups = adapter.group([v])
+            p.assert_not_called()
+        assert len(groups) == 1
+        assert groups[0].group_id == "terminal-app:singleton:-1"
+
     def test_psutil_terminal_failure_makes_singleton(self, adapter):
         import psutil
         v1 = _view(pid=10)
@@ -275,6 +297,22 @@ class TestFocus:
             argv = run.call_args[0][0]
             assert argv[0] == "osascript"
             assert "/dev/ttys001" in argv[2]
+
+    def test_focus_placeholder_pid_skips_psutil_and_falls_back(self, adapter):
+        """PLACEHOLDER_PID (-1): no real process to ask for tty. Must
+        bypass psutil.Process(-1) (raises ValueError) and hand off to
+        focus_host_app instead of crashing the click."""
+        v = _view(pid=-1)
+        with (
+            mock.patch("psutil.Process") as p,
+            mock.patch(
+                "claude_island.platform_.terminals.terminal_app.focus_host_app",
+                return_value=False,
+            ) as fha,
+        ):
+            assert adapter.focus(v) is False
+            p.assert_not_called()
+            fha.assert_called_once_with(-1)
 
     def test_focus_falls_back_on_tty_miss(self, adapter):
         v = _view(pid=10)

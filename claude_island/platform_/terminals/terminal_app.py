@@ -171,6 +171,12 @@ class TerminalAppAdapter(_CapabilityProvider):
         that one click). When System Events recovers, focus starts
         working again automatically.
         """
+        # Hook-bridge placeholder (pid<=0): no real process to walk → can't
+        # prove Terminal.app ancestry. Mirrors iterm2.can_handle and
+        # windows_terminal.can_handle so the dispatcher's can_handle list
+        # comprehension never sees a ValueError from psutil.Process(-1).
+        if session.pid <= 0:
+            return False
         try:
             import psutil
         except ImportError:
@@ -218,8 +224,14 @@ class TerminalAppAdapter(_CapabilityProvider):
             # on miss, falls back to UI-ancestor frontmost.
             return _singletons(views, self.name)
 
+        # Placeholder pid (<=0) routes here when jump_target picks
+        # terminal-app for a hook-bridged session. No process → no tty,
+        # bucket as singleton.
         view_ttys: dict[int, str | None] = {}
         for v in views:
+            if v.session.pid <= 0:
+                view_ttys[v.pid] = None
+                continue
             try:
                 view_ttys[v.pid] = psutil.Process(v.session.pid).terminal()
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -273,6 +285,10 @@ class TerminalAppAdapter(_CapabilityProvider):
         ``"miss"`` return) — same pattern as iterm2 so a click is
         never silently ignored."""
         del siblings  # Terminal exposes per-tab tty directly; no fallback needed
+        # Placeholder pid (<=0): no real process, hand off to the host-app
+        # raise (which is also pid<=0 safe via find_ui_app_ancestor's guard).
+        if view.session.pid <= 0:
+            return focus_host_app(view.session.pid)
         try:
             import psutil
         except ImportError:

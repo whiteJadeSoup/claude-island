@@ -177,6 +177,11 @@ class ITerm2Adapter(_CapabilityProvider):
         for a shell session; deeper if there's a tmux / nested launcher.
         Cheap — the parent chain is local memory once psutil snapshot
         is in cache."""
+        # Hook-bridge placeholder sessions (pid<=0) have no real process
+        # to walk; can't prove iTerm2 ancestry → return False and let
+        # jump_target routing place the view instead.
+        if session.pid <= 0:
+            return False
         try:
             import psutil
         except ImportError:
@@ -228,9 +233,14 @@ class ITerm2Adapter(_CapabilityProvider):
             # passed can_handle), so we must keep them visible.
             return _singletons(views, self.name)
 
-        # tty per view
+        # tty per view. Placeholder pids (<=0) come from hook-bridged
+        # sessions whose scanner snapshot hasn't landed yet — no real
+        # process to ask for tty, fall through to singleton bucket.
         view_ttys: dict[int, str | None] = {}
         for v in views:
+            if v.session.pid <= 0:
+                view_ttys[v.pid] = None
+                continue
             try:
                 view_ttys[v.pid] = psutil.Process(v.session.pid).terminal()
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -296,6 +306,10 @@ class ITerm2Adapter(_CapabilityProvider):
         no-ops; with it, the user at least gets the app raised.
         """
         del siblings
+        # Placeholder pid (<=0): no real process → no tty to match. Fall
+        # straight to the host-app raise so the click isn't a silent no-op.
+        if view.session.pid <= 0:
+            return focus_host_app(view.session.pid)
         try:
             import psutil
         except ImportError:

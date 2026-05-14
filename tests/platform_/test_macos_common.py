@@ -280,6 +280,18 @@ class TestFindUiAppAncestor:
         ):
             assert _macos_common.find_ui_app_ancestor(10) is _macos_common.PROCESS_GONE
 
+    def test_returns_process_gone_for_placeholder_pid(self):
+        """PLACEHOLDER_PID (-1) sessions come from the hook bridge before
+        a real process exists. psutil.Process(-1) raises ValueError;
+        guarding here keeps focus_host_app(-1) from crashing the click."""
+        with (
+            mock.patch.object(_macos_common, "_ui_app_pids",
+                              return_value=frozenset({100})),
+            mock.patch("psutil.Process") as p,
+        ):
+            assert _macos_common.find_ui_app_ancestor(-1) is _macos_common.PROCESS_GONE
+            p.assert_not_called()
+
     def test_returns_none_when_query_returned_empty(self):
         # If osascript permission is denied (System Events) we get an
         # empty UI pid set. Returning None here is what makes the

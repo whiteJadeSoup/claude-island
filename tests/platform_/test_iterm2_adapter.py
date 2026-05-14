@@ -168,6 +168,14 @@ class TestCanHandle:
         with mock.patch("psutil.Process", side_effect=psutil.NoSuchProcess(pid=1234)):
             assert adapter.can_handle(_session(1234)) is False
 
+    def test_placeholder_pid_returns_false_without_calling_psutil(self, adapter):
+        """PLACEHOLDER_PID (-1) sessions come from the hook bridge before
+        the scanner sees a real process; psutil.Process(-1) would raise
+        ValueError and explode the dispatcher's list comprehension."""
+        with mock.patch("psutil.Process") as p:
+            assert adapter.can_handle(_session(pid=-1)) is False
+            p.assert_not_called()
+
     def test_chain_walk_capped_at_max_depth(self, adapter):
         """A pathological infinite parent loop must terminate within
         _MAX_ANCESTOR_DEPTH iterations and return False."""
@@ -273,6 +281,21 @@ class TestGroup:
         assert len(groups) == 1
         assert groups[0].group_id.startswith("iterm2:singleton:")
 
+    def test_placeholder_pid_becomes_singleton_without_psutil_call(self, adapter):
+        """A view with PLACEHOLDER_PID (-1) has no real process — must
+        not call psutil.Process(-1) (raises ValueError) and must still
+        be rendered as a singleton group."""
+        v = _view(pid=-1)
+        enum_out = "100|1|/dev/ttys001\n"
+        with (
+            mock.patch("subprocess.run", return_value=_mock_run(enum_out)),
+            mock.patch("psutil.Process") as p,
+        ):
+            groups = adapter.group([v])
+            p.assert_not_called()
+        assert len(groups) == 1
+        assert groups[0].group_id == "iterm2:singleton:-1"
+
     def test_psutil_terminal_failure_makes_singleton(self, adapter):
         """psutil can't read the tty for one view → singleton (no
         coordinates to bucket on). Other views in the same call still
@@ -316,6 +339,22 @@ class TestFocus:
             called_args = run.call_args[0][0]
             assert called_args[0] == "osascript"
             assert "/dev/ttys001" in called_args[2]
+
+    def test_focus_placeholder_pid_skips_psutil_and_falls_back(self, adapter):
+        """PLACEHOLDER_PID (-1): no real process to ask for tty. Must not
+        call psutil.Process(-1) (raises ValueError); should hand off to
+        focus_host_app so the click isn't a silent crash."""
+        v = _view(pid=-1)
+        with (
+            mock.patch("psutil.Process") as p,
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2.focus_host_app",
+                return_value=False,
+            ) as fha,
+        ):
+            assert adapter.focus(v) is False
+            p.assert_not_called()
+            fha.assert_called_once_with(-1)
 
     def test_focus_falls_back_to_app_frontmost_on_tty_miss(self, adapter):
         """tty matched psutil but iTerm2's tree has no session for it

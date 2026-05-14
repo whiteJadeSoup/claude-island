@@ -120,6 +120,11 @@ def find_ui_app_ancestor(pid: int, *, max_depth: int = _MAX_DEPTH) -> "int | Non
     ui_pids = _ui_app_pids()
     if not ui_pids:
         return None
+    # Hook-bridge placeholder (pid<=0): no real process to walk. Treat
+    # like a vanished pid so callers (focus_host_app) cleanly return
+    # False instead of psutil raising ValueError mid-click.
+    if pid <= 0:
+        return PROCESS_GONE
     try:
         proc = psutil.Process(pid)
     except (psutil.NoSuchProcess, psutil.AccessDenied):
