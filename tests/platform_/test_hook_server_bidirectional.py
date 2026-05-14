@@ -118,148 +118,45 @@ class TestLegacyPath:
         assert body == {}
 
 
-# ── PreToolUse cache hit (T3.1, fast path) ───────────────────────────
+# ── PreToolUse always non-blocking ───────────────────────────────────
 
 
-class TestBypassPermissionMode:
-    """When the session is in bypassPermissions / dontAsk mode the user
-    has explicitly opted out of any prompts. HookServer must NOT register
-    a pending decision — that would override the user's intent."""
+class TestPreToolUseAlwaysEmpty:
+    """The approval card flow moved off PreToolUse onto PermissionRequest
+    (Claude fires PreToolUse for every tool call regardless of whether
+    it would prompt; PermissionRequest fires only when it actually
+    intends to ask the user). So PreToolUse now applies to the state
+    machine and immediately returns ``{}`` — no pending decisions, no
+    cache hits."""
 
-    def test_bypass_mode_returns_empty_no_pending(
+    def test_pretooluse_returns_empty_regardless_of_mode(
         self, server, registry: PendingDecisionRegistry,
     ):
         srv, port = server
-        status, body = _post(port, {
-            "hook_event_name": "PreToolUse",
-            "session_id": "u-bypass",
-            "tool_name": "Bash",
-            "tool_input": {"command": "rm -rf node_modules"},
-            "cwd": "/tmp",
-            "permission_mode": "bypassPermissions",
-        })
-        assert status == 200
-        assert body == {}
-        # Nothing should have been registered.
+        for mode in ("bypassPermissions", "dontAsk", "auto",
+                     "acceptEdits", "default", "plan", None):
+            payload = {
+                "hook_event_name": "PreToolUse",
+                "session_id": f"u-{mode}",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "cwd": "/tmp",
+            }
+            if mode is not None:
+                payload["permission_mode"] = mode
+            status, body = _post(port, payload)
+            assert status == 200, f"mode={mode}"
+            assert body == {}, f"mode={mode}"
         assert registry.snapshot() == ()
 
-    def test_dontask_mode_alias_also_skips(
-        self, server, registry: PendingDecisionRegistry,
-    ):
-        srv, port = server
-        status, body = _post(port, {
-            "hook_event_name": "PreToolUse",
-            "session_id": "u-dontask",
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
-            "cwd": "/tmp",
-            "permission_mode": "dontAsk",
-        })
-        assert status == 200
-        assert body == {}
-        assert registry.snapshot() == ()
-
-    def test_auto_mode_skips(
-        self, server, registry: PendingDecisionRegistry,
-    ):
-        """Autonomous mode — Claude's classifier decides; intercepting
-        with our card would override that explicit user intent."""
-        srv, port = server
-        status, body = _post(port, {
-            "hook_event_name": "PreToolUse",
-            "session_id": "u-auto",
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
-            "cwd": "/tmp",
-            "permission_mode": "auto",
-        })
-        assert status == 200
-        assert body == {}
-        assert registry.snapshot() == ()
-
-    def test_acceptedits_skips_only_edit_tools(
-        self, server, registry: PendingDecisionRegistry,
-    ):
-        """acceptEdits is partial bypass: Edit/Write/MultiEdit/Notebook
-        Edit auto-skip; Bash + others still hit the approval flow."""
-        srv, port = server
-        # Edit tool in acceptEdits → skip.
-        status, body = _post(port, {
-            "hook_event_name": "PreToolUse",
-            "session_id": "u-edits",
-            "tool_name": "Edit",
-            "tool_input": {"file_path": "/tmp/x"},
-            "cwd": "/tmp",
-            "permission_mode": "acceptEdits",
-        })
-        assert body == {}
-        assert registry.snapshot() == ()
-
-    def test_acceptedits_still_blocks_for_bash(
-        self, server, registry: PendingDecisionRegistry,
-    ):
-        srv, port = server
-
-        def _resolver():
-            for _ in range(50):
-                snap = registry.snapshot()
-                if snap:
-                    registry.resolve(
-                        snap[0].id, Decision(result=DecisionResult.ALLOW),
-                    )
-                    return
-                time.sleep(0.05)
-
-        t = threading.Thread(target=_resolver, daemon=True)
-        t.start()
-        status, body = _post(port, {
-            "hook_event_name": "PreToolUse",
-            "session_id": "u-edits-bash",
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
-            "cwd": "/tmp",
-            "permission_mode": "acceptEdits",
-        }, timeout=10.0)
-        t.join(timeout=2.0)
-        # Should have entered the approval flow, NOT the bypass fast-path.
-        assert body["hookSpecificOutput"]["permissionDecision"] == "allow"
-
-    def test_default_mode_still_blocks(
-        self, server, registry: PendingDecisionRegistry,
-    ):
-        """Sanity: default mode (no permission_mode set, or "default")
-        still triggers the pending-decision flow as before."""
-        srv, port = server
-
-        def _resolver():
-            for _ in range(50):
-                snap = registry.snapshot()
-                if snap:
-                    registry.resolve(snap[0].id, Decision(result=DecisionResult.ALLOW))
-                    return
-                time.sleep(0.05)
-
-        t = threading.Thread(target=_resolver, daemon=True)
-        t.start()
-        status, body = _post(port, {
-            "hook_event_name": "PreToolUse",
-            "session_id": "u-default",
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
-            "cwd": "/tmp",
-            "permission_mode": "default",
-        }, timeout=10.0)
-        t.join(timeout=2.0)
-        assert body["hookSpecificOutput"]["permissionDecision"] == "allow"
-
-
-class TestPreToolUseCache:
-    def test_cache_hit_returns_allow_immediately(
+    def test_pretooluse_ignores_perm_cache(
         self, server, perm_cache: SessionPermissionCache,
     ):
+        """Even if a grant exists in the cache, PreToolUse stays a
+        passthrough — cache hits only matter on the PermissionRequest
+        path now."""
         srv, port = server
         perm_cache.grant("u1", "Bash")
-        t0 = time.monotonic()
         status, body = _post(port, {
             "hook_event_name": "PreToolUse",
             "session_id": "u1",
@@ -267,9 +164,32 @@ class TestPreToolUseCache:
             "tool_input": {"command": "ls"},
             "cwd": "/tmp/proj",
         })
+        assert status == 200
+        assert body == {}
+
+
+# ── PermissionRequest cache hit (T3.1, fast path) ────────────────────
+
+
+class TestPermissionRequestCache:
+    def test_cache_hit_returns_allow_immediately(
+        self, server, perm_cache: SessionPermissionCache,
+    ):
+        srv, port = server
+        perm_cache.grant("u1", "Bash")
+        t0 = time.monotonic()
+        status, body = _post(port, {
+            "hook_event_name": "PermissionRequest",
+            "session_id": "u1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "cwd": "/tmp/proj",
+        })
         elapsed = time.monotonic() - t0
         assert status == 200
-        assert body["hookSpecificOutput"]["permissionDecision"] == "allow"
+        out = body["hookSpecificOutput"]
+        assert out["hookEventName"] == "PermissionRequest"
+        assert out["permissionDecision"] == "allow"
         # Fast path should be << 200 ms (network round-trip on loopback).
         assert elapsed < 0.5
 
@@ -288,7 +208,7 @@ class TestPreToolUseCache:
         port = srv.start()
         try:
             status, body = _post(port, {
-                "hook_event_name": "PreToolUse",
+                "hook_event_name": "PermissionRequest",
                 "session_id": "u1",
                 "tool_name": "Bash",
                 "tool_input": {"command": "ls"},
@@ -300,10 +220,10 @@ class TestPreToolUseCache:
             srv.stop()
 
 
-# ── PreToolUse blocking flow (T3.2) ──────────────────────────────────
+# ── PermissionRequest blocking flow (T3.2) ───────────────────────────
 
 
-class TestPreToolUseBlocking:
+class TestPermissionRequestBlocking:
     def test_blocks_until_resolve_then_returns_decision(
         self, server, registry: PendingDecisionRegistry,
     ):
@@ -333,7 +253,7 @@ class TestPreToolUseBlocking:
 
         # POST will block until resolver acts.
         status, body = _post(port, {
-            "hook_event_name": "PreToolUse",
+            "hook_event_name": "PermissionRequest",
             "session_id": "u1",
             "tool_name": "Bash",
             "tool_input": {"command": "npm test"},
@@ -342,7 +262,9 @@ class TestPreToolUseBlocking:
         t.join(timeout=2.0)
 
         assert status == 200
-        assert body["hookSpecificOutput"]["permissionDecision"] == "allow"
+        out = body["hookSpecificOutput"]
+        assert out["hookEventName"] == "PermissionRequest"
+        assert out["permissionDecision"] == "allow"
         assert result_holder.get("resolve_ok") is True
 
     def test_deny_returns_deny_with_reason(
@@ -364,7 +286,7 @@ class TestPreToolUseBlocking:
         t = threading.Thread(target=_resolver, daemon=True)
         t.start()
         status, body = _post(port, {
-            "hook_event_name": "PreToolUse",
+            "hook_event_name": "PermissionRequest",
             "session_id": "u1",
             "tool_name": "Bash",
             "tool_input": {"command": "rm -rf /"},
@@ -394,7 +316,7 @@ class TestPreToolUseBlocking:
         t = threading.Thread(target=_resolver, daemon=True)
         t.start()
         _post(port, {
-            "hook_event_name": "PreToolUse",
+            "hook_event_name": "PermissionRequest",
             "session_id": "u-remember",
             "tool_name": "Bash",
             "tool_input": {"command": "ls"},
@@ -405,10 +327,10 @@ class TestPreToolUseBlocking:
         assert perm_cache.check("u-remember", "Bash") is True
 
 
-# ── PreToolUse: registry full → defer (T3.3) ──────────────────────────
+# ── PermissionRequest: registry full → defer (T3.3) ──────────────────
 
 
-class TestPreToolUseRegistryFull:
+class TestPermissionRequestRegistryFull:
     def test_full_registry_returns_defer(
         self, state_machine, perm_cache, notify_queue, tmp_port_file,
     ):
@@ -425,7 +347,7 @@ class TestPreToolUseRegistryFull:
                 kind=DecisionKind.PRE_TOOL_USE,
                 session_uuid=f"u{i}", session_name=f"s{i}",
                 cwd=Path("/tmp"),
-                hook_event="PreToolUse",
+                hook_event="PermissionRequest",
                 timeout_s=60.0,
                 tool_name="Bash",
                 tool_input_preview="x",
@@ -443,7 +365,7 @@ class TestPreToolUseRegistryFull:
         port = srv.start()
         try:
             status, body = _post(port, {
-                "hook_event_name": "PreToolUse",
+                "hook_event_name": "PermissionRequest",
                 "session_id": "u-overflow",
                 "tool_name": "Bash",
                 "tool_input": {"command": "ls"},

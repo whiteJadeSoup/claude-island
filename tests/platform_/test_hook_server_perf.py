@@ -46,9 +46,9 @@ def server(tmp_path):
 
 
 def _post_with_resolver(port: int, registry: PendingDecisionRegistry, *, resolve_after_s: float) -> float:
-    """Run one PreToolUse blocking flow; return total elapsed time."""
+    """Run one PermissionRequest blocking flow; return total elapsed time."""
     body = json.dumps({
-        "hook_event_name": "PreToolUse",
+        "hook_event_name": "PermissionRequest",
         "session_id": "u-perf",
         "tool_name": "Bash",
         "tool_input": {"command": "ls"},
@@ -102,9 +102,9 @@ def test_b001_stop_returns_quickly_with_blocked_handlers(tmp_path):
     )
     port = srv.start()
 
-    # Fire a PreToolUse — the server thread will block in pending.wait().
+    # Fire a PermissionRequest — the server thread will block in pending.wait().
     body_bytes = json.dumps({
-        "hook_event_name": "PreToolUse",
+        "hook_event_name": "PermissionRequest",
         "session_id": "u",
         "tool_name": "Bash",
         "tool_input": {"command": "ls"},
@@ -124,7 +124,7 @@ def test_b001_stop_returns_quickly_with_blocked_handlers(tmp_path):
     fire_thread.start()
     # Let the request reach pending.wait()
     time.sleep(0.3)
-    assert len(pr) >= 1, "PreToolUse didn't reach the registry"
+    assert len(pr) >= 1, "PermissionRequest didn't reach the registry"
 
     # Stop should NOT block on the in-flight handler.
     t0 = time.monotonic()

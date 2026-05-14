@@ -63,11 +63,12 @@ class HookEventSpec:
     timeout_seconds: int | None
 
 
-# v1 installs all 11 events. PermissionRequest gets a short 10s timeout
-# because the v1 hook server returns ``{}`` immediately (we don't block
-# Claude on it) — but if the server crashes mid-startup we want Claude
-# to give up fast and fall back to its built-in terminal prompt rather
-# than hang for Claude's default permission-hook timeout.
+# v1 installs all 11 events. PermissionRequest carries the bidirectional
+# approval card now — Claude fires it only when it would have prompted
+# the user, so it's the right place to wait for a human decision. 600 s
+# matches the wait budget the pending-decision registry uses; combined
+# with the registry's safety margin, the hook process always exits 0
+# within Claude's deadline.
 HOOK_EVENTS_TO_INSTALL: tuple[HookEventSpec, ...] = (
     HookEventSpec("SessionStart",       None, None),
     HookEventSpec("SessionEnd",         None, None),
@@ -79,7 +80,7 @@ HOOK_EVENTS_TO_INSTALL: tuple[HookEventSpec, ...] = (
     HookEventSpec("StopFailure",        None, None),
     HookEventSpec("PreCompact",         None, None),
     HookEventSpec("Notification",       "*",  None),
-    HookEventSpec("PermissionRequest",  "*",  10),
+    HookEventSpec("PermissionRequest",  "*",  600),
 )
 
 

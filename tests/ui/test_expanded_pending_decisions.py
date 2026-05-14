@@ -51,18 +51,47 @@ def _view(
     )
 
 
-def _snap(*, pending: tuple = ()) -> WorldSnapshot:
+def _snap(
+    *, pending: tuple = (), groups: tuple = (),
+) -> WorldSnapshot:
     return WorldSnapshot.empty().__class__(
         today_cost_usd=0.0,
         quota=None,
         available_providers=(),
         selected_provider=None,
         fetched_at=datetime.now(timezone.utc),
-        session_groups=(),
+        session_groups=groups,
         dormant_sessions=(),
         launching_sessions=(),
         pending_decisions=pending,
         notify_events=(),
+    )
+
+
+def _session_group(*, uuid: str, pid: int = 1) -> "SessionGroup":
+    """Build a singleton SessionGroup wrapping a SessionView with the
+    given session_uuid — enough plumbing for the inline-decision tests
+    to exercise the matched-uuid path through _render_session_groups."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from claude_island.core.models import Session
+    from claude_island.core.snapshot import (
+        SessionGroup, SessionView, _degraded_view,
+    )
+    sess = Session(
+        pid=pid,
+        project_path=Path("/tmp/proj"),
+        session_uuid=uuid,
+        last_activity=datetime.now(timezone.utc),
+    )
+    view = _degraded_view(sess)
+    # _degraded_view sets session_uuid from session.session_uuid; verify.
+    assert view.session_uuid == uuid
+    return SessionGroup(
+        group_id=f"singleton:{pid}",
+        title_hint=None,
+        adapter_id="",
+        views=(view,),
     )
 
 
@@ -242,6 +271,93 @@ class TestNoResolver:
         btns = {b.objectName(): b for b in card.findChildren(QPushButton)}
         # Should not raise.
         btns["approvalAllow"].click()
+
+
+class TestInlineUnderSession:
+    """When a pending decision's session_uuid matches a visible session
+    group, the approval card renders inline beneath that group — not in
+    the global pending container."""
+
+    def test_matched_decision_renders_inline_not_globally(self, panel):
+        from claude_island.ui.approval_card import ApprovalCard
+        v = _view(id_="d1", kind=DecisionKind.PRE_TOOL_USE)
+        # The view fixture pins session_uuid to "u1" — match it.
+        group = _session_group(uuid="u1", pid=42)
+        panel.render(_snap(pending=(v,), groups=(group,)))
+        # Card was created and cached.
+        card = panel._decision_cards.get("d1")
+        assert isinstance(card, ApprovalCard)
+        # Inline placement: the card sits inside _session_box (under
+        # the matching group's wrapper), NOT in _pending_layout.
+        in_session_tree = _is_descendant_of_layout(card, panel._session_box)
+        assert in_session_tree, (
+            "matched-uuid decision must render inline beneath its session "
+            "group, not in the global pending container"
+        )
+        # Orphan container should stay hidden when nothing is orphan.
+        assert panel._pending_container.isVisibleTo(panel) is False
+
+    def test_unmatched_decision_falls_through_to_global(self, panel):
+        v = _view(id_="d2", kind=DecisionKind.PRE_TOOL_USE)
+        # Visible group has a different uuid → decision is orphan.
+        group = _session_group(uuid="different-uuid", pid=99)
+        panel.render(_snap(pending=(v,), groups=(group,)))
+        card = panel._decision_cards.get("d2")
+        assert card is not None
+        # Orphan: lands in the global container.
+        assert panel._pending_container.isVisibleTo(panel)
+        # And NOT in _session_box.
+        assert not _is_descendant_of_layout(card, panel._session_box)
+
+    def test_mixed_buckets_render_in_both_locations(self, panel):
+        matched = _view(id_="d-matched", kind=DecisionKind.PRE_TOOL_USE)
+        orphan = PendingDecisionView(
+            id="d-orphan",
+            kind=DecisionKind.PRE_TOOL_USE,
+            session_uuid="ghost-uuid",
+            session_name="ghost",
+            cwd_basename="ghost",
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=600),
+            risk_level=RiskLevel.MEDIUM,
+            tool_name="Bash",
+            tool_input_preview="ls",
+        )
+        group = _session_group(uuid="u1", pid=7)
+        panel.render(_snap(pending=(matched, orphan), groups=(group,)))
+        m_card = panel._decision_cards["d-matched"]
+        o_card = panel._decision_cards["d-orphan"]
+        assert _is_descendant_of_layout(m_card, panel._session_box)
+        assert not _is_descendant_of_layout(o_card, panel._session_box)
+        assert panel._pending_container.isVisibleTo(panel)
+
+    def test_resolved_inline_card_is_gced(self, panel):
+        v = _view(id_="d1", kind=DecisionKind.PRE_TOOL_USE)
+        group = _session_group(uuid="u1", pid=42)
+        panel.render(_snap(pending=(v,), groups=(group,)))
+        assert "d1" in panel._decision_cards
+        # Decision resolves → next render has empty pending tuple.
+        panel.render(_snap(pending=(), groups=(group,)))
+        assert "d1" not in panel._decision_cards
+
+
+def _is_descendant_of_layout(widget, layout) -> bool:
+    """True when ``widget`` is somewhere in the parent chain of
+    ``layout``'s container — used by the inline-render tests to assert
+    a card landed under the session list rather than the orphan
+    container."""
+    from PySide6.QtWidgets import QLayout, QWidget
+    container = layout.parentWidget() if isinstance(layout, QLayout) else None
+    if container is None:
+        return False
+    p = widget.parent()
+    while p is not None:
+        if p is container:
+            return True
+        if isinstance(p, QWidget):
+            p = p.parent()
+        else:
+            return False
+    return False
 
 
 class TestG8ReviewToggleWiring:

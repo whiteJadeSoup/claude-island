@@ -92,38 +92,6 @@ _BLOCKING_HOOK_TIMEOUT_S = 600.0 - WAIT_TIMEOUT_SAFETY_S
 # review A-005.)
 _USERPROMPTSUBMIT_PROMPT_PREVIEW_MAX = 500
 
-# Permission modes in which the user has globally opted out of any
-# tool-permission prompts. Intercepting PreToolUse with an approval card
-# would override the user's intent — wrong UX. When the payload's
-# ``permission_mode`` is one of these, the hook server skips the entire
-# pending-decision flow and replies "{}" so Claude Code runs the tool
-# under its own auto-allow rule.
-#
-# - ``bypassPermissions`` / ``dontAsk`` (alias): explicit "never prompt"
-# - ``auto``: autonomous mode; the classifier decides without user input
-#
-# Other modes (``default``, ``plan``) keep the existing flow — the user
-# is expecting confirmation in those modes. ``acceptEdits`` is partial
-# bypass (only Edit-family tools); see ``_ACCEPT_EDITS_TOOLS`` below.
-_BYPASS_PERMISSION_MODES = frozenset({
-    "bypassPermissions",
-    "dontAsk",
-    "auto",
-})
-
-# Tools that ``acceptEdits`` silently auto-approves. When ``permission_mode``
-# is ``"acceptEdits"`` AND the tool is one of these, skip the pending-
-# decision flow — the user already said "auto-accept all file edits".
-# Bash and other shell-style tools still flow through the approval card
-# in acceptEdits mode (matches Claude Code's built-in behaviour).
-_ACCEPT_EDITS_TOOLS = frozenset({
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "NotebookEdit",
-})
-
-
 class HookServerStartError(RuntimeError):
     """Raised when start() cannot bind any port in the retry range."""
 
@@ -345,8 +313,14 @@ class HookServer:
 
     # ── bidirectional handlers ──────────────────────────────────────────
 
-    def _handle_pre_tool_use(self, payload: dict) -> bytes:
-        """Decide allow / deny for a PreToolUse event.
+    def _handle_permission_request(self, payload: dict) -> bytes:
+        """Decide allow / deny for a PermissionRequest event.
+
+        Claude Code fires PermissionRequest only when it intends to prompt
+        the user for permission. ``bypassPermissions`` / ``dontAsk`` /
+        ``auto`` modes and the ``skipAutoPermissionPrompt`` setting all
+        suppress this event on Claude's side, so by the time we get here
+        we know Claude wants the user to decide.
 
         Order:
           1. session_perm_cache hit ⇒ encode allow immediately (fast path)
@@ -363,22 +337,9 @@ class HookServer:
         if not uuid or not tool_name:
             return b"{}"
 
-        # Fast path — user is in a "no prompts" mode (bypassPermissions /
-        # dontAsk / auto). Don't override their explicit choice; let
-        # Claude Code's built-in rules handle the call.
-        mode = _safe_str(payload.get("permission_mode"))
-        if mode in _BYPASS_PERMISSION_MODES:
-            return b"{}"
-        # Partial bypass — acceptEdits silently auto-approves Edit/Write
-        # /MultiEdit/NotebookEdit but still surfaces shell tools like Bash
-        # to the user. Match that semantic so we don't re-prompt for the
-        # mode's whole point.
-        if mode == "acceptEdits" and tool_name in _ACCEPT_EDITS_TOOLS:
-            return b"{}"
-
         # Fast path — granted earlier this session.
         if self._perm.check(uuid, tool_name):
-            return _encode_pretooluse(
+            return _encode_permission_request(
                 "allow", reason="auto-allowed (this session)",
             )
 
@@ -392,7 +353,7 @@ class HookServer:
                 session_uuid=uuid,
                 session_name=session_name,
                 cwd=cwd,
-                hook_event="PreToolUse",
+                hook_event="PermissionRequest",
                 timeout_s=_BLOCKING_HOOK_TIMEOUT_S,
                 tool_name=tool_name,
                 # _extract_tool_input_preview already truncates to
@@ -402,9 +363,10 @@ class HookServer:
             decision_id = self._pending.register(req)
         except RegistryFull:
             log.warning(
-                "pending registry full; deferring PreToolUse(%s)", tool_name,
+                "pending registry full; deferring PermissionRequest(%s)",
+                tool_name,
             )
-            return _encode_pretooluse(
+            return _encode_permission_request(
                 "defer", reason="claude-island queue full",
             )
 
@@ -413,29 +375,31 @@ class HookServer:
         )
         if decision is None:
             log.info(
-                "PreToolUse(%s) decision wait timed out — defer", tool_name,
+                "PermissionRequest(%s) decision wait timed out — defer",
+                tool_name,
             )
-            return _encode_pretooluse(
+            return _encode_permission_request(
                 "defer", reason="user did not respond in time",
             )
 
         # Side effect: if user ticked "remember", grant the cache so
-        # future PreToolUse hits the fast path.
+        # future PermissionRequest hits the fast path.
         if decision.remember and decision.result is DecisionResult.ALLOW:
             self._perm.grant(uuid, tool_name)
 
         if decision.result is DecisionResult.ALLOW:
-            return _encode_pretooluse("allow")
+            return _encode_permission_request("allow")
         if decision.result is DecisionResult.DENY:
-            return _encode_pretooluse(
+            return _encode_permission_request(
                 "deny", reason=decision.reason or "denied by user",
             )
-        # Defensive: BLOCK / INJECT shouldn't appear for PreToolUse;
+        # Defensive: BLOCK / INJECT shouldn't appear for PermissionRequest;
         # treat as defer rather than crashing.
         log.warning(
-            "unexpected decision result for PreToolUse: %s", decision.result,
+            "unexpected decision result for PermissionRequest: %s",
+            decision.result,
         )
-        return _encode_pretooluse(
+        return _encode_permission_request(
             "defer", reason=f"unexpected decision: {decision.result.value}",
         )
 
@@ -747,14 +711,16 @@ def _truncate(s: str, max_len: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _encode_pretooluse(
+def _encode_permission_request(
     permission: str, *, reason: str | None = None,
 ) -> bytes:
-    """PreToolUse directive: ``permissionDecision`` ∈
+    """PermissionRequest directive: ``permissionDecision`` ∈
     {"allow", "deny", "ask", "defer"} inside ``hookSpecificOutput``.
-    See Claude Code spec §PreToolUse decision control."""
+    Same shape as PreToolUse — Claude Code uses the same decision schema
+    on every permission-bearing hook event; ``hookEventName`` is the only
+    field that varies. See Claude Code spec §PermissionRequest."""
     inner: dict = {
-        "hookEventName": "PreToolUse",
+        "hookEventName": "PermissionRequest",
         "permissionDecision": permission,
     }
     if reason:

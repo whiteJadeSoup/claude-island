@@ -3373,10 +3373,50 @@ class ExpandedWindow(QWidget):
 
         Sessions are consumed from ``snap.session_groups`` — the adapter
         chain has already grouped them. UI just renders one card per
-        group, one row per view."""
+        group, one row per view.
+
+        Pending decisions are bucketed by whether their ``session_uuid``
+        matches a visible session group:
+
+          * matched   → rendered inline beneath the corresponding group
+            (so the user sees which session is asking).
+          * orphans   → rendered in the global ``_pending_container`` as
+            a fallback so a decision for a session we don't know about
+            yet (rare — placeholder pid, etc.) still surfaces.
+
+        GC for both buckets happens here once so the two render paths
+        don't fight over deletion."""
         self._latest_snap = snap
-        self._render_pending_decisions(snap.pending_decisions)
-        self._render_session_groups(snap.session_groups)
+        decisions = snap.pending_decisions
+
+        # GC widgets for any decision id that's no longer in the snapshot
+        # (resolved, expired, or otherwise dropped). Must happen before
+        # the bucket render calls so neither half tries to reuse a
+        # deleted widget.
+        live_ids = {d.id for d in decisions}
+        for did in list(self._decision_cards.keys()):
+            if did not in live_ids:
+                w = self._decision_cards.pop(did)
+                w.setParent(None)
+                w.deleteLater()
+
+        visible_uuids = {
+            v.session_uuid
+            for g in snap.session_groups
+            for v in g.views
+            if v.session_uuid
+        }
+        matched = tuple(
+            d for d in decisions if d.session_uuid in visible_uuids
+        )
+        orphans = tuple(
+            d for d in decisions if d.session_uuid not in visible_uuids
+        )
+        # Orphans first — the global container sits above the session
+        # list so something the user can't trace to a row still gets
+        # surfaced rather than dropped on the floor.
+        self._render_pending_decisions(orphans)
+        self._render_session_groups(snap.session_groups, matched)
         self._render_cards()
         # Update history chip from dormant + launching counts (resume-offline
         # feature). Hide entirely when zero — keeps the header clean for
@@ -3393,54 +3433,73 @@ class ExpandedWindow(QWidget):
     _PENDING_VISIBLE_CAP = 5
 
     def _render_pending_decisions(self, decisions: tuple) -> None:
-        """Diff-rebuild the pending section. Cached per-id so an existing
-        card whose decision is still in the snapshot keeps its widget
-        instance (preserves text-input state on PromptReviewCard)."""
-        # Lazy import — avoids the UI module pulling pending_decisions at
-        # import time when this feature isn't wired (test fixtures).
-        from claude_island.ui.approval_card import ApprovalCard
-        from claude_island.ui.prompt_review_card import PromptReviewCard
-        from claude_island.core.pending_decisions import DecisionKind
+        """Render orphan pending decisions into the global container.
 
-        # Empty fast path — hide container.
+        ``decisions`` here is the subset whose ``session_uuid`` doesn't
+        match any visible session group — the inline render path
+        consumes the matched subset directly. GC of resolved/expired
+        widgets is handled centrally by ``render()`` before this is
+        called, so this method only inserts/positions cards into
+        ``_pending_layout``.
+
+        Cards stay cached in ``_decision_cards`` by id so an existing
+        card whose decision is still pending keeps its widget instance
+        (preserves text-input state on PromptReviewCard)."""
         if not decisions:
-            for widget in self._decision_cards.values():
-                widget.setParent(None)
-                widget.deleteLater()
-            self._decision_cards.clear()
-            # Drop any "+N more" footer label too.
+            # Detach any orphan-bucket cards still sitting in the
+            # global container — they belong to a previous render
+            # and should disappear when there are no orphans now.
+            while self._pending_layout.count():
+                item = self._pending_layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.setParent(None)
             self._clear_pending_overflow_label()
             self._pending_container.setVisible(False)
             return
 
         visible = decisions[: self._PENDING_VISIBLE_CAP]
         overflow = len(decisions) - len(visible)
-        live_ids = {d.id for d in visible}
 
-        # Drop cards no longer present (resolved or expired).
-        for did in list(self._decision_cards.keys()):
-            if did not in live_ids:
-                w = self._decision_cards.pop(did)
+        # Empty the layout first so re-ordering across renders doesn't
+        # leave stale slots (inline render path may have re-parented
+        # widgets between calls).
+        while self._pending_layout.count():
+            item = self._pending_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
                 w.setParent(None)
-                w.deleteLater()
 
-        # Add / re-order cards for what's now visible.
-        # Strategy: ensure self._pending_layout contains exactly the
-        # visible cards in order. Cheaper than full teardown — diff-add.
-        for index, view in enumerate(visible):
-            card = self._decision_cards.get(view.id)
-            if card is None:
-                if view.kind is DecisionKind.PRE_TOOL_USE:
-                    card = ApprovalCard(view, on_resolve=self._on_decision_resolved)
-                else:
-                    card = PromptReviewCard(view, on_resolve=self._on_decision_resolved)
-                self._decision_cards[view.id] = card
-            # Position card at index — insertWidget tolerates re-insertion.
-            self._pending_layout.insertWidget(index, card)
+        for view in visible:
+            card = self._get_or_create_decision_card(view)
+            card.setParent(None)
+            self._pending_layout.addWidget(card)
 
         # Footer overflow label.
         self._update_pending_overflow_label(overflow)
         self._pending_container.setVisible(True)
+
+    def _get_or_create_decision_card(self, view):
+        """Get-or-build a card widget for a pending decision, cached
+        by id in ``_decision_cards``. The widget can be re-parented
+        across renders without losing its internal state (e.g. text
+        the user typed into a PromptReviewCard)."""
+        from claude_island.ui.approval_card import ApprovalCard
+        from claude_island.ui.prompt_review_card import PromptReviewCard
+        from claude_island.core.pending_decisions import DecisionKind
+
+        card = self._decision_cards.get(view.id)
+        if card is None:
+            if view.kind is DecisionKind.PRE_TOOL_USE:
+                card = ApprovalCard(
+                    view, on_resolve=self._on_decision_resolved,
+                )
+            else:
+                card = PromptReviewCard(
+                    view, on_resolve=self._on_decision_resolved,
+                )
+            self._decision_cards[view.id] = card
+        return card
 
     def _update_pending_overflow_label(self, overflow: int) -> None:
         if overflow <= 0:
@@ -3556,7 +3615,9 @@ class ExpandedWindow(QWidget):
         self._render_session_groups(tuple(groups))
 
     def _render_session_groups(
-        self, groups: tuple["SessionGroup", ...]
+        self,
+        groups: tuple["SessionGroup", ...],
+        pending_decisions: tuple = (),
     ) -> None:
         """Render pre-grouped sessions from the adapter chain.
 
@@ -3567,20 +3628,40 @@ class ExpandedWindow(QWidget):
         Row widgets are cached by pid to preserve hover/pressed state
         across ticks. Cards are rebuilt every refresh.
 
+        ``pending_decisions`` is the subset of snapshot decisions whose
+        ``session_uuid`` matches one of the visible groups' views
+        (caller does the bucketing). They render inline beneath their
+        group widget so the user sees which session is asking for
+        approval.
+
         Fast path: when the group structure (group_ids in order, view
-        pids in order within each group) is identical to the previous
-        render, skip the layout teardown + rebuild entirely — only
-        update each row's content in place via ``_update_row``. This
-        prevents the brief 1-frame visual flash caused by detaching
-        every widget from the layout and re-attaching them, which the
-        user sees as "the panel suddenly flashed". The structural
-        signature is computed once and cached in ``_last_struct_sig``."""
+        pids in order, and matched decision ids per group) is identical
+        to the previous render, skip the layout teardown + rebuild
+        entirely — only update each row's content in place via
+        ``_update_row``. Decision IDs are included in the signature so a
+        new approval card arriving forces a rebuild instead of being
+        silently lost to the fast path. Cached in
+        ``_last_struct_sig``."""
         total_views = sum(len(g.views) for g in groups)
         self._latest_sessions = list(range(total_views))  # sentinel
 
-        # Fast path: identical group structure → in-place row updates only.
+        # Decisions bucketed per group (by any view's uuid landing here).
+        decisions_by_group: dict[str, tuple] = {}
+        for g in groups:
+            uuids = {v.session_uuid for v in g.views if v.session_uuid}
+            decisions_by_group[g.group_id] = tuple(
+                d for d in pending_decisions if d.session_uuid in uuids
+            )
+
+        # Fast path: identical group structure + same matched decisions
+        # → in-place row updates only.
         new_struct_sig = tuple(
-            (g.group_id, tuple(v.pid for v in g.views)) for g in groups
+            (
+                g.group_id,
+                tuple(v.pid for v in g.views),
+                tuple(d.id for d in decisions_by_group[g.group_id]),
+            )
+            for g in groups
         )
         prev_sig = getattr(self, "_last_struct_sig", None)
         if (
@@ -3622,9 +3703,27 @@ class ExpandedWindow(QWidget):
         multi_idx = 0
         for group in groups:
             palette_idx = multi_idx if len(group.views) > 1 else None
-            self._session_box.addWidget(
-                self._make_group_widget(group, palette_idx=palette_idx)
+            group_widget = self._make_group_widget(
+                group, palette_idx=palette_idx,
             )
+            decisions = decisions_by_group.get(group.group_id, ())
+            if decisions:
+                # Wrap the group + its matching decision cards in a
+                # vertical container so the cards sit immediately below
+                # the session row(s) they belong to.
+                from PySide6.QtWidgets import QWidget, QVBoxLayout
+                wrapper = QWidget()
+                wlayout = QVBoxLayout(wrapper)
+                wlayout.setContentsMargins(0, 0, 0, 0)
+                wlayout.setSpacing(6)
+                wlayout.addWidget(group_widget)
+                for view in decisions:
+                    card = self._get_or_create_decision_card(view)
+                    card.setParent(None)
+                    wlayout.addWidget(card)
+                self._session_box.addWidget(wrapper)
+            else:
+                self._session_box.addWidget(group_widget)
             if palette_idx is not None:
                 multi_idx += 1
             for v in group.views:

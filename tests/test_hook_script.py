@@ -195,9 +195,13 @@ def test_t5_3_run_timeout_clean_exit(monkeypatch, capsys):
 
 
 def test_v4_blocking_event_uses_long_timeout(monkeypatch, capsys):
-    """PreToolUse / UserPromptSubmit must use the long blocking timeout
-    (not the 5 s fast-event default). Verified by patching the urlopen
-    call to capture the timeout argument."""
+    """PermissionRequest / UserPromptSubmit must use the long blocking
+    timeout (not the 5 s fast-event default). Verified by patching the
+    urlopen call to capture the timeout argument.
+
+    v5: PermissionRequest replaced PreToolUse in the blocking set —
+    PreToolUse went back to being fire-and-forget after the approval
+    flow moved off it (see hook.py module docstring)."""
     captured_timeouts: list[float] = []
 
     class _FakeResp:
@@ -214,8 +218,8 @@ def test_v4_blocking_event_uses_long_timeout(monkeypatch, capsys):
         hook_module.urllib.request, "urlopen", fake_urlopen,
     )
 
-    # Drive PreToolUse → expect blocking timeout (~600 s).
-    raw = b'{"hook_event_name":"PreToolUse","session_id":"u1","tool_name":"Bash"}'
+    # Drive PermissionRequest → expect blocking timeout (~600 s).
+    raw = b'{"hook_event_name":"PermissionRequest","session_id":"u1","tool_name":"Bash"}'
     stdin_buf = io.BytesIO(raw)
     monkeypatch.setattr(sys, "stdin",
                         type("F", (), {"buffer": stdin_buf, "read": lambda self=None: ""})())
@@ -224,7 +228,40 @@ def test_v4_blocking_event_uses_long_timeout(monkeypatch, capsys):
     assert len(captured_timeouts) == 1
     # Should be the BLOCKING constant (600 s), well above the 5 s fast.
     assert captured_timeouts[0] >= 60.0, (
-        f"PreToolUse should use blocking timeout, got {captured_timeouts[0]}"
+        f"PermissionRequest should use blocking timeout, got "
+        f"{captured_timeouts[0]}"
+    )
+
+
+def test_v5_pretooluse_now_uses_fast_timeout(monkeypatch, capsys):
+    """v5 regression guard: PreToolUse must NOT use the blocking timeout —
+    the approval flow moved to PermissionRequest, so PreToolUse is again
+    a pure fire-and-forget state-machine ping."""
+    captured_timeouts: list[float] = []
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return b'{}'
+
+    def fake_urlopen(req, *, timeout):
+        captured_timeouts.append(timeout)
+        return _FakeResp()
+
+    monkeypatch.setattr(hook_module, "_read_port", lambda: 50777)
+    monkeypatch.setattr(
+        hook_module.urllib.request, "urlopen", fake_urlopen,
+    )
+
+    raw = b'{"hook_event_name":"PreToolUse","session_id":"u1","tool_name":"Bash"}'
+    stdin_buf = io.BytesIO(raw)
+    monkeypatch.setattr(sys, "stdin",
+                        type("F", (), {"buffer": stdin_buf, "read": lambda self=None: ""})())
+    hook_module.run()
+
+    assert len(captured_timeouts) == 1
+    assert captured_timeouts[0] <= 10.0, (
+        f"PreToolUse should use fast timeout, got {captured_timeouts[0]}"
     )
 
 
@@ -284,8 +321,8 @@ def test_v4_userpromptsubmit_uses_long_timeout(monkeypatch, capsys):
     assert captured_timeouts[0] >= 60.0
 
 
-def test_v4_version_bumped():
-    assert hook_module.__version__ == "4"
+def test_v5_version_bumped():
+    assert hook_module.__version__ == "5"
 
 
 # ---------------------------------------------------------------------------

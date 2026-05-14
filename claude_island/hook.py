@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-__version__ = "4"
+__version__ = "5"
 """Stable schema version of this hook script.
 
 When ``hook_installer.sync_hook_script`` runs at boot it compares this
@@ -61,6 +61,13 @@ design). Other events keep the 5 s timeout — they're pure
 fire-and-forget and the longer wait would just mask listener bugs.
 Fail-open contract preserved: any timeout (5 s or 600 s) still results
 in stdout="{}" and exit 0 so Claude never hangs on us.
+
+v5 (2026-05-14): swap PreToolUse → PermissionRequest in the blocking
+set. PreToolUse fires for every tool call regardless of whether Claude
+intends to prompt the user (it skips its own permission UI in
+``bypassPermissions``/``skipAutoPermissionPrompt`` setups), so the
+old design over-intercepted. PermissionRequest fires only when Claude
+actually wants a human decision, which is what we want to surface.
 """
 
 _DEFAULT_PORT = 50777
@@ -80,8 +87,13 @@ _POST_TIMEOUT_BLOCKING_S = 600.0
 
 # Hook events that may legitimately block on a human in the loop. All
 # others use _POST_TIMEOUT_FAST_S.
+#
+# v5: PermissionRequest replaces PreToolUse here — the approval card
+# now fires off PermissionRequest (Claude only sends it when it actually
+# intends to prompt), and PreToolUse goes back to being a fast
+# fire-and-forget state-machine ping.
 _BLOCKING_HOOK_EVENTS = frozenset({
-    "PreToolUse",
+    "PermissionRequest",
     "UserPromptSubmit",
 })
 
