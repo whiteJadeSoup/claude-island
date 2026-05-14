@@ -91,6 +91,37 @@ _PRETOOLUSE_INPUT_PREVIEW_MAX = 300
 # Preview length for prompt shown on PromptReviewCard. ≤ 500 per design.
 _USERPROMPTSUBMIT_PROMPT_PREVIEW_MAX = 500
 
+# Permission modes in which the user has globally opted out of any
+# tool-permission prompts. Intercepting PreToolUse with an approval card
+# would override the user's intent — wrong UX. When the payload's
+# ``permission_mode`` is one of these, the hook server skips the entire
+# pending-decision flow and replies "{}" so Claude Code runs the tool
+# under its own auto-allow rule.
+#
+# - ``bypassPermissions`` / ``dontAsk`` (alias): explicit "never prompt"
+# - ``auto``: autonomous mode; the classifier decides without user input
+#
+# Other modes (``default``, ``plan``) keep the existing flow — the user
+# is expecting confirmation in those modes. ``acceptEdits`` is partial
+# bypass (only Edit-family tools); see ``_ACCEPT_EDITS_TOOLS`` below.
+_BYPASS_PERMISSION_MODES = frozenset({
+    "bypassPermissions",
+    "dontAsk",
+    "auto",
+})
+
+# Tools that ``acceptEdits`` silently auto-approves. When ``permission_mode``
+# is ``"acceptEdits"`` AND the tool is one of these, skip the pending-
+# decision flow — the user already said "auto-accept all file edits".
+# Bash and other shell-style tools still flow through the approval card
+# in acceptEdits mode (matches Claude Code's built-in behaviour).
+_ACCEPT_EDITS_TOOLS = frozenset({
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+})
+
 
 class HookServerStartError(RuntimeError):
     """Raised when start() cannot bind any port in the retry range."""
@@ -311,6 +342,19 @@ class HookServer:
         uuid = _safe_str(payload.get("session_id"))
         tool_name = _safe_str(payload.get("tool_name"))
         if not uuid or not tool_name:
+            return b"{}"
+
+        # Fast path — user is in a "no prompts" mode (bypassPermissions /
+        # dontAsk / auto). Don't override their explicit choice; let
+        # Claude Code's built-in rules handle the call.
+        mode = _safe_str(payload.get("permission_mode"))
+        if mode in _BYPASS_PERMISSION_MODES:
+            return b"{}"
+        # Partial bypass — acceptEdits silently auto-approves Edit/Write
+        # /MultiEdit/NotebookEdit but still surfaces shell tools like Bash
+        # to the user. Match that semantic so we don't re-prompt for the
+        # mode's whole point.
+        if mode == "acceptEdits" and tool_name in _ACCEPT_EDITS_TOOLS:
             return b"{}"
 
         # Fast path — granted earlier this session.

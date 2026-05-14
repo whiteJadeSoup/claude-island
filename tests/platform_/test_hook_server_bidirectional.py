@@ -121,6 +121,138 @@ class TestLegacyPath:
 # ── PreToolUse cache hit (T3.1, fast path) ───────────────────────────
 
 
+class TestBypassPermissionMode:
+    """When the session is in bypassPermissions / dontAsk mode the user
+    has explicitly opted out of any prompts. HookServer must NOT register
+    a pending decision — that would override the user's intent."""
+
+    def test_bypass_mode_returns_empty_no_pending(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        srv, port = server
+        status, body = _post(port, {
+            "hook_event_name": "PreToolUse",
+            "session_id": "u-bypass",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf node_modules"},
+            "cwd": "/tmp",
+            "permission_mode": "bypassPermissions",
+        })
+        assert status == 200
+        assert body == {}
+        # Nothing should have been registered.
+        assert registry.snapshot() == ()
+
+    def test_dontask_mode_alias_also_skips(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        srv, port = server
+        status, body = _post(port, {
+            "hook_event_name": "PreToolUse",
+            "session_id": "u-dontask",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "cwd": "/tmp",
+            "permission_mode": "dontAsk",
+        })
+        assert status == 200
+        assert body == {}
+        assert registry.snapshot() == ()
+
+    def test_auto_mode_skips(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        """Autonomous mode — Claude's classifier decides; intercepting
+        with our card would override that explicit user intent."""
+        srv, port = server
+        status, body = _post(port, {
+            "hook_event_name": "PreToolUse",
+            "session_id": "u-auto",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "cwd": "/tmp",
+            "permission_mode": "auto",
+        })
+        assert status == 200
+        assert body == {}
+        assert registry.snapshot() == ()
+
+    def test_acceptedits_skips_only_edit_tools(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        """acceptEdits is partial bypass: Edit/Write/MultiEdit/Notebook
+        Edit auto-skip; Bash + others still hit the approval flow."""
+        srv, port = server
+        # Edit tool in acceptEdits → skip.
+        status, body = _post(port, {
+            "hook_event_name": "PreToolUse",
+            "session_id": "u-edits",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/tmp/x"},
+            "cwd": "/tmp",
+            "permission_mode": "acceptEdits",
+        })
+        assert body == {}
+        assert registry.snapshot() == ()
+
+    def test_acceptedits_still_blocks_for_bash(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        srv, port = server
+
+        def _resolver():
+            for _ in range(50):
+                snap = registry.snapshot()
+                if snap:
+                    registry.resolve(
+                        snap[0].id, Decision(result=DecisionResult.ALLOW),
+                    )
+                    return
+                time.sleep(0.05)
+
+        t = threading.Thread(target=_resolver, daemon=True)
+        t.start()
+        status, body = _post(port, {
+            "hook_event_name": "PreToolUse",
+            "session_id": "u-edits-bash",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "cwd": "/tmp",
+            "permission_mode": "acceptEdits",
+        }, timeout=10.0)
+        t.join(timeout=2.0)
+        # Should have entered the approval flow, NOT the bypass fast-path.
+        assert body["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_default_mode_still_blocks(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        """Sanity: default mode (no permission_mode set, or "default")
+        still triggers the pending-decision flow as before."""
+        srv, port = server
+
+        def _resolver():
+            for _ in range(50):
+                snap = registry.snapshot()
+                if snap:
+                    registry.resolve(snap[0].id, Decision(result=DecisionResult.ALLOW))
+                    return
+                time.sleep(0.05)
+
+        t = threading.Thread(target=_resolver, daemon=True)
+        t.start()
+        status, body = _post(port, {
+            "hook_event_name": "PreToolUse",
+            "session_id": "u-default",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "cwd": "/tmp",
+            "permission_mode": "default",
+        }, timeout=10.0)
+        t.join(timeout=2.0)
+        assert body["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
 class TestPreToolUseCache:
     def test_cache_hit_returns_allow_immediately(
         self, server, perm_cache: SessionPermissionCache,
