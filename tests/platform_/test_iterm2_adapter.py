@@ -190,9 +190,30 @@ class TestCanHandle:
 
 # ── group ─────────────────────────────────────────────────────────────
 
-def _proc_with_tty(tty: str | None) -> mock.Mock:
+def _proc_with_tty(tty: str | None, *, parent_chain: list[tuple[int, str]] | None = None) -> mock.Mock:
+    """Build a Mock psutil.Process whose ``terminal()`` returns ``tty``.
+
+    ``parent_chain`` is the ancestor list as ``(pid, name)`` pairs in
+    walk order (immediate parent first). Each ancestor Mock has its
+    own ``parent()`` returning the next, so ``_iterm_host_pid`` can
+    walk the chain. Defaults to an empty chain → ``_iterm_host_pid``
+    returns ``None`` and ``focus()`` falls through to ``focus_host_app``.
+    """
+    if parent_chain is None:
+        parent_chain = []
     p = mock.Mock()
     p.terminal = lambda: tty
+    # Build the chain from the tail inward so each ancestor knows its
+    # own parent (a linked list rooted at the input proc).
+    next_proc: mock.Mock | None = None
+    for pid, name in reversed(parent_chain):
+        anc = mock.Mock()
+        anc.pid = pid
+        anc.name = lambda n=name: n
+        nxt = next_proc
+        anc.parent = lambda _n=nxt: _n
+        next_proc = anc
+    p.parent = lambda _n=next_proc: _n
     return p
 
 
@@ -330,15 +351,21 @@ class TestFocus:
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
-                       return_value=_proc_with_tty("/dev/ttys001")),
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(20, "zsh"), (30, "iTerm2")],
+                       )),
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="ok\n")) as run,
         ):
             assert adapter.focus(v) is True
-            # Verify the AppleScript embedded the tty
+            # Verify the AppleScript embedded the tty AND the resolved
+            # iTerm2 host pid (30, from the parent chain). The host pid
+            # disambiguates between multiple iTerm2 installations.
             called_args = run.call_args[0][0]
             assert called_args[0] == "osascript"
             assert "/dev/ttys001" in called_args[2]
+            assert "unix id is 30" in called_args[2]
 
     def test_focus_placeholder_pid_skips_psutil_and_falls_back(self, adapter):
         """PLACEHOLDER_PID (-1): no real process to ask for tty. Must not
@@ -365,7 +392,10 @@ class TestFocus:
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
-                       return_value=_proc_with_tty("/dev/ttys999")),
+                       return_value=_proc_with_tty(
+                           "/dev/ttys999",
+                           parent_chain=[(20, "zsh"), (30, "iTerm2")],
+                       )),
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="miss\n")),
             mock.patch(
@@ -382,7 +412,10 @@ class TestFocus:
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
-                       return_value=_proc_with_tty("/dev/ttys999")),
+                       return_value=_proc_with_tty(
+                           "/dev/ttys999",
+                           parent_chain=[(20, "zsh"), (30, "iTerm2")],
+                       )),
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="miss\n")),
             mock.patch(
@@ -412,7 +445,10 @@ class TestFocus:
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
-                       return_value=_proc_with_tty("/dev/ttys001")),
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(20, "zsh"), (30, "iTerm2")],
+                       )),
             mock.patch("subprocess.run",
                        return_value=_mock_run(returncode=1)),
             mock.patch(
@@ -428,7 +464,10 @@ class TestFocus:
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
-                       return_value=_proc_with_tty("/dev/ttys001")),
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(20, "zsh"), (30, "iTerm2")],
+                       )),
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="ok\n")),
         ):
@@ -443,7 +482,10 @@ class TestFocus:
         weird_tty = '/dev/tty"hax\\'
         with (
             mock.patch("psutil.Process",
-                       return_value=_proc_with_tty(weird_tty)),
+                       return_value=_proc_with_tty(
+                           weird_tty,
+                           parent_chain=[(20, "zsh"), (30, "iTerm2")],
+                       )),
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="miss\n")) as run,
             # Stub the fallback so this test only asserts on the
@@ -474,7 +516,10 @@ class TestFocus:
         v = _view(pid=10)
         with (
             mock.patch("psutil.Process",
-                       return_value=_proc_with_tty("/dev/ttys001")),
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(20, "zsh"), (30, "iTerm2")],
+                       )),
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="ok\n")) as run,
         ):
@@ -484,7 +529,10 @@ class TestFocus:
             # block so the window-order privilege is in place when
             # ``select w`` runs.
             assert 'tell application "System Events"' in script
-            assert 'set frontmost of process "iTerm2"' in script
+            # Frontmost targets the resolved iTerm2 host pid (30 from
+            # the parent chain) by unix id rather than by process name
+            # — required for the multi-iTerm-installation case.
+            assert "unix id is 30" in script
             i_se = script.index('tell application "System Events"')
             i_iterm = script.index('tell application "iTerm"')
             assert i_se < i_iterm, (
@@ -502,6 +550,273 @@ class TestFocus:
             i_t = script.index("select t")
             i_w = script.index("select w")
             assert i_s < i_t < i_w
+
+
+# ── Dual-iTerm host-pid resolution ──────────────────────────────────────
+
+
+class TestITermHostPidResolution:
+    """Regression coverage for the dual-iTerm2 click-no-response bug.
+
+    When two iTerm2 installations are running simultaneously (e.g. the
+    factory ``/Applications/iTerm.app`` plus a user-installed copy in
+    ``~/Applications/iTerm 2.app``, both bundle id
+    ``com.googlecode.iterm2``), the previous focus script used
+    ``set frontmost of process "iTerm2"`` — System Events resolves
+    that to the FIRST matching process by name, regardless of which
+    instance hosts the clicked session. Sessions in the OTHER instance
+    silently brought the wrong window forward.
+
+    The fix walks the session's ancestor chain to resolve the specific
+    iTerm2 host pid and targets it by ``unix id`` in the AppleScript.
+    """
+
+    def test_iterm_host_pid_walks_to_iterm_ancestor(self):
+        """Helper returns the pid of the first iTerm2-named ancestor."""
+        from claude_island.platform_.terminals.iterm2 import _iterm_host_pid
+        proc = _proc_with_tty(
+            "/dev/ttys001",
+            parent_chain=[
+                (100, "zsh"),
+                (200, "login"),
+                (300, "iTermServer-3.6.10"),  # NOT matched
+                (400, "iTerm2"),                # matched here
+                (1, "launchd"),
+            ],
+        )
+        with mock.patch("psutil.Process", return_value=proc):
+            assert _iterm_host_pid(1234) == 400
+
+    def test_iterm_host_pid_returns_none_when_no_iterm_ancestor(self):
+        """tmux/screen-style chain with no iTerm2 ancestor → None.
+        Callers must treat None as 'fall back to focus_host_app' so
+        the click isn't a silent no-op."""
+        from claude_island.platform_.terminals.iterm2 import _iterm_host_pid
+        proc = _proc_with_tty(
+            "/dev/ttys001",
+            parent_chain=[(100, "tmux"), (200, "launchd")],
+        )
+        with mock.patch("psutil.Process", return_value=proc):
+            assert _iterm_host_pid(1234) is None
+
+    def test_iterm_host_pid_returns_none_on_placeholder_pid(self):
+        """PLACEHOLDER_PID (-1): no real process to walk. Helper must
+        guard against ValueError from ``psutil.Process(-1)``."""
+        from claude_island.platform_.terminals.iterm2 import _iterm_host_pid
+        with mock.patch("psutil.Process") as p:
+            assert _iterm_host_pid(-1) is None
+            p.assert_not_called()
+
+    def test_iterm_host_pid_is_case_insensitive(self):
+        """``iTerm2`` vs ``iterm2`` vs ``iTerm`` — psutil reports the
+        binary name as the OS provides it; the matcher must not care
+        about case."""
+        from claude_island.platform_.terminals.iterm2 import _iterm_host_pid
+        proc = _proc_with_tty(
+            "/dev/ttys001",
+            parent_chain=[(100, "ITERM2")],
+        )
+        with mock.patch("psutil.Process", return_value=proc):
+            assert _iterm_host_pid(1234) == 100
+
+    def test_focus_targets_host_pid_not_process_name(self):
+        """Bug regression: the focus AppleScript must reference the
+        resolved host pid by ``unix id``, not the ambiguous
+        ``process "iTerm2"``. Two iTerm2 installations are simulated
+        via a chain whose iTerm2 ancestor pid is 999; the emitted
+        script must contain ``unix id is 999``."""
+        v = _view(pid=10)
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(50, "zsh"), (999, "iTerm2")],
+                       )),
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="ok\n")) as run,
+        ):
+            assert adapter_for_test().focus(v) is True
+            script = run.call_args[0][0][2]
+            assert "unix id is 999" in script
+            # And it should NOT use the old name-based selector that
+            # the bug originally triggered.
+            assert 'process "iTerm2"' not in script
+
+    def test_focus_falls_back_when_no_iterm_ancestor(self):
+        """When the parent walk finds no iTerm2 ancestor (e.g. tmux
+        daemon reparenting), focus skips the tty-precision script
+        entirely and hands off to ``focus_host_app`` rather than
+        emitting a malformed AppleScript."""
+        v = _view(pid=10)
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(50, "tmux"), (60, "launchd")],
+                       )),
+            mock.patch("subprocess.run") as run,
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2.focus_host_app",
+                return_value=True,
+            ) as fha,
+        ):
+            assert adapter_for_test().focus(v) is True
+            # No tty-precision AppleScript emitted (host pid unknown).
+            run.assert_not_called()
+            fha.assert_called_once_with(10)
+
+
+def adapter_for_test() -> ITerm2Adapter:
+    """Adapter instance for the dual-iTerm regression tests.
+    Bypasses the @adapter registry so the tests run on any OS."""
+    a = ITerm2Adapter()
+    a.name = "iterm2"
+    a._priority = 100
+    return a
+
+
+# ── Hook-captured identifiers fast path (v6) ────────────────────────────
+
+
+class TestFocusByHookCapturedIds:
+    """When the SessionStart hook captured ``iterm_session_id`` +
+    ``terminal_pid`` into ``jump_target``, the focus path should
+    skip all psutil walks and run a single id-match AppleScript.
+
+    Falling back: if the captured id has aged out (iTerm restarted,
+    session closed), focus must transparently fall through to the
+    tty-based path rather than reporting failure outright.
+    """
+
+    @staticmethod
+    def _view_with_jt(*, pid: int, iterm_session_id: str, terminal_pid: int) -> SessionView:
+        from dataclasses import replace as _replace
+        from claude_island.core.hook_events import JumpTarget
+        v = _view(pid=pid)
+        return _replace(
+            v,
+            jump_target=JumpTarget(
+                terminal_app="iTerm.app",
+                term_program="iTerm.app",
+                iterm_session_id=iterm_session_id,
+                terminal_pid=terminal_pid,
+            ),
+        )
+
+    def test_id_path_skips_psutil_entirely_when_capture_present(self):
+        """The fast path runs ONE osascript and returns True. psutil
+        and the parent-walk helper must not be touched."""
+        v = self._view_with_jt(
+            pid=12345, iterm_session_id="ABC-123", terminal_pid=90559,
+        )
+        with (
+            mock.patch("psutil.Process") as p,
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="ok\n")) as run,
+        ):
+            assert adapter_for_test().focus(v) is True
+            p.assert_not_called()
+            assert run.call_count == 1
+            script = run.call_args[0][0][2]
+            # The id-match template, not the tty-match template.
+            assert "id of s as text" in script
+            assert "ABC-123" in script
+            assert "unix id is 90559" in script
+
+    def test_id_path_miss_falls_back_to_tty_path(self):
+        """Captured id no longer resolves (iTerm restarted, etc.) —
+        the slow path takes over and recovers via tty match."""
+        v = self._view_with_jt(
+            pid=12345, iterm_session_id="STALE-ID", terminal_pid=90559,
+        )
+        # First call (id template) returns "miss"; second call (tty
+        # template) returns "ok". subprocess.run side_effect cycles.
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(50, "zsh"), (90559, "iTerm2")],
+                       )),
+            mock.patch("subprocess.run", side_effect=[
+                _mock_run(stdout="miss\n"),  # id path miss
+                _mock_run(stdout="ok\n"),     # tty path hit
+            ]) as run,
+        ):
+            assert adapter_for_test().focus(v) is True
+            assert run.call_count == 2
+            # Second call should be the tty template, not the id one.
+            second_script = run.call_args_list[1][0][0][2]
+            assert "tty of s is " in second_script
+
+    def test_id_path_uses_captured_host_pid_not_runtime_walk(self):
+        """``jump_target.terminal_pid`` is preferred over the runtime
+        ``_iterm_host_pid`` walk. When both the id-match script lands
+        and host_pid is captured, the script must reference the
+        captured pid (90559), NOT the result of an ancestor walk."""
+        v = self._view_with_jt(
+            pid=12345, iterm_session_id="ABC-123", terminal_pid=90559,
+        )
+        with (
+            mock.patch("psutil.Process") as p,
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="ok\n")) as run,
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._iterm_host_pid",
+            ) as walk,
+        ):
+            adapter_for_test().focus(v)
+            walk.assert_not_called()
+            p.assert_not_called()
+            assert "unix id is 90559" in run.call_args[0][0][2]
+
+    def test_id_path_partial_capture_id_only_falls_through(self):
+        """Only iterm_session_id captured, terminal_pid=0 (parent walk
+        failed at hook time). Without a host_pid the id template can't
+        run safely — fall through to the slow path which can derive
+        host_pid at click time via _iterm_host_pid."""
+        v = self._view_with_jt(
+            pid=12345, iterm_session_id="ABC-123", terminal_pid=0,
+        )
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(50, "zsh"), (77777, "iTerm2")],
+                       )),
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="ok\n")) as run,
+        ):
+            assert adapter_for_test().focus(v) is True
+            # Only the tty template ran — id template was skipped.
+            assert run.call_count == 1
+            script = run.call_args[0][0][2]
+            assert "tty of s is " in script
+            assert "unix id is 77777" in script  # from the runtime walk
+
+    def test_id_path_partial_capture_pid_only_falls_through(self):
+        """Only terminal_pid captured. Without an id the id template
+        can't run; fall through to the tty path but use the captured
+        pid for frontmost (skipping the runtime walk)."""
+        v = self._view_with_jt(
+            pid=12345, iterm_session_id="", terminal_pid=90559,
+        )
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(50, "zsh"), (77777, "iTerm2")],
+                       )),
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="ok\n")) as run,
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._iterm_host_pid",
+            ) as walk,
+        ):
+            assert adapter_for_test().focus(v) is True
+            # Runtime walk must NOT run when captured pid is available.
+            walk.assert_not_called()
+            script = run.call_args[0][0][2]
+            assert "unix id is 90559" in script
 
 
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────
