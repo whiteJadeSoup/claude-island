@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-__version__ = "5"
+__version__ = "6"
 """Stable schema version of this hook script.
 
 When ``hook_installer.sync_hook_script`` runs at boot it compares this
@@ -68,6 +68,14 @@ intends to prompt the user (it skips its own permission UI in
 ``bypassPermissions``/``skipAutoPermissionPrompt`` setups), so the
 old design over-intercepted. PermissionRequest fires only when Claude
 actually wants a human decision, which is what we want to surface.
+
+v6 (2026-05-15): on macOS, augment ``jump_target`` with two stable
+identifiers captured at hook time: ``iterm_session_id`` (iTerm2's
+own per-session id via osascript) and ``terminal_pid`` (pid of the
+hosting iTerm2 app via parent-chain walk). These let the click
+handler skip its runtime parent-walk + tty-rename-resilient match
+the right pane. iTerm2 ONLY for now; other macOS terminals leave
+the new fields empty and the click path falls back to the old logic.
 """
 
 _DEFAULT_PORT = 50777
@@ -352,12 +360,17 @@ def _build_jump_target() -> dict | None:
       * ``GetCurrentProcessId()`` — sanity check value, matches the
         pid the listener already knows from the wire payload.
 
+    On macOS the equivalent capture is via ``_macos_jump_target_extras``,
+    which fills ``iterm_session_id`` + ``terminal_pid`` when running
+    inside iTerm2.
+
     Returns a dict suitable for the wire (str/int only), or None if
     capture failed entirely. Sub-fields default to empty/zero rather
     than missing so the listener's parse is simpler.
 
-    Pure stdlib (ctypes + os). No psutil — keeps hook.py cold-start
-    fast (target <100ms).
+    Pure stdlib (ctypes + os + subprocess). No psutil — keeps hook.py
+    cold-start fast (target <100ms on Windows, ~<300ms on macOS-iTerm
+    when the osascript leg runs).
     """
     out: dict = {
         "term_program": "",
@@ -365,6 +378,8 @@ def _build_jump_target() -> dict | None:
         "wt_session_guid": "",
         "conhost_hwnd": 0,
         "host_pid": 0,
+        "iterm_session_id": "",
+        "terminal_pid": 0,
     }
     try:
         out["term_program"] = os.environ.get("TERM_PROGRAM", "") or ""
@@ -376,27 +391,143 @@ def _build_jump_target() -> dict | None:
             out["terminal_app"] = "WindowsTerminal"
         elif out["term_program"]:
             out["terminal_app"] = out["term_program"]
-        else:
+        elif sys.platform == "win32":
             out["terminal_app"] = "ConsoleHost"
     except Exception:
         pass
 
     # Win32 calls via ctypes — stay stdlib-only.
-    try:
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        user32 = ctypes.windll.user32
-        # GetConsoleWindow returns a HANDLE; coerce to int hwnd.
-        conhost = int(kernel32.GetConsoleWindow() or 0)
-        out["conhost_hwnd"] = conhost
-        out["host_pid"] = int(kernel32.GetCurrentProcessId() or 0)
-    except Exception:
-        # ctypes not available (extremely rare on Windows) or call
-        # failed — leave conhost_hwnd=0 / host_pid=0. The listener
-        # interprets 0 as "not captured".
-        pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            # GetConsoleWindow returns a HANDLE; coerce to int hwnd.
+            conhost = int(kernel32.GetConsoleWindow() or 0)
+            out["conhost_hwnd"] = conhost
+            out["host_pid"] = int(kernel32.GetCurrentProcessId() or 0)
+        except Exception:
+            # ctypes not available (extremely rare on Windows) or call
+            # failed — leave conhost_hwnd=0 / host_pid=0. The listener
+            # interprets 0 as "not captured".
+            pass
+
+    # macOS: capture stable iTerm2 identifiers + host app pid. We do
+    # this only for the iTerm2 path because that's where the click
+    # handler benefits from pane-precise + multi-instance-safe data.
+    # Terminal.app and others fall through to the click-time tty walk.
+    if sys.platform == "darwin" and out["term_program"] == "iTerm.app":
+        try:
+            extras = _macos_jump_target_extras()
+        except Exception:
+            extras = None
+        if extras:
+            # Don't blindly overwrite — extras may have partial capture.
+            for k, v in extras.items():
+                if v:
+                    out[k] = v
+        # Always set host_pid to the claude pid on macOS for parity
+        # with the Windows branch (the bridge uses this as the
+        # canonical SessionRegistry pid before scanner catches up).
+        try:
+            out["host_pid"] = int(os.getpid())
+        except Exception:
+            pass
 
     # Don't emit a fully-empty record — it adds wire weight without info.
+    if not any(out.values()):
+        return None
+    return out
+
+
+def _macos_jump_target_extras() -> dict | None:
+    """macOS-only capture: ``iterm_session_id`` + ``terminal_pid``.
+
+    Two steps, each best-effort with its own short timeout:
+
+      1. Walk the parent process chain via ``/bin/ps`` until an
+         ``iTerm2`` ancestor is found → ``terminal_pid``.
+      2. Resolve our own controlling tty (``os.ttyname(0)``) and ask
+         iTerm via osascript for the session whose ``tty`` matches →
+         ``iterm_session_id``.
+
+    Returns a dict with whichever subset succeeded (empty / 0 for the
+    fields that failed) or None if nothing was captured. Designed so a
+    permission denial or iTerm-not-scriptable case doesn't take down
+    the entire hook.
+    """
+    import subprocess
+    out: dict = {"iterm_session_id": "", "terminal_pid": 0}
+
+    # --- terminal_pid: walk parent chain via /bin/ps ----------------
+    # /bin/ps -o ppid=,comm= -p <pid> emits "  PPID command\n". On
+    # macOS ``comm`` is the full executable path. We walk up to 12
+    # hops looking for the actual iTerm2.app process — basename
+    # ``iTerm2`` (case-insensitive). Critically we must NOT stop at
+    # ``iTermServer-3.6.x`` (which also contains "iterm2"): the server
+    # is a launchd-spawned daemon and System Events refuses to
+    # ``set frontmost`` on it with error -1719 invalid index. Only
+    # iTerm2.app's main process is a frontmost-able UI app.
+    try:
+        pid = os.getppid()
+        for _ in range(12):
+            if pid <= 1:
+                break
+            result = subprocess.run(
+                ["/bin/ps", "-o", "ppid=,comm=", "-p", str(pid)],
+                capture_output=True, timeout=0.5,
+            )
+            if result.returncode != 0:
+                break
+            line = result.stdout.decode("utf-8", errors="replace").strip()
+            if not line:
+                break
+            try:
+                ppid_str, _, comm = line.partition(" ")
+                ppid_int = int(ppid_str.strip())
+            except (ValueError, IndexError):
+                break
+            basename = comm.rsplit("/", 1)[-1].strip()
+            if basename.lower() == "iterm2":
+                out["terminal_pid"] = pid
+                break
+            pid = ppid_int
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    # --- iterm_session_id: osascript tty match ----------------------
+    try:
+        try:
+            tty = os.ttyname(0)
+        except OSError:
+            tty = ""
+        if tty:
+            # Escape for AppleScript double-quoted literal.
+            tty_escaped = tty.replace("\\", "\\\\").replace('"', '\\"')
+            script = (
+                'tell application "iTerm"\n'
+                '  repeat with w in windows\n'
+                '    repeat with t in tabs of w\n'
+                '      repeat with s in sessions of t\n'
+                f'        if tty of s is "{tty_escaped}" then\n'
+                '          return id of s as text\n'
+                '        end if\n'
+                '      end repeat\n'
+                '    end repeat\n'
+                '  end repeat\n'
+                '  return ""\n'
+                'end tell\n'
+            )
+            result = subprocess.run(
+                ["/usr/bin/osascript", "-e", script],
+                capture_output=True, timeout=1.0,
+            )
+            if result.returncode == 0:
+                sid = result.stdout.decode("utf-8", errors="replace").strip()
+                if sid:
+                    out["iterm_session_id"] = sid
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
     if not any(out.values()):
         return None
     return out

@@ -71,8 +71,11 @@ class JumpTarget:
     # target process. 0 when unknown.
     conhost_hwnd: int = 0
 
-    # The PID at the time of capture. Mostly a sanity check —
-    # matches Session.pid for in-process scanner-discovered sessions.
+    # PID of the **claude process itself** at hook time. NOT the
+    # hosting terminal's pid (see ``terminal_pid`` for that). The
+    # ``hook_session_bridge`` uses this as the canonical pid for
+    # the SessionRegistry entry before the scanner catches up; the
+    # WT adapter uses it as a sanity check against ``Session.pid``.
     host_pid: int = 0
 
     # Windows Terminal pane GUID (WT 1.18+ env var WT_SESSION).
@@ -83,6 +86,24 @@ class JumpTarget:
     # Verbatim TERM_PROGRAM env var. Used by the wiring layer to
     # pick the right adapter at click time.
     term_program: str = ""
+
+    # iTerm2's stable per-session id, captured at hook time via
+    # ``tell application "iTerm" to id of session whose tty is …``.
+    # When non-empty, the iTerm2 adapter matches by id instead of by
+    # tty in the focus AppleScript — id is stable across reconnects
+    # and process restarts that tty isn't. Empty when the session
+    # doesn't run inside iTerm2, the hook ran before iTerm was
+    # scriptable, or AppleScript permission was denied.
+    iterm_session_id: str = ""
+
+    # PID of the hosting terminal application (iTerm2.app process,
+    # WindowsTerminal.exe, etc.) — NOT the claude pid (see
+    # ``host_pid``). Captured at hook time by walking the claude
+    # process's parent chain. Used at click time to disambiguate
+    # when multiple instances of the same terminal app are running
+    # (e.g. two iTerm2 installs with the same bundle id). 0 when
+    # the parent walk found no recognised terminal ancestor.
+    terminal_pid: int = 0
 
 
 # ---------------------------------------------------------------------------
