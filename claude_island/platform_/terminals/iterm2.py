@@ -121,11 +121,21 @@ end tell
 # the active application's windows`` and visually does nothing. The
 # user sees AppleScript return "ok" but no window switches.
 #
-# System Events' ``set frontmost of process "iTerm2" to true`` runs
-# with higher privilege via the accessibility API and bypasses that
-# rule, so the target window is actually surfaced. Verified live: the
-# AppKit warning disappears and the user-perceived "click does
-# nothing" symptom resolves.
+# System Events' ``set frontmost of (... unix id is HOST_PID ...) to
+# true`` runs with higher privilege via the accessibility API and
+# bypasses that rule, so the target window is actually surfaced.
+# Verified live: the AppKit warning disappears and the user-perceived
+# "click does nothing" symptom resolves.
+#
+# Why target by ``unix id`` instead of ``process "iTerm2"``: a user
+# can have two iTerm2 installations running side by side (e.g. the
+# 3.6.9 in /Applications and the 3.6.10 in ~/Applications, both
+# bundle id ``com.googlecode.iterm2``). ``first process whose name is
+# "iTerm2"`` returns the first match — usually the older instance —
+# regardless of which one hosts the clicked session, so clicks on
+# sessions in the OTHER instance silently bring the wrong window to
+# front. Resolving the host pid via ``find_iterm2_host_pid`` at click
+# time and targeting it by unix id picks the correct instance.
 #
 # ``select w`` is still load-bearing for the multi-window case:
 # raising iTerm2 to the OS foreground doesn't pick which iTerm2
@@ -135,7 +145,7 @@ end tell
 # window with the right pane hidden behind it.
 _FOCUS_SCRIPT_TEMPLATE = """\
 tell application "System Events"
-    set frontmost of process "iTerm2" to true
+    set frontmost of (first process whose unix id is {host_pid}) to true
 end tell
 tell application "iTerm"
     repeat with w in windows
@@ -318,7 +328,17 @@ class ITerm2Adapter(_CapabilityProvider):
             tty = psutil.Process(view.session.pid).terminal()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return focus_host_app(view.session.pid)
-        if tty and _focus_by_tty(tty):
+        # Resolve the host iTerm2 pid via the ancestor chain. Used to
+        # disambiguate when multiple iTerm2 installations are running
+        # — ``set frontmost of process "iTerm2"`` would pick the first
+        # match by name, which is rarely the one hosting this session.
+        host_pid = _iterm_host_pid(view.session.pid)
+        if host_pid is None:
+            # No iTerm2 ancestor found (race / unusual chain). Skip the
+            # tty-precision script entirely and fall back to the
+            # generic host-app raise, which walks System Events itself.
+            return focus_host_app(view.session.pid)
+        if tty and _focus_by_tty(tty, host_pid=host_pid):
             return True
         return focus_host_app(view.session.pid)
 
@@ -426,11 +446,19 @@ def _parse_enum_output(text: str) -> dict[str, tuple[int, int]]:
     return out
 
 
-def _focus_by_tty(tty: str) -> bool:
+def _focus_by_tty(tty: str, *, host_pid: int) -> bool:
     """Run the focus AppleScript for the given tty. Returns True iff
     osascript completed AND the script reported "ok" (i.e. iTerm2
-    found a session matching the tty and selected/activated it)."""
-    script = _FOCUS_SCRIPT_TEMPLATE.format(tty=_escape_applescript_string(tty))
+    found a session matching the tty and selected/activated it).
+
+    ``host_pid`` is the pid of the specific iTerm2 instance that owns
+    the session. Targeting by pid (not by process name) is required
+    when two iTerm2 installations are running simultaneously — see
+    ``_FOCUS_SCRIPT_TEMPLATE`` docstring for context."""
+    script = _FOCUS_SCRIPT_TEMPLATE.format(
+        tty=_escape_applescript_string(tty),
+        host_pid=int(host_pid),
+    )
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
@@ -441,6 +469,39 @@ def _focus_by_tty(tty: str) -> bool:
     if result.returncode != 0:
         return False
     return result.stdout.decode("utf-8", errors="replace").strip() == "ok"
+
+
+def _iterm_host_pid(claude_pid: int) -> int | None:
+    """Walk ``claude_pid``'s parent chain and return the pid of the
+    first iTerm2-named ancestor, or ``None`` if no such ancestor is
+    found within ``_MAX_ANCESTOR_DEPTH`` hops.
+
+    Used at FOCUS time to disambiguate between multiple iTerm2
+    installations running side by side — see ``_FOCUS_SCRIPT_TEMPLATE``.
+    Returns None on any psutil failure so the caller can fall back to
+    the generic host-app raise rather than silently no-op'ing.
+    """
+    if claude_pid <= 0:
+        return None
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        proc = psutil.Process(claude_pid)
+        for _ in range(_MAX_ANCESTOR_DEPTH):
+            p = proc.parent()
+            if p is None:
+                return None
+            try:
+                if p.name().lower() in _ITERM2_ANCESTOR_NAMES:
+                    return p.pid
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+            proc = p
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
+    return None
 
 
 def _escape_applescript_string(s: str) -> str:
