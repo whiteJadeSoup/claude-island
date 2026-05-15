@@ -675,6 +675,150 @@ def adapter_for_test() -> ITerm2Adapter:
     return a
 
 
+# ── Hook-captured identifiers fast path (v6) ────────────────────────────
+
+
+class TestFocusByHookCapturedIds:
+    """When the SessionStart hook captured ``iterm_session_id`` +
+    ``terminal_pid`` into ``jump_target``, the focus path should
+    skip all psutil walks and run a single id-match AppleScript.
+
+    Falling back: if the captured id has aged out (iTerm restarted,
+    session closed), focus must transparently fall through to the
+    tty-based path rather than reporting failure outright.
+    """
+
+    @staticmethod
+    def _view_with_jt(*, pid: int, iterm_session_id: str, terminal_pid: int) -> SessionView:
+        from dataclasses import replace as _replace
+        from claude_island.core.hook_events import JumpTarget
+        v = _view(pid=pid)
+        return _replace(
+            v,
+            jump_target=JumpTarget(
+                terminal_app="iTerm.app",
+                term_program="iTerm.app",
+                iterm_session_id=iterm_session_id,
+                terminal_pid=terminal_pid,
+            ),
+        )
+
+    def test_id_path_skips_psutil_entirely_when_capture_present(self):
+        """The fast path runs ONE osascript and returns True. psutil
+        and the parent-walk helper must not be touched."""
+        v = self._view_with_jt(
+            pid=12345, iterm_session_id="ABC-123", terminal_pid=90559,
+        )
+        with (
+            mock.patch("psutil.Process") as p,
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="ok\n")) as run,
+        ):
+            assert adapter_for_test().focus(v) is True
+            p.assert_not_called()
+            assert run.call_count == 1
+            script = run.call_args[0][0][2]
+            # The id-match template, not the tty-match template.
+            assert "id of s as text" in script
+            assert "ABC-123" in script
+            assert "unix id is 90559" in script
+
+    def test_id_path_miss_falls_back_to_tty_path(self):
+        """Captured id no longer resolves (iTerm restarted, etc.) —
+        the slow path takes over and recovers via tty match."""
+        v = self._view_with_jt(
+            pid=12345, iterm_session_id="STALE-ID", terminal_pid=90559,
+        )
+        # First call (id template) returns "miss"; second call (tty
+        # template) returns "ok". subprocess.run side_effect cycles.
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(50, "zsh"), (90559, "iTerm2")],
+                       )),
+            mock.patch("subprocess.run", side_effect=[
+                _mock_run(stdout="miss\n"),  # id path miss
+                _mock_run(stdout="ok\n"),     # tty path hit
+            ]) as run,
+        ):
+            assert adapter_for_test().focus(v) is True
+            assert run.call_count == 2
+            # Second call should be the tty template, not the id one.
+            second_script = run.call_args_list[1][0][0][2]
+            assert "tty of s is " in second_script
+
+    def test_id_path_uses_captured_host_pid_not_runtime_walk(self):
+        """``jump_target.terminal_pid`` is preferred over the runtime
+        ``_iterm_host_pid`` walk. When both the id-match script lands
+        and host_pid is captured, the script must reference the
+        captured pid (90559), NOT the result of an ancestor walk."""
+        v = self._view_with_jt(
+            pid=12345, iterm_session_id="ABC-123", terminal_pid=90559,
+        )
+        with (
+            mock.patch("psutil.Process") as p,
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="ok\n")) as run,
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._iterm_host_pid",
+            ) as walk,
+        ):
+            adapter_for_test().focus(v)
+            walk.assert_not_called()
+            p.assert_not_called()
+            assert "unix id is 90559" in run.call_args[0][0][2]
+
+    def test_id_path_partial_capture_id_only_falls_through(self):
+        """Only iterm_session_id captured, terminal_pid=0 (parent walk
+        failed at hook time). Without a host_pid the id template can't
+        run safely — fall through to the slow path which can derive
+        host_pid at click time via _iterm_host_pid."""
+        v = self._view_with_jt(
+            pid=12345, iterm_session_id="ABC-123", terminal_pid=0,
+        )
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(50, "zsh"), (77777, "iTerm2")],
+                       )),
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="ok\n")) as run,
+        ):
+            assert adapter_for_test().focus(v) is True
+            # Only the tty template ran — id template was skipped.
+            assert run.call_count == 1
+            script = run.call_args[0][0][2]
+            assert "tty of s is " in script
+            assert "unix id is 77777" in script  # from the runtime walk
+
+    def test_id_path_partial_capture_pid_only_falls_through(self):
+        """Only terminal_pid captured. Without an id the id template
+        can't run; fall through to the tty path but use the captured
+        pid for frontmost (skipping the runtime walk)."""
+        v = self._view_with_jt(
+            pid=12345, iterm_session_id="", terminal_pid=90559,
+        )
+        with (
+            mock.patch("psutil.Process",
+                       return_value=_proc_with_tty(
+                           "/dev/ttys001",
+                           parent_chain=[(50, "zsh"), (77777, "iTerm2")],
+                       )),
+            mock.patch("subprocess.run",
+                       return_value=_mock_run(stdout="ok\n")) as run,
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._iterm_host_pid",
+            ) as walk,
+        ):
+            assert adapter_for_test().focus(v) is True
+            # Runtime walk must NOT run when captured pid is available.
+            walk.assert_not_called()
+            script = run.call_args[0][0][2]
+            assert "unix id is 90559" in script
+
+
 # ── Phase 4 (resume-offline): LAUNCH capability ──────────────────────────
 
 class TestITerm2Launch:

@@ -164,6 +164,40 @@ tell application "iTerm"
 end tell
 """
 
+# Same shape as _FOCUS_SCRIPT_TEMPLATE but matches by stable session id
+# (``id of s``) instead of tty. Used when the hook captured an
+# ``iterm_session_id`` at SessionStart time — id matching is preferred
+# because:
+#   • tty can drift across reconnect / pane reuse / process restart;
+#     session id is stable for the lifetime of the iTerm session.
+#   • Avoids the click-time ``psutil.Process(pid).terminal()`` syscall
+#     and the iTerm-3.6.9-vs-3.6.10 enumeration ambiguity (we ask the
+#     specific iTerm instance addressed by host_pid for the session
+#     with this id).
+# Falls through to "miss" if the captured id has aged out (window
+# closed / iTerm restarted); the caller then falls back to the
+# tty-template path and ultimately to ``focus_host_app``.
+_FOCUS_SCRIPT_BY_ID_TEMPLATE = """\
+tell application "System Events"
+    set frontmost of (first process whose unix id is {host_pid}) to true
+end tell
+tell application "iTerm"
+    repeat with w in windows
+        repeat with t in tabs of w
+            repeat with s in sessions of t
+                if (id of s as text) is "{session_id}" then
+                    select s
+                    select t
+                    select w
+                    return "ok"
+                end if
+            end repeat
+        end repeat
+    end repeat
+    return "miss"
+end tell
+"""
+
 
 @adapter("iterm2", priority=100, platform="mac")
 class ITerm2Adapter(_CapabilityProvider):
@@ -316,6 +350,25 @@ class ITerm2Adapter(_CapabilityProvider):
         no-ops; with it, the user at least gets the app raised.
         """
         del siblings
+        # ── Fast path: hook-captured identifiers ────────────────────
+        # When the SessionStart hook ran inside the claude process it
+        # may have populated ``view.jump_target`` with the iTerm
+        # session id (stable across tty drift) and the host iTerm2
+        # pid (stable across multi-install ambiguity). When both are
+        # present we skip all psutil walks entirely — one osascript
+        # round-trip and we're done.
+        jt = view.jump_target
+        if jt is not None and jt.iterm_session_id and jt.terminal_pid > 0:
+            if _focus_by_session_id(
+                jt.iterm_session_id, host_pid=jt.terminal_pid,
+            ):
+                return True
+            # Captured id didn't resolve (iTerm restarted, session
+            # closed). Fall through to the slow path which re-derives
+            # everything from psutil. Don't return False yet —
+            # focus_host_app via the slow path may still raise the
+            # right app to the front.
+
         # Placeholder pid (<=0): no real process → no tty to match. Fall
         # straight to the host-app raise so the click isn't a silent no-op.
         if view.session.pid <= 0:
@@ -328,11 +381,15 @@ class ITerm2Adapter(_CapabilityProvider):
             tty = psutil.Process(view.session.pid).terminal()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return focus_host_app(view.session.pid)
-        # Resolve the host iTerm2 pid via the ancestor chain. Used to
-        # disambiguate when multiple iTerm2 installations are running
-        # — ``set frontmost of process "iTerm2"`` would pick the first
-        # match by name, which is rarely the one hosting this session.
-        host_pid = _iterm_host_pid(view.session.pid)
+        # Resolve the host iTerm2 pid. Prefer the hook-captured value
+        # on the jump_target; fall back to walking the ancestor chain
+        # at click time. The runtime walk handles older hook scripts
+        # and the macOS-Terminal.app path where capture didn't run.
+        host_pid = (
+            jt.terminal_pid
+            if jt is not None and jt.terminal_pid > 0
+            else _iterm_host_pid(view.session.pid)
+        )
         if host_pid is None:
             # No iTerm2 ancestor found (race / unusual chain). Skip the
             # tty-precision script entirely and fall back to the
@@ -444,6 +501,37 @@ def _parse_enum_output(text: str) -> dict[str, tuple[int, int]]:
             continue
         out[tty] = (wid, tab)
     return out
+
+
+def _focus_by_session_id(session_id: str, *, host_pid: int) -> bool:
+    """Run the focus AppleScript matching by iTerm session id. Returns
+    True iff osascript completed AND the script reported "ok".
+
+    Preferred over ``_focus_by_tty`` when the SessionStart hook
+    captured ``iterm_session_id`` — id is stable across tty drift
+    and avoids the click-time psutil terminal() lookup. ``host_pid``
+    is the iTerm2 host pid (also from ``jump_target.terminal_pid``)
+    used by the System Events frontmost call.
+
+    A "miss" return (id not found in any window/tab/session of the
+    addressed iTerm instance) means the captured id has aged out
+    (iTerm restarted, the session window was closed). The caller
+    falls back to ``_focus_by_tty`` to recover.
+    """
+    script = _FOCUS_SCRIPT_BY_ID_TEMPLATE.format(
+        session_id=_escape_applescript_string(session_id),
+        host_pid=int(host_pid),
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, timeout=_OSASCRIPT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    return result.stdout.decode("utf-8", errors="replace").strip() == "ok"
 
 
 def _focus_by_tty(tty: str, *, host_pid: int) -> bool:
