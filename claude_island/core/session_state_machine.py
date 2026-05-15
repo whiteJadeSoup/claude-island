@@ -301,6 +301,10 @@ def _transition(
             phase=SessionPhase.THINKING,
             last_hook_at=event.at,
             current_tool=None,
+            # If a permission was pending (WAITING_APPROVAL → ToolFinished,
+            # e.g. user denied and PostToolUseFailure fired), the cycle is
+            # over either way — clear pending to satisfy the iff invariant.
+            pending_permission_tool=None,
         )
 
     # ── TurnCompleted: Stop/StopFailure → IDLE ────────────────────────────

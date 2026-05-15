@@ -171,6 +171,26 @@ def test_t1_7_turn_completed_from_waiting_clears_pending():
 
 
 # ---------------------------------------------------------------------------
+# T1.7b — WAITING_APPROVAL + ToolFinished → THINKING, pending cleared.
+# Regression: previously ToolFinished only cleared current_tool, leaving
+# pending_permission_tool stale and tripping the WAITING_APPROVAL iff
+# invariant when PostToolUse(Failure) fired after a denied PermissionRequest.
+# ---------------------------------------------------------------------------
+
+
+def test_t1_7b_tool_finished_from_waiting_clears_pending():
+    sm = SessionStateMachine()
+    sm.apply(_started_at())
+    sm.apply(PromptSubmitted(_UUID, "rm -rf /", _NOW + timedelta(seconds=1)))
+    sm.apply(PermissionRequested(_UUID, "Bash", _NOW + timedelta(seconds=2)))
+    sm.apply(ToolFinished(_UUID, "Bash", None, True, _NOW + timedelta(seconds=3)))
+    state = sm.read(_UUID)
+    assert state.phase == SessionPhase.THINKING
+    assert state.current_tool is None
+    assert state.pending_permission_tool is None
+
+
+# ---------------------------------------------------------------------------
 # T1.8 — Any phase + SessionEnded → ENDED with overlays cleared.
 # ---------------------------------------------------------------------------
 
