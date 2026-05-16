@@ -673,6 +673,8 @@ def _parse_jump_target(raw: Any) -> JumpTarget | None:
         host_pid=_i("host_pid"),
         wt_session_guid=_s("wt_session_guid"),
         term_program=_s("term_program"),
+        iterm_session_id=_s("iterm_session_id"),
+        terminal_pid=_i("terminal_pid"),
     )
 
 

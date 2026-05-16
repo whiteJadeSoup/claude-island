@@ -321,8 +321,11 @@ def test_v4_userpromptsubmit_uses_long_timeout(monkeypatch, capsys):
     assert captured_timeouts[0] >= 60.0
 
 
-def test_v5_version_bumped():
-    assert hook_module.__version__ == "5"
+def test_v6_version_bumped():
+    """v6 adds iterm_session_id + terminal_pid to jump_target on macOS.
+    Bumping forces hook_installer to overwrite ~/.claude-island/hook.py
+    on the next app start."""
+    assert hook_module.__version__ == "6"
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +516,20 @@ def test_build_jump_target_captures_env(monkeypatch):
     # WT_SESSION present → terminal_app classified as WindowsTerminal
     # regardless of TERM_PROGRAM value.
     assert jt["terminal_app"] == "WindowsTerminal"
-    # host_pid populated from GetCurrentProcessId (positive int).
+
+
+def test_build_jump_target_host_pid_on_windows(monkeypatch):
+    """``host_pid`` (claude's own process id, NOT the hosting terminal)
+    is captured from GetCurrentProcessId on Windows. macOS path
+    populates host_pid only for the iTerm-specific branch (see the
+    dedicated macOS tests below)."""
+    import sys as _sys
+    if _sys.platform != "win32":
+        import pytest
+        pytest.skip("Windows-only host_pid capture path")
+    monkeypatch.setenv("WT_SESSION", "guid")
+    jt = hook_module._build_jump_target()
+    assert jt is not None
     assert jt["host_pid"] > 0
 
 
@@ -528,15 +544,82 @@ def test_build_jump_target_no_wt_falls_back_to_term_program(monkeypatch):
     assert jt["terminal_app"] == "iTerm.app"
 
 
-def test_build_jump_target_no_env_uses_console_host_default(monkeypatch):
-    """Bare console (no WT_SESSION, no TERM_PROGRAM): terminal_app
-    defaults to 'ConsoleHost' so the listener always has SOMETHING
-    to dispatch on."""
+def test_build_jump_target_no_env_uses_console_host_default_on_windows(monkeypatch):
+    """Bare Windows console (no WT_SESSION, no TERM_PROGRAM):
+    terminal_app defaults to 'ConsoleHost' so the listener always has
+    SOMETHING to dispatch on. On macOS no such default exists — the
+    function returns None when there's nothing meaningful to ship."""
+    import sys as _sys
+    if _sys.platform != "win32":
+        import pytest
+        pytest.skip("ConsoleHost default is Windows-only")
     monkeypatch.delenv("WT_SESSION", raising=False)
     monkeypatch.delenv("TERM_PROGRAM", raising=False)
     jt = hook_module._build_jump_target()
     assert jt is not None
     assert jt["terminal_app"] == "ConsoleHost"
+
+
+# ── v6 macOS capture: iterm_session_id + terminal_pid ──────────────────
+
+
+def test_build_jump_target_macos_iterm_adds_new_fields(monkeypatch):
+    """v6 enrichment: when TERM_PROGRAM is iTerm.app on macOS, the
+    hook runs the osascript + parent-walk capture so jump_target gets
+    ``iterm_session_id`` + ``terminal_pid``. Mocked so the test runs
+    on any host."""
+    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+    monkeypatch.delenv("WT_SESSION", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(
+        hook_module, "_macos_jump_target_extras",
+        lambda: {"iterm_session_id": "ABC-123-IDENTIFIER", "terminal_pid": 90559},
+    )
+    jt = hook_module._build_jump_target()
+    assert jt is not None
+    assert jt["iterm_session_id"] == "ABC-123-IDENTIFIER"
+    assert jt["terminal_pid"] == 90559
+    # host_pid on darwin/iTerm is set to the claude process pid so the
+    # bridge has a canonical SessionRegistry pid (matches the Windows
+    # branch behaviour for consistency).
+    assert jt["host_pid"] > 0
+
+
+def test_build_jump_target_macos_non_iterm_skips_extras(monkeypatch):
+    """When TERM_PROGRAM isn't iTerm.app on macOS (Terminal.app,
+    Ghostty, WezTerm, …), skip the osascript capture entirely —
+    we don't have iTerm-style stable session ids for other apps."""
+    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
+    monkeypatch.delenv("WT_SESSION", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    calls: list = []
+    monkeypatch.setattr(
+        hook_module, "_macos_jump_target_extras",
+        lambda: calls.append(1) or {"iterm_session_id": "should-not-appear"},
+    )
+    jt = hook_module._build_jump_target()
+    assert jt is not None
+    assert calls == [], "extras must NOT be invoked outside iTerm path"
+    assert jt.get("iterm_session_id", "") == ""
+    assert jt.get("terminal_pid", 0) == 0
+
+
+def test_build_jump_target_macos_iterm_capture_failure_keeps_other_fields(monkeypatch):
+    """If the osascript / parent-walk capture raises (permission
+    denied, AppleScript timeout), the rest of jump_target still
+    ships — partial degradation, not total loss."""
+    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+    monkeypatch.delenv("WT_SESSION", raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+    def _raises():
+        raise RuntimeError("simulated osascript failure")
+    monkeypatch.setattr(hook_module, "_macos_jump_target_extras", _raises)
+    jt = hook_module._build_jump_target()
+    assert jt is not None
+    assert jt["term_program"] == "iTerm.app"
+    assert jt["terminal_app"] == "iTerm.app"
+    assert jt["iterm_session_id"] == ""
+    assert jt["terminal_pid"] == 0
 
 
 def test_run_injects_jump_target_into_payload(fake_listener, monkeypatch):

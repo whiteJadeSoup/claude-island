@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Detail §7 · Testing Strategy</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+
+<header class="section-head">
+  <div class="crumb">iTerm Focus Performance — Detail Design</div>
+  <h1>§7 · Testing Strategy</h1>
+  <div class="trace">
+    Traces to Overview · G1-G5 全部 Goal 各自的 happy / edge / error 用例
+    + §3 不变量 I-1~I-5 + §4 错误矩阵
+  </div>
+</header>
+
+<div class="callout">
+<h4>测试金字塔的边界</h4>
+<ul>
+  <li><b>unit</b> ── 不接触 NSAppleScript / NSRunningApplication 真实 API；用 PyObjC mock。覆盖
+    决策链、状态机、错误传播、frozen 字段不变量。</li>
+  <li><b>integration</b> ── 真实 PyObjC + 假 iTerm（一个最小 AppleScript 测试夹具，下文 §7.5 详述）。
+    覆盖 cache 编译、worker pool 序列化、handler 行为。</li>
+  <li><b>e2e</b> ── 真实 iTerm + 真实 session（手动 + 一个 CI-skippable 自动化夹具）。
+    覆盖 G2 端到端 wall-time、用户感知延迟。</li>
+</ul>
+</div>
+
+<h2>7.1 G1 ── 主线程 ≤ 5 ms 验证</h2>
+
+<table>
+<tr><th>ID</th><th>路径</th><th>等级</th><th>输入</th><th>预期</th></tr>
+<tr>
+  <td>G1.H1</td>
+  <td>happy</td>
+  <td>unit (benchmark)</td>
+  <td>
+    Mock <code>NSRunningApplication.runningApplicationWithProcessIdentifier_</code> 返回 fake app；
+    fake app.activate_ 返回 True；Mock <code>QThreadPool.start</code> 立即返回；
+    view 带 <code>jump_target.terminal_pid=12345, iterm_session_id="abc"</code>
+  </td>
+  <td>
+    <code>focus(view)</code> 返回 <code>True</code> 且 <b>median elapsed &lt; 2 ms</b> over 100 iter
+    （pytest-benchmark）
+  </td>
+</tr>
+<tr>
+  <td>G1.E1</td>
+  <td>edge</td>
+  <td>unit</td>
+  <td>view <code>jump_target=None</code>；走 <code>_iterm_host_pid</code> 路径（mock psutil 返回 12345）</td>
+  <td><code>focus</code> 返回 True；elapsed 多 ~0.3 ms 但仍 &lt; 5 ms p95</td>
+</tr>
+<tr>
+  <td>G1.E2</td>
+  <td>edge</td>
+  <td>integration</td>
+  <td>真实 PyObjC + fake iTerm 夹具；首次 + 第二次调用</td>
+  <td>首次 (含 import) &lt; 50 ms；第二次 warm &lt; 2 ms</td>
+</tr>
+<tr>
+  <td>G1.X1</td>
+  <td>error</td>
+  <td>unit</td>
+  <td>Mock <code>NSRunningApplication.activate_</code> 抛 <code>objc.error</code></td>
+  <td><code>focus</code> 不抛、转 fallback；返回值与 fallback 一致</td>
+</tr>
+</table>
+
+<h3>7.1.1 通过准则</h3>
+
+<ul>
+  <li><code>tests/platform_/test_iterm2_fast_path_perf.py::test_warm_path_under_5ms</code> ── pytest-benchmark median &lt; 2 ms / p95 &lt; 5 ms</li>
+  <li>该测试 100 次连续运行，零 flake（CI tolerance ±20%）</li>
+</ul>
+
+<h2>7.2 G2 ── 端到端 wall-time ≤ 50 ms p95</h2>
+
+<table>
+<tr><th>ID</th><th>路径</th><th>等级</th><th>输入</th><th>预期</th></tr>
+<tr>
+  <td>G2.H1</td>
+  <td>happy</td>
+  <td>e2e</td>
+  <td>真实 iTerm 启动，4 个活跃 session；测试夹具点击其中一个 row，记录 mouse-up → WindowServer 触发"iTerm 在前"事件的差</td>
+  <td>p95 &lt; 50 ms 在 100 次试验中</td>
+</tr>
+<tr>
+  <td>G2.E1</td>
+  <td>edge</td>
+  <td>e2e</td>
+  <td>2 个并行 iTerm 实例（3.6.9 + 3.6.10）；点击属于第二个实例的 session</td>
+  <td>正确的 iTerm 实例前置（验证 host_pid 路由），p95 &lt; 50 ms</td>
+</tr>
+<tr>
+  <td>G2.X1</td>
+  <td>error</td>
+  <td>e2e</td>
+  <td>iTerm 进程被 <code>kill -STOP</code> 模拟 hang；点击 row</td>
+  <td>fast-path 返回 True 但 pane select 进入 backlog → 解 STOP 后队列清空，没崩</td>
+</tr>
+</table>
+
+<div class="callout warn">
+<h4>e2e 测试夹具 ── 选型</h4>
+<p>
+方案 A：基于 <code>NSWorkspace.frontmostApplication</code> 轮询（10 ms 间隔）。
+方案 B：基于 <code>NSWorkspaceDidActivateApplicationNotification</code>。
+<br>采用 B：事件驱动，无轮询误差；唯一前置是 e2e fixture 启用 <code>NSWorkspace.notificationCenter</code> 监听。
+</p>
+<p>
+e2e 默认在 CI 上 skip（需真实 iTerm + 真实 session）；本地开发用
+<code>pytest -m e2e</code> 触发。CI Mac runner 若资源允许后续可启用。
+</p>
+</div>
+
+<h2>7.3 G3 ── pane 精度不退化</h2>
+
+<table>
+<tr><th>ID</th><th>路径</th><th>等级</th><th>输入</th><th>预期</th></tr>
+<tr>
+  <td>G3.H1</td>
+  <td>happy</td>
+  <td>integration</td>
+  <td>fake iTerm 夹具，3 个 session（id=A/B/C，对应 tty=tty1/tty2/tty3）；提交 task(session_id="B")</td>
+  <td>id_handler 命中；fake iTerm 内部 selected_session == "B"</td>
+</tr>
+<tr>
+  <td>G3.H2</td>
+  <td>happy</td>
+  <td>integration</td>
+  <td>同上但 task(session_id=None, tty="tty2")</td>
+  <td>tty_handler 命中；selected_session == "B"</td>
+</tr>
+<tr>
+  <td>G3.E1</td>
+  <td>edge</td>
+  <td>integration</td>
+  <td>task(session_id="X-stale", tty="tty2") —— id 已不存在，tty 有效</td>
+  <td>id_handler miss → 转 tty_handler → ok；cache counter 未递增（miss 不算失败）</td>
+</tr>
+<tr>
+  <td>G3.E2</td>
+  <td>edge</td>
+  <td>integration</td>
+  <td>task(session_id="X-stale", tty="tty-stale") —— 双双失效</td>
+  <td>两 handler 都 miss；log.info "pane select miss"；fast-path 仍已让 host 前置</td>
+</tr>
+<tr>
+  <td>G3.X1</td>
+  <td>error</td>
+  <td>unit</td>
+  <td>构造 task(session_id=None, tty=None)</td>
+  <td>raise <code>ValueError</code>（§2 不变量 assert）</td>
+</tr>
+<tr>
+  <td>G3.X2</td>
+  <td>error</td>
+  <td>integration</td>
+  <td>fake iTerm 模拟 <code>-1743</code> 权限错误返回</td>
+  <td>note_failure → counter++；连续 3 次后 invalidate；log.error 一次</td>
+</tr>
+</table>
+
+<h2>7.4 G4 ── PyObjC 不可用降级</h2>
+
+<table>
+<tr><th>ID</th><th>路径</th><th>等级</th><th>输入</th><th>预期</th></tr>
+<tr>
+  <td>G4.H1</td>
+  <td>happy</td>
+  <td>unit</td>
+  <td>
+    Monkeypatch <code>sys.modules['AppKit']</code> = MagicMock 抛 <code>ImportError</code>；
+    调用 <code>focus(view)</code>
+  </td>
+  <td>
+    <code>_HAS_PYOBJC = False</code>；不调用任何 PyObjC API；
+    完整走 <code>_legacy_focus</code> 路径（subprocess osascript）；
+    返回值与现有 <code>_focus_by_session_id</code> 一致
+  </td>
+</tr>
+<tr>
+  <td>G4.E1</td>
+  <td>edge</td>
+  <td>unit</td>
+  <td>PyObjC import OK 但 NSRunningApplication 是 <code>None</code>（pyobjc 极端不完整安装）</td>
+  <td><code>focus</code> 第一句 attr 取值失败 → catch → fallback</td>
+</tr>
+<tr>
+  <td>G4.X1</td>
+  <td>error</td>
+  <td>unit</td>
+  <td>PyObjC 在 fast-path 中途抛 <code>objc.internal_error</code></td>
+  <td><code>except Exception</code> 边界吞掉 → fallback → 返回 fallback 结果</td>
+</tr>
+</table>
+
+<h2>7.5 G5 ── 非 FOCUS dispatch 不受影响</h2>
+
+<table>
+<tr><th>ID</th><th>路径</th><th>等级</th><th>输入</th><th>预期</th></tr>
+<tr>
+  <td>G5.H1</td>
+  <td>happy</td>
+  <td>unit</td>
+  <td>调用 <code>dispatch(view, Capability.RENAME, new_name=...)</code></td>
+  <td>路径未碰 fast-path 代码；与改动前 byte-identical 行为</td>
+</tr>
+<tr>
+  <td>G5.H2</td>
+  <td>happy</td>
+  <td>unit</td>
+  <td>同上 for REVEAL_CWD / RESET_THINKING</td>
+  <td>同上</td>
+</tr>
+<tr>
+  <td>G5.E1</td>
+  <td>edge</td>
+  <td>integration</td>
+  <td>批量执行 dispatcher 现有测试套件 <code>tests/platform_/test_dispatcher.py</code></td>
+  <td>全部绿色，零修改</td>
+</tr>
+</table>
+
+<h2>7.6 内部不变量验证（§3 I-1~I-5）</h2>
+
+<table>
+<tr><th>ID</th><th>不变量</th><th>测试</th><th>等级</th></tr>
+<tr>
+  <td>I-1.T1</td>
+  <td>I-1 单 worker 串行</td>
+  <td>提交 100 个 task；fake handler 内部记录"我是不是被并发调用了"（线程 id + 计数）；断言峰值并发 = 1</td>
+  <td>integration</td>
+</tr>
+<tr>
+  <td>I-2.T1</td>
+  <td>I-2 counter 单调上限 ≤ 3</td>
+  <td>fake handler 每次返回错误 5 次；检查 counter 在第 3 次后已触发 invalidate（重置 to 0）</td>
+  <td>unit</td>
+</tr>
+<tr>
+  <td>I-2.T2</td>
+  <td>I-2 ok 必归零</td>
+  <td>错误 2 次 → ok → 错误 2 次：counter 序列 [1,2,0,1,2]，永不触发 invalidate</td>
+  <td>unit</td>
+</tr>
+<tr>
+  <td>I-3.T1</td>
+  <td>I-3 ≤ 5 ms warm</td>
+  <td>= G1.H1</td>
+  <td>unit benchmark</td>
+</tr>
+<tr>
+  <td>I-4.T1</td>
+  <td>I-4 True ⇒ 宿主前置</td>
+  <td>fake 夹具记录 frontmostApplication；focus 返回 True 后 100 ms 内观察到 host_pid 前置</td>
+  <td>integration</td>
+</tr>
+<tr>
+  <td>I-5.T1</td>
+  <td>I-5 fallback 路径不变</td>
+  <td>对比改动前后 <code>_focus_by_session_id</code> / <code>_focus_by_tty</code> / <code>focus_host_app</code> AST 应当字节一致（git diff 不应碰这些函数体）</td>
+  <td>静态 / CI</td>
+</tr>
+</table>
+
+<h2>7.7 Mock 边界 ── 显式列表与理由</h2>
+
+<table>
+<tr><th>边界</th><th>真实 / mock</th><th>理由</th></tr>
+<tr>
+  <td><code>NSRunningApplication</code></td>
+  <td>unit: mock<br>integration: real</td>
+  <td>unit 关心决策路径；integration 必须验证 PyObjC bridge 真的能跑通（不能用 mock 掩盖 bridge 误用）</td>
+</tr>
+<tr>
+  <td><code>NSAppleScript</code></td>
+  <td>unit: mock<br>integration: real + fake iTerm</td>
+  <td>同上；integration 用 fake iTerm 是因为不能在 CI 上启动真实 iTerm</td>
+</tr>
+<tr>
+  <td>iTerm 应用本身</td>
+  <td>integration: fake iTerm 夹具（一个小 AppleScriptable 进程 / 测试 stub app）<br>e2e: real</td>
+  <td>
+    fake iTerm 是一个最小的 AppleScript 字典实现，暴露 <code>windows/tabs/sessions/id/tty</code>
+    的最小子集。用 Apple <code>osacompile</code> 编译一个 .app 在测试 setup 中启动；
+    脚本 select 命令落到我们能查询的内部变量上。
+  </td>
+</tr>
+<tr>
+  <td><code>QThreadPool</code></td>
+  <td>unit: real (Qt 真实) 但 task 同步运行<br>integration: real</td>
+  <td>QThreadPool 已经 thread-safe；mock 收益低</td>
+</tr>
+<tr>
+  <td><code>psutil</code></td>
+  <td>unit: mock<br>integration: real on small test process</td>
+  <td>避免测试依赖宿主机进程状态</td>
+</tr>
+<tr>
+  <td><code>logging</code></td>
+  <td>real，<code>caplog</code> 捕获</td>
+  <td>测试日志级别 + 去重逻辑</td>
+</tr>
+</table>
+
+<h2>7.8 通过准则 ── 与 Goal 的回溯</h2>
+
+<table>
+<tr><th>Goal</th><th>验收测试</th><th>量化标准</th></tr>
+<tr>
+  <td>G1 主线程 ≤ 5 ms</td>
+  <td>G1.H1 (benchmark)</td>
+  <td>median &lt; 2 ms / p95 &lt; 5 ms over 100 iter, 0 flake</td>
+</tr>
+<tr>
+  <td>G2 端到端 ≤ 50 ms p95</td>
+  <td>G2.H1 (e2e)</td>
+  <td>p95 &lt; 50 ms over 100 trials</td>
+</tr>
+<tr>
+  <td>G3 pane 精度不退化</td>
+  <td>G3.H1, G3.H2, G3.E1, G3.E2</td>
+  <td>4 用例全绿；现有 <code>test_iterm2_adapter.py</code> 全绿</td>
+</tr>
+<tr>
+  <td>G4 PyObjC 降级</td>
+  <td>G4.H1, G4.E1, G4.X1</td>
+  <td>3 用例全绿；fallback 行为字节一致</td>
+</tr>
+<tr>
+  <td>G5 其他 dispatch 不变</td>
+  <td>G5.H1, G5.H2, G5.E1</td>
+  <td>现有 <code>test_dispatcher.py</code> 零修改，全绿</td>
+</tr>
+</table>
+
+<h2>7.9 测试文件清单</h2>
+
+<table>
+<tr><th>文件</th><th>类型</th><th>覆盖</th></tr>
+<tr>
+  <td><code>tests/platform_/test_iterm2_fast_path.py</code> <span class="chip new">NEW</span></td>
+  <td>unit + integration</td>
+  <td>G1, G3 unit 部分；I-1, I-2</td>
+</tr>
+<tr>
+  <td><code>tests/platform_/test_iterm2_fast_path_perf.py</code> <span class="chip new">NEW</span></td>
+  <td>unit benchmark</td>
+  <td>G1 (pytest-benchmark)</td>
+</tr>
+<tr>
+  <td><code>tests/platform_/test_iterm2_apple_script_cache.py</code> <span class="chip new">NEW</span></td>
+  <td>unit</td>
+  <td>§3 状态机所有转移；I-2.T1, I-2.T2</td>
+</tr>
+<tr>
+  <td><code>tests/platform_/test_iterm2_focus_worker.py</code> <span class="chip new">NEW</span></td>
+  <td>integration</td>
+  <td>I-1.T1, §3.3 backlog 策略, §3.4 不 coalesce 论证</td>
+</tr>
+<tr>
+  <td><code>tests/e2e/test_iterm2_focus_e2e.py</code> <span class="chip new">NEW</span></td>
+  <td>e2e (CI-skippable)</td>
+  <td>G2.H1, G2.E1, G2.X1</td>
+</tr>
+<tr>
+  <td><code>tests/platform_/test_iterm2_adapter.py</code></td>
+  <td>existing</td>
+  <td>fallback 路径仍绿（I-5.T1）</td>
+</tr>
+<tr>
+  <td><code>tests/platform_/test_dispatcher.py</code></td>
+  <td>existing</td>
+  <td>G5（零修改）</td>
+</tr>
+</table>
+
+<h2>7.10 Flake 预防</h2>
+
+<table>
+<tr><th>潜在 flake 源</th><th>对策</th></tr>
+<tr><td>pytest-benchmark 在 CI 高负载下偏慢</td><td>使用 median 而非 mean；阈值 ±20% tolerance</td></tr>
+<tr><td>e2e 真实 iTerm 启动时序不稳</td><td>e2e 默认 skip on CI；本地手动跑或专用 Mac runner</td></tr>
+<tr><td>fake iTerm 夹具竞态（启动慢）</td><td>fixture 用 <code>poll_until</code> 等待 .app 完全启动再开始测试</td></tr>
+<tr><td>worker 异步完成的断言</td><td>统一通过 <code>QThreadPool.waitForDone(timeout_ms=2000)</code> 等待，不睡 sleep</td></tr>
+</table>
+
+<nav class="section-nav">
+  <a href="06-performance-estimation.html">← §6 · Performance Estimation</a>
+  <a href="08-migration-compatibility.html">§8 · Migration &amp; Compatibility →</a>
+</nav>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif',
+      fontSize: '13px',
+      primaryColor: '#ffffff',
+      primaryBorderColor: '#d0d7de',
+      lineColor: '#57606a',
+      tertiaryColor: '#f6f8fa'
+    },
+    flowchart: { curve: 'basis', padding: 14 }
+  });
+</script>
+</body>
+</html>

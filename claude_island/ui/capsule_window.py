@@ -29,8 +29,14 @@ from .window_position import save_position as _save_position
 _CAPSULE_W = 200
 _CAPSULE_W_WITH_QUOTA = 290
 _CAPSULE_H = 36
-_DOT_W = 12
-_DOT_H = 12
+_DOT_W = 18
+_DOT_H = 18
+# Hover-expanded dot: the affordance for "you can click me to open the
+# panel even with zero sessions". Stays small enough not to scream at
+# the user — this is the quiet-state visual. ~28 px is the smallest
+# round target the eye unambiguously reads as "tappable".
+_DOT_HOVER_W = 28
+_DOT_HOVER_H = 28
 _TOP_MARGIN = 8
 
 # Long-press → unlock free-drag (2D + edge snap).
@@ -460,9 +466,23 @@ class CapsuleWindow(QWidget):
         else:
             self._apply_capsule()
 
-    def _apply_dot(self) -> None:
+    def _apply_dot(self, *, hover: bool = False) -> None:
+        """Render the quiet "no active sessions" indicator.
+
+        The dot is clickable: pressing it opens the expanded panel
+        (controller transition ``user_expand`` on source=``dot``) so
+        the user can still reach Recents / Spend / Quota when no
+        live claude sessions exist. The hover-grow affordance signals
+        "this is a target" without making the resting visual loud.
+
+        ``hover`` flips between the resting (~18 px) and hovered (~28
+        px) size. ``enterEvent`` / ``leaveEvent`` call this with
+        ``hover=True``/``False`` to drive the grow/shrink.
+        """
         self._is_dot = True
-        self._center_top(_DOT_W, _DOT_H)
+        w = _DOT_HOVER_W if hover else _DOT_W
+        h = _DOT_HOVER_H if hover else _DOT_H
+        self._center_top(w, h)
         self._label.hide()
         self._cost_label.hide()
         self._dot_label.hide()
@@ -472,6 +492,11 @@ class CapsuleWindow(QWidget):
             _RowStatusGlyph.STATE_IDLE, dot_color=_DOT_IDLE_COLOR,
         )
         self._is_breathing = False
+        # Cursor flips to PointingHand so the user knows it's clickable.
+        # Set unconditionally here (cheap, idempotent) rather than only
+        # at construction; future _apply_capsule transitions also need
+        # the pointer cursor and they call setCursor themselves.
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update()
         self.show()
 
@@ -1101,20 +1126,30 @@ class CapsuleWindow(QWidget):
         self._apply_capsule()
 
     def enterEvent(self, event) -> None:  # type: ignore[override]
-        """Mouse entered the capsule's hit-area. If we're docked at a
-        non-top edge in idle form, expand back to full size so the
-        user can read the label. Top-edge docks have no idle state
-        to exit."""
-        if self._is_idle:
+        """Mouse entered the capsule's hit-area.
+
+        Three behaviours, picked by current state:
+          * dot   → grow to the hover size so the click target reads
+            as "tappable" (resting size is intentionally quiet).
+          * docked idle (capsule, off-top edge) → restore full size
+            so the user can read the label.
+          * normal capsule on top edge → no-op.
+        """
+        if self._is_dot:
+            self._apply_dot(hover=True)
+        elif self._is_idle:
             self._exit_idle()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]
-        """Mouse left the capsule. If we're docked at a non-top edge
-        and not currently being dragged, collapse back to idle —
-        completes the AssistiveTouch-style "fade away when you're
-        not touching me" loop."""
-        if (
+        """Mouse left the capsule.
+
+        Mirrors enterEvent: shrink the dot back to resting; or
+        re-enter docked-idle for non-top edges. Drag-in-progress is
+        protected against in the idle path."""
+        if self._is_dot:
+            self._apply_dot(hover=False)
+        elif (
             self._docked_edge in _IDLE_EDGES
             and not self._is_idle
             and self._drag_origin_global is None

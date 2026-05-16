@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Detail §1 · Module Responsibilities &amp; Interfaces</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+
+<header class="section-head">
+  <div class="crumb">iTerm Focus Performance — Detail Design</div>
+  <h1>§1 · Module Responsibilities &amp; Interfaces</h1>
+  <div class="trace">
+    Traces to Overview · <b>G1</b> (主线程 ≤ 5 ms) · <b>G2</b> (前台 ≤ 50 ms p95) ·
+    <b>G3</b> (pane 精度不退化) · <b>G4</b> (PyObjC 缺失时降级)
+  </div>
+</header>
+
+<h2>1.1 Component diagram（C4 L3 · iTerm2 Focus 子系统内部）</h2>
+
+<p>
+本节范围限定在 <code>ITerm2Adapter.focus()</code> 调用链。
+外部边界（<code>TerminalDispatcher.dispatch</code>、<code>focus_host_app</code> fallback、<code>_iterm_host_pid</code>
+祖先链查找）已在 Overview Architecture 中固化，不在本节复述其内部。
+</p>
+
+<figure class="mermaid-fig">
+<div class="mermaid">
+flowchart TB
+  classDef new fill:#dafbe1,stroke:#1a7f37,stroke-width:1.5px,color:#0a3d1e
+  classDef mod fill:#fff8c5,stroke:#9a6700,stroke-width:1.5px,color:#3b2300
+  classDef unc fill:#f6f8fa,stroke:#6e7781,stroke-width:1px,color:#24292f
+  classDef ext fill:#ddf4ff,stroke:#0969da,stroke-width:1px,color:#0a2540
+  classDef boundary fill:#ffffff,stroke:#8a949e,stroke-dasharray:4 3,color:#57606a
+
+  focus["focus(view)<br/>Capability.FOCUS<br/><i>MOD · 返回语义演化</i>"]:::mod
+
+  subgraph mainTH["Qt main thread"]
+    direction TB
+    FFP["FocusFastPath<br/>· activate_host_app()<br/>· schedule_pane_select()<br/><i>NEW</i>"]:::new
+    NSRA["NSRunningApplication<br/>.activate(host_pid)<br/>AppKit · ~0.3 ms warm"]:::ext
+  end
+
+  subgraph workerTH["worker thread (QThreadPool · maxThreadCount = 1)"]
+    direction TB
+    FW["FocusWorker<br/>FIFO, 串行 dispatch<br/><i>NEW</i>"]:::new
+    PST["_PaneSelectTask<br/>QRunnable · id→tty fallback<br/><i>NEW</i>"]:::new
+    ASC["AppleScriptCache<br/>· id_handler (lazy compile)<br/>· tty_handler (lazy compile)<br/>· invalidate()<br/><i>NEW · module singleton</i>"]:::new
+    NSAS["NSAppleScript<br/>Foundation · 40–200 ms"]:::ext
+  end
+
+  subgraph fb["Fallback chain (unchanged)"]
+    direction LR
+    FBQ["_focus_by_session_id /<br/>_focus_by_tty<br/>subprocess osascript"]:::unc
+    FHA["focus_host_app<br/>~250 ms 同步"]:::unc
+    FBQ --> FHA
+  end
+
+  focus -- delegate --> FFP
+  FFP -- "1 同步 ~0.3 ms" --> NSRA
+  FFP -- "2 submit (fire-and-forget)" --> FW
+  FW --> PST
+  PST -- get_*_handler --> ASC
+  ASC -- executeAppleEvent_error_ --> NSAS
+  focus -. "fast-path 失败 / PyObjC 缺失" .-> FBQ
+
+  class mainTH,workerTH,fb boundary
+</div>
+<figcaption>图 1 · iTerm2 Focus 调用链组件图（C4 L3）</figcaption>
+</figure>
+
+<p>
+  <span class="chip new">NEW</span> 新增组件 ·
+  <span class="chip mod">MOD</span> 契约改动 ·
+  <span class="chip unc">UNCHANGED</span> 仅作为 fallback ·
+  <span class="chip ext">外部 API</span>
+</p>
+
+<p class="legend">
+关键决策两处：左侧 <b>NSRunningApplication.activate</b> 走主线程、~0.3 ms，立刻触发面板
+<code>WindowDeactivate</code> 自动隐藏；右侧 <b>worker 线程上的 cached NSAppleScript</b>
+承担 pane 精度（40–200 ms），fire-and-forget。
+</p>
+
+<h2>1.2 组件契约（按调用顺序展开）</h2>
+
+<!-- ───── focus(view) ───── -->
+
+<div class="contract">
+<h4>ITerm2Adapter.focus(view, *, siblings=()) → bool <span class="tag mod">MOD</span></h4>
+
+<dl>
+  <dt>参数</dt>
+  <dd>
+    <code>view: SessionView</code> — 必含 <code>session.pid &gt; 0</code> 或者
+    <code>view.jump_target</code> 至少有一个识别字段（<code>iterm_session_id</code>
+    / <code>terminal_pid</code>）；否则进入 <code>focus_host_app</code> 兜底。<br>
+    <code>siblings</code> — 接受但忽略，与 WT 适配器保持 kwargs 一致。
+  </dd>
+
+  <dt>返回</dt>
+  <dd>
+    <b>True</b>：主线程 fast-path 成功完成"将 iTerm2 宿主进程置前"，
+    pane select 已提交到 worker（不保证完成）。<br>
+    <b>False</b>：主线程 fast-path 失败（PyObjC ImportError / 无 host_pid /
+    NSRunningApplication.activate 返回 NO），并且 fallback 链路也已尝试且失败。
+  </dd>
+
+  <dt>前置条件</dt>
+  <dd>
+    在 Qt 主线程上调用。
+    <code>view.adapter_id == "iterm2"</code>（由 dispatcher 保证）。
+  </dd>
+
+  <dt>错误</dt>
+  <dd>
+    不抛异常 —— 所有失败转 <code>False</code> 或转 fallback 路径。
+    内部任何异常被适配器外层 <code>try/except</code> 兜住并 <code>log.warning</code>。
+  </dd>
+
+  <dt>契约演化（与现状对比）</dt>
+  <dd>
+    <b>旧</b>：<code>True</code> = pane 精度成功（osascript 返回 <code>ok</code>）。<br>
+    <b>新</b>：<code>True</code> = 宿主应用已前置（用户已经看到 iTerm2），pane 精度异步落地。<br>
+    调用方语义不变：dispatcher 只用 bool 决定是否记 warning，
+    UI 不依赖 pane 精度的同步反馈（已确认：<code>_on_row_clicked</code>
+    点完就靠 <code>WindowDeactivate</code> 自动隐藏面板，不读 bool）。
+  </dd>
+</dl>
+</div>
+
+<!-- ───── FocusFastPath ───── -->
+
+<div class="contract">
+<h4>FocusFastPath <span class="tag new">NEW</span></h4>
+<p>主线程编排器。状态无关、线程亲和（必须主线程）。</p>
+
+<dl>
+  <dt>activate_host_app(host_pid: int) → bool</dt>
+  <dd>
+    调用 <code>NSRunningApplication.runningApplicationWithProcessIdentifier_(host_pid)</code>
+    取得目标 app，再调 <code>activateWithOptions_(NSApplicationActivateIgnoringOtherApps)</code>。
+    返回 PyObjC 调用是否完成（<code>None</code> app → False；activate 返回 NO → False）。
+    <br><b>耗时</b>：warm ~0.3 ms（in-process AppKit，不出进程）。
+    <br><b>错误</b>：<code>ImportError</code> 上抛（由 focus() 捕获）；其他异常吞掉返回 False。
+  </dd>
+
+  <dt>schedule_pane_select(view: SessionView, host_pid: int) → None</dt>
+  <dd>
+    构造一个 <code>_PaneSelectTask</code>（<code>QRunnable</code> 子类），
+    交给 <code>FocusWorker.submit()</code>。fire-and-forget，立即返回。
+    <br><b>线程</b>：调用方必须在主线程；任务体执行在 worker 线程。
+    <br><b>幂等性</b>：多次提交同 view 是安全的（pane select 两次 = 同一结果）。
+  </dd>
+</dl>
+</div>
+
+<!-- ───── AppleScriptCache ───── -->
+
+<div class="contract">
+<h4>AppleScriptCache <span class="tag new">NEW</span></h4>
+<p>
+模块级单例。生命周期 = 进程；首次访问时懒编译。
+保存两份 <code>NSAppleScript</code> 实例对应 id-match / tty-match 两个 subroutine 模板。
+</p>
+
+<dl>
+  <dt>get_id_handler() → NSAppleScript</dt>
+  <dd>
+    返回已编译的 id-match 脚本实例。脚本体声明
+    <code>on focusByID(sessionID, hostPID)</code> handler。
+    <br><b>线程安全</b>：内部用 <code>threading.Lock</code> 保护"懒编译 + 首次返回"。
+    一旦编译完成，<code>executeAppleEvent_error_</code> 在单一 worker 上串行调用
+    （由 FocusWorker maxThreadCount=1 保证）。
+  </dd>
+
+  <dt>get_tty_handler() → NSAppleScript</dt>
+  <dd>
+    同上，对应 <code>on focusByTTY(targetTTY, hostPID)</code>。
+  </dd>
+
+  <dt>invalidate() → None</dt>
+  <dd>
+    丢弃当前缓存（下次访问重新编译）。
+    用途：连续 N 次执行返回 <code>errOSAScriptError</code> 时由 worker 触发，
+    防止"脚本对象本身坏了"的极端情况长期卡死。
+    门限在 §3 状态机定义。
+  </dd>
+
+  <dt>错误</dt>
+  <dd>
+    懒编译失败抛 <code>RuntimeError("AppleScript compile failed: ...")</code> —
+    意味着脚本模板本身有语法错（开发期问题，不应进生产）。
+    worker 捕获并降级到 osascript subprocess 兜底。
+  </dd>
+</dl>
+</div>
+
+<!-- ───── FocusWorker ───── -->
+
+<div class="contract">
+<h4>FocusWorker <span class="tag new">NEW</span></h4>
+<p>
+<code>QThreadPool</code> 实例，<code>setMaxThreadCount(1)</code>，FIFO。
+进程单例（模块级），通过 <code>focus_worker()</code> 函数取得。
+</p>
+
+<dl>
+  <dt>submit(task: QRunnable) → None</dt>
+  <dd>
+    入队即返。任务体调用 <code>AppleScriptCache.get_*_handler()</code> +
+    <code>NSAppleScript.executeAppleEvent_error_(event)</code>。
+  </dd>
+
+  <dt>线程模型</dt>
+  <dd>
+    <b>maxThreadCount=1</b> 的核心理由：Apple 文档明确
+    <code>NSAppleScript</code> "not thread-safe" —— 但允许 "serialised on a single thread"。
+    单线程池天然提供这个不变量，无需额外锁。
+  </dd>
+
+  <dt>队列饱和</dt>
+  <dd>
+    人类点击速率上限 ~10 Hz，单次 pane select ~100 ms，理论稳态队长 ≤ 1。
+    v1 不设上界。监控指标：worker 长期 backlog &gt; 3 时记 WARNING（在 §4 错误处理细化）。
+  </dd>
+
+  <dt>关停</dt>
+  <dd>
+    进程退出时 <code>QThreadPool.waitForDone(timeout=500ms)</code>；超时后任务被丢弃 —
+    pane select 没完成不会阻止退出。
+  </dd>
+</dl>
+</div>
+
+<!-- ───── _PaneSelectTask ───── -->
+
+<div class="contract">
+<h4>_PaneSelectTask(QRunnable) <span class="tag new">NEW</span></h4>
+<p>worker thread 上承载一次 pane 选择尝试，内含 fallback 链。</p>
+
+<dl>
+  <dt>__init__(*, host_pid, session_id, tty)</dt>
+  <dd>
+    构造时三个字段冻结。<code>session_id</code> / <code>tty</code> 至少有一项非空（调用方保证）。
+  </dd>
+
+  <dt>run() → None</dt>
+  <dd>
+    <ol>
+      <li>有 <code>session_id</code> → 调用 id_handler。<code>ok</code> 即返回。</li>
+      <li>否则 / id miss → 有 <code>tty</code> 则调用 tty_handler。<code>ok</code> 即返回。</li>
+      <li>仍 miss → 不重试，记 <code>log.info("iterm2 pane select miss: ...")</code>。
+        Main-thread 已经把宿主置前，用户至少看到 iTerm。</li>
+      <li>NSAppleScript 抛错 → 记 <code>log.warning</code> + 累计 <code>AppleScriptCache</code>
+        失败计数；达阈值后 <code>cache.invalidate()</code>，让下一次重新编译。</li>
+    </ol>
+  </dd>
+
+  <dt>不变量</dt>
+  <dd>
+    无返回值；不持有 view 强引用之外的状态。
+    多个 <code>_PaneSelectTask</code> 在 worker 串行执行（FocusWorker 保证）。
+  </dd>
+</dl>
+</div>
+
+<!-- ───── Existing, called as fallback ───── -->
+
+<div class="contract">
+<h4>focus_host_app(pid: int) → bool <span class="tag unc">UNCHANGED</span></h4>
+<p>
+现有兜底（<code>_macos_common.py:177</code>）。
+当 fast-path 任何一个前置条件失败（PyObjC ImportError、无 host_pid）时，
+<code>focus()</code> 直接调用它 —— 保持当前 ~250 ms 同步行为，但只用于退化路径。
+契约不变，仅扩大调用比例下降的范围。
+</p>
+</div>
+
+<div class="contract">
+<h4>_iterm_host_pid(claude_pid: int) → int | None <span class="tag unc">UNCHANGED</span></h4>
+<p>
+现有祖先链查找（<code>iterm2.py:562</code>）。仅在 <code>view.jump_target.terminal_pid</code>
+缺失时调用。0.3 ms 量级，可继续在主线程执行。
+</p>
+</div>
+
+<h2>1.3 对外契约的最小变更面</h2>
+
+<table>
+<tr><th>调用方</th><th>是否需要改动</th><th>原因</th></tr>
+<tr>
+  <td><code>TerminalDispatcher.dispatch</code></td>
+  <td class="center">否</td>
+  <td>仍是 <code>bool method(view, **kwargs)</code> 调用；签名一致。</td>
+</tr>
+<tr>
+  <td><code>ExpandedWindow._on_row_clicked</code></td>
+  <td class="center">否</td>
+  <td>当前实现不读 bool 返回值（依赖 <code>WindowDeactivate</code> 自动隐藏面板）。</td>
+</tr>
+<tr>
+  <td><code>__main__.py</code> 装配</td>
+  <td class="center">否</td>
+  <td>FocusWorker / AppleScriptCache 都是模块级懒初始化，不需要外部注入。</td>
+</tr>
+<tr>
+  <td><code>tests/platform_/test_iterm2_adapter.py</code></td>
+  <td class="center">是</td>
+  <td>新增 PyObjC 路径 + worker 提交断言；现有 subprocess osascript 断言变为 fallback 场景。</td>
+</tr>
+</table>
+
+<div class="callout warn">
+<h4>本节遗留到后续章节的问题</h4>
+<ul>
+  <li><b>§2</b> · AppleScriptCache 的内部状态（编译态、失败计数）的精确结构。</li>
+  <li><b>§3</b> · 缓存失效阈值、id→tty fallback 的决策序列、外部权限被吊销时的恢复路径。</li>
+  <li><b>§4</b> · NSAppleScript / NSRunningApplication 每个外部调用的失败矩阵与可观察后果。</li>
+  <li><b>§5</b> · 主线程 + worker 两路 function-level 时序图（含分支）。</li>
+  <li><b>§7</b> · 主线程 ≤ 5 ms / worker p95 ≤ 50 ms 的可执行验收用例。</li>
+</ul>
+</div>
+
+<nav class="section-nav">
+  <span class="disabled">← (开始)</span>
+  <a href="02-data-model.html">§2 · Data Model / Schema →</a>
+</nav>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif',
+      fontSize: '13px',
+      primaryColor: '#ffffff',
+      primaryBorderColor: '#d0d7de',
+      lineColor: '#57606a',
+      tertiaryColor: '#f6f8fa'
+    },
+    flowchart: { curve: 'basis', padding: 14 }
+  });
+</script>
+</body>
+</html>

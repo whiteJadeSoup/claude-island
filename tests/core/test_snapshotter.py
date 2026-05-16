@@ -407,6 +407,17 @@ class TestHookLivePhaseIdleOverride:
         view = self._compose(live=live, pid_status="busy")
         assert view.phase == SessionPhase.IDLE
 
+    def test_hook_compacting_with_pid_idle_preserves_compacting(self):
+        """B-001/C-003 regression: COMPACTING is intentionally EXCLUDED
+        from the idle-override. Compaction's closing event is
+        SessionStart(source='compact'), which is reliably delivered, so
+        the staleness motivation that drove the override doesn't apply.
+        Whether claude writes status='idle' during /compact is
+        undocumented; the safe default is to trust the live phase."""
+        live = self._live(SessionPhase.COMPACTING)
+        view = self._compose(live=live, pid_status="idle")
+        assert view.phase == SessionPhase.COMPACTING
+
     def test_hook_tool_use_with_no_pid_status_preserves_tool_use(self):
         # No pid.json status field — no override signal; trust hook.
         live = self._live(SessionPhase.TOOL_USE, tool="Bash")

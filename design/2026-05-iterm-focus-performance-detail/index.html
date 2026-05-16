@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>iTerm Focus Performance — Detail Design 索引</title>
+<link rel="stylesheet" href="style.css" />
+<style>
+  .toc-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    margin-top: 20px;
+  }
+  .toc-card {
+    display: block;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    text-decoration: none;
+    color: var(--fg);
+    transition: background 0.1s, border-color 0.1s;
+  }
+  .toc-card:hover {
+    background: var(--bg-alt);
+    border-color: var(--accent);
+  }
+  .toc-card .num {
+    display: inline-block;
+    width: 36px;
+    height: 36px;
+    line-height: 36px;
+    text-align: center;
+    background: var(--accent-bg);
+    color: var(--accent);
+    border-radius: 50%;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 14px;
+    font-weight: 600;
+    margin-right: 12px;
+    vertical-align: middle;
+  }
+  .toc-card .title {
+    font-size: 16px;
+    font-weight: 600;
+    vertical-align: middle;
+  }
+  .toc-card .desc {
+    margin-top: 6px;
+    margin-left: 48px;
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .toc-card .traces {
+    margin-top: 4px;
+    margin-left: 48px;
+    font-size: 12px;
+    color: var(--accent);
+    font-family: "SF Mono", Menlo, monospace;
+  }
+  .meta {
+    margin: 24px 0;
+    padding: 14px 18px;
+    background: var(--bg-alt);
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  .meta b { color: var(--fg); }
+</style>
+</head>
+<body>
+<main>
+
+<header class="section-head">
+  <div class="crumb">iTerm Focus Performance — Detail Design</div>
+  <h1>Detail Design · 全 8 节索引</h1>
+  <div class="trace">
+    Overview: <code>../2026-05-iterm-focus-performance.md</code><br>
+    Status: <b>待评审</b> · 评审通过后进入实现
+  </div>
+</header>
+
+<div class="meta">
+<b>设计核心一句话</b>：把"点击 row → iTerm 在前"的瓶颈拆成两段 —
+主线程用 <b>NSRunningApplication.activate</b>（~0.3 ms）让宿主立刻前置，
+pane 精度的 <b>NSAppleScript</b> 调用（40–200 ms）扔到单线程 QThreadPool 异步落地。
+现有 subprocess osascript 路径保留为 fallback，PyObjC 不可用时自动降级。
+</div>
+
+<div class="meta">
+<b>Goal 速查</b><br>
+<b>G1</b> 主线程 ≤ 5 ms · <b>G2</b> 端到端 ≤ 50 ms p95 ·
+<b>G3</b> pane 精度不退化 · <b>G4</b> PyObjC 缺失降级 ·
+<b>G5</b> 其他 dispatch 不变
+</div>
+
+<div class="toc-grid">
+
+<a class="toc-card" href="01-module-responsibilities.html">
+  <span class="num">§1</span><span class="title">Module Responsibilities &amp; Interfaces</span>
+  <div class="desc">
+    C4 Component diagram（NEW / MOD / UNCHANGED 着色），<code>focus()</code> /
+    <code>FocusFastPath</code> / <code>AppleScriptCache</code> /
+    <code>FocusWorker</code> / <code>_PaneSelectTask</code> 各自契约。
+  </div>
+  <div class="traces">trace · §1 契约 → 下游全部</div>
+</a>
+
+<a class="toc-card" href="02-data-model.html">
+  <span class="num">§2</span><span class="title">Data Model / Schema</span>
+  <div class="desc">
+    内存对象关系 (classDiagram)、字段冻结表、AppleScript subroutine 模板格式。
+    <b>无持久化 schema</b>。
+  </div>
+  <div class="traces">trace · §1 内部状态 → §3 状态机</div>
+</a>
+
+<a class="toc-card" href="03-core-algorithms.html">
+  <span class="num">§3</span><span class="title">Core Algorithms / State Machines</span>
+  <div class="desc">
+    AppleScriptCache 生命周期状态机、id→tty fallback 决策、cache invalidate
+    阈值 = 3 的论证、backlog ≥ 10 的 reject 策略、不做 coalescing 的论证。
+  </div>
+  <div class="traces">trace · G2, G3 · 5 条不变量</div>
+</a>
+
+<a class="toc-card" href="04-error-handling.html">
+  <span class="num">§4</span><span class="title">Error Handling</span>
+  <div class="desc">
+    11 个外部交互点的失败矩阵（E1-E11），主线程异常吞咽边界，日志级别与去重约定，
+    与现有 fallback 链的失败级联图。
+  </div>
+  <div class="traces">trace · §3 状态机 ↔ 错误转移</div>
+</a>
+
+<a class="toc-card" href="05-implementation-flows.html">
+  <span class="num">§5</span><span class="title">Implementation Flows</span>
+  <div class="desc">
+    3 张 sequence diagram：主线程主路径 + worker run() 决策 + 跨线程边界细节。
+    含 <code>_build_focus_event</code> 最小实现示例。
+  </div>
+  <div class="traces">trace · §1 契约 + §3 决策链 → 函数级</div>
+</a>
+
+<a class="toc-card" href="06-performance-estimation.html">
+  <span class="num">§6</span><span class="title">Performance Estimation</span>
+  <div class="desc">
+    主线程预算 ~0.7-1.0 ms（G1 阈值 5 ms 留 80% 余量），端到端 p95 ~35 ms（G2 阈值 50 ms）。
+    瓶颈 = macOS WindowServer。内存增量 &lt; 1 MB。
+  </div>
+  <div class="traces">trace · G1, G2 量化验证</div>
+</a>
+
+<a class="toc-card" href="07-testing-strategy.html">
+  <span class="num">§7</span><span class="title">Testing Strategy</span>
+  <div class="desc">
+    每个 Goal 的 happy / edge / error 用例（共 20 个用例），不变量验证，mock 边界与理由，
+    5 个新建测试文件清单，Flake 预防策略。
+  </div>
+  <div class="traces">trace · G1-G5 + I-1~I-5</div>
+</a>
+
+<a class="toc-card" href="08-migration-compatibility.html">
+  <span class="num">§8</span><span class="title">Migration &amp; Compatibility</span>
+  <div class="desc">
+    无 schema migration / 无 canary / 回滚 = git revert。
+    PyObjC 部分缺失 / 权限吊销 / 旧 hook 的运行时降级矩阵。
+    合并前验证清单。
+  </div>
+  <div class="traces">trace · G4, G5</div>
+</a>
+
+</div>
+
+<h2 style="margin-top: 40px;">阅读顺序建议</h2>
+
+<ul>
+  <li><b>初次评审</b>：§1 → §3 → §4 → §6 → §7（按依赖序）；§2、§5、§8 可在初轮通过后细看</li>
+  <li><b>实现者</b>：§1 契约 → §5 时序 → §3 状态机 → §7 测试，按这条线写代码 + 测试</li>
+  <li><b>reviewer</b>：§6 性能预算 + §4 错误矩阵是两条最容易漏的检查线</li>
+</ul>
+
+</main>
+
+</body>
+</html>

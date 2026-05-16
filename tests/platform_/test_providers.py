@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -1129,6 +1130,113 @@ class TestQuotaCacheState:
         assert state.five_hour is None
         assert state.seven_day is None
 
+    # ---- Exponential backoff -----------------------------------------------
+
+    def test_backoff_window_doubles_then_clamps(self):
+        """5m → 10m → 20m → 40m → 60m (cap) → 60m. Catches a future
+        refactor that changes the schedule or forgets to clamp."""
+        from claude_island.platform_.providers import (
+            POLL_TTL, POLL_TTL_MAX, QuotaCacheState,
+        )
+        s = QuotaCacheState.empty("anthropic")
+        cases = [(0, POLL_TTL), (1, 600), (2, 1200), (3, 2400),
+                 (4, POLL_TTL_MAX), (10, POLL_TTL_MAX), (30, POLL_TTL_MAX)]
+        for failures, expected in cases:
+            got = replace(s, consecutive_failures=failures)._backoff_window_seconds()
+            assert got == expected, f"failures={failures}: {got} != {expected}"
+
+    def test_with_failed_attempt_increments_consecutive_failures(self):
+        from claude_island.platform_.providers import QuotaCacheState
+        s = QuotaCacheState.empty("anthropic")
+        for expected in (1, 2, 3, 4):
+            s = s.with_failed_attempt(now=self._now())
+            assert s.consecutive_failures == expected
+
+    def test_with_successful_fetch_resets_consecutive_failures(self):
+        """Either auto or manual ⟳ success → failures back to 0 → next
+        cycle resumes the 5-min cadence."""
+        from claude_island.platform_.providers import QuotaCacheState, Window
+        s = QuotaCacheState.empty("anthropic")
+        for _ in range(5):
+            s = s.with_failed_attempt(now=self._now())
+        assert s.consecutive_failures == 5
+        s = s.with_successful_fetch(
+            now=self._now(),
+            five_hour=Window(pct=10.0,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+            seven_day=Window(pct=5.0,
+                             resets_at=datetime(2030, 1, 7, tzinfo=timezone.utc)),
+        )
+        assert s.consecutive_failures == 0
+
+    def test_is_fetch_due_respects_backoff_window(self):
+        """6 minutes past a single failure: under POLL_TTL (5 min) but
+        the backoff window has doubled to 10 min, so still throttled.
+        Verifies the backoff actually changes is_fetch_due output."""
+        from claude_island.platform_.providers import QuotaCacheState
+        six_min_ago = datetime(2026, 5, 5, 11, 54, 0, tzinfo=timezone.utc)
+        s = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=None, last_attempt_at=six_min_ago,
+            five_hour=None, seven_day=None,
+            consecutive_failures=1,   # backoff window = 10 min
+        )
+        assert s.is_fetch_due(now=self._now()) is False
+        # 11 minutes past the same failure → window has elapsed.
+        eleven_min_ago = datetime(2026, 5, 5, 11, 49, 0, tzinfo=timezone.utc)
+        s = replace(s, last_attempt_at=eleven_min_ago)
+        assert s.is_fetch_due(now=self._now()) is True
+
+    def test_consecutive_failures_round_trips_through_cache(self):
+        """Persistence: a counter > 0 must survive process restart so
+        backoff doesn't reset on every cold start of the app."""
+        from claude_island.platform_.providers import QuotaCacheState, Window
+        s = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=datetime(2026, 5, 5, 11, 0, 0, tzinfo=timezone.utc),
+            last_attempt_at=datetime(2026, 5, 5, 11, 30, 0, tzinfo=timezone.utc),
+            five_hour=Window(pct=10.0,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+            seven_day=Window(pct=5.0,
+                             resets_at=datetime(2030, 1, 7, tzinfo=timezone.utc)),
+            consecutive_failures=3,
+        )
+        back = QuotaCacheState.from_cache_dict(
+            s.to_cache_dict(), fallback_provider="anthropic",
+        )
+        assert back == s
+        assert back.consecutive_failures == 3
+
+    def test_consecutive_failures_defaults_zero_for_legacy_cache(self):
+        """Caches written before backoff existed have no such key —
+        round-trip must default to 0, not crash, not None."""
+        from claude_island.platform_.providers import QuotaCacheState
+        s = QuotaCacheState.from_cache_dict(
+            {"provider": "anthropic",
+             "last_attempt_at": "2026-05-05T11:30:00+00:00"},
+            fallback_provider="anthropic",
+        )
+        assert s.consecutive_failures == 0
+
+    def test_consecutive_failures_zero_is_omitted_from_cache_dict(self):
+        """Zero-suppress: the on-disk JSON stays clean of the noise key
+        on the happy path. Verifies the cache file an existing user
+        opens doesn't gain a `consecutive_failures: 0` line on first
+        successful fetch after upgrade."""
+        from claude_island.platform_.providers import QuotaCacheState
+        d = QuotaCacheState.empty("anthropic").to_cache_dict()
+        assert "consecutive_failures" not in d
+
+    def test_consecutive_failures_corrupt_value_falls_back_to_zero(self):
+        """A malformed cache (someone hand-edited a string in there)
+        must not crash the throttle on startup."""
+        from claude_island.platform_.providers import QuotaCacheState
+        s = QuotaCacheState.from_cache_dict(
+            {"provider": "anthropic", "consecutive_failures": "broken"},
+            fallback_provider="anthropic",
+        )
+        assert s.consecutive_failures == 0
+
 
 class TestAnthropicNegativeCache:
     """Behaviour-level tests on the anthropic provider's failure path.
@@ -1227,6 +1335,26 @@ class TestLogFetchFailure:
         assert _fmt_ago(timedelta(hours=1))       == "1h"
         assert _fmt_ago(timedelta(hours=2, minutes=13)) == "2h 13m"
         assert _fmt_ago(timedelta(seconds=-5))    == "0s"  # clamp
+
+    def test_log_line_starts_with_local_wall_clock_timestamp(self, capsys):
+        """User asked for absolute time on each line: scrollback otherwise
+        only carries relative ages ('5m ago'), which is useless when the
+        user wants to know *when* something actually broke. Format:
+        ``[YYYY-MM-DD HH:MM:SS]`` in the host's local timezone."""
+        import re
+        from claude_island.platform_.providers import (
+            log_fetch_failure, QuotaCacheState,
+        )
+        log_fetch_failure(
+            QuotaCacheState.empty("anthropic"),
+            reason="HTTP 429",
+            now=datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc),
+        )
+        line = capsys.readouterr().err.strip()
+        # Local TZ → don't pin the exact value (CI runs in UTC, dev runs in CST/etc).
+        # Pin the shape instead: bracketed YYYY-MM-DD HH:MM:SS at line start.
+        assert re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[claude-island\] ", line), \
+            f"missing local-time prefix: {line!r}"
 
     def test_log_includes_reason_and_first_attempt_for_empty_state(self, capsys):
         """First-ever failure: empty state → 'first attempt — no prior success'."""

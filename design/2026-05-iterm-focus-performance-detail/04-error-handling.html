@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Detail §4 · Error Handling</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+
+<header class="section-head">
+  <div class="crumb">iTerm Focus Performance — Detail Design</div>
+  <h1>§4 · Error Handling</h1>
+  <div class="trace">
+    Traces to Overview · 风险 Type B（NSAppleScript 线程亲和 / iTerm AppleScript 引擎方差 / 权限吊销）
+    + §3 不变量 I-1~I-5
+  </div>
+</header>
+
+<div class="callout">
+<h4>错误处理总原则</h4>
+<ol>
+  <li><b>fast-path 失败一定有兜底</b>。任何 PyObjC / NSAppleScript 异常路径都至少落到现有 <code>focus_host_app</code>，
+      不允许"点击后用户得到沉默"。</li>
+  <li><b>主线程不抛</b>。<code>focus()</code> 接口返回 <code>bool</code>，所有异常在边界吞掉转 False + log.warning。</li>
+  <li><b>worker 不影响 UI</b>。worker 线程的失败仅 log，不通过任何 Signal / WorldSnapshot 反传到 UI ——
+      用户已经看到 iTerm 在前台，pane 错位是次要副作用。</li>
+  <li><b>日志降噪</b>。重复同因失败用与 <code>_macos_common.py</code> 相同的"only-log-on-change"模式
+      （per-message 去重，避免 stderr 被刷屏）。</li>
+</ol>
+</div>
+
+<h2>4.1 外部交互失败矩阵</h2>
+
+<p>列出 fast-path 涉及的所有外部调用，逐条给"失败模式 / 处理 / 调用方观察"。</p>
+
+<table>
+<tr>
+  <th>#</th>
+  <th>调用</th>
+  <th>失败模式</th>
+  <th>处理</th>
+  <th>调用方观察到</th>
+</tr>
+
+<tr>
+  <td>E1</td>
+  <td><code>from AppKit import NSRunningApplication</code><br>（模块级懒导入）</td>
+  <td>ImportError（pyobjc-framework-Cocoa 未装 / pyenv 怪构建）</td>
+  <td>模块级 <code>_HAS_PYOBJC = False</code>，<code>focus()</code> 第一句即跳过 fast-path，转 <code>focus_host_app(view.session.pid)</code></td>
+  <td><code>True</code>（同步 ~250 ms）/ <code>False</code>（无 UI ancestor）；与改动前一致</td>
+</tr>
+
+<tr>
+  <td>E2</td>
+  <td><code>NSRunningApplication.runningApplicationWithProcessIdentifier_(host_pid)</code></td>
+  <td>返回 <code>nil</code>（host_pid 已死 / 不属于活跃进程）</td>
+  <td>主线程不构造 <code>_PaneSelectTask</code>，直接 <code>focus_host_app(view.session.pid)</code></td>
+  <td><code>True</code> / <code>False</code> 取决兜底链路</td>
+</tr>
+
+<tr>
+  <td>E3</td>
+  <td><code>NSRunningApplication.activate_(opts)</code></td>
+  <td>返回 <code>NO</code>（罕见 —— 通常是目标进程已 hide-on-deactivate 中途）</td>
+  <td>不重试。<code>focus_host_app</code> 兜底</td>
+  <td>同 E2</td>
+</tr>
+
+<tr>
+  <td>E4</td>
+  <td><code>_iterm_host_pid(claude_pid)</code><br>（仅当 jump_target.terminal_pid 缺失时调）</td>
+  <td>psutil <code>NoSuchProcess</code> / <code>AccessDenied</code> / 链路上没有 iTerm 名称</td>
+  <td>返回 <code>None</code>；<code>focus()</code> 进 <code>focus_host_app</code> 兜底</td>
+  <td>同 E2</td>
+</tr>
+
+<tr>
+  <td>E5</td>
+  <td><code>psutil.Process(pid).terminal()</code><br>（构造 tty 字段时）</td>
+  <td><code>NoSuchProcess</code> / <code>AccessDenied</code></td>
+  <td>tty 字段填 <code>None</code>。task 仍可构造（若 session_id 非空）；否则跳过 task 构造</td>
+  <td>无变化 —— 与今日同种失败语义</td>
+</tr>
+
+<tr>
+  <td>E6</td>
+  <td><code>NSAppleScript.compileAndReturnError_</code><br>（首次 <code>get_*_handler</code>）</td>
+  <td>返回 <code>NO</code> + errorDict（脚本模板语法错；不应进生产）</td>
+  <td>状态机入 <code>COMPILE_FAILED</code>。worker 此后对该 handler 直接走 subprocess osascript 兜底</td>
+  <td>worker fire-and-forget；UI 仍正常（宿主已前置）</td>
+</tr>
+
+<tr>
+  <td>E7</td>
+  <td><code>NSAppleScript.executeAppleEvent_error_</code> <span class="chip new">id</span></td>
+  <td>
+    返回 <code>nil</code> + errorDict<br>
+    （常见 errno：<code>-1743</code> 权限未授；<code>-10006</code> object not found；<code>-1712</code> AppleEvent timeout）
+  </td>
+  <td>
+    <code>note_failure</code> → counter++ → 阈值则 <code>invalidate</code>。<br>
+    紧接着 fallthrough 到 tty handler（图 4）。
+  </td>
+  <td>worker fire-and-forget；用户看见 iTerm 在前台但 pane 可能不准 —— 同当前 tty-miss 行为</td>
+</tr>
+
+<tr>
+  <td>E8</td>
+  <td><code>NSAppleScript.executeAppleEvent_error_</code> <span class="chip new">tty</span></td>
+  <td>同 E7</td>
+  <td>同 E7。tty 是最后一根线索，失败后 task 结束（log.info "pane select miss"）</td>
+  <td>同 E7</td>
+</tr>
+
+<tr>
+  <td>E9</td>
+  <td><code>NSAppleScript.executeAppleEvent</code> 阻塞过久<br>（iTerm 引擎死锁）</td>
+  <td>无主动 timeout（PyObjC API 不支持），实际可能 hang ≥ 1 s</td>
+  <td>
+    单 worker 串行，hang 期间新提交会进 queue。<br>
+    backlog ≥ 10 时由 §3.3 reject 策略拒绝新提交。<br>
+    worker 自己 hang 没有 watchdog（v1 不实现 watchdog kill —— 见下方 callout）
+  </td>
+  <td>用户看见的 pane 切换延迟，但宿主已前置不影响主交互</td>
+</tr>
+
+<tr>
+  <td>E10</td>
+  <td>System Events 权限被吊销<br>（脚本里调用 <code>tell application "System Events"</code>）</td>
+  <td>errorDict[<code>NSAppleScriptErrorNumber</code>] = <code>-1743</code></td>
+  <td>
+    note_failure；第 3 次后 invalidate；重编译同样会失败 —— 但脚本编译本身<b>不</b>触发权限询问
+    （执行才触发）。所以会卡在 FAILING ↔ INVALIDATED 循环中，每次首尝试都失败。<br>
+    worker 在 errno 等于 <code>-1743</code> 时记一条 ERROR：<code>"Automation permission for System Events revoked; restore via System Settings ▶ Privacy & Security ▶ Automation"</code>
+  </td>
+  <td>fast-path 永久失效；fallback 也会失败（subprocess 路径相同权限要求）；用户看见 iTerm 不前置</td>
+</tr>
+
+<tr>
+  <td>E11</td>
+  <td><code>QThreadPool.start(task)</code></td>
+  <td>队列已满（§3.3 阈值触发）</td>
+  <td>主线程不调 <code>pool.start</code>，记 <code>log.error("FocusWorker rejected submit; backlog=%d")</code></td>
+  <td><code>focus()</code> 已返回 <code>True</code>（宿主已前置）；用户看见 iTerm 但 pane 是 stale</td>
+</tr>
+
+</table>
+
+<h2>4.2 主线程异常吞咽边界</h2>
+
+<p>
+<code>focus()</code> 的实现遵守"边界全包"原则：
+</p>
+
+<pre><code>def focus(self, view, *, siblings=()):
+    try:
+        return self._focus_fast_path(view)
+    except ImportError:
+        # 罕见：fast-path 内的子依赖 import 失败
+        _HAS_PYOBJC = False
+        return focus_host_app(view.session.pid)
+    except Exception as e:
+        log.warning("focus fast-path raised; falling back: %s", e)
+        return focus_host_app(view.session.pid)</code></pre>
+
+<p>
+这里的 <code>except Exception</code> 是<b>显式宽 catch</b> ——
+理由：fast-path 调用 PyObjC，错误类型可能是 <code>objc.error</code> / <code>RuntimeError</code> / Apple 异常包装等异常类，
+精确枚举既冗长又易漏。统一兜底 + log.warning 比"漏一种异常类型 → 点击没反应"代价低。
+</p>
+
+<div class="callout warn">
+<h4>worker hang 与 watchdog ── v1 明确不做</h4>
+<p>
+<b>不做的理由</b>：
+</p>
+<ul>
+  <li>QThreadPool 没有"杀死任意 task"的 API；要实现 watchdog 需放弃 QThreadPool，自己起 <code>QThread</code>
+    + 信号量 + 计时器，整体复杂度翻倍。</li>
+  <li>worker hang 的可观察后果有限 —— 主线程已经 <code>NSRunningApplication.activate</code> 让宿主前置，
+    用户看到 iTerm 在前；pane 错位等同今天的 tty-miss 体验。</li>
+  <li>当 backlog ≥ 10（§3.3）时已经走 reject 路径，hang 不会无限累积。</li>
+</ul>
+<p>
+<b>启发监控</b>：如果生产观察到长时间 hang（如 worker thread CPU=0 但任务 30 s 未完成），
+未来可在 worker 包装一层 <code>signal.setitimer + SIGALRM</code> 的 timeout —
+但这属于 v2 优化，不在当前范围。
+</p>
+</div>
+
+<h2>4.3 日志级别约定</h2>
+
+<table>
+<tr><th>事件</th><th>级别</th><th>消息样式</th><th>去重</th></tr>
+<tr>
+  <td>fast-path 完整命中</td>
+  <td><code>DEBUG</code></td>
+  <td><code>"iterm2 fast-path: host=%d, attempt=%s"</code></td>
+  <td>否</td>
+</tr>
+<tr>
+  <td>fallback 触发（PyObjC 缺失）</td>
+  <td><code>INFO</code></td>
+  <td><code>"iterm2 fast-path disabled (PyObjC unavailable); using subprocess"</code></td>
+  <td>per-process 一次</td>
+</tr>
+<tr>
+  <td>fallback 触发（host_pid 解析失败）</td>
+  <td><code>INFO</code></td>
+  <td><code>"iterm2 fast-path: cannot resolve host_pid for pid=%d; fallback"</code></td>
+  <td>否（每次都打，量本身少）</td>
+</tr>
+<tr>
+  <td>worker pane select miss</td>
+  <td><code>INFO</code></td>
+  <td><code>"iterm2 pane select miss (id=%r, tty=%r)"</code></td>
+  <td>否</td>
+</tr>
+<tr>
+  <td>worker NSAppleScript 异常（counter &lt; 3）</td>
+  <td><code>WARNING</code></td>
+  <td><code>"iterm2 pane select error errno=%d msg=%s; counter=%d"</code></td>
+  <td>per-errno 去重 ── 同 errno 连续出现只打第一条</td>
+</tr>
+<tr>
+  <td>cache invalidate 触发</td>
+  <td><code>WARNING</code></td>
+  <td><code>"AppleScriptCache invalidated after %d consecutive failures (handler=%s)"</code></td>
+  <td>否</td>
+</tr>
+<tr>
+  <td>Automation 权限被吊销</td>
+  <td><code>ERROR</code></td>
+  <td><code>"System Events Automation permission revoked; restore via System Settings ▶ Privacy & Security ▶ Automation"</code></td>
+  <td>per-process 一次（持久化 module-level flag）</td>
+</tr>
+<tr>
+  <td>FocusWorker reject（backlog ≥ 10）</td>
+  <td><code>ERROR</code></td>
+  <td><code>"FocusWorker rejected pane select; backlog=%d; iTerm likely hung"</code></td>
+  <td>窗口 60 s 一次</td>
+</tr>
+</table>
+
+<h2>4.4 与 §3 状态机的对应</h2>
+
+<p>状态机的转移条件 ↔ 错误矩阵：</p>
+
+<table>
+<tr><th>状态机转移</th><th>触发的错误项</th></tr>
+<tr><td><code>UNCOMPILED → COMPILE_FAILED</code></td><td>E6</td></tr>
+<tr><td><code>READY → FAILING</code></td><td>E7 或 E8 首发</td></tr>
+<tr><td><code>FAILING → READY</code>（任一成功）</td><td>—</td></tr>
+<tr><td><code>FAILING → INVALIDATED</code></td><td>E7 或 E8 连续累计到 3</td></tr>
+<tr><td><code>INVALIDATED → UNCOMPILED</code></td><td>下一次 <code>get_handler()</code> 触发</td></tr>
+</table>
+
+<p>
+注意 E10（权限吊销）会让 <code>READY → FAILING → INVALIDATED → UNCOMPILED → COMPILE_OR_FAIL</code>
+循环每 3 次点击重置一次 —— 这是可接受的"摩擦"，因为：
+(a) 用户必须从系统设置恢复权限才能根治；
+(b) 每次循环只多花一次 ~50 ms 重编译，与已经 broken 的 fast-path 相比是噪音；
+(c) 我们至少在 ERROR 日志里把诊断写清楚，让用户能找到设置入口。
+</p>
+
+<h2>4.5 与现有 fallback 链的关系</h2>
+
+<figure class="mermaid-fig">
+<div class="mermaid">
+flowchart LR
+  classDef new fill:#dafbe1,stroke:#1a7f37,color:#0a3d1e
+  classDef unc fill:#f6f8fa,stroke:#6e7781,color:#24292f
+  classDef bad fill:#ffebe9,stroke:#cf222e,color:#82071e
+
+  IN([focus·view]):::new
+  FP[Fast-path]:::new
+  T1{fast-path 可走?}:::new
+  T2{NSRunningApplication<br/>.activate ok?}:::new
+  OK1([True · pane 异步落地]):::new
+
+  L1[_focus_by_session_id<br/>subprocess osascript]:::unc
+  L2[_focus_by_tty<br/>subprocess osascript]:::unc
+  L3[focus_host_app·pid<br/>System Events]:::unc
+
+  IN --> T1
+  T1 -- 是 --> T2
+  T2 -- 是 --> OK1
+  T1 -- 否 --> L1
+  T2 -- 否 --> L1
+  L1 -- miss --> L2
+  L2 -- miss --> L3
+  L1 -- ok --> OK2([True · 同步路径]):::unc
+  L2 -- ok --> OK2
+  L3 -- ok --> OK2
+  L3 -- 失败 --> NG([False · 用户点击无响应]):::bad
+</div>
+<figcaption>图 6 · 失败级联（绿色 = 新增 fast-path，灰色 = 现有 fallback 路径）</figcaption>
+</figure>
+
+<p>
+关键点：<b>fallback 链路一行不动</b>。fast-path 是叠加在最前面的"快速命中通道"，
+失败时退到现状。这是 G4（PyObjC 不可用降级）与"无新风险"的双重保证：
+任何新 bug 只可能让 fast-path 退到 fallback，不会引入<b>比当前更差</b>的状态。
+</p>
+
+<nav class="section-nav">
+  <a href="03-core-algorithms.html">← §3 · Core Algorithms</a>
+  <a href="05-implementation-flows.html">§5 · Implementation Flows →</a>
+</nav>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif',
+      fontSize: '13px',
+      primaryColor: '#ffffff',
+      primaryBorderColor: '#d0d7de',
+      lineColor: '#57606a',
+      tertiaryColor: '#f6f8fa'
+    },
+    flowchart: { curve: 'basis', padding: 14 }
+  });
+</script>
+</body>
+</html>

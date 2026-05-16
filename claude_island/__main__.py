@@ -1018,6 +1018,22 @@ _usage_heartbeat.start(60_000)
 capsule.show()
 
 
+# Pre-warm the Windows Terminal focus worker pool. First-click cost
+# would otherwise include ~5-15 ms of QThread spawn + ~1 ms of
+# pythoncom.CoInitializeEx. No-op on non-Windows. See
+# `design/2026-05-wt-focus-performance-decision.md` — Q-2 / C-006.
+try:
+    from claude_island.platform_.terminals import _wt_fast_path as _wt_fp
+    _wt_fp.prewarm()
+except Exception as _e:
+    # Pool warmup is best-effort; first click pays the cost if this
+    # fails. Don't gate app start on it.
+    import logging as _logging
+    _logging.getLogger(__name__).debug(
+        "wt fast-path prewarm skipped: %s", _e,
+    )
+
+
 def _bootstrap_session_discovery() -> None:
     """Background-thread bootstrap for the session pipeline.
 

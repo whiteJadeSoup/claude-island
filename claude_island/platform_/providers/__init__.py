@@ -178,8 +178,21 @@ class Provider(Protocol):
 # ---------------------------------------------------------------------------
 
 HTTP_TIMEOUT = 3.0
-POLL_TTL = 300      # 5 min
+POLL_TTL = 300      # 5 min — base interval between fetch attempts
+POLL_TTL_MAX = 3600  # 60 min — backoff cap for consecutive failures
 STALE_MULT = 3       # 3 × TTL = stale flag
+
+# Exponential-backoff schedule on consecutive failures: window doubles
+# each failure, capped at POLL_TTL_MAX.
+#   failures=0  →  POLL_TTL          (5 min — happy path)
+#   failures=1  →  POLL_TTL × 2      (10 min)
+#   failures=2  →  POLL_TTL × 4      (20 min)
+#   failures=3  →  POLL_TTL × 8      (40 min)
+#   failures≥4  →  POLL_TTL_MAX      (60 min — clamped)
+# Any success (auto OR manual ⟳) resets the counter, so a flaky network
+# blip doesn't permanently slow polling. Rationale for 60-min cap: 429
+# rate-limits typically clear in 1–15 min; 401 auth issues usually need
+# user intervention, so hourly is the right cadence to redetect a fix.
 
 
 def read_env_token() -> str | None:
@@ -615,6 +628,13 @@ class QuotaCacheState:
     Business data (also goes into QuotaSnapshot for the UI):
       * five_hour / seven_day — the actual quota windows.
         None if no fetch has ever succeeded (failure-only state).
+
+    Backoff counter (throttle metadata, persisted to cache):
+      * consecutive_failures — how many failed fetches in a row?
+        Drives the exponential-backoff schedule in ``is_fetch_due``.
+        Bumped by ``with_failed_attempt``, reset to 0 by
+        ``with_successful_fetch``. Default 0 for round-trip with caches
+        written before backoff existed (no field → no prior failures).
     """
 
     provider: str
@@ -622,6 +642,7 @@ class QuotaCacheState:
     fetched_at: datetime | None
     five_hour: Window | None
     seven_day: Window | None
+    consecutive_failures: int = 0
 
     # ---- Constructors --------------------------------------------------
 
@@ -632,6 +653,7 @@ class QuotaCacheState:
             provider=provider,
             last_attempt_at=None, fetched_at=None,
             five_hour=None, seven_day=None,
+            consecutive_failures=0,
         )
 
     @classmethod
@@ -659,12 +681,18 @@ class QuotaCacheState:
                 return None
             return Window(pct=float(d.get("pct", 0)), resets_at=resets)
 
+        raw_failures = cached.get("consecutive_failures", 0)
+        try:
+            failures = max(0, int(raw_failures))
+        except (TypeError, ValueError):
+            failures = 0
         return cls(
             provider=provider,
             last_attempt_at=last_attempt,
             fetched_at=fetched,
             five_hour=_parse_window(cached.get("five_hour")),
             seven_day=_parse_window(cached.get("seven_day")),
+            consecutive_failures=failures,
         )
 
     # ---- Serialisation -------------------------------------------------
@@ -690,6 +718,12 @@ class QuotaCacheState:
                 "pct": self.seven_day.pct,
                 "resets_at": self.seven_day.resets_at.isoformat(),
             }
+        # Zero-suppress: caches written before backoff existed had no
+        # such key, and writing 0 on every successful fetch adds noise
+        # to the (often hand-inspected) cache file. The from_cache_dict
+        # default already covers the round-trip.
+        if self.consecutive_failures:
+            d["consecutive_failures"] = self.consecutive_failures
         return d
 
     # ---- Throttle queries (pure functions of self + now) ---------------
@@ -698,13 +732,30 @@ class QuotaCacheState:
         """True when the cache permits a fresh HTTP fetch.
 
         Gates on ``last_attempt_at`` (covers success AND failure) so
-        5 min after any kind of attempt the window opens. Falls back
-        to ``fetched_at`` for caches that pre-date the negative-cache
-        logic (no last_attempt_at field)."""
+        the window opens once the backoff interval has passed. Falls
+        back to ``fetched_at`` for caches that pre-date the negative-
+        cache logic (no last_attempt_at field).
+
+        Window length is ``POLL_TTL × 2^consecutive_failures`` clamped
+        at ``POLL_TTL_MAX`` — happy path is plain POLL_TTL; each failure
+        doubles the wait so a persistently broken provider doesn't burn
+        a request every 5 min."""
         last = self.last_attempt_at or self.fetched_at
         if last is None:
             return True
-        return (now - last).total_seconds() > POLL_TTL
+        window = self._backoff_window_seconds()
+        return (now - last).total_seconds() > window
+
+    def _backoff_window_seconds(self) -> float:
+        """Current backoff interval in seconds, clamped at POLL_TTL_MAX.
+
+        Computed as ``POLL_TTL << consecutive_failures`` (cheap integer
+        shift) and clamped. ``min(failures, 30)`` bound on the shift
+        prevents a wildly corrupt counter from overflowing — at 30
+        shifts we'd already be ~10⁹ × POLL_TTL anyway, all clamped to
+        the max."""
+        shift = min(max(self.consecutive_failures, 0), 30)
+        return float(min(POLL_TTL << shift, POLL_TTL_MAX))
 
     def is_stale(self, *, now: datetime) -> bool:
         """True when the displayed business data is too old to trust.
@@ -719,12 +770,17 @@ class QuotaCacheState:
     # ---- Transitions (return new state, never mutate) ------------------
 
     def with_failed_attempt(self, *, now: datetime) -> "QuotaCacheState":
-        """Bump last_attempt_at to ``now`` so the gate re-closes for
-        another POLL_TTL. Business data and fetched_at are unchanged —
-        the UI continues to show the last-known reading with rising
+        """Bump last_attempt_at to ``now`` so the gate re-closes for the
+        next backoff window, and increment ``consecutive_failures`` so
+        that window doubles. Business data and fetched_at are unchanged
+        — the UI continues to show the last-known reading with rising
         is_stale until either a success refreshes it or the window
         ages out."""
-        return replace(self, last_attempt_at=now)
+        return replace(
+            self,
+            last_attempt_at=now,
+            consecutive_failures=self.consecutive_failures + 1,
+        )
 
     def with_successful_fetch(
         self,
@@ -736,11 +792,14 @@ class QuotaCacheState:
         """Replace business data with a fresh reading. Both timestamps
         move to ``now`` so is_fetch_due gates the next attempt to
         POLL_TTL after THIS success — not POLL_TTL after some stale
-        prior attempt."""
+        prior attempt. ``consecutive_failures`` resets to 0 so the next
+        cycle resumes the happy-path 5-min cadence — applies equally to
+        auto fetches and manual ⟳ that happened to succeed."""
         return replace(
             self,
             fetched_at=now, last_attempt_at=now,
             five_hour=five_hour, seven_day=seven_day,
+            consecutive_failures=0,
         )
 
     # ---- UI projection -------------------------------------------------
@@ -814,14 +873,25 @@ def log_fetch_failure(
 
     Output format::
 
-        [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 5m ago — last success 47m ago
+        [2026-05-16 14:23:45] [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 5m ago — last success 47m ago
+
+    The leading bracket is the LOCAL wall-clock timestamp of the
+    failure (``now`` converted to the host's local timezone). Stderr
+    scrollback otherwise gives only relative ages — useless when the
+    user comes back after lunch and wants to know *when* it actually
+    broke. We accept the ~22-char overhead because every failure line
+    is a discrete event the user needs to anchor in real time.
 
     Edge cases:
       * No prior attempt → "first attempt"
       * No prior success (token never worked) → "no prior success"
       * Both missing (cold cache) → "first attempt — no prior success"
     """
-    parts = [f"[claude-island] {prior.provider} quota fetch: {reason}"]
+    # now arrives tz-aware in UTC from callers; astimezone() with no
+    # arg converts to the host's local zone, matching what the user
+    # reads on their system clock.
+    local_ts = now.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    parts = [f"[{local_ts}] [claude-island] {prior.provider} quota fetch: {reason}"]
     parts.append(
         f"last attempt {_fmt_ago(now - prior.last_attempt_at)} ago"
         if prior.last_attempt_at is not None

@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Detail §5 · Implementation Flows</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+
+<header class="section-head">
+  <div class="crumb">iTerm Focus Performance — Detail Design</div>
+  <h1>§5 · Implementation Flows</h1>
+  <div class="trace">
+    Traces to Overview · 核心流 + 边缘流的 <b>function-level</b> 细化（C4 Dynamic at component level）
+  </div>
+</header>
+
+<div class="callout">
+<h4>本节与 Overview Flow 的关系</h4>
+Overview §2 给的是"模块级"流（mouse-up → 主线程 activate → worker pane select → 用户看见）。
+本节给"函数级"展开：精确的方法名、参数、跨线程跨越点（marshaler / pool / lock）、
+以及所有失败分支。共 3 张图：<b>主路径</b>、<b>worker 任务</b>、<b>跨线程边界细节</b>。
+</div>
+
+<h2>5.1 主路径 ── 主线程上 focus(view) 的完整时序</h2>
+
+<figure class="mermaid-fig">
+<div class="mermaid">
+sequenceDiagram
+autonumber
+participant UI as IslandRowButton<br/>(Qt main)
+participant EW as ExpandedWindow<br/>(Qt main)
+participant DSP as TerminalDispatcher<br/>(Qt main)
+participant ADP as ITerm2Adapter<br/>(Qt main)
+participant FFP as FocusFastPath<br/>(Qt main)
+participant NSR as NSRunningApplication<br/>(AppKit)
+participant POOL as FocusWorker<br/>(QThreadPool)
+
+UI->>EW: clicked
+EW->>EW: _on_row_clicked(view, siblings)
+EW->>DSP: dispatch(view, Capability.FOCUS, siblings=...)
+DSP->>DSP: _resolve_target(Scope.TERMINAL) → adapter
+DSP->>ADP: focus(view, siblings=...)
+
+ADP->>ADP: _check_pyobjc_available()
+alt PyObjC import 成功
+  ADP->>FFP: try_fast_path(view)
+  FFP->>FFP: host_pid ← view.jump_target.terminal_pid<br/>or _iterm_host_pid(view.session.pid)
+  alt host_pid 可解析
+    FFP->>NSR: runningApplicationWithProcessIdentifier_(host_pid)
+    alt 非 nil
+      FFP->>NSR: activate_(NSApplicationActivateIgnoringOtherApps)
+      alt 返回 YES
+        FFP->>FFP: tty ← psutil.Process(pid).terminal()<br/>(吞 NoSuchProcess → None)
+        FFP->>FFP: build _PaneSelectTask(host_pid, session_id, tty)
+        alt session_id 或 tty 至少一个非空
+          FFP->>POOL: submit(task)
+          Note over POOL: 立即返回；task 在 worker 线程异步运行
+        else 两者都空
+          Note over FFP: 跳过 task 提交<br/>(主线程已让宿主前置)
+        end
+        FFP-->>ADP: True
+      else 返回 NO
+        FFP-->>ADP: False (转 fallback)
+      end
+    else nil
+      FFP-->>ADP: False (转 fallback)
+    end
+  else host_pid = None
+    FFP-->>ADP: False (转 fallback)
+  end
+else PyObjC ImportError
+  Note over ADP: _HAS_PYOBJC = False<br/>(模块级缓存)
+end
+
+alt fast-path 返回 False 或 PyObjC 不可用
+  ADP->>ADP: legacy path: subprocess osascript<br/>_focus_by_session_id → _focus_by_tty → focus_host_app
+  Note right of ADP: 行为与改动前完全相同
+end
+
+ADP-->>DSP: bool
+DSP-->>EW: bool (仅用于 log)
+
+Note over UI,EW: WindowDeactivate 事件触发<br/>panel.hide()
+</div>
+<figcaption>图 7 · focus() 主线程时序（含所有 fast-path 失败分支）</figcaption>
+</figure>
+
+<h3>5.1.1 时序图上没画但仍需注意的两件事</h3>
+
+<ul>
+  <li><b>PyObjC import 缓存</b>：第 11 步的 <code>_check_pyobjc_available()</code> 只在 module 加载或 fast-path 第一次失败时真正执行 import；
+    后续是模块级 <code>_HAS_PYOBJC: bool | None</code> 三态读（<code>None</code>=未检测 / <code>True</code>=可用 / <code>False</code>=不可用）。</li>
+  <li><b>WindowDeactivate 是 Qt 的副作用</b>：最后一条 Note 不依赖我们写代码 ——
+    Qt 监听 macOS 的应用激活事件；<code>NSRunningApplication.activate</code> 一旦成功，
+    我们的进程不再 frontmost，Qt 触发 <code>QEvent::WindowDeactivate</code> →
+    <code>ExpandedWindow.event()</code> 内现有逻辑调 <code>self.hide()</code>。</li>
+</ul>
+
+<h2>5.2 Worker 任务 ── _PaneSelectTask.run() 的完整决策</h2>
+
+<figure class="mermaid-fig">
+<div class="mermaid">
+sequenceDiagram
+autonumber
+participant POOL as FocusWorker<br/>(worker thread)
+participant T as _PaneSelectTask<br/>(worker thread)
+participant CACHE as AppleScriptCache<br/>(module singleton)
+participant SCR as NSAppleScript<br/>(Foundation)
+
+POOL->>T: run()
+T->>T: start = time.monotonic()
+
+alt session_id 非空
+  T->>CACHE: get_id_handler()
+  alt 已编译 (READY/FAILING)
+    CACHE-->>T: _id_script
+  else 未编译 (UNCOMPILED)
+    CACHE->>SCR: NSAppleScript.alloc().initWithSource_(_FOCUS_BY_ID_SOURCE)
+    CACHE->>SCR: compileAndReturnError_()
+    alt 编译失败
+      Note over CACHE: state → COMPILE_FAILED<br/>抛 RuntimeError
+      CACHE-->>T: raise
+    else 编译成功
+      Note over CACHE: state → READY
+      CACHE-->>T: _id_script
+    end
+  end
+
+  T->>T: event = _build_focus_event("focusByID", session_id, host_pid)
+  T->>SCR: executeAppleEvent_error_(event)
+
+  alt 返回 descriptor with "ok"
+    T->>CACHE: note_success(handler="id")<br/>counter ← 0
+    Note over T: log.debug<br/>return
+  else 返回 descriptor with "miss"
+    Note over T: 不算失败<br/>fallthrough 到 tty
+  else 返回 nil + errorDict
+    T->>CACHE: note_failure(handler="id")<br/>counter++
+    alt counter ≥ 3
+      CACHE->>CACHE: invalidate()<br/>state → INVALIDATED → UNCOMPILED
+    end
+    Note over T: log.warning<br/>fallthrough 到 tty
+  end
+end
+
+alt id 路径未命中 AND tty 非空
+  T->>CACHE: get_tty_handler()
+  Note over CACHE: 同上的懒编译路径
+
+  T->>T: event = _build_focus_event("focusByTTY", tty, host_pid)
+  T->>SCR: executeAppleEvent_error_(event)
+
+  alt "ok"
+    T->>CACHE: note_success(handler="tty")
+    Note over T: log.debug<br/>return
+  else "miss" 或异常
+    T->>CACHE: note_failure(handler="tty") (仅异常路径)
+    Note over T: log.info "pane select miss"<br/>return
+  end
+end
+
+alt 两条线索都没尝试 (id/tty 都空)
+  Note over T: log.warning "task has no clue" (理论不应到达 — 构造时已 assert)
+end
+
+T->>T: elapsed = time.monotonic() - start
+Note over T: if elapsed > 0.5s: log.warning<br/>(soft SLA)
+</div>
+<figcaption>图 8 · _PaneSelectTask.run() 的完整决策（worker 线程内全部步骤）</figcaption>
+</figure>
+
+<h3>5.2.1 _build_focus_event 的最小实现</h3>
+
+<pre><code>def _build_focus_event(handler_name: str, arg1: str, host_pid: int):
+    """
+    构造 aevt/psbr AppleEvent 调用一个 subroutine handler。
+    用 NSAppleEventDescriptor 包装参数，避开字符串模板转义。
+    """
+    target = NSAppleEventDescriptor.descriptorWithProcessIdentifier_(os.getpid())
+    event = NSAppleEventDescriptor.appleEventWithEventClass_eventID_targetDescriptor_returnID_transactionID_(
+        FourCharCode('ascr'),
+        FourCharCode('psbr'),
+        target,
+        kAutoGenerateReturnID,
+        kAnyTransactionID,
+    )
+    event.setParamDescriptor_forKeyword_(
+        NSAppleEventDescriptor.descriptorWithString_(handler_name),
+        FourCharCode('snam'),
+    )
+    args = NSAppleEventDescriptor.listDescriptor()
+    args.insertDescriptor_atIndex_(NSAppleEventDescriptor.descriptorWithString_(arg1), 0)
+    args.insertDescriptor_atIndex_(NSAppleEventDescriptor.descriptorWithInt32_(host_pid), 0)
+    event.setParamDescriptor_forKeyword_(args, FourCharCode('----'))
+    return event
+</code></pre>
+
+<p class="legend">
+此实现细节是为说明"参数走 descriptor 不走字符串拼接"而展开；
+具体 4-char codes 与 PyObjC 绑定细节交给实现期参照 Apple AEDataModel 文档。
+</p>
+
+<h2>5.3 跨线程边界细节</h2>
+
+<p>
+fast-path 涉及两个跨线程交接点。本节明确每个点上"谁拥有内存所有权"。
+</p>
+
+<figure class="mermaid-fig">
+<div class="mermaid">
+sequenceDiagram
+autonumber
+participant MAIN as Qt main thread
+participant POOL as QThreadPool internal queue
+participant WORKER as Worker thread
+
+Note over MAIN: 1) submit (主→worker)<br/>线程安全责任：Qt
+MAIN->>POOL: pool.start(_PaneSelectTask)
+Note right of MAIN: task 字段全部 frozen，<br/>worker 看见的是构造瞬间冻结值
+
+Note over POOL,WORKER: 2) pop &amp; run<br/>线程安全责任：Qt
+POOL->>WORKER: run()
+
+Note over WORKER: 3) AppleScriptCache 访问<br/>线程安全责任：threading.Lock
+WORKER->>WORKER: get_id_handler() {内部 with _lock}
+WORKER->>WORKER: executeAppleEvent (无锁但 pool=1)
+
+Note over WORKER: 4) 日志<br/>线程安全责任：logging 模块本身
+WORKER->>WORKER: log.warning(...)
+
+Note over WORKER: 5) 无回调主线程<br/>(fire-and-forget)
+</div>
+<figcaption>图 9 · 跨线程交接点（每步标注"谁负责保证线程安全"）</figcaption>
+</figure>
+
+<h3>5.3.1 为什么 _PaneSelectTask 必须冻结字段</h3>
+
+<p>
+主线程构造 task 时，<code>view.jump_target</code> / <code>view.session.pid</code> 可能在数毫秒后被 snapshotter
+新一帧覆盖（<code>WorldSnapshot</code> 是不可变值对象，但 view 实例本身不是单例）。
+如果 task 持有 view 强引用，worker run 时读到的字段就可能是"过期 view"。<br>
+解决：构造时把<b>必要原始值</b>（host_pid / session_id / tty）<b>复制</b>进 frozen 字段，
+不持 view 引用。<br>
+代价：每 task 几十字节内存；几乎为零。
+</p>
+
+<h3>5.3.2 worker → 主线程的回流 ── 显式没有</h3>
+
+<table>
+<tr><th>潜在需求</th><th>v1 是否实现</th><th>原因</th></tr>
+<tr>
+  <td>pane select 失败 → UI 闪一下提示</td>
+  <td class="center">否</td>
+  <td>主线程已让宿主前置，用户感知"焦点已经到了"；闪提示反而干扰</td>
+</tr>
+<tr>
+  <td>cache invalidate → 状态栏指示</td>
+  <td class="center">否</td>
+  <td>事件极稀有，靠 log；不值得拉一条 Signal 通道</td>
+</tr>
+<tr>
+  <td>backlog reject → 提示用户</td>
+  <td class="center">否</td>
+  <td>同上 + 出现意味着 iTerm 已僵死，UI toast 也无济于事</td>
+</tr>
+</table>
+
+<p>
+"worker 不持 QObject" 的不变量让我们规避所有"跨线程 Signal-from-non-QThread"陷阱
+（项目历史上踩过 reactivex QtScheduler 与 Qt 主线程的兼容性坑，见
+<code>tests/integration/test_reactivex_qt_compat.py</code>）。
+</p>
+
+<h2>5.4 关键边缘流的具体路径</h2>
+
+<h3>5.4.1 PyObjC ImportError 路径（图 7 替代分支）</h3>
+
+<pre><code>focus(view):
+  if _HAS_PYOBJC is None:           # 首次调用
+      try:
+          from AppKit import NSRunningApplication
+          _HAS_PYOBJC = True
+      except ImportError:
+          _HAS_PYOBJC = False
+          log.info("iterm2 fast-path disabled; PyObjC unavailable")
+
+  if not _HAS_PYOBJC:
+      return self._legacy_focus(view)   # 现有 subprocess osascript 路径
+
+  return self._fast_path_focus(view)
+</code></pre>
+
+<h3>5.4.2 host_pid 解析失败路径</h3>
+
+<pre><code>def _resolve_host_pid(view) -> int | None:
+    jt = view.jump_target
+    if jt and jt.terminal_pid > 0:
+        return jt.terminal_pid
+    if view.session.pid > 0:
+        return _iterm_host_pid(view.session.pid)
+    return None
+
+# 在 fast-path 入口：
+host_pid = _resolve_host_pid(view)
+if host_pid is None:
+    return self._legacy_focus(view)
+</code></pre>
+
+<h3>5.4.3 NSRunningApplication.activate 返回 NO</h3>
+
+<p>
+极罕见。<b>不</b>试第二次 ——
+重试在主线程上会再吃一次 latency 预算且失败概率不会下降。
+直接降级到 legacy path 是最快/最不破坏 G1 的选择。
+</p>
+
+<h2>5.5 与 Overview Flow 的对照</h2>
+
+<table>
+<tr><th>Overview 步骤</th><th>本节图位置</th><th>关键差异</th></tr>
+<tr>
+  <td>1. mouse-up</td>
+  <td>图 7 step 1</td>
+  <td>—</td>
+</tr>
+<tr>
+  <td>2. main thread: NSRunningApplication.activate(host_pid)</td>
+  <td>图 7 step 10-13</td>
+  <td>细化为 3 步：<code>runningApplicationWithProcessIdentifier_</code> → <code>activate_</code> → 检查返回值</td>
+</tr>
+<tr>
+  <td>3. main thread: schedule pane select onto QThreadPool</td>
+  <td>图 7 step 16-18</td>
+  <td>多了"构造 task 前 tty 解析与字段冻结"</td>
+</tr>
+<tr>
+  <td>4. Qt's WindowDeactivate fires → panel.hide()</td>
+  <td>图 7 最后 Note</td>
+  <td>Qt 副作用，不写代码</td>
+</tr>
+<tr>
+  <td>5. user sees iTerm in front</td>
+  <td>—</td>
+  <td>视觉确认点</td>
+</tr>
+<tr>
+  <td>6. worker thread: NSAppleScript.executeAppleEvent</td>
+  <td>图 8 全图</td>
+  <td>展开 id→tty 决策、cache 状态转移、log 级别</td>
+</tr>
+<tr>
+  <td>7. user sees the correct pane highlighted</td>
+  <td>—</td>
+  <td>视觉确认点</td>
+</tr>
+</table>
+
+<nav class="section-nav">
+  <a href="04-error-handling.html">← §4 · Error Handling</a>
+  <a href="06-performance-estimation.html">§6 · Performance Estimation →</a>
+</nav>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif',
+      fontSize: '13px',
+      primaryColor: '#ffffff',
+      primaryBorderColor: '#d0d7de',
+      lineColor: '#57606a',
+      tertiaryColor: '#f6f8fa'
+    },
+    flowchart: { curve: 'basis', padding: 14 },
+    sequence: { actorFontSize: 13, messageFontSize: 12, noteFontSize: 12, wrap: true }
+  });
+</script>
+</body>
+</html>

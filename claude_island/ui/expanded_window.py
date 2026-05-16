@@ -3366,6 +3366,15 @@ class ExpandedWindow(QWidget):
             # something else triggered a render.
             len(snap.dormant_sessions),
             len(snap.launching_sessions),
+            # Bidirectional Hooks v1: pending decisions drive both the
+            # inline-under-row card and the orphan-container card. Without
+            # (id, session_uuid) in the dedup key, a PermissionRequest
+            # arriving when the rest of the world is quiet (idle session,
+            # no quota tick, no cost change) would be filtered out by
+            # distinct_until_changed and the approval card would never
+            # appear → user couldn't decide → 598 s wait timeout → defer.
+            # Fixed in code review A-001.
+            tuple((d.id, d.session_uuid) for d in snap.pending_decisions),
         )
 
     def render(self, snap: WorldSnapshot) -> None:
@@ -3711,16 +3720,31 @@ class ExpandedWindow(QWidget):
                 # Wrap the group + its matching decision cards in a
                 # vertical container so the cards sit immediately below
                 # the session row(s) they belong to.
-                from PySide6.QtWidgets import QWidget, QVBoxLayout
+                #
+                # A-005/B-004: cap matched decisions per group at the
+                # same _PENDING_VISIBLE_CAP the orphan path uses.
+                # PermissionRequest serialises per uuid in claude today
+                # so the realistic case is 1 card per group, but if
+                # parallel-tool patterns ever produce >5 we don't want
+                # to push the panel offscreen.
                 wrapper = QWidget()
                 wlayout = QVBoxLayout(wrapper)
                 wlayout.setContentsMargins(0, 0, 0, 0)
                 wlayout.setSpacing(6)
                 wlayout.addWidget(group_widget)
-                for view in decisions:
+                visible_decisions = decisions[: self._PENDING_VISIBLE_CAP]
+                for view in visible_decisions:
                     card = self._get_or_create_decision_card(view)
                     card.setParent(None)
                     wlayout.addWidget(card)
+                overflow = len(decisions) - len(visible_decisions)
+                if overflow > 0:
+                    overflow_lbl = QLabel(f"+{overflow} more pending")
+                    overflow_lbl.setStyleSheet(
+                        "QLabel { color: #999; font-size: 10px; "
+                        "padding: 2px 4px; }"
+                    )
+                    wlayout.addWidget(overflow_lbl)
                 self._session_box.addWidget(wrapper)
             else:
                 self._session_box.addWidget(group_widget)
@@ -5267,9 +5291,23 @@ class ExpandedWindow(QWidget):
         """Remove every top-level item from session_box. Cached row
         buttons AND cached card frames are detached (kept alive in
         self._rows / self._cards for reuse); the placeholder is
-        deleted (recreated on demand by _show_placeholder)."""
+        deleted (recreated on demand by _show_placeholder).
+
+        B-003/A-004: when an item is a wrapper QWidget (the
+        group + inline-decisions container built by
+        _render_session_groups for matched-decision groups), it isn't
+        in cached_rows or cached_cards, so the old code went straight
+        to deleteLater() while the wrapper still owned cached children.
+        That worked by accident-of-order because Qt's deferred-delete
+        runs only after the synchronous rebuild loop re-parents the
+        cached children OFF the wrapper (via setParent(None)). To
+        remove the implicit dependency on rebuild ordering, we now
+        explicitly detach any cached row/card/decision-card descendant
+        before deleteLater().
+        """
         cached_rows = set(self._rows.values())
         cached_cards = set(self._cards.values())
+        cached_decisions = set(self._decision_cards.values())
         while self._session_box.count():
             item = self._session_box.takeAt(0)
             widget = item.widget()
@@ -5280,6 +5318,15 @@ class ExpandedWindow(QWidget):
                 continue
             if widget is self._placeholder:
                 self._placeholder = None
+            else:
+                # Wrapper or other non-cached top-level: detach any
+                # cached children so deleteLater doesn't cascade-destroy
+                # them on the next event-loop tick.
+                for child in widget.findChildren(QWidget):
+                    if (child in cached_rows
+                            or child in cached_cards
+                            or child in cached_decisions):
+                        child.setParent(None)
             widget.deleteLater()
 
     def _show_placeholder(self) -> None:

@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Detail §6 · Performance Estimation</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+
+<header class="section-head">
+  <div class="crumb">iTerm Focus Performance — Detail Design</div>
+  <h1>§6 · Performance Estimation</h1>
+  <div class="trace">
+    Traces to Overview · <b>G1</b>（主线程 ≤ 5 ms）· <b>G2</b>（前台 ≤ 50 ms p95）
+  </div>
+</header>
+
+<div class="callout">
+<h4>本节回答的问题</h4>
+"按 §1-§5 的设计落地后，主线程预算与端到端 wall-time 各能压到多少？" ──
+逐步骤拆解 + 实测数据对照 + 瓶颈识别。
+</div>
+
+<style>
+.bar-row { display: grid; grid-template-columns: 200px 1fr 80px; gap: 10px; align-items: center; margin: 4px 0; font-size: 13px; }
+.bar-row .label { font-family: "SF Mono", Menlo, monospace; }
+.bar-track { background: var(--bg-alt); border: 1px solid var(--border); height: 18px; border-radius: 3px; overflow: hidden; position: relative; }
+.bar-fill { height: 100%; border-radius: 0; }
+.bar-fill.warm { background: linear-gradient(90deg, #4ade80, #16a34a); }
+.bar-fill.cold { background: linear-gradient(90deg, #fbbf24, #d97706); }
+.bar-fill.bad  { background: linear-gradient(90deg, #f87171, #b91c1c); }
+.bar-row .num { text-align: right; font-family: "SF Mono", Menlo, monospace; color: var(--muted); }
+.bar-scale { color: var(--muted); font-size: 11px; margin: 4px 0 12px; text-align: right; }
+</style>
+
+<h2>6.1 输入假设（明确写出）</h2>
+
+<table>
+<tr><th>变量</th><th>值</th><th>来源</th></tr>
+<tr><td>iTerm2 实例数</td><td>1–2 个并行</td><td>当前生产观察 + 4-session 测试场景</td></tr>
+<tr><td>每实例窗口数</td><td>1–4</td><td>同上</td></tr>
+<tr><td>每窗口 tab 数</td><td>2–6</td><td>同上</td></tr>
+<tr><td>用户点击间隔</td><td>≥ 300 ms（人类反应下限）</td><td>HCI 经验数据</td></tr>
+<tr><td>iTerm2 AppleScript 引擎负载</td><td>typical：&lt; 100 ms；high：~ 1 s 偶发</td><td>Overview §3 微基准</td></tr>
+<tr><td>PyObjC 已装可用</td><td>是（<code>pyproject.toml</code> 已声明 <code>sys_platform == "darwin"</code>）</td><td><code>pyproject.toml:31</code></td></tr>
+<tr><td>测试硬件</td><td>M1/M2 Mac，常温，无 CPU 抢占</td><td>开发机</td></tr>
+</table>
+
+<h2>6.2 主线程预算（G1 ≤ 5 ms）</h2>
+
+<p>逐步骤拆解 <code>_on_row_clicked → focus → fast-path 命中 → 返回 True</code>。</p>
+
+<table>
+<tr><th>#</th><th>步骤</th><th>预估（warm）</th><th>估算依据</th></tr>
+<tr><td>1</td><td>Qt 信号 dispatch (clicked → slot)</td><td>&lt; 0.05 ms</td><td>Qt 5.x signal-slot 同线程直连</td></tr>
+<tr><td>2</td><td><code>_on_row_clicked</code> → <code>_dispatch</code></td><td>&lt; 0.05 ms</td><td>Python 函数调用</td></tr>
+<tr><td>3</td><td><code>TerminalDispatcher.dispatch</code> 路由</td><td>~0.1 ms</td><td>枚举 + dict lookup（现状量级）</td></tr>
+<tr><td>4</td><td><code>_HAS_PYOBJC</code> 三态读 + branch</td><td>&lt; 0.01 ms</td><td>模块级 bool 比较</td></tr>
+<tr><td>5</td><td><code>_resolve_host_pid(view)</code> ── jump_target 命中</td><td>&lt; 0.05 ms</td><td>对象字段访问</td></tr>
+<tr><td>5b</td><td><code>_resolve_host_pid(view)</code> ── jump_target 缺失，走 <code>_iterm_host_pid</code></td><td>~0.3 ms</td><td>Overview §1 实测</td></tr>
+<tr><td>6</td><td><code>NSRunningApplication.runningApplicationWithProcessIdentifier_</code></td><td>~0.05 ms</td><td>PyObjC bridge + AppKit in-process</td></tr>
+<tr><td>7</td><td><code>NSRunningApplication.activate_</code></td><td><b>~0.3 ms</b></td><td>Overview §3 微基准 S5</td></tr>
+<tr><td>8</td><td><code>psutil.Process(pid).terminal()</code></td><td>~0.1 ms</td><td>Overview §1 实测</td></tr>
+<tr><td>9</td><td>构造 <code>_PaneSelectTask</code> (frozen dataclass)</td><td>&lt; 0.02 ms</td><td>5 字段 dataclass</td></tr>
+<tr><td>10</td><td><code>QThreadPool.start(task)</code></td><td>&lt; 0.05 ms</td><td>Qt 入队，无阻塞</td></tr>
+<tr><td colspan="2"><b>合计（jump_target 命中路径）</b></td><td><b>~0.7 ms</b></td><td>步骤 1-4, 5, 6-10</td></tr>
+<tr><td colspan="2"><b>合计（jump_target 缺失走 _iterm_host_pid）</b></td><td><b>~1.0 ms</b></td><td>步骤 1-4, 5b, 6-10</td></tr>
+</table>
+
+<h3>6.2.1 可视化</h3>
+
+<p style="font-size:13px;color:var(--muted)">绿色 = 主线程 warm path · 黄色 = 主线程冷启动一次性成本 · 红色 = 现状（对照）</p>
+
+<div class="bar-row">
+  <span class="label">现状 (subprocess osascript)</span>
+  <div class="bar-track"><div class="bar-fill bad" style="width: 89.2%"></div></div>
+  <span class="num">223 ms</span>
+</div>
+<div class="bar-row">
+  <span class="label">首次 PyObjC import (一次性)</span>
+  <div class="bar-track"><div class="bar-fill cold" style="width: 12%"></div></div>
+  <span class="num">~30 ms</span>
+</div>
+<div class="bar-row">
+  <span class="label">fast-path warm (jump_target 命中)</span>
+  <div class="bar-track"><div class="bar-fill warm" style="width: 0.28%; min-width: 2px;"></div></div>
+  <span class="num">~0.7 ms</span>
+</div>
+<div class="bar-row">
+  <span class="label">fast-path warm (legacy resolve)</span>
+  <div class="bar-track"><div class="bar-fill warm" style="width: 0.4%; min-width: 3px;"></div></div>
+  <span class="num">~1.0 ms</span>
+</div>
+<div class="bar-row">
+  <span class="label">G1 预算上限</span>
+  <div class="bar-track"><div class="bar-fill" style="width: 2%; background: #94a3b8;"></div></div>
+  <span class="num">5 ms</span>
+</div>
+<div class="bar-scale">scale: 0 ms ─────────────────── 250 ms</div>
+
+<h3>6.2.2 G1 是否达成</h3>
+
+<p>
+warm path 预算 ~0.7–1.0 ms <b>≪ 5 ms</b>，留有 4 ms 头部预算给：
+</p>
+<ul>
+  <li>冷启动后第一次点击多吃 ~30 ms PyObjC import（不在 warm 范畴；用户感知 = 面板已显示，点击响应可被掩盖）</li>
+  <li>背景 CPU 抢占（macOS 在 thermal throttle 下可能 2-3× 抖动）</li>
+  <li>Qt 信号链上未来若加 capability 检查 / 权限审计中间件</li>
+</ul>
+
+<div class="callout">
+<h4>结论 ── G1 达成 ✅</h4>
+warm path 80% ~ 87% 留余量；冷启动场景由"首次点击时面板已显示完毕"这一时序天然遮蔽。
+</div>
+
+<h2>6.3 端到端 wall-time 预算（G2 ≤ 50 ms p95）</h2>
+
+<p>
+"前台 ≤ 50 ms p95" 的 G2 指的是<b>用户点击 → 目标 iTerm 实例的窗口前置</b>这个事件 ——
+不是 pane 内部 select 完成。后者由 §6.4 单独估算。
+</p>
+
+<table>
+<tr><th>步骤</th><th>耗时</th><th>用户视觉事件</th></tr>
+<tr><td>fast-path 主线程总耗时</td><td>~0.7–1.0 ms</td><td>—</td></tr>
+<tr><td><code>NSRunningApplication.activate</code> 完成 → macOS WindowServer 接收</td><td>~0.3 ms（含在上）</td><td>—</td></tr>
+<tr><td>macOS WindowServer 切换窗口层级</td><td>~5–30 ms</td><td>iTerm 窗口出现在前</td></tr>
+<tr><td>Qt 收到 <code>QEvent::WindowDeactivate</code> → <code>panel.hide()</code></td><td>~1-5 ms</td><td>面板消失</td></tr>
+<tr><td colspan="2"><b>合计 p50</b></td><td><b>~10 ms</b></td></tr>
+<tr><td colspan="2"><b>合计 p95</b></td><td><b>~35 ms</b>（WindowServer 抖动决定上限）</td></tr>
+</table>
+
+<div class="bar-row">
+  <span class="label">G2 预算上限</span>
+  <div class="bar-track"><div class="bar-fill" style="width: 100%; background: #94a3b8;"></div></div>
+  <span class="num">50 ms</span>
+</div>
+<div class="bar-row">
+  <span class="label">预估 p50</span>
+  <div class="bar-track"><div class="bar-fill warm" style="width: 20%"></div></div>
+  <span class="num">~10 ms</span>
+</div>
+<div class="bar-row">
+  <span class="label">预估 p95</span>
+  <div class="bar-track"><div class="bar-fill warm" style="width: 70%"></div></div>
+  <span class="num">~35 ms</span>
+</div>
+<div class="bar-scale">scale: 0 ms ── 50 ms</div>
+
+<h3>6.3.1 G2 瓶颈</h3>
+
+<p>
+<b>瓶颈是 macOS WindowServer 切换窗口</b>，不在我们代码内。
+若 G2 在生产 p95 上不达标，唯一可优化方向是预先把面板从
+<code>WindowStaysOnTopHint</code> 切换为<code>非</code> staysOnTop 的瞬间触发
+（避免 WindowServer 处理"非活动 app 想置顶"的额外规则）——
+但这超出 fast-path 范围，可作为 v2 探索。
+</p>
+
+<div class="callout">
+<h4>结论 ── G2 达成 ✅（依赖 WindowServer 表现）</h4>
+预估 p95 ~35 ms 留余 15 ms。前提：macOS WindowServer 在常规负载下；
+若用户机器在 thermal throttle 状态可能突破。
+</div>
+
+<h2>6.4 Pane 精度落地时间（G3 相关，非阻塞用户）</h2>
+
+<p>
+worker 线程上 NSAppleScript 的耗时不在 G2 预算内，但用户能感知"pane 是否对"。
+</p>
+
+<table>
+<tr><th>测量项</th><th>S6 (cached NSAppleScript)</th><th>S1 现状</th><th>差</th></tr>
+<tr><td>warm avg</td><td>70-180 ms</td><td>223 ms</td><td>-19% ~ -69%</td></tr>
+<tr><td>floor</td><td>~40 ms</td><td>~200 ms</td><td>-80%</td></tr>
+<tr><td>p95 (iTerm 平静)</td><td>~150 ms</td><td>~250 ms</td><td>-40%</td></tr>
+<tr><td>p95 (iTerm 忙)</td><td>~500 ms</td><td>~700 ms</td><td>-29%</td></tr>
+</table>
+
+<p>
+"pane 精度落地"的用户感知 = WindowServer 已切换（看到 iTerm）→ 等 40-500 ms → 看到 pane 高亮。
+对 user 而言这是<b>已经 in-app</b>的子动作，远不如"app 切换"重要。
+此值我们<b>不</b>立硬性 SLA；只做"比现状好"的弱保证。
+</p>
+
+<div class="bar-row">
+  <span class="label">现状 pane 精度延迟</span>
+  <div class="bar-track"><div class="bar-fill bad" style="width: 44.6%"></div></div>
+  <span class="num">~223 ms</span>
+</div>
+<div class="bar-row">
+  <span class="label">新方案 pane 精度延迟 (avg)</span>
+  <div class="bar-track"><div class="bar-fill warm" style="width: 24%"></div></div>
+  <span class="num">~120 ms</span>
+</div>
+<div class="bar-scale">scale: 0 ms ── 500 ms</div>
+
+<h2>6.5 一次性成本与稳态成本</h2>
+
+<table>
+<tr><th>成本项</th><th>触发条件</th><th>开销</th><th>用户感知</th></tr>
+<tr><td>PyObjC import</td><td>进程内 fast-path 首次调用</td><td>~30 ms</td><td>面板已经显示完毕，掩盖</td></tr>
+<tr><td>NSAppleScript 首次编译 (id)</td><td>worker 首个 id-match task</td><td>~50-100 ms</td><td>无（worker 异步）</td></tr>
+<tr><td>NSAppleScript 首次编译 (tty)</td><td>worker 首个 tty-match task（通常很少触发）</td><td>~50-100 ms</td><td>无</td></tr>
+<tr><td>cache invalidate 后重编译</td><td>3 次连续失败</td><td>~50-100 ms</td><td>仅记录在 log；下次点击多 ~80 ms</td></tr>
+<tr><td>每次 fast-path warm path</td><td>每次点击</td><td>~0.7-1.0 ms</td><td>无感（≪ 5 ms 阈值）</td></tr>
+<tr><td>每次 worker pane select</td><td>每次点击</td><td>~70-180 ms</td><td>"pane 高亮稍滞后" —— 比现状好</td></tr>
+</table>
+
+<h2>6.6 内存占用</h2>
+
+<table>
+<tr><th>项</th><th>估计</th></tr>
+<tr><td>2 个 NSAppleScript 实例（已编译字节码）</td><td>~10-30 KB · 进程生命周期</td></tr>
+<tr><td>QThreadPool (max=1) idle</td><td>~2 KB（pool 结构本身）+ 1 个 worker thread 栈 ~512 KB</td></tr>
+<tr><td>每个 in-flight _PaneSelectTask</td><td>~200 B（frozen dataclass + QRunnable）</td></tr>
+<tr><td>cache 失败计数 / 锁</td><td>~150 B</td></tr>
+<tr><td><b>总增量</b></td><td>&lt; 1 MB，可忽略</td></tr>
+</table>
+
+<h2>6.7 性能验证基准（推到 §7 实现）</h2>
+
+<table>
+<tr><th>基准</th><th>方法</th><th>通过准则</th></tr>
+<tr>
+  <td>主线程 warm path</td>
+  <td><code>pytest-benchmark</code> 100 iter，mock <code>NSRunningApplication</code> 与 <code>QThreadPool.start</code></td>
+  <td>median &lt; 2 ms，p95 &lt; 5 ms</td>
+</tr>
+<tr>
+  <td>主线程冷启动</td>
+  <td>新 Python process 启动 + 首次 <code>focus()</code> 调用</td>
+  <td>&lt; 50 ms 总耗时（含 PyObjC import + 第一次 activate）</td>
+</tr>
+<tr>
+  <td>端到端 wall-time</td>
+  <td>真实 iTerm session；用 <code>NSWorkspace.frontmostApplication</code> 轮询确认前置；时间戳差</td>
+  <td>p95 &lt; 50 ms 在 4 session 场景下</td>
+</tr>
+<tr>
+  <td>worker p95</td>
+  <td>同上，再多记 worker task <code>elapsed</code> 字段</td>
+  <td>p95 &lt; 250 ms 在 iTerm 平静时</td>
+</tr>
+</table>
+
+<nav class="section-nav">
+  <a href="05-implementation-flows.html">← §5 · Implementation Flows</a>
+  <a href="07-testing-strategy.html">§7 · Testing Strategy →</a>
+</nav>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif',
+      fontSize: '13px',
+      primaryColor: '#ffffff',
+      primaryBorderColor: '#d0d7de',
+      lineColor: '#57606a',
+      tertiaryColor: '#f6f8fa'
+    },
+    flowchart: { curve: 'basis', padding: 14 }
+  });
+</script>
+</body>
+</html>

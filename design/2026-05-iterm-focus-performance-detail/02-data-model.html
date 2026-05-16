@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Detail §2 · Data Model / Schema</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+
+<header class="section-head">
+  <div class="crumb">iTerm Focus Performance — Detail Design</div>
+  <h1>§2 · Data Model / Schema</h1>
+  <div class="trace">
+    Traces to Overview · <b>G3</b>（pane 精度不退化）· <b>G4</b>（PyObjC 缺失降级）
+    + §1 组件契约的内部状态边界
+  </div>
+</header>
+
+<div class="callout">
+<h4>本节范围一句话</h4>
+本变更<b>无任何持久化 schema</b>。新增的全部状态都在<b>进程内存</b>，生命周期 ≤ 进程。
+本节定义这些内存结构的字段、不变量与访问模式；
+状态机转移与阈值放在 §3，外部错误观察放在 §4。
+</div>
+
+<h2>2.1 进程内状态全景</h2>
+
+<figure class="mermaid-fig">
+<div class="mermaid">
+classDiagram
+direction LR
+
+class AppleScriptCache {
+  module singleton
+  -_id_script : NSAppleScript?
+  -_tty_script : NSAppleScript?
+  -_lock : threading.Lock
+  -_consecutive_failures : int
+  +get_id_handler() NSAppleScript
+  +get_tty_handler() NSAppleScript
+  +note_failure() bool
+  +invalidate() None
+}
+
+class FocusWorker {
+  module singleton
+  -_pool : QThreadPool
+  -maxThreadCount = 1
+  +submit(task) None
+  +backlog() int
+  +shutdown(timeout_ms) None
+}
+
+class PaneSelectTask {
+  QRunnable · frozen
+  +host_pid : int
+  +session_id : str | None
+  +tty : str | None
+  +created_at : float
+  +run() None
+}
+
+class JumpTarget {
+  existing · read-only here
+  +iterm_session_id : str | None
+  +terminal_pid : int
+  +terminal_app : str
+}
+
+FocusWorker o-- PaneSelectTask : 持有 (运行时 ≤1)
+PaneSelectTask ..> AppleScriptCache : 读·run() 期间
+PaneSelectTask ..> JumpTarget : 仅构造时拷贝字段
+</div>
+<figcaption>图 2 · 进程内对象关系（虚线 = 读关系，实线 = 持有）</figcaption>
+</figure>
+
+<p>
+关键边界：<code>SessionView</code> / <code>WorldSnapshot</code> 不新增任何字段。
+fast-path 所需的全部数据都来自 <b>已存在</b>的 <code>view.jump_target</code> 与 <code>view.session.pid</code>。
+这保证 <code>distinct_until_changed(render_key)</code> 的结构性等价语义不被打破，
+也避免给 snapshot 管线引入新的脏路径。
+</p>
+
+<h2>2.2 <code>_PaneSelectTask</code> ── 冻结字段表</h2>
+
+<table>
+<tr>
+  <th style="width:18%">字段</th>
+  <th style="width:18%">类型 / 默认</th>
+  <th>约束</th>
+  <th>来源</th>
+</tr>
+<tr>
+  <td><code>host_pid</code></td>
+  <td><code>int</code></td>
+  <td>必须 &gt; 0。构造时校验，否则 <code>ValueError</code>（视为编程错误）。</td>
+  <td><code>view.jump_target.terminal_pid</code> 或运行时 <code>_iterm_host_pid()</code> 解析结果。</td>
+</tr>
+<tr>
+  <td><code>session_id</code></td>
+  <td><code>str | None</code></td>
+  <td>非空时必须是 hook 捕获的 iTerm session id；不做格式校验（iTerm 内部用 UUID-ish 字符串）。</td>
+  <td><code>view.jump_target.iterm_session_id</code>，hook 未捕获或 jump_target 为空时为 <code>None</code>。</td>
+</tr>
+<tr>
+  <td><code>tty</code></td>
+  <td><code>str | None</code></td>
+  <td>非空时必须以 <code>/dev/</code> 开头（psutil 在 macOS 上的返回格式）；不做更细校验。</td>
+  <td>主线程构造 task 前调用 <code>psutil.Process(pid).terminal()</code>；失败则 <code>None</code>。</td>
+</tr>
+<tr>
+  <td><code>created_at</code></td>
+  <td><code>float</code> · <code>time.monotonic()</code></td>
+  <td>仅供 worker 计算端到端 wall-time 用，<b>不</b>参与决策。</td>
+  <td>构造瞬间。</td>
+</tr>
+<tr>
+  <td colspan="4"><b>跨字段不变量</b>：<code>session_id is not None or tty is not None</code>。
+    两者皆空意味着主线程上没有任何线索可走 AppleScript，应当直接走 <code>focus_host_app</code> 兜底，不构造 task。
+    构造函数 assert 该不变量。</td>
+</tr>
+</table>
+
+<h3>实现形态</h3>
+
+<pre><code>@dataclass(frozen=True, slots=True)
+class _PaneSelectTask(QRunnable):
+    host_pid: int
+    session_id: str | None
+    tty: str | None
+    created_at: float = field(default_factory=time.monotonic)
+
+    def __post_init__(self) -&gt; None:
+        if self.host_pid &lt;= 0:
+            raise ValueError("host_pid must be positive")
+        if not self.session_id and not self.tty:
+            raise ValueError("session_id or tty required")
+        # QRunnable.__init__ via super() is required for Qt's C++ bookkeeping;
+        # work around frozen=True by routing through object.__setattr__.
+        QRunnable.__init__(self)
+</code></pre>
+
+<p>
+<b>frozen + slots</b> 是为了与项目里现有 <code>SessionView</code>/<code>Session</code>
+的不可变值对象语义保持一致（见 CLAUDE.md 设计原则 #7）。
+冻结避免 worker 运行时被主线程意外修改字段。
+</p>
+
+<h2>2.3 <code>AppleScriptCache</code> ── 内部态</h2>
+
+<table>
+<tr><th>属性</th><th>类型</th><th>初值</th><th>读写规则</th></tr>
+<tr>
+  <td><code>_id_script</code></td>
+  <td><code>NSAppleScript | None</code></td>
+  <td><code>None</code></td>
+  <td>
+    懒初始化。读：<code>get_id_handler()</code> 触发，需持 <code>_lock</code> 检查后赋值。
+    写：仅在懒编译 / <code>invalidate()</code> 时。
+  </td>
+</tr>
+<tr>
+  <td><code>_tty_script</code></td>
+  <td><code>NSAppleScript | None</code></td>
+  <td><code>None</code></td>
+  <td>同上，独立编译。</td>
+</tr>
+<tr>
+  <td><code>_lock</code></td>
+  <td><code>threading.Lock</code></td>
+  <td>fresh lock</td>
+  <td>
+    仅保护"懒编译 + 字段写"的<b>临界段</b>。
+    脚本对象的 <code>executeAppleEvent_error_</code> 调用<b>不</b>持锁 ——
+    由 <code>FocusWorker maxThreadCount=1</code> 提供执行串行化。
+  </td>
+</tr>
+<tr>
+  <td><code>_consecutive_failures</code></td>
+  <td><code>int</code></td>
+  <td><code>0</code></td>
+  <td>
+    worker 在 <code>note_failure()</code> 中递增；
+    <code>get_*_handler</code> 成功返回 <code>ok</code> 时由 worker 调
+    <code>note_success()</code>（隐式定义为重置）归零。阈值 / 触发 invalidate 的规则在 §3。
+  </td>
+</tr>
+</table>
+
+<h3>线程亲和性 ── 显式说明</h3>
+
+<table>
+<tr><th>操作</th><th>哪个线程</th><th>并发上限</th></tr>
+<tr><td>首次 <code>get_*_handler()</code>（含懒编译）</td><td>worker</td><td>1（<code>_lock</code> 序列化）</td></tr>
+<tr><td>已编译后的 <code>get_*_handler()</code></td><td>worker</td><td>1（pool maxThreadCount=1）</td></tr>
+<tr><td><code>NSAppleScript.executeAppleEvent_error_</code></td><td>worker</td><td>1（同上）</td></tr>
+<tr><td><code>invalidate()</code></td><td>worker（由 task <code>run()</code> 触发）</td><td>1</td></tr>
+<tr><td><code>note_failure()</code> / <code>note_success()</code></td><td>worker</td><td>1</td></tr>
+</table>
+
+<div class="callout warn">
+<h4>为什么不暴露 main-thread 的 invalidate()</h4>
+有想过让用户在"权限设置改完"后从托盘菜单按钮调 <code>invalidate()</code>。否决理由：
+跨线程访问 <code>NSAppleScript</code> 实例语义未定义；让缓存只在 worker 线程被改，
+是最便宜的不变量。如果未来需要 UI 触发清缓存，应当通过给 worker 投递一个
+<code>_InvalidateTask</code> 间接达成，而不是 main thread 直接调。
+</div>
+
+<h2>2.4 AppleScript 模板 ── 从字符串拼接到 subroutine</h2>
+
+<p>
+现有 <code>_FOCUS_SCRIPT_BY_ID_TEMPLATE</code> / <code>_FOCUS_SCRIPT_TEMPLATE</code>
+是把 <code>host_pid</code> / <code>session_id</code> / <code>tty</code>
+直接 <code>str.format</code> 进脚本体的"模板字符串"。
+fast-path 路径下脚本只编译一次，所以参数不能再嵌进源码 ——
+改成 AppleScript 的 <b>subroutine</b>，参数通过 <code>NSAppleEventDescriptor</code> 传入。
+</p>
+
+<table>
+<tr><th>项</th><th>id 模板</th><th>tty 模板</th></tr>
+<tr>
+  <td>handler 签名</td>
+  <td><code>on focusByID(sessionID, hostPID)</code></td>
+  <td><code>on focusByTTY(targetTTY, hostPID)</code></td>
+</tr>
+<tr>
+  <td>返回</td>
+  <td colspan="2"><code>"ok"</code>（找到并 select 成功） / <code>"miss"</code>（遍历结束未匹配）</td>
+</tr>
+<tr>
+  <td>输入字符类型</td>
+  <td colspan="2">两个参数都是 AppleScript text（UTF-8 / 自动转 unicode text）；hostPID 在 AppleScript 内 <code>as integer</code>。</td>
+</tr>
+<tr>
+  <td>转义需求</td>
+  <td colspan="2"><b>无</b>。参数通过事件描述符传入，AppleScript 引擎不再做字符串内联，
+    所以现有 <code>_escape_applescript_string()</code> 不再用于这条路径
+    （仍保留供 fallback subprocess 路径继续用）。</td>
+</tr>
+</table>
+
+<h3>模板代码（写在脚本字面量里，编译一次）</h3>
+
+<pre><code>_FOCUS_BY_ID_SOURCE = """
+on focusByID(sessionID, hostPID)
+    tell application "System Events"
+        set frontmost of (first process whose unix id is (hostPID as integer)) to true
+    end tell
+    tell application "iTerm"
+        repeat with w in windows
+            repeat with t in tabs of w
+                repeat with s in sessions of t
+                    if (id of s as text) is sessionID then
+                        select s
+                        select t
+                        select w
+                        return "ok"
+                    end if
+                end repeat
+            end repeat
+        end repeat
+        return "miss"
+    end tell
+end focusByID
+"""</code></pre>
+
+<p class="legend">
+tty 模板结构同形，仅判定条件从 <code>id of s</code> 换成 <code>tty of s</code>。
+两份脚本独立编译为独立 <code>NSAppleScript</code> 实例 —— 不合并成一个多 handler 脚本，
+是为了：(a) 任一边出问题（语法 / 权限）可以独立 invalidate；
+(b) 单脚本里两个 handler 共享一个 <code>_lock</code> 没收益但增加耦合。
+</p>
+
+<h2>2.5 <code>FocusWorker</code> ── 队列与生命周期</h2>
+
+<table>
+<tr><th>属性 / 行为</th><th>说明</th></tr>
+<tr>
+  <td><code>_pool: QThreadPool</code></td>
+  <td>独立实例（非 <code>QThreadPool.globalInstance()</code>）。
+      隔离避免我们的 task 被 Qt 内部其他 QRunnable 排队卡住。</td>
+</tr>
+<tr>
+  <td><code>setMaxThreadCount(1)</code></td>
+  <td>核心不变量，参 §2.3 的线程亲和。</td>
+</tr>
+<tr>
+  <td>队列容量</td>
+  <td>无显式上限。稳态队长 = 人类点击间隔 ÷ task 平均耗时 ≈ 1。
+      观察：<code>backlog() &gt; 3</code> 时 WARNING；&gt; 10 时启动溢出丢弃策略（在 §3 状态机里）。</td>
+</tr>
+<tr>
+  <td>停机</td>
+  <td><code>shutdown(timeout_ms=500)</code> → <code>pool.waitForDone(timeout_ms)</code>。
+      到时未完成的 task 被丢弃；不阻塞进程退出。</td>
+</tr>
+</table>
+
+<h2>2.6 持久化 schema —— <span style="color:var(--muted)">N/A</span></h2>
+
+<p>
+本变更不引入 SQLite 表 / JSON 配置文件 / 文件系统写。
+唯一外部副作用是 <code>NSRunningApplication.activate</code> 与 <code>NSAppleScript</code> 调用本身，
+属于"对 OS 状态的瞬时操作"，不留持久痕迹。
+</p>
+
+<p>
+因此 design-plan-guide 模板里要求的"migration path with rollback"在本节<b>退化为单点</b>：
+回滚 = git revert。<b>无需</b>数据库 backfill、双写、版本号字段等。
+完整兼容性讨论（含 PyObjC ImportError 降级、运行期 feature 切换）放 §8。
+</p>
+
+<h2>2.7 与现有数据流的耦合点（明确边界）</h2>
+
+<table>
+<tr><th>已存在的数据结构</th><th>本节如何使用</th><th>是否改动</th></tr>
+<tr>
+  <td><code>SessionView</code> / <code>WorldSnapshot</code></td>
+  <td>仅<b>读</b> <code>view.session.pid</code>、<code>view.jump_target</code>。</td>
+  <td class="center">否</td>
+</tr>
+<tr>
+  <td><code>JumpTarget</code>（<code>iterm_session_id</code>, <code>terminal_pid</code>）</td>
+  <td>主线程构造 task 时拷贝必要字段进 <code>_PaneSelectTask</code> ——
+      避免 worker 在 task 排队期间持有可能过期的 view 引用。</td>
+  <td class="center">否</td>
+</tr>
+<tr>
+  <td><code>jsonl_parser._session_meta</code></td>
+  <td>不读不写。fast-path 不依赖 jsonl 派生事实。</td>
+  <td class="center">否</td>
+</tr>
+<tr>
+  <td><code>capabilities.Capability.FOCUS</code></td>
+  <td>枚举值不动。</td>
+  <td class="center">否</td>
+</tr>
+</table>
+
+<div class="callout warn">
+<h4>遗留到 §3 的问题</h4>
+<ul>
+  <li><code>AppleScriptCache._consecutive_failures</code> 的阈值与 invalidate 触发规则</li>
+  <li><code>FocusWorker</code> backlog 溢出后的丢弃策略（直接丢最旧 vs 拒绝新提交）</li>
+  <li>同一 view 的连续点击是否做 dedupe / coalescing</li>
+  <li>id-match 失败 → tty-match 回退的决策链（在 task <code>run()</code> 内部）</li>
+</ul>
+</div>
+
+<nav class="section-nav">
+  <a href="01-module-responsibilities.html">← §1 · Module Responsibilities</a>
+  <a href="03-core-algorithms.html">§3 · Core Algorithms / State Machines →</a>
+</nav>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif',
+      fontSize: '13px',
+      primaryColor: '#ffffff',
+      primaryBorderColor: '#d0d7de',
+      lineColor: '#57606a',
+      tertiaryColor: '#f6f8fa'
+    },
+    flowchart: { curve: 'basis', padding: 14 }
+  });
+</script>
+</body>
+</html>
