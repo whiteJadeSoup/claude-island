@@ -200,7 +200,7 @@ class _HoverRevealRow(QFrame):
         return super().leaveEvent(event)
 
 
-_PANEL_W = 320
+_PANEL_W = 400
 _GAP = 6  # px gap between capsule bottom and panel top
 
 # Bound the sessions list so a heavy user with 20+ sessions doesn't
@@ -724,7 +724,7 @@ class _ElasticRichLabel(QLabel):
     content width — for RichText (HTML strings with ``<span>`` colour
     segments) that's the full one-line width of the rendered HTML. When
     such a label sits inside a layout whose parent has
-    ``setFixedWidth(_PANEL_W=320)``, Qt resolves the conflict by
+    ``setFixedWidth(_PANEL_W=400)``, Qt resolves the conflict by
     forcing the parent's effective minimum width up to fit the
     child — producing the QWindowsWindow::setGeometry mintrack=480
     warning every layout pass.
@@ -2983,10 +2983,6 @@ class ExpandedWindow(QWidget):
         self._resolve_decision = resolve_decision
         self._get_review_mode = get_review_mode
         self._set_review_mode = set_review_mode
-        # Per-decision-id widget cache so a render(snap) tick that just
-        # adds/removes one card doesn't tear down the others (preserves
-        # in-progress text input on PromptReviewCard).
-        self._decision_cards: dict[str, QWidget] = {}
         self._provider_btns: dict[str, QPushButton] = {}
         # Hold a reference to the active add-provider dialog so Qt's
         # GC doesn't tear it down before the user can interact with it.
@@ -3219,16 +3215,22 @@ class ExpandedWindow(QWidget):
         self._recents_toggle: Callable[[], None] | None = None
         self._recents_chip.clicked.connect(self._on_recents_chip_clicked)
         # ── Pending decisions section (Bidirectional Hooks v1) ─────
-        # Sits ABOVE the sessions header so any approval/review card the
-        # user must act on is the first thing visible when the panel
-        # expands. Hidden when there are zero pending decisions.
-        self._pending_container = QWidget()
-        self._pending_container.setObjectName("pendingDecisionsContainer")
-        self._pending_layout = QVBoxLayout(self._pending_container)
-        self._pending_layout.setContentsMargins(0, 0, 0, 8)
-        self._pending_layout.setSpacing(6)
-        self._pending_container.setVisible(False)
-        root.addWidget(self._pending_container)
+        # Sits ABOVE the sessions header so any approval / question
+        # card the user must act on is the first thing visible when
+        # the panel expands. v2 (2026-05) renders the queue as a
+        # stack of cards — only the head is interactive — to force
+        # serial resolution; see ui/decisions_stack.
+        from claude_island.ui.decisions_stack import StackedDecisionsPanel
+        self._pending_panel = StackedDecisionsPanel(
+            on_resolve=self._on_decision_resolved,
+            on_focus_terminal=self._on_focus_terminal_for_decision,
+        )
+        root.addWidget(self._pending_panel)
+        # Legacy alias — some older test scaffolding peeked at
+        # ``_pending_container``. Point it at the new panel so those
+        # tests keep working while v2 settles in. Remove once all
+        # callers are updated.
+        self._pending_container = self._pending_panel
 
         sessions_header = QHBoxLayout()
         sessions_header.setContentsMargins(0, 0, 0, 0)
@@ -3384,48 +3386,17 @@ class ExpandedWindow(QWidget):
         chain has already grouped them. UI just renders one card per
         group, one row per view.
 
-        Pending decisions are bucketed by whether their ``session_uuid``
-        matches a visible session group:
-
-          * matched   → rendered inline beneath the corresponding group
-            (so the user sees which session is asking).
-          * orphans   → rendered in the global ``_pending_container`` as
-            a fallback so a decision for a session we don't know about
-            yet (rare — placeholder pid, etc.) still surfaces.
-
-        GC for both buckets happens here once so the two render paths
-        don't fight over deletion."""
+        Pending decisions are routed entirely to the
+        :class:`StackedDecisionsPanel` at the top of the panel. v1's
+        bucketing into ``matched`` (inline-under-row) and ``orphans``
+        (global container) was deleted in v2 because the inline path
+        sat inside ``_session_scroll`` whose ``setFixedHeight`` clipped
+        approval-card buttons out of view; routing every decision to
+        the dedicated top panel sidesteps the clip entirely.
+        """
         self._latest_snap = snap
-        decisions = snap.pending_decisions
-
-        # GC widgets for any decision id that's no longer in the snapshot
-        # (resolved, expired, or otherwise dropped). Must happen before
-        # the bucket render calls so neither half tries to reuse a
-        # deleted widget.
-        live_ids = {d.id for d in decisions}
-        for did in list(self._decision_cards.keys()):
-            if did not in live_ids:
-                w = self._decision_cards.pop(did)
-                w.setParent(None)
-                w.deleteLater()
-
-        visible_uuids = {
-            v.session_uuid
-            for g in snap.session_groups
-            for v in g.views
-            if v.session_uuid
-        }
-        matched = tuple(
-            d for d in decisions if d.session_uuid in visible_uuids
-        )
-        orphans = tuple(
-            d for d in decisions if d.session_uuid not in visible_uuids
-        )
-        # Orphans first — the global container sits above the session
-        # list so something the user can't trace to a row still gets
-        # surfaced rather than dropped on the floor.
-        self._render_pending_decisions(orphans)
-        self._render_session_groups(snap.session_groups, matched)
+        self._pending_panel.render(snap.pending_decisions)
+        self._render_session_groups(snap.session_groups)
         self._render_cards()
         # Update history chip from dormant + launching counts (resume-offline
         # feature). Hide entirely when zero — keeps the header clean for
@@ -3434,105 +3405,15 @@ class ExpandedWindow(QWidget):
             len(snap.dormant_sessions) + len(snap.launching_sessions)
         )
 
-    # ── Pending-decision rendering (Bidirectional Hooks v1) ─────────
-
-    # Cap visible cards. Beyond cap, footer label says "+N more pending".
-    # Picked at 5 in Detail Design §1 — fits the panel without scrolling
-    # in the common case while still surfacing the existence of overflow.
-    _PENDING_VISIBLE_CAP = 5
-
-    def _render_pending_decisions(self, decisions: tuple) -> None:
-        """Render orphan pending decisions into the global container.
-
-        ``decisions`` here is the subset whose ``session_uuid`` doesn't
-        match any visible session group — the inline render path
-        consumes the matched subset directly. GC of resolved/expired
-        widgets is handled centrally by ``render()`` before this is
-        called, so this method only inserts/positions cards into
-        ``_pending_layout``.
-
-        Cards stay cached in ``_decision_cards`` by id so an existing
-        card whose decision is still pending keeps its widget instance
-        (preserves text-input state on PromptReviewCard)."""
-        if not decisions:
-            # Detach any orphan-bucket cards still sitting in the
-            # global container — they belong to a previous render
-            # and should disappear when there are no orphans now.
-            while self._pending_layout.count():
-                item = self._pending_layout.takeAt(0)
-                w = item.widget()
-                if w is not None:
-                    w.setParent(None)
-            self._clear_pending_overflow_label()
-            self._pending_container.setVisible(False)
-            return
-
-        visible = decisions[: self._PENDING_VISIBLE_CAP]
-        overflow = len(decisions) - len(visible)
-
-        # Empty the layout first so re-ordering across renders doesn't
-        # leave stale slots (inline render path may have re-parented
-        # widgets between calls).
-        while self._pending_layout.count():
-            item = self._pending_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-
-        for view in visible:
-            card = self._get_or_create_decision_card(view)
-            card.setParent(None)
-            self._pending_layout.addWidget(card)
-
-        # Footer overflow label.
-        self._update_pending_overflow_label(overflow)
-        self._pending_container.setVisible(True)
-
-    def _get_or_create_decision_card(self, view):
-        """Get-or-build a card widget for a pending decision, cached
-        by id in ``_decision_cards``. The widget can be re-parented
-        across renders without losing its internal state (e.g. text
-        the user typed into a PromptReviewCard)."""
-        from claude_island.ui.approval_card import ApprovalCard
-        from claude_island.ui.prompt_review_card import PromptReviewCard
-        from claude_island.core.pending_decisions import DecisionKind
-
-        card = self._decision_cards.get(view.id)
-        if card is None:
-            if view.kind is DecisionKind.PRE_TOOL_USE:
-                card = ApprovalCard(
-                    view, on_resolve=self._on_decision_resolved,
-                )
-            else:
-                card = PromptReviewCard(
-                    view, on_resolve=self._on_decision_resolved,
-                )
-            self._decision_cards[view.id] = card
-        return card
-
-    def _update_pending_overflow_label(self, overflow: int) -> None:
-        if overflow <= 0:
-            self._clear_pending_overflow_label()
-            return
-        if not hasattr(self, "_pending_overflow_label") or self._pending_overflow_label is None:
-            from PySide6.QtWidgets import QLabel
-            lbl = QLabel()
-            lbl.setObjectName("pendingOverflowLabel")
-            lbl.setStyleSheet(
-                "QLabel#pendingOverflowLabel { color: #999; font-size: 10px; "
-                "padding: 2px 4px; }"
-            )
-            self._pending_overflow_label = lbl
-        self._pending_overflow_label.setText(
-            f"+{overflow} more pending"
-        )
-        self._pending_layout.addWidget(self._pending_overflow_label)
-
-    def _clear_pending_overflow_label(self) -> None:
-        if hasattr(self, "_pending_overflow_label") and self._pending_overflow_label is not None:
-            self._pending_overflow_label.setParent(None)
-            self._pending_overflow_label.deleteLater()
-            self._pending_overflow_label = None
+    # ── Pending-decision rendering (Bidirectional Hooks v2) ─────────
+    #
+    # The legacy `_render_pending_decisions` / `_get_or_create_decision_card`
+    # / `_update_pending_overflow_label` chain was removed in v2 — the
+    # ``StackedDecisionsPanel`` at the top of the panel owns the whole
+    # queue rendering now. The fields `_decision_cards`, `_pending_layout`,
+    # `_PENDING_VISIBLE_CAP`, `_pending_overflow_label` no longer exist;
+    # callers should drive the stack via ``self._pending_panel.render(...)``
+    # (already wired in ``render(snap)``).
 
     def _on_decision_resolved(self, decision_id: str, decision: object) -> None:
         """Card click handler — routes to the injected resolve callback.
@@ -3552,6 +3433,19 @@ class ExpandedWindow(QWidget):
             # ⇒ the hook server thread hits its 600 s wait timeout ⇒
             # Claude proceeds via fail-open (defer). Acceptable.
             pass
+
+    def _on_focus_terminal_for_decision(self, session_uuid: str) -> None:
+        """QuestionCard option-pick hook — focus the terminal of the
+        session the question came from so the user can press the
+        matching digit key without switching apps first.
+
+        v1 stub: wiring to ``WindowActivatorProtocol`` is the seam,
+        plumbed from ``__main__.py`` in a follow-up (the activator
+        isn't held by this widget today). The decision resolves
+        correctly regardless; only the convenience focus is a no-op
+        until wired.
+        """
+        del session_uuid   # intentional no-op for now; seam preserved
 
     # ── History chip integration ────────────────────────────────────────
 
@@ -3626,7 +3520,6 @@ class ExpandedWindow(QWidget):
     def _render_session_groups(
         self,
         groups: tuple["SessionGroup", ...],
-        pending_decisions: tuple = (),
     ) -> None:
         """Render pre-grouped sessions from the adapter chain.
 
@@ -3637,39 +3530,21 @@ class ExpandedWindow(QWidget):
         Row widgets are cached by pid to preserve hover/pressed state
         across ticks. Cards are rebuilt every refresh.
 
-        ``pending_decisions`` is the subset of snapshot decisions whose
-        ``session_uuid`` matches one of the visible groups' views
-        (caller does the bucketing). They render inline beneath their
-        group widget so the user sees which session is asking for
-        approval.
-
         Fast path: when the group structure (group_ids in order, view
-        pids in order, and matched decision ids per group) is identical
-        to the previous render, skip the layout teardown + rebuild
-        entirely — only update each row's content in place via
-        ``_update_row``. Decision IDs are included in the signature so a
-        new approval card arriving forces a rebuild instead of being
-        silently lost to the fast path. Cached in
-        ``_last_struct_sig``."""
+        pids in order) is identical to the previous render, skip the
+        layout teardown + rebuild entirely — only update each row's
+        content in place via ``_update_row``. Cached in
+        ``_last_struct_sig``.
+
+        v2: pending decisions used to be inlined as wrapper widgets
+        below their matching group here; they now live exclusively
+        in the top-of-panel ``StackedDecisionsPanel``, so the wrapper
+        logic and ``pending_decisions`` parameter are gone."""
         total_views = sum(len(g.views) for g in groups)
         self._latest_sessions = list(range(total_views))  # sentinel
 
-        # Decisions bucketed per group (by any view's uuid landing here).
-        decisions_by_group: dict[str, tuple] = {}
-        for g in groups:
-            uuids = {v.session_uuid for v in g.views if v.session_uuid}
-            decisions_by_group[g.group_id] = tuple(
-                d for d in pending_decisions if d.session_uuid in uuids
-            )
-
-        # Fast path: identical group structure + same matched decisions
-        # → in-place row updates only.
         new_struct_sig = tuple(
-            (
-                g.group_id,
-                tuple(v.pid for v in g.views),
-                tuple(d.id for d in decisions_by_group[g.group_id]),
-            )
+            (g.group_id, tuple(v.pid for v in g.views))
             for g in groups
         )
         prev_sig = getattr(self, "_last_struct_sig", None)
@@ -3715,39 +3590,7 @@ class ExpandedWindow(QWidget):
             group_widget = self._make_group_widget(
                 group, palette_idx=palette_idx,
             )
-            decisions = decisions_by_group.get(group.group_id, ())
-            if decisions:
-                # Wrap the group + its matching decision cards in a
-                # vertical container so the cards sit immediately below
-                # the session row(s) they belong to.
-                #
-                # A-005/B-004: cap matched decisions per group at the
-                # same _PENDING_VISIBLE_CAP the orphan path uses.
-                # PermissionRequest serialises per uuid in claude today
-                # so the realistic case is 1 card per group, but if
-                # parallel-tool patterns ever produce >5 we don't want
-                # to push the panel offscreen.
-                wrapper = QWidget()
-                wlayout = QVBoxLayout(wrapper)
-                wlayout.setContentsMargins(0, 0, 0, 0)
-                wlayout.setSpacing(6)
-                wlayout.addWidget(group_widget)
-                visible_decisions = decisions[: self._PENDING_VISIBLE_CAP]
-                for view in visible_decisions:
-                    card = self._get_or_create_decision_card(view)
-                    card.setParent(None)
-                    wlayout.addWidget(card)
-                overflow = len(decisions) - len(visible_decisions)
-                if overflow > 0:
-                    overflow_lbl = QLabel(f"+{overflow} more pending")
-                    overflow_lbl.setStyleSheet(
-                        "QLabel { color: #999; font-size: 10px; "
-                        "padding: 2px 4px; }"
-                    )
-                    wlayout.addWidget(overflow_lbl)
-                self._session_box.addWidget(wrapper)
-            else:
-                self._session_box.addWidget(group_widget)
+            self._session_box.addWidget(group_widget)
             if palette_idx is not None:
                 multi_idx += 1
             for v in group.views:
@@ -4463,7 +4306,7 @@ class ExpandedWindow(QWidget):
         # rendered HTML width — observed at 429 px for the typical
         # warning-state string. Default Preferred policy would let
         # that propagate up to the parent card, then to the panel,
-        # which has ``setFixedWidth(_PANEL_W=320)`` set. Qt resolves
+        # which has ``setFixedWidth(_PANEL_W=400)`` set. Qt resolves
         # the conflict by overriding the fixed-width to fit the
         # child, producing the QWindowsWindow::setGeometry mintrack
         # warning every layout pass. Ignored h-policy tells Qt to use
@@ -4923,7 +4766,7 @@ class ExpandedWindow(QWidget):
         # text. Two reasons we need the eliding variant here:
         #   1. minimumSizeHint=0 stops a long name from propagating
         #      its full width up the layout chain to ExpandedWindow,
-        #      which would override setFixedWidth(_PANEL_W=320) and
+        #      which would override setFixedWidth(_PANEL_W=400) and
         #      produce the QWindowsWindow::setGeometry mintrack=480
         #      warning. setSizePolicy(Expanding, …) alone won't do
         #      it — see _ElasticRichLabel docstring.
@@ -5307,7 +5150,6 @@ class ExpandedWindow(QWidget):
         """
         cached_rows = set(self._rows.values())
         cached_cards = set(self._cards.values())
-        cached_decisions = set(self._decision_cards.values())
         while self._session_box.count():
             item = self._session_box.takeAt(0)
             widget = item.widget()
@@ -5323,9 +5165,7 @@ class ExpandedWindow(QWidget):
                 # cached children so deleteLater doesn't cascade-destroy
                 # them on the next event-loop tick.
                 for child in widget.findChildren(QWidget):
-                    if (child in cached_rows
-                            or child in cached_cards
-                            or child in cached_decisions):
+                    if child in cached_rows or child in cached_cards:
                         child.setParent(None)
             widget.deleteLater()
 

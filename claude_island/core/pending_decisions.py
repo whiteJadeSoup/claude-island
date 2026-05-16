@@ -59,6 +59,10 @@ class DecisionKind(Enum):
     """Which hook event the user is being asked to decide on."""
     PRE_TOOL_USE = "pre_tool_use"
     USER_PROMPT_SUBMIT = "user_prompt_submit"
+    # Claude wants to ASK the user a question (AskUserQuestion or a
+    # similarly-shaped MCP tool). UI shows option buttons instead of
+    # Allow/Deny — see ui/question_card.QuestionCard.
+    ASK_QUESTION = "ask_question"
 
 
 class DecisionResult(Enum):
@@ -96,12 +100,29 @@ class DecisionRequest:
     hook_event: str                  # raw hook_event_name
     created_at: datetime
     expires_at: datetime
-    # PRE_TOOL_USE-only
+    # PRE_TOOL_USE / ASK_QUESTION
     tool_name: str | None = None
     tool_input_preview: str | None = None
+    # Tool invocation correlation id from Claude Code's hook payload. Used
+    # to match a later PostToolUse / PostToolUseFailure / PermissionDenied
+    # event back to this entry so the registry can mark it externally
+    # resolved (Claude Code decided in some other path — CLI prompt,
+    # fail-open, etc.). Optional because Claude's payload occasionally
+    # omits it; falls back to (session_uuid, tool_name) FIFO matching.
+    tool_use_id: str | None = None
     risk_level: RiskLevel = RiskLevel.MEDIUM
     # USER_PROMPT_SUBMIT-only
     prompt_preview: str | None = None
+    # ASK_QUESTION-only — the human-readable question + options Claude
+    # wants the user to answer (AskUserQuestion tool). Options carry
+    # label + optional description in parallel tuples (no nested
+    # dataclass — keeps the value type cheap to hash for
+    # distinct_until_changed).
+    question_text: str | None = None
+    question_header: str | None = None
+    question_options: tuple[str, ...] = ()
+    question_option_descriptions: tuple[str, ...] = ()
+    multi_select: bool = False
 
     def __post_init__(self) -> None:
         if self.expires_at <= self.created_at:
@@ -110,6 +131,21 @@ class DecisionRequest:
             raise ValueError("PRE_TOOL_USE requires tool_name")
         if self.kind is DecisionKind.USER_PROMPT_SUBMIT and self.prompt_preview is None:
             raise ValueError("USER_PROMPT_SUBMIT requires prompt_preview")
+        if self.kind is DecisionKind.ASK_QUESTION:
+            if not self.tool_name:
+                raise ValueError("ASK_QUESTION requires tool_name")
+            if not self.question_text:
+                raise ValueError("ASK_QUESTION requires question_text")
+            if not self.question_options:
+                raise ValueError("ASK_QUESTION requires non-empty question_options")
+            if (
+                self.question_option_descriptions
+                and len(self.question_option_descriptions) != len(self.question_options)
+            ):
+                raise ValueError(
+                    "question_option_descriptions must be empty or "
+                    "the same length as question_options"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +155,16 @@ class Decision:
     reason: str | None = None              # required when DENY/BLOCK
     additional_context: str | None = None  # required when INJECT
     remember: bool = False                 # only meaningful for ALLOW + PRE_TOOL_USE
+    # ASK_QUESTION answer relay: maps each question's text → the picked
+    # option(s). HookServer merges this into the original ``tool_input``
+    # as ``answers`` and returns it via ``hookSpecificOutput.decision
+    # .updatedInput`` so Claude's AskUserQuestion tool sees the user's
+    # choice on its first read and skips the terminal stdin prompt.
+    # Mirrors open-vibe-island ``BridgeServer.swift:2434-2481``.
+    # Modelled as a tuple of (question_text, answer) pairs instead of a
+    # dict so the dataclass stays frozen + hashable; HookServer rebuilds
+    # the dict at merge time.
+    answers: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.result in (DecisionResult.DENY, DecisionResult.BLOCK) and not self.reason:
@@ -127,6 +173,8 @@ class Decision:
             raise ValueError("INJECT requires non-empty additional_context")
         if self.remember and self.result is not DecisionResult.ALLOW:
             raise ValueError("remember=True only valid with ALLOW")
+        if self.answers and self.result is not DecisionResult.ALLOW:
+            raise ValueError("answers only valid with ALLOW")
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,11 +193,17 @@ class PendingDecisionView:
     cwd_basename: str
     expires_at: datetime
     risk_level: RiskLevel
-    # PRE_TOOL_USE-only
+    # PRE_TOOL_USE / ASK_QUESTION
     tool_name: str | None = None
     tool_input_preview: str | None = None
     # USER_PROMPT_SUBMIT-only
     prompt_preview: str | None = None
+    # ASK_QUESTION-only
+    question_text: str | None = None
+    question_header: str | None = None
+    question_options: tuple[str, ...] = ()
+    question_option_descriptions: tuple[str, ...] = ()
+    multi_select: bool = False
 
 
 class RegistryFull(Exception):
@@ -271,6 +325,85 @@ class PendingDecisionRegistry:
         self._on_change()
         return decision
 
+    # ── hook-server API for events that observe the outside world ──────
+
+    def mark_externally_resolved_by_tool(
+        self,
+        session_uuid: str,
+        *,
+        tool_use_id: str | None,
+        tool_name: str | None,
+        observed: str,
+    ) -> bool:
+        """Drop a pending PRE_TOOL_USE entry because Claude Code already
+        finished executing the tool through some other path (CLI prompt,
+        fail-open default rules, hook timeout fallback, etc.).
+
+        Unlike ``resolve``, this attaches no Decision — the registry
+        truthfully does not know what the outside path decided. The
+        waiting server thread will see ``entry.decision is None`` and
+        return None, which the HookServer encodes as ``"defer"``. By
+        that time Claude Code has already moved past this PreToolUse,
+        so the directive is effectively a no-op on the wire; the value
+        of this call is letting the UI card disappear immediately
+        instead of waiting out the full 598 s timeout.
+
+        Match strategy:
+          1. tool_use_id exact match scoped to session_uuid (precise)
+          2. fallback: (session_uuid, tool_name) FIFO — earliest
+             created_at among pending entries for that pair
+
+        Returns True iff an entry was matched and dropped. False means
+        no pending entry matched (already resolved by UI, never
+        registered, or different session) — caller treats as no-op.
+        """
+        if not session_uuid:
+            return False
+        if not tool_use_id and not tool_name:
+            return False
+        with self._lock:
+            target_did: str | None = None
+            match_kind = ""
+            if tool_use_id is not None:
+                for did, e in self._entries.items():
+                    if (
+                        not e.event.is_set()
+                        and e.request.session_uuid == session_uuid
+                        and e.request.tool_use_id == tool_use_id
+                    ):
+                        target_did = did
+                        match_kind = "tool_use_id"
+                        break
+            if target_did is None and tool_name:
+                # FIFO over (session_uuid, tool_name) — pick earliest
+                # created_at. Tools run serially per session so duplicates
+                # are rare; FIFO ensures we don't clear the wrong card
+                # when they do appear.
+                candidates = [
+                    (e.request.created_at, did)
+                    for did, e in self._entries.items()
+                    if (
+                        not e.event.is_set()
+                        and e.request.session_uuid == session_uuid
+                        and e.request.tool_name == tool_name
+                    )
+                ]
+                if candidates:
+                    candidates.sort()
+                    target_did = candidates[0][1]
+                    match_kind = "tool_name_fifo"
+            if target_did is None:
+                return False
+            entry = self._entries.pop(target_did)
+            entry.event.set()
+        # decision stays None — see docstring
+        self._on_change()
+        log.info(
+            "decision %s externally resolved (observed=%s, match=%s)",
+            target_did, observed, match_kind,
+        )
+        return True
+
     # ── UI-thread API (called from AppBackend.resolve_decision) ─────────
 
     def resolve(self, decision_id: str, decision: Decision) -> bool:
@@ -370,6 +503,11 @@ def _to_view(req: DecisionRequest) -> PendingDecisionView:
         tool_name=req.tool_name,
         tool_input_preview=req.tool_input_preview,
         prompt_preview=req.prompt_preview,
+        question_text=req.question_text,
+        question_header=req.question_header,
+        question_options=req.question_options,
+        question_option_descriptions=req.question_option_descriptions,
+        multi_select=req.multi_select,
     )
 
 
@@ -412,7 +550,13 @@ def build_request(
     now: datetime | None = None,
     tool_name: str | None = None,
     tool_input_preview: str | None = None,
+    tool_use_id: str | None = None,
     prompt_preview: str | None = None,
+    question_text: str | None = None,
+    question_header: str | None = None,
+    question_options: tuple[str, ...] = (),
+    question_option_descriptions: tuple[str, ...] = (),
+    multi_select: bool = False,
 ) -> DecisionRequest:
     """Convenience constructor that fills in id, timestamps, risk_level,
     and cwd_basename consistently. Use from HookServer; keeps callers
@@ -432,6 +576,12 @@ def build_request(
         expires_at=expires,
         tool_name=tool_name,
         tool_input_preview=tool_input_preview,
+        tool_use_id=tool_use_id,
         prompt_preview=prompt_preview,
+        question_text=question_text,
+        question_header=question_header,
+        question_options=question_options,
+        question_option_descriptions=question_option_descriptions,
+        multi_select=multi_select,
         risk_level=risk,
     )

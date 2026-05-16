@@ -41,6 +41,7 @@ def _req(
     kind: DecisionKind = DecisionKind.PRE_TOOL_USE,
     timeout_s: float = 5.0,
     tool_name: str = "Bash",
+    tool_use_id: str | None = None,
     prompt_preview: str | None = None,
     session_uuid: str = "u1",
 ) -> DecisionRequest:
@@ -53,6 +54,7 @@ def _req(
         timeout_s=timeout_s,
         tool_name=tool_name if kind is DecisionKind.PRE_TOOL_USE else None,
         tool_input_preview="npm test" if kind is DecisionKind.PRE_TOOL_USE else None,
+        tool_use_id=tool_use_id if kind is DecisionKind.PRE_TOOL_USE else None,
         prompt_preview=prompt_preview if kind is DecisionKind.USER_PROMPT_SUBMIT else None,
     )
 
@@ -377,6 +379,330 @@ class TestEvictExpired:
         registry.evict_expired()
         # one eviction should fire one on_change
         assert len(changes) == baseline + 1
+
+
+# ── ASK_QUESTION request validation ──────────────────────────────────
+
+
+class TestAskQuestionRequest:
+    """DecisionKind.ASK_QUESTION carries the question + options Claude
+    wants the user to answer. __post_init__ guards against malformed
+    requests so the UI never sees half-populated views."""
+
+    def _build(self, **overrides):
+        kwargs = dict(
+            kind=DecisionKind.ASK_QUESTION,
+            session_uuid="u1",
+            session_name="s",
+            cwd=Path("/tmp/proj"),
+            hook_event="PermissionRequest",
+            timeout_s=5.0,
+            tool_name="AskUserQuestion",
+            tool_input_preview="What size?",
+            question_text="What size?",
+            question_header="Sizing",
+            question_options=("S", "M", "L"),
+            question_option_descriptions=("small", "medium", "large"),
+            multi_select=False,
+        )
+        kwargs.update(overrides)
+        return build_request(**kwargs)
+
+    def test_happy_build_carries_all_question_fields(self):
+        req = self._build()
+        assert req.kind is DecisionKind.ASK_QUESTION
+        assert req.question_text == "What size?"
+        assert req.question_options == ("S", "M", "L")
+        assert req.question_option_descriptions == ("small", "medium", "large")
+        assert req.multi_select is False
+
+    def test_missing_question_text_raises(self):
+        with pytest.raises(ValueError, match="question_text"):
+            self._build(question_text=None)
+
+    def test_empty_options_raises(self):
+        with pytest.raises(ValueError, match="question_options"):
+            self._build(question_options=())
+
+    def test_descs_length_mismatch_raises(self):
+        with pytest.raises(ValueError, match="question_option_descriptions"):
+            self._build(
+                question_options=("A", "B"),
+                question_option_descriptions=("only one",),
+            )
+
+    def test_descs_empty_is_ok(self):
+        # Descriptions are optional — empty tuple bypasses the
+        # length-match check.
+        req = self._build(question_option_descriptions=())
+        assert req.question_option_descriptions == ()
+
+    def test_view_projects_question_fields(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        req = self._build()
+        registry.register(req)
+        snap = registry.snapshot()
+        assert len(snap) == 1
+        v = snap[0]
+        assert v.kind is DecisionKind.ASK_QUESTION
+        assert v.question_text == "What size?"
+        assert v.question_options == ("S", "M", "L")
+        assert v.multi_select is False
+
+
+# ── mark_externally_resolved_by_tool ─────────────────────────────────
+
+
+class TestMarkExternallyResolved:
+    """Detail Design §7 — T1..T10 (T10 is the hook_server integration
+    test; lives in test_hook_server_bidirectional.py)."""
+
+    def test_T1_tool_use_id_match_drops_entry(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        req = _req(tool_use_id="tu_abc")
+        registry.register(req)
+        ok = registry.mark_externally_resolved_by_tool(
+            req.session_uuid,
+            tool_use_id="tu_abc",
+            tool_name="Bash",
+            observed="post_tool_use",
+        )
+        assert ok is True
+        assert registry.snapshot() == ()
+        assert len(registry) == 0
+
+    def test_T1_wait_returns_None_after_external_mark(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        req = _req(timeout_s=2.0, tool_use_id="tu_abc")
+        registry.register(req)
+
+        def _marker():
+            time.sleep(0.05)
+            registry.mark_externally_resolved_by_tool(
+                req.session_uuid,
+                tool_use_id="tu_abc",
+                tool_name="Bash",
+                observed="post_tool_use",
+            )
+
+        t = threading.Thread(target=_marker)
+        t.start()
+        result = registry.wait(req.id, timeout_s=2.0)
+        t.join(timeout=1.0)
+        # decision is None — registry doesn't fake what the outside
+        # path decided. HookServer encodes None as "defer".
+        assert result is None
+
+    def test_T2_post_tool_use_failure_observed_label(
+        self,
+        registry: PendingDecisionRegistry,
+        changes: list[int],
+    ):
+        req = _req(tool_use_id="tu_xyz")
+        registry.register(req)
+        baseline = len(changes)
+        ok = registry.mark_externally_resolved_by_tool(
+            req.session_uuid,
+            tool_use_id="tu_xyz",
+            tool_name="Bash",
+            observed="post_tool_use_failure",
+        )
+        assert ok is True
+        # on_change fires exactly once per successful mark
+        assert len(changes) == baseline + 1
+
+    def test_T3_falls_back_to_tool_name_when_id_missing(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        keep = _req(tool_name="Read", tool_use_id="tu_keep")
+        target = _req(tool_name="Edit", tool_use_id="tu_target")
+        registry.register(keep)
+        registry.register(target)
+        # PostToolUse without tool_use_id — must match by tool_name
+        ok = registry.mark_externally_resolved_by_tool(
+            target.session_uuid,
+            tool_use_id=None,
+            tool_name="Edit",
+            observed="post_tool_use",
+        )
+        assert ok is True
+        remaining = {v.id for v in registry.snapshot()}
+        assert remaining == {keep.id}
+
+    def test_T4_tool_name_fifo_picks_earliest(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        # Build two entries with controlled created_at so FIFO is
+        # deterministic regardless of clock resolution.
+        now = datetime.now(timezone.utc)
+        first = DecisionRequest(
+            id=new_decision_id(),
+            kind=DecisionKind.PRE_TOOL_USE,
+            session_uuid="u1",
+            session_name="s",
+            cwd=Path("/tmp/proj"),
+            cwd_basename="proj",
+            hook_event="PreToolUse",
+            created_at=now,
+            expires_at=now + timedelta(seconds=5),
+            tool_name="Bash",
+            tool_input_preview="echo first",
+        )
+        second = DecisionRequest(
+            id=new_decision_id(),
+            kind=DecisionKind.PRE_TOOL_USE,
+            session_uuid="u1",
+            session_name="s",
+            cwd=Path("/tmp/proj"),
+            cwd_basename="proj",
+            hook_event="PreToolUse",
+            created_at=now + timedelta(milliseconds=50),
+            expires_at=now + timedelta(seconds=5),
+            tool_name="Bash",
+            tool_input_preview="echo second",
+        )
+        registry.register(first)
+        registry.register(second)
+
+        ok = registry.mark_externally_resolved_by_tool(
+            "u1",
+            tool_use_id=None,
+            tool_name="Bash",
+            observed="post_tool_use",
+        )
+        assert ok is True
+        remaining_ids = {v.id for v in registry.snapshot()}
+        # Earliest (first) must be the one dropped — second remains
+        # awaiting the next PostToolUse / user decision.
+        assert remaining_ids == {second.id}
+
+    def test_T5_race_user_resolve_wins(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        # User clicks Allow first; PostToolUse arrives second and
+        # finds the entry already resolved — must no-op safely.
+        req = _req(timeout_s=2.0, tool_use_id="tu_abc")
+        registry.register(req)
+        assert registry.resolve(
+            req.id, Decision(DecisionResult.ALLOW),
+        ) is True
+        ok = registry.mark_externally_resolved_by_tool(
+            req.session_uuid,
+            tool_use_id="tu_abc",
+            tool_name="Bash",
+            observed="post_tool_use",
+        )
+        # Already resolved — no entry to mark.
+        assert ok is False
+        # The user's Allow must still be deliverable to a waiting thread.
+        result = registry.wait(req.id, timeout_s=1.0)
+        assert result is not None
+        assert result.result is DecisionResult.ALLOW
+
+    def test_T6_race_external_mark_then_user_resolve_is_noop(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        req = _req(timeout_s=2.0, tool_use_id="tu_abc")
+        registry.register(req)
+        assert registry.mark_externally_resolved_by_tool(
+            req.session_uuid,
+            tool_use_id="tu_abc",
+            tool_name="Bash",
+            observed="post_tool_use",
+        ) is True
+        # Late user click — entry already popped.
+        assert registry.resolve(
+            req.id, Decision(DecisionResult.ALLOW),
+        ) is False
+        # wait sees no entry — returns None.
+        assert registry.wait(req.id, timeout_s=0.1) is None
+
+    def test_T7_no_match_returns_False(
+        self,
+        registry: PendingDecisionRegistry,
+        changes: list[int],
+    ):
+        registry.register(_req(tool_use_id="tu_abc", tool_name="Bash"))
+        baseline = len(changes)
+        # Wrong session.
+        assert registry.mark_externally_resolved_by_tool(
+            "other_session",
+            tool_use_id="tu_abc",
+            tool_name="Bash",
+            observed="post_tool_use",
+        ) is False
+        # Wrong tool_use_id AND wrong tool_name.
+        assert registry.mark_externally_resolved_by_tool(
+            "u1",
+            tool_use_id="tu_other",
+            tool_name="Edit",
+            observed="post_tool_use",
+        ) is False
+        # No-op must not fire on_change.
+        assert len(changes) == baseline
+
+    def test_T8_empty_session_uuid_returns_False(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        registry.register(_req(tool_use_id="tu_abc"))
+        assert registry.mark_externally_resolved_by_tool(
+            "",
+            tool_use_id="tu_abc",
+            tool_name="Bash",
+            observed="post_tool_use",
+        ) is False
+
+    def test_T8_both_keys_missing_returns_False(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        registry.register(_req(tool_use_id="tu_abc"))
+        assert registry.mark_externally_resolved_by_tool(
+            "u1",
+            tool_use_id=None,
+            tool_name=None,
+            observed="post_tool_use",
+        ) is False
+
+    def test_T9_legacy_request_without_tool_use_id_still_works(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        # DecisionRequest constructed without tool_use_id (legacy path /
+        # payload that lacked the field). Must still register, wait,
+        # and resolve.
+        req = _req(tool_use_id=None)
+        registry.register(req)
+        assert registry.resolve(req.id, Decision(DecisionResult.ALLOW))
+        result = registry.wait(req.id, timeout_s=1.0)
+        assert result is not None and result.result is DecisionResult.ALLOW
+
+    def test_T9_legacy_request_can_be_externally_marked_by_tool_name(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        # tool_use_id absent on registration AND on PostToolUse — pure
+        # FIFO fallback still works.
+        req = _req(tool_use_id=None, tool_name="Bash")
+        registry.register(req)
+        ok = registry.mark_externally_resolved_by_tool(
+            req.session_uuid,
+            tool_use_id=None,
+            tool_name="Bash",
+            observed="post_tool_use",
+        )
+        assert ok is True
 
 
 # ── PROMPT-flavoured projection ──────────────────────────────────────

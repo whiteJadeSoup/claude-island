@@ -76,6 +76,12 @@ HOOK_EVENTS_TO_INSTALL: tuple[HookEventSpec, ...] = (
     HookEventSpec("PreToolUse",         "*",  None),
     HookEventSpec("PostToolUse",        "*",  None),
     HookEventSpec("PostToolUseFailure", "*",  None),
+    # Claude Code emits PermissionDenied when the user denies a
+    # permission prompt in the terminal. Island uses it to clear the
+    # matching approval card so it doesn't sit stale until the 598 s
+    # hook-wait timeout. See open-vibe-island/BridgeServer.swift:774
+    # for the same wiring on the Swift side.
+    HookEventSpec("PermissionDenied",   "*",  None),
     HookEventSpec("Stop",               None, None),
     HookEventSpec("StopFailure",        None, None),
     HookEventSpec("PreCompact",         None, None),

@@ -139,14 +139,52 @@ def test_low_risk_hides_warning_label(app):
 # ── Title / preview surfaces correct fields ───────────────────────────
 
 
-def test_title_includes_tool_and_session(app):
+def test_title_shows_tool_name(app):
     from PySide6.QtWidgets import QLabel
     from claude_island.ui.approval_card import ApprovalCard
     card = ApprovalCard(_view(tool="Edit"))
     app.addWidget(card)
     title = card.findChild(QLabel, "approvalCardTitle")
-    assert "Edit" in title.text()
-    assert "my-session" in title.text()
+    assert title.text() == "Edit"
+
+
+def test_session_name_shown_in_badge(app):
+    """v2: session lives in its own badge widget (with the accent
+    dot), no longer concatenated into the title."""
+    from PySide6.QtWidgets import QLabel
+    from claude_island.ui.approval_card import ApprovalCard
+    card = ApprovalCard(_view(tool="Edit"))
+    app.addWidget(card)
+    badge = card.findChild(QLabel, "approvalCardSessionBadge")
+    assert badge is not None
+    assert "my-session" in badge.text()
+
+
+def test_preview_starts_folded_and_toggles_on_request(app):
+    from claude_island.ui.approval_card import ApprovalCard
+    card = ApprovalCard(_view(preview="a" * 500))
+    app.addWidget(card)
+    assert card.is_expanded is False
+    folded_h = card.findChild(type(card.findChild(type, "approvalCardPreview")) or object, "approvalCardPreview")
+    # Easier: just call toggle and inspect.
+    card.toggle_expanded()
+    assert card.is_expanded is True
+    card.toggle_expanded()
+    assert card.is_expanded is False
+
+
+def test_min_height_floor_holds(app):
+    """v2 invariant: the card declares min-height so the footer
+    buttons stay visible even when the parent layout tries to
+    compress it. Guard against accidental regression to the v1
+    QSizePolicy.Maximum which let the buttons get clipped."""
+    from claude_island.ui.approval_card import ApprovalCard
+    card = ApprovalCard(_view())
+    app.addWidget(card)
+    assert card.minimumHeight() >= 100, (
+        "ApprovalCard must declare a minimum height so the footer "
+        "buttons can never be compressed out of view."
+    )
 
 
 def test_preview_label_shows_tool_input(app):

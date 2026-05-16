@@ -327,6 +327,341 @@ class TestPermissionRequestBlocking:
         assert perm_cache.check("u-remember", "Bash") is True
 
 
+# ── AskUserQuestion routes to ASK_QUESTION pending decision ──────────
+
+
+class TestAskUserQuestionRouting:
+    """When the PermissionRequest is for AskUserQuestion (or a similar
+    question-shaped MCP tool), the pending decision must carry kind=
+    ASK_QUESTION + a parsed question_text + options for the question
+    card UI variant — not a plain PRE_TOOL_USE approval card."""
+
+    def _post_ask_user_question(self, port, *, tool_input):
+        # POST runs on a background thread because PermissionRequest
+        # blocks until the UI resolves. Test then asserts on the
+        # snapshot — body assertion not used here.
+        def _send():
+            try:
+                _post(port, {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "u-ask",
+                    "tool_name": "AskUserQuestion",
+                    "tool_input": tool_input,
+                    "cwd": "/tmp/proj",
+                }, timeout=10.0)
+            except Exception:
+                pass
+        t = threading.Thread(target=_send, daemon=True)
+        t.start()
+        return t
+
+    def _wait_for_pending(self, registry, *, attempts=60):
+        for _ in range(attempts):
+            snap = registry.snapshot()
+            if snap:
+                return snap
+            time.sleep(0.05)
+        raise AssertionError("no pending decision registered")
+
+    def test_well_formed_question_registers_ask_question_view(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        from claude_island.core.pending_decisions import DecisionKind, Decision, DecisionResult
+        srv, port = server
+        t = self._post_ask_user_question(port, tool_input={
+            "questions": [{
+                "question": "指数退避的上限应设为多少？",
+                "header": "退避策略",
+                "options": [
+                    {"label": "5m → 10m → 20m → 40m → 80m", "description": "更保守"},
+                    {"label": "固定 30m",                   "description": "可预测"},
+                ],
+                "multiSelect": False,
+            }],
+        })
+        try:
+            snap = self._wait_for_pending(registry)
+            assert len(snap) == 1
+            v = snap[0]
+            assert v.kind is DecisionKind.ASK_QUESTION
+            assert v.tool_name == "AskUserQuestion"
+            assert v.question_text == "指数退避的上限应设为多少？"
+            assert v.question_header == "退避策略"
+            assert v.question_options == (
+                "5m → 10m → 20m → 40m → 80m", "固定 30m",
+            )
+            assert v.question_option_descriptions == ("更保守", "可预测")
+            assert v.multi_select is False
+        finally:
+            # Resolve so the blocking POST thread can exit cleanly.
+            snap = registry.snapshot()
+            if snap:
+                registry.resolve(
+                    snap[0].id, Decision(result=DecisionResult.ALLOW),
+                )
+            t.join(timeout=2.0)
+
+    def test_answer_relay_emits_updated_input_for_askuserquestion(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        """When the user picks an option in island, the hook response
+        must carry the picked label back to Claude as updatedInput so
+        AskUserQuestion's tool body skips the terminal stdin prompt.
+        Mirrors open-vibe-island BridgeServer.swift:2434-2481."""
+        from claude_island.core.pending_decisions import Decision, DecisionResult
+        srv, port = server
+        responses: dict = {}
+
+        def _send():
+            try:
+                status, body = _post(port, {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "u-relay",
+                    "tool_name": "AskUserQuestion",
+                    "tool_input": {
+                        "questions": [{
+                            "question": "Size?",
+                            "options": [{"label": "S"}, {"label": "M"}],
+                            "multiSelect": False,
+                        }],
+                    },
+                    "cwd": "/tmp/proj",
+                }, timeout=10.0)
+                responses["status"] = status
+                responses["body"] = body
+            except Exception as e:
+                responses["error"] = repr(e)
+
+        t = threading.Thread(target=_send, daemon=True)
+        t.start()
+        try:
+            self._wait_for_pending(registry)
+            snap = registry.snapshot()
+            registry.resolve(snap[0].id, Decision(
+                result=DecisionResult.ALLOW,
+                reason="picked: M",
+                answers=(("Size?", "M"),),
+            ))
+            t.join(timeout=3.0)
+            assert "status" in responses
+            assert responses["status"] == 200
+            inner = responses["body"]["hookSpecificOutput"]
+            # Nested form: hookSpecificOutput.decision.{behavior, updatedInput}
+            assert inner["hookEventName"] == "PermissionRequest"
+            decision_obj = inner["decision"]
+            assert decision_obj["behavior"] == "allow"
+            updated = decision_obj["updatedInput"]
+            # Original input preserved + answers added
+            assert "questions" in updated
+            assert updated["answers"] == {"Size?": "M"}
+        finally:
+            t.join(timeout=1.0)
+
+
+    def test_malformed_question_falls_back_to_pre_tool_use(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        from claude_island.core.pending_decisions import DecisionKind, Decision, DecisionResult
+        srv, port = server
+        # Missing options → can't render an option-picker card. Falls
+        # back so the server still has a way to surface the decision.
+        t = self._post_ask_user_question(port, tool_input={
+            "questions": [{"question": "no options"}],
+        })
+        try:
+            snap = self._wait_for_pending(registry)
+            assert snap[0].kind is DecisionKind.PRE_TOOL_USE
+            assert snap[0].tool_name == "AskUserQuestion"
+        finally:
+            snap = registry.snapshot()
+            if snap:
+                registry.resolve(
+                    snap[0].id, Decision(result=DecisionResult.ALLOW),
+                )
+            t.join(timeout=2.0)
+
+
+# ── PostToolUse evicts pending PermissionRequest (T10) ───────────────
+
+
+class TestPostToolUseEvict:
+    """Detail Design §7 T10 — PostToolUse / PostToolUseFailure arriving
+    while a PermissionRequest is still blocked on the UI must clear the
+    pending entry and unblock the waiting server thread."""
+
+    def _spawn_permission_request(
+        self, port: int, *, tool_use_id: str, session_uuid: str = "u-evict",
+    ) -> tuple[threading.Thread, dict]:
+        responses: dict = {}
+
+        def _send():
+            try:
+                status, body = _post(port, {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": session_uuid,
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "echo hi"},
+                    "tool_use_id": tool_use_id,
+                    "cwd": "/tmp/proj",
+                }, timeout=15.0)
+                responses["status"] = status
+                responses["body"] = body
+            except Exception as e:
+                responses["error"] = repr(e)
+
+        t = threading.Thread(target=_send, daemon=True)
+        t.start()
+        return t, responses
+
+    def _wait_for_pending(
+        self, registry: PendingDecisionRegistry, *, attempts: int = 60,
+    ) -> None:
+        for _ in range(attempts):
+            if registry.snapshot():
+                return
+            time.sleep(0.05)
+        raise AssertionError("PermissionRequest never registered pending")
+
+    def test_post_tool_use_evicts_by_tool_use_id_and_unblocks(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        srv, port = server
+        perm_thread, responses = self._spawn_permission_request(
+            port, tool_use_id="tu_evict_1",
+        )
+        self._wait_for_pending(registry)
+
+        status, body = _post(port, {
+            "hook_event_name": "PostToolUse",
+            "session_id": "u-evict",
+            "tool_name": "Bash",
+            "tool_use_id": "tu_evict_1",
+            "cwd": "/tmp/proj",
+        })
+        assert status == 200
+        assert body == {}
+
+        perm_thread.join(timeout=3.0)
+        assert not perm_thread.is_alive(), "PermissionRequest still blocking"
+        out = responses["body"]["hookSpecificOutput"]
+        # decision is None inside the registry; HookServer encodes that
+        # as "defer" — see _handle_permission_request wait-timeout branch
+        # (mark_externally_resolved goes through the same return None
+        # codepath in wait()).
+        assert out["permissionDecision"] == "defer"
+        assert registry.snapshot() == ()
+
+    def test_post_tool_use_failure_also_evicts(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        srv, port = server
+        perm_thread, responses = self._spawn_permission_request(
+            port, tool_use_id="tu_fail_1",
+        )
+        self._wait_for_pending(registry)
+
+        _post(port, {
+            "hook_event_name": "PostToolUseFailure",
+            "session_id": "u-evict",
+            "tool_name": "Bash",
+            "tool_use_id": "tu_fail_1",
+            "cwd": "/tmp/proj",
+        })
+        perm_thread.join(timeout=3.0)
+        assert not perm_thread.is_alive()
+        assert registry.snapshot() == ()
+
+    def test_post_tool_use_for_different_session_is_noop(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        srv, port = server
+        perm_thread, responses = self._spawn_permission_request(
+            port, tool_use_id="tu_keep", session_uuid="u-keep",
+        )
+        self._wait_for_pending(registry)
+
+        # PostToolUse from a different session must not touch our entry.
+        _post(port, {
+            "hook_event_name": "PostToolUse",
+            "session_id": "u-other",
+            "tool_name": "Bash",
+            "tool_use_id": "tu_keep",   # same id, different session
+            "cwd": "/tmp/proj",
+        })
+        # Entry still pending — perm POST still blocked.
+        time.sleep(0.1)
+        assert perm_thread.is_alive()
+        assert len(registry.snapshot()) == 1
+
+        # Clean up: resolve so the blocking thread returns.
+        snap = registry.snapshot()
+        registry.resolve(
+            snap[0].id, Decision(result=DecisionResult.ALLOW),
+        )
+        perm_thread.join(timeout=3.0)
+
+    def test_permission_denied_evicts_pending_card(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        """When the user denies in the terminal, Claude Code emits
+        ``PermissionDenied`` instead of PostToolUse (the tool was
+        never executed). Island must treat it the same way — clear
+        the matching pending card — so the user doesn't see a stale
+        card sitting around for 598 s."""
+        srv, port = server
+        perm_thread, responses = self._spawn_permission_request(
+            port, tool_use_id="tu_denied_1",
+        )
+        self._wait_for_pending(registry)
+
+        _post(port, {
+            "hook_event_name": "PermissionDenied",
+            "session_id": "u-evict",
+            "tool_name": "Bash",
+            "tool_use_id": "tu_denied_1",
+            "cwd": "/tmp/proj",
+        })
+        perm_thread.join(timeout=3.0)
+        assert not perm_thread.is_alive()
+        assert registry.snapshot() == ()
+
+    def test_post_tool_use_falls_back_to_tool_name_when_id_missing(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        srv, port = server
+        # Register a PermissionRequest WITHOUT tool_use_id in payload.
+        responses: dict = {}
+
+        def _send():
+            try:
+                status, body = _post(port, {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "u-fallback",
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": "/tmp/x"},
+                    "cwd": "/tmp/proj",
+                }, timeout=15.0)
+                responses["body"] = body
+            except Exception as e:
+                responses["error"] = repr(e)
+
+        perm_thread = threading.Thread(target=_send, daemon=True)
+        perm_thread.start()
+        self._wait_for_pending(registry)
+
+        # PostToolUse also without tool_use_id — must fall back to
+        # (session_uuid, tool_name) FIFO match.
+        _post(port, {
+            "hook_event_name": "PostToolUse",
+            "session_id": "u-fallback",
+            "tool_name": "Edit",
+            "cwd": "/tmp/proj",
+        })
+        perm_thread.join(timeout=3.0)
+        assert not perm_thread.is_alive()
+        assert registry.snapshot() == ()
+
+
 # ── PermissionRequest: registry full → defer (T3.3) ──────────────────
 
 
