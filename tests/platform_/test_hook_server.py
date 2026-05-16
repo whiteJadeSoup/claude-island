@@ -156,6 +156,93 @@ def test_t2_3_pretooluse_falls_back_to_file_path():
     assert event.tool_input_preview == "/src/foo.py"
 
 
+def test_t2_7_askuserquestion_surfaces_first_question_text():
+    """AskUserQuestion's tool_input shape has no single-string field
+    among the well-known keys; the preview must dig into the questions
+    list and surface the first question's human-readable text instead
+    of falling through to a JSON dump."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "AskUserQuestion",
+        "tool_input": {
+            "questions": [
+                {"question": "指数退避的上限应设为多少？", "options": []},
+            ],
+        },
+    }
+    event = parse_claude_payload(payload)
+    assert isinstance(event, ToolStarted)
+    assert event.tool_input_preview == "指数退避的上限应设为多少？"
+
+
+def test_t2_8_askuserquestion_multi_question_appends_more_suffix():
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "AskUserQuestion",
+        "tool_input": {
+            "questions": [
+                {"question": "A?"},
+                {"question": "B?"},
+                {"question": "C?"},
+            ],
+        },
+    }
+    event = parse_claude_payload(payload)
+    assert event.tool_input_preview == "A?  (+2 more)"
+
+
+def test_t2_9_askuserquestion_malformed_shape_falls_through_to_json():
+    """When the questions list is missing/empty/non-list, we don't make
+    up text — we fall through to the JSON dump so the user at least
+    sees the raw payload. ensure_ascii=False keeps it readable."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "AskUserQuestion",
+        "tool_input": {"questions": []},
+    }
+    event = parse_claude_payload(payload)
+    assert event.tool_input_preview is not None
+    # Must NOT be the literal "(+−1 more)" or any inferred text — fall
+    # through to JSON dump.
+    assert "questions" in event.tool_input_preview
+
+
+def test_t2_10_json_fallback_keeps_unicode_readable():
+    """The fallback used to be json.dumps(default=str) which defaults
+    to ensure_ascii=True and turned 指数 into \\u6307\\u6570. This
+    regression-guards ensure_ascii=False."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "mcp__custom__do",
+        "tool_input": {"opaque_field": "需要中文展示"},
+    }
+    event = parse_claude_payload(payload)
+    assert event.tool_input_preview is not None
+    assert "需要中文展示" in event.tool_input_preview
+    assert "\\u" not in event.tool_input_preview
+
+
+def test_t2_11_preferred_keys_win_over_askuserquestion_shape():
+    """A pathological tool_input that has BOTH a well-known key
+    (e.g. "command") and a questions list must surface the well-known
+    one — established priority order is part of the contract."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "ls -la",
+            "questions": [{"question": "should not show"}],
+        },
+    }
+    event = parse_claude_payload(payload)
+    assert event.tool_input_preview == "ls -la"
+
+
 def test_t2_4_malformed_payload_returns_none():
     """JSON is well-formed but content is bogus."""
     assert parse_claude_payload({}) is None

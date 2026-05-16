@@ -1,0 +1,1272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ApprovalCard v2 — Interactive Prototype</title>
+<style>
+  /* ====== Reset + base ====== */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                 "Helvetica Neue", Arial, sans-serif;
+    background: #0a0a0a;
+    color: #e8e8e8;
+    min-height: 100vh;
+    padding: 24px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ====== Layout ====== */
+  .page {
+    display: grid;
+    grid-template-columns: 280px auto;
+    gap: 40px;
+    max-width: 1000px;
+    margin: 0 auto;
+    align-items: start;
+  }
+
+  .controls h2 {
+    font-size: 13px;
+    color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 12px;
+  }
+  .controls h2:not(:first-child) { margin-top: 24px; }
+
+  .control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .control-group button {
+    text-align: left;
+    background: #1a1a1a;
+    color: #e8e8e8;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .control-group button:hover { background: #232323; }
+  .control-group button.active {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+  }
+
+  .stage-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+  }
+  .stage-meta {
+    font-size: 11px;
+    color: #888;
+    align-self: flex-start;
+  }
+  .stage-meta strong { color: #fff; }
+
+  /* Island expanded-panel currently 320 px. Plan: widen _PANEL_W to
+     400 px so the new pending stack + cards render comfortably. */
+  .stage {
+    background: rgba(15,15,15,0.96);
+    border: 1px solid #1d1d1d;
+    border-radius: 16px;
+    padding: 14px;
+    width: 400px;
+    box-shadow: 0 24px 48px rgba(0,0,0,0.5);
+  }
+  .stage.full-island { width: 400px; }
+  .stage.full-island .island-section {
+    border-top: 1px solid #1d1d1d;
+    margin-top: 14px;
+    padding-top: 14px;
+    color: #999;
+    font-size: 11px;
+  }
+  .stage.full-island .island-section .lbl {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 6px;
+  }
+  .stage.full-island .island-section .row {
+    background: #1a1a1a;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: #ddd;
+    border-left: 3px solid transparent;
+  }
+  /* A session row whose session has a pending decision waiting */
+  .stage.full-island .island-section .row.has-pending {
+    border-left-color: var(--session-color, #f59e0b);
+  }
+  .row .session-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+  }
+  .row .session-left .name { color: #fff; font-weight: 600; }
+  .row .session-left .meta { color: #888; font-size: 11px; }
+  .row .pending-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(245,158,11,0.15);
+    color: #fbbf24;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 10px;
+    margin-left: 6px;
+    flex: 0 0 auto;
+  }
+  .row .pending-badge::before {
+    content: "⚠";
+    font-size: 10px;
+  }
+  .row .right-col {
+    color: #888;
+    font-size: 12px;
+    flex: 0 0 auto;
+  }
+
+  .stage-header {
+    font-size: 11px;
+    color: #666;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  /* ====== Pending container (matches Qt _pending_container) ====== */
+  .pending-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 0 12px 0;
+  }
+
+  /* ====== ApprovalCard v2 ====== */
+  .approval-card {
+    background: #1f1f1f;
+    border-radius: 10px;
+    border: 1px solid #2a2a2a;
+    overflow: hidden;
+    /* Fixed vertical sizePolicy — never compressed below content */
+    min-height: 110px;
+    /* Smooth height transition during chevron toggle */
+    transition: min-height 0.18s ease-out;
+  }
+
+  .approval-card.expanded {
+    min-height: 200px;
+    border-color: #3a3a3a;
+  }
+
+  /* ── Risk top bar ── */
+  .risk-bar {
+    height: 3px;
+    width: 100%;
+  }
+  .risk-bar.low    { background: #22c55e; }
+  .risk-bar.medium { background: #f59e0b; }
+  .risk-bar.high   { background: #ef4444; }
+
+  /* ── Header row ── */
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .tool-icon {
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+  }
+  .tool-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    flex: 1;                /* take remaining space so badge + chevron sit at end */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session-name {            /* legacy — kept for the comparison/old card mock */
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 11px;
+    color: #888;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chevron {
+    color: #999;
+    font-size: 11px;
+    transition: transform 0.18s;
+    flex: 0 0 auto;
+  }
+  .approval-card.expanded .chevron { transform: rotate(180deg); }
+
+  /* ── Preview ── */
+  .preview-folded, .preview-opened {
+    margin: 0 14px;
+    background: #0e0e0e;
+    border-radius: 6px;
+    border: 1px solid #1a1a1a;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 11px;
+    color: #cdd2d8;
+    padding: 6px 10px;
+    line-height: 1.5;
+  }
+  .preview-folded {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    height: 22px;
+  }
+  .preview-opened {
+    max-height: 80px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    display: none;
+  }
+  .approval-card.expanded .preview-folded { display: none; }
+  .approval-card.expanded .preview-opened { display: block; }
+  /* Custom scrollbar to match Qt's dark thin scrollbar */
+  .preview-opened::-webkit-scrollbar { width: 6px; }
+  .preview-opened::-webkit-scrollbar-track { background: transparent; }
+  .preview-opened::-webkit-scrollbar-thumb {
+    background: #3a3a3a;
+    border-radius: 3px;
+  }
+
+  /* ── Warning (HIGH only) ── */
+  .warning {
+    display: none;
+    margin: 8px 14px 0;
+    color: #f59e0b;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .approval-card.risk-high .warning { display: block; }
+
+  /* ── Footer (remember + buttons) ── */
+  .card-footer {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    margin-top: 8px;
+  }
+  .remember {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #cdd2d8;
+    font-size: 11px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .remember input[type="checkbox"] {
+    accent-color: #1d4ed8;
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+  }
+  .btn {
+    border: none;
+    border-radius: 6px;
+    padding: 7px 16px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .btn-deny {
+    background: transparent;
+    color: #d4d4d4;
+    border: 1px solid #404040;
+  }
+  .btn-deny:hover { background: #2a2a2a; }
+  .btn-allow {
+    background: #1d4ed8;
+    color: white;
+  }
+  .btn-allow:hover { background: #2563eb; }
+
+  /* ── Overflow label ── */
+  .overflow-label {
+    color: #888;
+    font-size: 10px;
+    padding: 4px 8px;
+    text-align: center;
+  }
+
+  /* ── Resolved animation ── */
+  .approval-card.resolving {
+    animation: resolve 0.4s ease-out forwards;
+  }
+  @keyframes resolve {
+    0%   { opacity: 1; transform: translateX(0); }
+    100% { opacity: 0; transform: translateX(20px); max-height: 0; min-height: 0; padding: 0; margin: 0; border-width: 0; }
+  }
+
+  /* ====== Pending stack (pile of cards) ======
+     ONLY one decision is interactive at a time. Cards queued behind
+     it peek out as thin slivers so the user can see "there are more
+     waiting" without being able to skip the current one. */
+  .pending-count {
+    font-size: 11px;
+    color: #999;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .pending-count .badge {
+    background: #1d4ed8;
+    color: white;
+    border-radius: 10px;
+    padding: 1px 7px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0;
+  }
+  .pending-count .counter {
+    margin-left: auto;
+    font-size: 10px;
+    color: #888;
+  }
+
+  .pending-stack { position: relative; }
+
+  /* Peeks: super-thin "sliver" tops of queued cards. Up to 3, each
+     ~18-22px high. Not interactive — they exist purely to communicate
+     "queue depth at a glance". */
+  .stack-peek {
+    background: #1a1a1a;
+    border: 1px solid #232323;
+    border-bottom: none;
+    border-radius: 10px 10px 0 0;
+    overflow: hidden;
+    position: relative;
+  }
+  .stack-peek.depth-1 {
+    margin: 0 8px;
+    height: 22px;
+    z-index: 3;
+  }
+  .stack-peek.depth-2 {
+    margin: 0 14px;
+    height: 20px;
+    opacity: 0.8;
+    z-index: 2;
+  }
+  .stack-peek.depth-3 {
+    margin: 0 20px;
+    height: 18px;
+    opacity: 0.6;
+    z-index: 1;
+  }
+  .stack-peek .peek-bar {
+    height: 2px;
+    background: var(--session-color, #888);
+  }
+  .stack-peek .peek-content {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    font-size: 10px;
+    color: #aaa;
+    overflow: hidden;
+    white-space: nowrap;
+    line-height: 1.4;
+  }
+  .stack-peek .peek-content .session-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--session-color, #888);
+    flex: 0 0 auto;
+  }
+  .stack-peek .peek-content .session-tag {
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
+    color: #ccc;
+    flex: 0 0 auto;
+  }
+  .stack-peek .peek-content .row-sep { color: #555; }
+  .stack-peek .peek-content .tool-name-small {
+    font-size: 10px;
+    color: #999;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+  }
+  .stack-peek .peek-content .risk-pill {
+    font-size: 8px;
+    padding: 0 5px;
+    border-radius: 7px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex: 0 0 auto;
+    line-height: 1.6;
+  }
+  .stack-peek .peek-content .risk-pill.low    { background: rgba(34,197,94,0.15);  color: #4ade80; }
+  .stack-peek .peek-content .risk-pill.medium { background: rgba(245,158,11,0.15); color: #fbbf24; }
+  .stack-peek .peek-content .risk-pill.high   { background: rgba(239,68,68,0.18);  color: #f87171; }
+
+  .stack-active {
+    position: relative;
+    z-index: 5;
+    margin-top: -6px;   /* slight overlap so the pile feels physical */
+  }
+
+  .stack-overflow {
+    text-align: center;
+    font-size: 10px;
+    color: #777;
+    padding: 8px 0 0;
+  }
+
+  /* Animation when active resolves: slide down + fade, then the next
+     peek "rises" into place (handled by a re-render). */
+  .stack-active.advancing {
+    animation: advance-out 0.32s ease-in forwards;
+  }
+  @keyframes advance-out {
+    0%   { transform: translateY(0)   scale(1);    opacity: 1; }
+    100% { transform: translateY(40px) scale(0.95); opacity: 0; }
+  }
+
+  /* Card header: now shows a session badge on the left edge */
+  .approval-card .session-badge,
+  .question-card .session-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.06);
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 10px;
+    color: #ddd;
+    flex: 0 0 auto;
+  }
+  .approval-card .session-badge::before,
+  .question-card .session-badge::before {
+    content: "";
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--session-color, #1d4ed8);
+    display: inline-block;
+  }
+
+  /* ====== Question Card (for AskUserQuestion-class tools) ====== */
+  .question-card {
+    background: #1f1f1f;
+    border-radius: 10px;
+    border: 1px solid #2a2a2a;
+    overflow: hidden;
+  }
+  .question-card .qcard-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px 4px;
+  }
+  .question-card .question-text {
+    padding: 6px 14px 10px;
+    font-size: 13px;
+    color: #fff;
+    line-height: 1.5;
+  }
+  .question-card .question-meta {
+    padding: 0 14px 10px;
+    font-size: 10px;
+    color: #888;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  }
+  .option-list {
+    display: flex;
+    flex-direction: column;
+    padding: 0 14px 10px;
+    gap: 6px;
+  }
+  .option-btn {
+    text-align: left;
+    background: #0e0e0e;
+    color: #e8e8e8;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .option-btn > span:last-child {
+    flex: 1;
+    min-width: 0;
+  }
+  .option-btn .option-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .option-btn .option-desc {
+    color: #888;
+    font-size: 10px;
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* When the list has >3 options, cap it and scroll inside. Keeps
+     the stage's overall height stable. */
+  .option-list.scroll {
+    max-height: 160px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .option-list.scroll::-webkit-scrollbar { width: 6px; }
+  .option-list.scroll::-webkit-scrollbar-thumb {
+    background: #3a3a3a; border-radius: 3px;
+  }
+  .option-btn .option-key {
+    color: #666;
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
+    background: #1a1a1a;
+    padding: 1px 6px;
+    border-radius: 3px;
+    flex: 0 0 auto;
+  }
+  .option-btn:hover {
+    background: #1d1d1d;
+    border-color: #3a3a3a;
+  }
+  .option-btn.selected {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+    color: #fff;
+  }
+  .option-btn.selected .option-key {
+    background: rgba(255,255,255,0.2);
+    color: #fff;
+  }
+  .qcard-hint {
+    padding: 8px 14px;
+    font-size: 10px;
+    color: #888;
+    background: #161616;
+    border-top: 1px solid #2a2a2a;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .qcard-hint .hint-icon { font-size: 11px; }
+  .qcard-actions {
+    display: flex;
+    gap: 8px;
+    padding: 10px 14px;
+    align-items: center;
+  }
+  .qcard-actions .skip {
+    flex: 1;
+    background: transparent;
+    color: #888;
+    border: none;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .qcard-actions .skip:hover { color: #ccc; }
+
+  /* ── Old card (for comparison view) ── */
+  .old-comparison {
+    margin-top: 24px;
+    padding: 20px;
+    background: #181818;
+    border-radius: 12px;
+    border-left: 3px solid #ef4444;
+  }
+  .old-comparison .label {
+    font-size: 11px;
+    color: #ef4444;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 12px;
+  }
+  .old-card-mock {
+    background: #1f1f1f;
+    border-radius: 8px;
+    border: 1px solid #2a2a2a;
+    overflow: hidden;
+    /* Simulate the scroll-clip bug: max-height < natural height */
+    max-height: 200px;
+    position: relative;
+  }
+  .old-card-mock::after {
+    content: "↓ buttons clipped by scroll area";
+    position: absolute;
+    bottom: 4px;
+    right: 8px;
+    font-size: 9px;
+    color: #ef4444;
+    background: rgba(0,0,0,0.7);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .old-card-mock .raw-json {
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    color: #cdd2d8;
+    background: #0e0e0e;
+    padding: 8px 10px;
+    margin: 6px 14px;
+    border-radius: 4px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  /* ── Notes ── */
+  .notes {
+    margin-top: 32px;
+    padding: 16px;
+    background: #181818;
+    border-radius: 8px;
+    font-size: 12px;
+    color: #aaa;
+    line-height: 1.6;
+  }
+  .notes h3 {
+    color: #e8e8e8;
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
+  .notes ul { padding-left: 18px; }
+  .notes code {
+    background: #0a0a0a;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <!-- ===== Controls ===== -->
+  <aside class="controls">
+    <h2>Risk Level</h2>
+    <div class="control-group" id="risk-controls">
+      <button data-risk="low">LOW · Read / Glob / LS</button>
+      <button data-risk="medium" class="active">MEDIUM · MCP / AskUserQuestion</button>
+      <button data-risk="high">HIGH · Bash / Write / Edit</button>
+    </div>
+
+    <h2>Tool Scenario</h2>
+    <div class="control-group" id="scenario-controls">
+      <button data-scenario="askuserquestion" class="active">AskUserQuestion · question card</button>
+      <button data-scenario="askuserquestion_multi">AskUserQuestion · multi-select</button>
+      <button data-scenario="bash">Bash · npm test</button>
+      <button data-scenario="edit">Edit · /Users/.../snapshot.py</button>
+      <button data-scenario="mcp">MCP custom tool</button>
+    </div>
+
+    <h2>Stage</h2>
+    <div class="control-group" id="stage-controls">
+      <button data-action="single" class="active">Single card</button>
+      <button data-action="multi">Multiple (4)</button>
+      <button data-action="overflow">Overflow (6 total)</button>
+      <button data-action="fullisland">Full Island panel</button>
+      <button data-action="resolve">Resolve top card</button>
+    </div>
+  </aside>
+
+  <!-- ===== Stage ===== -->
+  <main>
+    <div class="stage-wrap">
+      <div class="stage-meta">Stage width: <strong>400 px</strong> — proposed new <code>_PANEL_W</code> (current 320 → widen for stack + cards)</div>
+      <div class="stage" id="stage-root">
+        <div class="pending-container" id="stage"></div>
+        <!-- Full-island sections appear here only when 'Full Island panel' stage is selected -->
+        <div id="island-extras"></div>
+      </div>
+    </div>
+
+    <div class="old-comparison">
+      <div class="label">⚠ Before (current bug) — for comparison</div>
+      <div class="old-card-mock">
+        <div class="risk-bar high"></div>
+        <div class="card-header">
+          <span class="tool-icon">🛠</span>
+          <span class="tool-name">AskUserQuestion</span>
+          <span class="session-name">— claude-island</span>
+        </div>
+        <div class="raw-json">{"questions": [{"question": "指数退避的上限应设为？5m → 10m → 20m → 40m →...</div>
+        <div style="margin: 8px 14px; font-size: 11px; color: #888;">
+          ☐ Remember for this session
+        </div>
+        <div style="margin: 8px 14px; color: #f59e0b; font-size: 10px;">
+          ⚠ This will allow ALL future Bash/Edit/Write calls in this ses...
+        </div>
+        <!-- buttons are clipped — they "exist" but you can't see them -->
+      </div>
+    </div>
+
+    <div class="notes">
+      <h3>What changed</h3>
+      <ul>
+        <li><strong>Buttons always visible</strong> — card has <code>min-height: 110px</code> and the footer has fixed size, can no longer be compressed by parent layout / ScrollArea.</li>
+        <li><strong>Preview is collapsed by default</strong> — click anywhere on the header (icon / tool name / session / chevron) to expand. Click again to collapse. Expanded preview gets max 80px scroll viewport.</li>
+        <li><strong>AskUserQuestion renders the actual question</strong> — not raw <code>指数</code> JSON escapes (fixed at <code>_extract_tool_input_preview</code>).</li>
+        <li><strong>Cards live in <code>_pending_container</code> only</strong> — no longer nested inside <code>_session_scroll</code>, so the ScrollArea max-height (292px) can't clip them.</li>
+        <li><strong>HIGH risk shows a 2-line warning</strong> — MEDIUM / LOW omit it.</li>
+        <li><strong>Overflow degrades gracefully</strong> — beyond 3 visible cards, show "+N more pending" instead of stacking infinitely.</li>
+      </ul>
+    </div>
+  </main>
+</div>
+
+<script>
+// ====== State ======
+let currentRisk = "medium";
+let currentScenario = "askuserquestion";
+let currentMode = "single";   // single | multi | overflow | fullisland
+
+// A deterministic session color palette. Real implementation would
+// pull from the existing group-palette in expanded_window.py.
+const SESSION_PALETTE = {
+  "dev-1":             "#22c55e",   // green
+  "dev-2-small-problem": "#1d4ed8", // blue
+  "review":            "#a855f7",   // purple
+};
+function sessionColor(name) {
+  return SESSION_PALETTE[name] || "#888";
+}
+
+// In multi / overflow / fullisland modes, this is the list of pending
+// decisions (each tied to a session + scenario). active = id of the
+// currently expanded one (rest are collapsed).
+let pendingList = [];
+let activeId = null;
+
+const scenarios = {
+  askuserquestion: {
+    kind: "question",
+    icon: "❓",
+    tool: "AskUserQuestion",
+    session: "— claude-island",
+    header: "退避策略",
+    question: "指数退避的上限应设为多少？",
+    multiSelect: false,
+    options: [
+      { label: "5m → 10m → 20m → 40m → 80m", desc: "更保守，长时间故障下不空轮" },
+      { label: "固定 30m", desc: "可预测、实现简单" },
+      { label: "5m → 15m → 45m → 90m", desc: "中间档" },
+    ],
+  },
+  askuserquestion_multi: {
+    kind: "question",
+    icon: "❓",
+    tool: "AskUserQuestion",
+    session: "— claude-island",
+    header: "需要保留的修复点",
+    question: "本次 PR 中你希望保留哪些改动？(可多选)",
+    multiSelect: true,
+    options: [
+      { label: "问题 1 修复（AskUserQuestion 友好化）", desc: "" },
+      { label: "问题 2 修复（按钮可见性）", desc: "" },
+      { label: "问题 3 修复（已合入）", desc: "" },
+      { label: "全新 ApprovalCard v2 设计", desc: "" },
+    ],
+  },
+  bash: {
+    icon: "⚡",
+    tool: "Bash",
+    session: "— claude-island",
+    folded: "npm test -- --testPathPattern=approval",
+    opened: "npm test -- --testPathPattern=approval --verbose --runInBand",
+    risk: "high",
+  },
+  edit: {
+    icon: "✏️",
+    tool: "Edit",
+    session: "— claude-island",
+    folded: "/Users/constantine/coding-projects/claude-island/claude_island/core/snapshot.py",
+    opened: `file_path: /Users/constantine/coding-projects/claude-island/claude_island/core/snapshot.py
+old_string: "world.push(snap)  # synchronous main-thread emit"
+new_string: "world.push(snap)  # main-thread emit (see WorldMarshaler)"`,
+    risk: "high",
+  },
+  mcp: {
+    icon: "🔌",
+    tool: "mcp__memory__store",
+    session: "— claude-island",
+    folded: "key: project-context, value: …",
+    opened: `{
+  "key": "project-context",
+  "value": "Claude Island is a floating capsule UI for monitoring Claude Code sessions",
+  "ttl_seconds": 3600
+}`,
+    risk: "medium",
+  },
+};
+
+// ====== Templates ======
+
+const KEYCAPS = ["1","2","3","4","5","6","7","8","9"];
+
+function questionCardHTML(scenario, sessionName) {
+  const s = scenarios[scenario];
+  const sname = sessionName || (s.session || "").replace(/^—\s*/, "");
+  const options = s.options.map((opt, i) => `
+    <button class="option-btn" data-idx="${i}" onclick="pickOption(this, ${s.multiSelect ? "true" : "false"})">
+      <span class="option-key">${KEYCAPS[i] || "·"}</span>
+      <span>
+        <div class="option-label">${opt.label}</div>
+        ${opt.desc ? `<div class="option-desc">${opt.desc}</div>` : ""}
+      </span>
+    </button>
+  `).join("");
+  // Beyond 3 options, scroll inside the list to keep card height bounded.
+  const scrollCls = s.options.length > 3 ? " scroll" : "";
+  return `
+    <div class="question-card" data-card data-kind="question" data-multi="${s.multiSelect}" style="--session-color: ${sessionColor(sname)};">
+      <div class="risk-bar medium"></div>
+      <div class="qcard-header">
+        <span class="tool-icon">${s.icon}</span>
+        <span class="tool-name">${s.header || s.tool}</span>
+        <span class="session-badge">${sname}</span>
+      </div>
+      <div class="question-text">${s.question}</div>
+      <div class="question-meta">via ${s.tool}${s.multiSelect ? " · multi-select" : ""}</div>
+      <div class="option-list${scrollCls}">
+        ${options}
+      </div>
+      ${s.multiSelect ? `
+      <div class="qcard-actions">
+        <button class="skip" onclick="resolveCard(this, 'skip')">Skip — answer in terminal</button>
+        <button class="btn btn-allow" onclick="submitMulti(this)">Submit</button>
+      </div>` : `
+      <div class="qcard-actions">
+        <button class="skip" onclick="resolveCard(this, 'skip')">Skip — answer in terminal</button>
+      </div>`}
+      <div class="qcard-hint">
+        <span class="hint-icon">ℹ️</span>
+        <span>Selecting here also focuses the terminal so Claude can read your answer.</span>
+      </div>
+    </div>
+  `;
+}
+
+function approvalCardHTML(scenario, riskOverride, sessionName) {
+  const s = scenarios[scenario];
+  const risk = riskOverride || s.risk || "medium";
+  const sname = sessionName || (s.session || "").replace(/^—\s*/, "");
+  return `
+    <div class="approval-card risk-${risk}" data-card data-kind="approval" style="--session-color: ${sessionColor(sname)};">
+      <div class="risk-bar ${risk}"></div>
+      <div class="card-header" onclick="toggleExpand(this)">
+        <span class="tool-icon">${s.icon}</span>
+        <span class="tool-name">${s.tool}</span>
+        <span class="session-badge">${sname}</span>
+        <span class="chevron" style="margin-left:auto;">▾</span>
+      </div>
+      <div class="preview-folded">${s.folded}</div>
+      <div class="preview-opened">${s.opened}</div>
+      <div class="warning">⚠ Allowing this will permit ALL future ${s.tool} calls in this session without asking.</div>
+      <div class="card-footer">
+        <label class="remember">
+          <input type="checkbox">
+          Auto-allow ${s.tool} in this session
+        </label>
+        <button class="btn btn-deny" onclick="resolveCard(this, 'deny')">Deny</button>
+        <button class="btn btn-allow" onclick="resolveCard(this, 'allow')">Allow</button>
+      </div>
+    </div>
+  `;
+}
+
+// Dispatcher — picks question vs approval template by scenario.kind
+function cardHTML(scenario, riskOverride, sessionName) {
+  const s = scenarios[scenario];
+  if (s && s.kind === "question") return questionCardHTML(scenario, sessionName);
+  return approvalCardHTML(scenario, riskOverride, sessionName);
+}
+
+// ====== Pending stack (pile-of-cards model) ======
+//
+// User MUST decide one at a time. The currently active card is the only
+// thing interactive; the next 1-2 cards peek out as thin slivers to
+// signal queue depth. Past the second peek, an "+N more queued behind"
+// label keeps the height bounded.
+
+function peekHTML(entry, depthClass) {
+  const s = scenarios[entry.scenario];
+  const risk = entry.riskOverride || s.risk || "medium";
+  const toolName = s.kind === "question" ? (s.header || s.tool) : s.tool;
+  return `
+    <div class="stack-peek ${depthClass}" style="--session-color: ${sessionColor(entry.sessionName)};">
+      <div class="peek-bar"></div>
+      <div class="peek-content">
+        <span class="session-dot"></span>
+        <span class="session-tag">${entry.sessionName}</span>
+        <span class="row-sep">·</span>
+        <span class="tool-name-small">${toolName}</span>
+        <span class="risk-pill ${risk}">${risk}</span>
+      </div>
+    </div>
+  `;
+}
+
+function pendingStackHTML(entries) {
+  if (!entries.length) return "";
+  const active = entries[0];
+  // Show up to 3 super-thin peeks (~18-22px slivers) behind active.
+  // Anything beyond is collapsed into "+N more queued behind".
+  const MAX_PEEKS = 3;
+  const peeks = entries.slice(1, 1 + MAX_PEEKS);
+  const overflow = entries.length - 1 - peeks.length;
+  // Render order: deepest peek first (sits at the top of the visible
+  // pile; rendered first in DOM so the next-up sliver lands right
+  // above the active card). depth-1 is closest to active.
+  const depthClass = i => `depth-${i + 1}`;
+  const peekDom = peeks
+    .map((e, i) => peekHTML(e, depthClass(i)))
+    .reverse()
+    .join("");
+  return `
+    <div class="pending-count">
+      <span>PENDING DECISIONS</span>
+      <span class="badge">${entries.length}</span>
+      <span class="counter">decide one at a time · ${entries.length - 1} queued</span>
+    </div>
+    <div class="pending-stack">
+      ${peekDom}
+      <div class="stack-active" data-active-slot>
+        ${cardHTML(active.scenario, active.riskOverride, active.sessionName)}
+      </div>
+      ${overflow > 0 ? `<div class="stack-overflow">+${overflow} more queued behind</div>` : ""}
+    </div>
+  `;
+}
+
+function renderPending() {
+  const stage = document.getElementById("stage");
+  stage.innerHTML = pendingStackHTML(pendingList);
+}
+
+// Called when the user resolves the active card (Allow / Deny / pick
+// option / skip). Animates the active out, then shifts the queue.
+function advanceStack() {
+  const slot = document.querySelector("[data-active-slot]");
+  if (slot) slot.classList.add("advancing");
+  setTimeout(() => {
+    pendingList.shift();
+    if (pendingList.length === 0) {
+      // No more pending — clear stage. In real app, the pending
+      // section's setVisible(False) hides it entirely.
+      document.getElementById("stage").innerHTML = `
+        <div style="color:#666;text-align:center;padding:20px;font-size:12px;">
+          ✓ All decisions resolved
+        </div>
+      `;
+    } else {
+      renderPending();
+    }
+    // Keep the fullisland sections in sync (pending badges may
+    // change too).
+    if (currentMode === "fullisland") {
+      document.getElementById("island-extras").innerHTML =
+        islandSectionsHTML(pendingList);
+    }
+  }, 320);
+}
+
+// ====== Render ======
+function render() {
+  const stage = document.getElementById("stage");
+  const stageRoot = document.getElementById("stage-root");
+  const extras = document.getElementById("island-extras");
+  stageRoot.classList.toggle("full-island", currentMode === "fullisland");
+  extras.innerHTML = "";
+
+  if (currentMode === "single") {
+    pendingList = [];
+    activeId = null;
+    stage.innerHTML = cardHTML(currentScenario, currentRisk);
+  } else if (currentMode === "multi") {
+    // 4 total: active + 3 peeks (max), 0 overflow.
+    pendingList = [
+      { id: "p1", sessionName: "dev-1",               scenario: "askuserquestion" },
+      { id: "p2", sessionName: "dev-2-small-problem", scenario: "bash", riskOverride: "high" },
+      { id: "p3", sessionName: "review",              scenario: "edit", riskOverride: "high" },
+      { id: "p4", sessionName: "dev-1",               scenario: "mcp", riskOverride: "medium" },
+    ];
+    if (!activeId || !pendingList.find(e => e.id === activeId)) activeId = "p1";
+    renderPending();
+  } else if (currentMode === "overflow") {
+    // 6 total: active + 3 peeks + 2 in "+N more queued" label.
+    pendingList = [
+      { id: "p1", sessionName: "dev-1",               scenario: "askuserquestion" },
+      { id: "p2", sessionName: "dev-2-small-problem", scenario: "bash", riskOverride: "high" },
+      { id: "p3", sessionName: "review",              scenario: "edit", riskOverride: "high" },
+      { id: "p4", sessionName: "dev-1",               scenario: "mcp", riskOverride: "medium" },
+      { id: "p5", sessionName: "review",              scenario: "bash", riskOverride: "high" },
+      { id: "p6", sessionName: "dev-2-small-problem", scenario: "edit", riskOverride: "high" },
+    ];
+    if (!activeId || !pendingList.find(e => e.id === activeId)) activeId = "p1";
+    renderPending();
+  } else if (currentMode === "fullisland") {
+    pendingList = [
+      { id: "p1", sessionName: "dev-1",  scenario: "askuserquestion", ageLabel: "just now" },
+      { id: "p2", sessionName: "review", scenario: "edit", riskOverride: "high", ageLabel: "1m ago" },
+    ];
+    if (!activeId || !pendingList.find(e => e.id === activeId)) activeId = "p1";
+    renderPending();
+    extras.innerHTML = islandSectionsHTML(pendingList);
+  }
+}
+
+function islandSectionsHTML(pendings) {
+  pendings = pendings || [];
+  // Count pending per session for badge rendering
+  const pendingBySession = {};
+  for (const p of pendings) {
+    pendingBySession[p.sessionName] = (pendingBySession[p.sessionName] || 0) + 1;
+  }
+  function sessionRow(name, meta, cost) {
+    const count = pendingBySession[name] || 0;
+    const sc = sessionColor(name);
+    return `
+      <div class="row ${count > 0 ? "has-pending" : ""}" style="--session-color: ${sc};"
+           onclick="${count > 0 ? `focusPendingFor('${name}')` : ""}">
+        <div class="session-left">
+          <span class="name">${name}</span>
+          <span class="meta">· ${meta}</span>
+          ${count > 0 ? `<span class="pending-badge">${count} pending</span>` : ""}
+        </div>
+        <span class="right-col">${cost}</span>
+      </div>
+    `;
+  }
+  return `
+    <div class="island-section">
+      <div class="lbl">TODAY</div>
+      <div class="row">
+        <div class="session-left"><span class="meta">Anthropic · resets in 3h 7m</span></div>
+        <strong class="right-col" style="color:#fff;font-size:18px;">$58</strong>
+      </div>
+      <div style="height:6px;background:#1a1a1a;border-radius:3px;margin:6px 0;">
+        <div style="width:47%;height:100%;background:#22c55e;border-radius:3px;"></div>
+      </div>
+      <div style="color:#22c55e;font-size:11px;">47% of 5h limit</div>
+    </div>
+    <div class="island-section">
+      <div class="lbl">Claude sessions · 3</div>
+      ${sessionRow("dev-1",               "Opus · Thinking…",       "$19")}
+      ${sessionRow("dev-2-small-problem", "Opus · active 11s ago",  "$10")}
+      ${sessionRow("review",              "Opus · active 31m ago",  "$44")}
+    </div>
+    <div class="island-section">
+      <div class="lbl">SPEND · 5h window</div>
+      <div style="color:#fff;font-size:18px;font-weight:600;">$45 · 48.3M tokens</div>
+      <div class="row" style="margin-top:6px;">
+        <div class="session-left"><span class="meta">Opus</span></div>
+        <span class="right-col">$45 · 46.9M</span>
+      </div>
+      <div class="row">
+        <div class="session-left"><span class="meta">Haiku</span></div>
+        <span class="right-col">$0.23 · 1.3M</span>
+      </div>
+    </div>
+    <div class="island-section">
+      <div class="lbl">QUOTA · Anthropic</div>
+      <div style="color:#22c55e;font-size:11px;">5h 47% · 3h 7m | Weekly 5% · 26h 37m</div>
+    </div>
+  `;
+}
+
+// Clicking a session row with "N pending" → if the active card is
+// already this session's, scroll & flash; otherwise inform the user
+// they have to clear the queue ahead of it first (the user wants
+// strict serial resolution).
+function focusPendingFor(sessionName) {
+  const idx = pendingList.findIndex(p => p.sessionName === sessionName);
+  if (idx < 0) return;
+  if (idx === 0) {
+    document.querySelector(".stack-active")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    flashNote(`Active decision is from ${sessionName} — decide below`);
+  } else {
+    flashNote(`${sessionName} is queued — finish the ${idx} above first`);
+  }
+}
+
+// ====== Interactions ======
+function toggleExpand(headerEl) {
+  const card = headerEl.closest(".approval-card");
+  card.classList.toggle("expanded");
+}
+
+function resolveCard(btnEl, decision) {
+  const labels = {
+    allow: "Allowed — moving to next decision",
+    deny:  "Denied — moving to next decision",
+    skip:  "Skipped — terminal focused; moving to next",
+  };
+  flashNote(labels[decision] || "Dismissed");
+  // In single-card mode, just remove. In stack modes, advance queue.
+  if (currentMode === "single") {
+    const card = btnEl.closest("[data-card]");
+    card.classList.add("resolving");
+    setTimeout(() => card.remove(), 400);
+  } else {
+    advanceStack();
+  }
+}
+
+function pickOption(btn, multiSelect) {
+  if (multiSelect) {
+    btn.classList.toggle("selected");
+    return;
+  }
+  // Single-select: pick + auto-submit + advance
+  btn.parentElement.querySelectorAll(".option-btn").forEach(b => b.classList.remove("selected"));
+  btn.classList.add("selected");
+  setTimeout(() => {
+    const label = btn.querySelector(".option-label, div").textContent;
+    flashNote(`Selected "${label.slice(0, 30)}" — focusing terminal`);
+    if (currentMode === "single") {
+      const card = btn.closest("[data-card]");
+      card.classList.add("resolving");
+      setTimeout(() => card.remove(), 400);
+    } else {
+      advanceStack();
+    }
+  }, 220);
+}
+
+function submitMulti(btn) {
+  const card = btn.closest("[data-card]");
+  const picked = [...card.querySelectorAll(".option-btn.selected")];
+  if (picked.length === 0) {
+    flashNote("Pick at least one option, or click Skip");
+    return;
+  }
+  flashNote(`Submitted ${picked.length} answers — focusing terminal`);
+  if (currentMode === "single") {
+    card.classList.add("resolving");
+    setTimeout(() => card.remove(), 400);
+  } else {
+    advanceStack();
+  }
+}
+
+function flashNote(msg) {
+  const el = document.createElement("div");
+  el.textContent = msg;
+  el.style.cssText = `
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #1f1f1f; color: #e8e8e8; padding: 8px 16px;
+    border-radius: 6px; border: 1px solid #2a2a2a;
+    font-size: 12px; z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    opacity: 0; transition: opacity 0.2s;
+  `;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.style.opacity = "1");
+  setTimeout(() => {
+    el.style.opacity = "0";
+    setTimeout(() => el.remove(), 200);
+  }, 1500);
+}
+
+// ====== Control wiring ======
+document.querySelectorAll("#risk-controls button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    currentRisk = btn.dataset.risk;
+    document.querySelectorAll("#risk-controls button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    render();
+  });
+});
+
+document.querySelectorAll("#scenario-controls button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    currentScenario = btn.dataset.scenario;
+    const s = scenarios[currentScenario];
+    // question cards are always MEDIUM (no allow/deny semantics)
+    currentRisk = s.kind === "question" ? "medium" : (s.risk || "medium");
+    document.querySelectorAll("#scenario-controls button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    // Disable risk buttons for question kind (irrelevant)
+    document.querySelectorAll("#risk-controls button").forEach(b => {
+      b.disabled = s.kind === "question";
+      b.style.opacity = s.kind === "question" ? "0.4" : "1";
+      b.classList.toggle("active", b.dataset.risk === currentRisk);
+    });
+    render();
+  });
+});
+
+document.querySelectorAll("#stage-controls button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const action = btn.dataset.action;
+    document.querySelectorAll("#stage-controls button").forEach(b => b.classList.remove("active"));
+    if (action === "resolve") {
+      // animate-resolve the first visible card without changing mode
+      const first = document.querySelector("#stage .approval-card");
+      if (first) {
+        resolveCard(first.querySelector(".btn-allow"), "allow");
+      } else {
+        flashNote("No cards left — switch back to a stage mode");
+      }
+      // Don't mark resolve active permanently
+      return;
+    }
+    currentMode = action;
+    btn.classList.add("active");
+    render();
+  });
+});
+
+// Init
+render();
+</script>
+</body>
+</html>

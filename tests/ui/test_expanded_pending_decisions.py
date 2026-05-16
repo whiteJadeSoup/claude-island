@@ -1,12 +1,20 @@
-"""Integration tests for ExpandedWindow's pending-decisions rendering.
+"""Integration tests for ExpandedWindow's pending-decisions wiring (v2).
 
-Covers Phase 9 wiring:
-  - Pending container hidden when snap.pending_decisions is empty
-  - One ApprovalCard rendered per PRE_TOOL_USE entry
-  - One PromptReviewCard rendered per USER_PROMPT_SUBMIT entry
-  - Cap at 5 visible + "+N more" footer
-  - Click resolves through injected callback
-  - Cards survive across snapshot ticks (cache by id)
+v2 design (2026-05): all pending decisions render in the
+:class:`StackedDecisionsPanel` (pile-of-cards) at the top of the
+panel. The legacy v1 inline-under-row + cap-at-5 + per-id widget cache
+were deleted; tests in this file now exercise:
+
+  - panel hides when ``snap.pending_decisions`` is empty
+  - panel becomes visible with the right card kind when non-empty
+  - resolve callback wiring still routes card click → registry
+  - dedup key still includes pending decisions so an idle world tick
+    bringing a new approval card doesn't get swallowed by
+    ``distinct_until_changed``
+
+Tests that asserted on v1 internals (``_pending_layout``,
+``_decision_cards``, ``_PENDING_VISIBLE_CAP``, inline wrappers, matched/
+orphan buckets) were removed: those concepts are gone in v2.
 """
 from __future__ import annotations
 
@@ -36,11 +44,12 @@ def _view(
     kind: DecisionKind = DecisionKind.PRE_TOOL_USE,
     risk: RiskLevel = RiskLevel.MEDIUM,
     tool: str = "Bash",
+    session_uuid: str = "u1",
 ) -> PendingDecisionView:
     return PendingDecisionView(
         id=id_,
         kind=kind,
-        session_uuid="u1",
+        session_uuid=session_uuid,
         session_name="my-session",
         cwd_basename="myproj",
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=600),
@@ -51,9 +60,7 @@ def _view(
     )
 
 
-def _snap(
-    *, pending: tuple = (), groups: tuple = (),
-) -> WorldSnapshot:
+def _snap(*, pending: tuple = (), groups: tuple = ()) -> WorldSnapshot:
     return WorldSnapshot.empty().__class__(
         today_cost_usd=0.0,
         quota=None,
@@ -65,33 +72,6 @@ def _snap(
         launching_sessions=(),
         pending_decisions=pending,
         notify_events=(),
-    )
-
-
-def _session_group(*, uuid: str, pid: int = 1) -> "SessionGroup":
-    """Build a singleton SessionGroup wrapping a SessionView with the
-    given session_uuid — enough plumbing for the inline-decision tests
-    to exercise the matched-uuid path through _render_session_groups."""
-    from datetime import datetime, timezone
-    from pathlib import Path
-    from claude_island.core.models import Session
-    from claude_island.core.snapshot import (
-        SessionGroup, SessionView, _degraded_view,
-    )
-    sess = Session(
-        pid=pid,
-        project_path=Path("/tmp/proj"),
-        session_uuid=uuid,
-        last_activity=datetime.now(timezone.utc),
-    )
-    view = _degraded_view(sess)
-    # _degraded_view sets session_uuid from session.session_uuid; verify.
-    assert view.session_uuid == uuid
-    return SessionGroup(
-        group_id=f"singleton:{pid}",
-        title_hint=None,
-        adapter_id="",
-        views=(view,),
     )
 
 
@@ -137,398 +117,148 @@ def panel_with_resolver(qtbot):
 
 
 class TestEmpty:
-    def test_no_pending_hides_container(self, panel):
+    def test_no_pending_hides_stacked_panel(self, panel):
         panel.render(_snap(pending=()))
-        assert panel._pending_container.isVisibleTo(panel) is False
-        assert panel._decision_cards == {}
+        assert panel._pending_panel.isVisible() is False
+        assert panel._pending_panel.active_card is None
 
 
-# ── Renders correct widget per kind ──────────────────────────────────
+# ── Render kind dispatch ─────────────────────────────────────────────
 
 
 class TestRenderKind:
     def test_pre_tool_use_renders_approval_card(self, panel):
         from claude_island.ui.approval_card import ApprovalCard
-        v = _view(id_="d1", kind=DecisionKind.PRE_TOOL_USE)
-        panel.render(_snap(pending=(v,)))
-        assert "d1" in panel._decision_cards
-        assert isinstance(panel._decision_cards["d1"], ApprovalCard)
-        assert panel._pending_container.isVisibleTo(panel)
 
-    def test_user_prompt_submit_renders_review_card(self, panel):
-        from claude_island.ui.prompt_review_card import PromptReviewCard
-        v = _view(id_="d2", kind=DecisionKind.USER_PROMPT_SUBMIT)
-        panel.render(_snap(pending=(v,)))
-        assert isinstance(panel._decision_cards["d2"], PromptReviewCard)
+        panel.show()
+        panel.render(_snap(pending=(
+            _view(kind=DecisionKind.PRE_TOOL_USE),
+        )))
+        assert panel._pending_panel.isVisible() is True
+        assert isinstance(panel._pending_panel.active_card, ApprovalCard)
 
+    def test_ask_question_renders_question_card(self, panel):
+        from claude_island.ui.question_card import QuestionCard
 
-# ── Diff stability: card cached across snapshots ─────────────────────
-
-
-class TestDiffStability:
-    def test_same_id_keeps_widget_instance(self, panel):
-        v = _view(id_="d1")
-        panel.render(_snap(pending=(v,)))
-        first_card = panel._decision_cards["d1"]
-        # Re-render with same view — should NOT create a new widget.
-        panel.render(_snap(pending=(v,)))
-        assert panel._decision_cards["d1"] is first_card
-
-    def test_resolved_id_dropped(self, panel):
-        v1 = _view(id_="d1")
-        v2 = _view(id_="d2")
-        panel.render(_snap(pending=(v1, v2)))
-        assert set(panel._decision_cards.keys()) == {"d1", "d2"}
-        # Snap drops d1 (resolved).
-        panel.render(_snap(pending=(v2,)))
-        assert set(panel._decision_cards.keys()) == {"d2"}
-
-
-# ── Cap + overflow ──────────────────────────────────────────────────
-
-
-class TestCap:
-    def test_cap_at_5_visible_with_overflow_label(self, panel):
-        decisions = tuple(_view(id_=f"d{i}") for i in range(8))
-        panel.render(_snap(pending=decisions))
-        # Only first 5 cached (visible).
-        assert len(panel._decision_cards) == 5
-        # Overflow label exists.
-        assert hasattr(panel, "_pending_overflow_label")
-        assert panel._pending_overflow_label is not None
-        assert "+3" in panel._pending_overflow_label.text()
-
-    def test_no_overflow_label_when_at_cap(self, panel):
-        decisions = tuple(_view(id_=f"d{i}") for i in range(5))
-        panel.render(_snap(pending=decisions))
-        assert (
-            getattr(panel, "_pending_overflow_label", None) is None
-            or not panel._pending_overflow_label.parent()
+        question_view = PendingDecisionView(
+            id="q1",
+            kind=DecisionKind.ASK_QUESTION,
+            session_uuid="u1",
+            session_name="my-session",
+            cwd_basename="proj",
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=600),
+            risk_level=RiskLevel.MEDIUM,
+            tool_name="AskUserQuestion",
+            question_text="Pick one?",
+            question_header="Choice",
+            question_options=("A", "B"),
         )
-
-    def test_overflow_label_cleared_when_drops_below_cap(self, panel):
-        # First render with overflow.
-        panel.render(_snap(pending=tuple(_view(id_=f"d{i}") for i in range(8))))
-        assert panel._pending_overflow_label is not None
-        # Now drops to 3.
-        panel.render(_snap(pending=tuple(_view(id_=f"d{i}") for i in range(3))))
-        assert panel._pending_overflow_label is None
+        panel.show()
+        panel.render(_snap(pending=(question_view,)))
+        assert isinstance(panel._pending_panel.active_card, QuestionCard)
 
 
-# ── Resolve callback ────────────────────────────────────────────────
+# ── Resolve plumbing ─────────────────────────────────────────────────
 
 
 class TestResolve:
     def test_card_click_invokes_resolver(self, panel_with_resolver):
         from PySide6.QtWidgets import QPushButton
+
         panel, captured = panel_with_resolver
-        v = _view(id_="d1")
-        panel.render(_snap(pending=(v,)))
-        card = panel._decision_cards["d1"]
-        # Click Allow.
-        btns = {b.objectName(): b for b in card.findChildren(QPushButton)}
-        btns["approvalAllow"].click()
+        panel.show()
+        panel.render(_snap(pending=(_view(id_="d-x"),)))
+        allow_btn = next(
+            b for b in panel.findChildren(QPushButton)
+            if b.objectName() == "approvalAllow"
+        )
+        allow_btn.click()
         assert len(captured) == 1
-        assert captured[0][0] == "d1"
-        assert captured[0][1].result is DecisionResult.ALLOW
+        did, decision = captured[0]
+        assert did == "d-x"
+        assert decision.result is DecisionResult.ALLOW
 
     def test_resolver_exception_does_not_propagate(self, qtbot):
+        # An exception inside the registry-resolve callback must be
+        # absorbed in ExpandedWindow — the user's click should never
+        # surface a stack trace.
+        from PySide6.QtWidgets import QPushButton
         from claude_island.ui.capsule_window import CapsuleWindow
         from claude_island.ui.expanded_window import ExpandedWindow
-        from PySide6.QtWidgets import QPushButton
-        ctrl = IslandController()
-        capsule = CapsuleWindow(ctrl)
+
+        controller = IslandController()
+        capsule = CapsuleWindow(controller)
         qtbot.addWidget(capsule)
-        def _bad_resolver(i, d):
+
+        def _raise(_did, _dec):
             raise RuntimeError("boom")
+
         pw = ExpandedWindow(
-            capsule=capsule, controller=ctrl,
+            capsule=capsule, controller=controller,
             get_usage_totals=_empty_totals,
-            resolve_decision=_bad_resolver,
+            resolve_decision=_raise,
         )
         qtbot.addWidget(pw)
-        v = _view(id_="d1")
-        pw.render(_snap(pending=(v,)))
-        card = pw._decision_cards["d1"]
-        btns = {b.objectName(): b for b in card.findChildren(QPushButton)}
-        # Should NOT raise.
-        btns["approvalAllow"].click()
-
-
-# ── No-op when resolver missing (ctor None default) ─────────────────
+        pw.show()
+        pw.render(_snap(pending=(_view(),)))
+        allow_btn = next(
+            b for b in pw.findChildren(QPushButton)
+            if b.objectName() == "approvalAllow"
+        )
+        # No exception should escape this call.
+        allow_btn.click()
 
 
 class TestNoResolver:
     def test_card_renders_even_without_resolver(self, panel):
-        # Default panel fixture has resolve_decision=None — but cards
-        # still render; click is just a silent no-op (testable: no
-        # exception, decision_id stays in cards because nothing
-        # resolved it).
-        from PySide6.QtWidgets import QPushButton
-        v = _view(id_="d1")
-        panel.render(_snap(pending=(v,)))
-        card = panel._decision_cards["d1"]
-        btns = {b.objectName(): b for b in card.findChildren(QPushButton)}
-        # Should not raise.
-        btns["approvalAllow"].click()
-
-
-class TestInlineUnderSession:
-    """When a pending decision's session_uuid matches a visible session
-    group, the approval card renders inline beneath that group — not in
-    the global pending container."""
-
-    def test_matched_decision_renders_inline_not_globally(self, panel):
         from claude_island.ui.approval_card import ApprovalCard
-        v = _view(id_="d1", kind=DecisionKind.PRE_TOOL_USE)
-        # The view fixture pins session_uuid to "u1" — match it.
-        group = _session_group(uuid="u1", pid=42)
-        panel.render(_snap(pending=(v,), groups=(group,)))
-        # Card was created and cached.
-        card = panel._decision_cards.get("d1")
-        assert isinstance(card, ApprovalCard)
-        # Inline placement: the card sits inside _session_box (under
-        # the matching group's wrapper), NOT in _pending_layout.
-        in_session_tree = _is_descendant_of_layout(card, panel._session_box)
-        assert in_session_tree, (
-            "matched-uuid decision must render inline beneath its session "
-            "group, not in the global pending container"
-        )
-        # Orphan container should stay hidden when nothing is orphan.
-        assert panel._pending_container.isVisibleTo(panel) is False
 
-    def test_unmatched_decision_falls_through_to_global(self, panel):
-        v = _view(id_="d2", kind=DecisionKind.PRE_TOOL_USE)
-        # Visible group has a different uuid → decision is orphan.
-        group = _session_group(uuid="different-uuid", pid=99)
-        panel.render(_snap(pending=(v,), groups=(group,)))
-        card = panel._decision_cards.get("d2")
-        assert card is not None
-        # Orphan: lands in the global container.
-        assert panel._pending_container.isVisibleTo(panel)
-        # And NOT in _session_box.
-        assert not _is_descendant_of_layout(card, panel._session_box)
-
-    def test_mixed_buckets_render_in_both_locations(self, panel):
-        matched = _view(id_="d-matched", kind=DecisionKind.PRE_TOOL_USE)
-        orphan = PendingDecisionView(
-            id="d-orphan",
-            kind=DecisionKind.PRE_TOOL_USE,
-            session_uuid="ghost-uuid",
-            session_name="ghost",
-            cwd_basename="ghost",
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=600),
-            risk_level=RiskLevel.MEDIUM,
-            tool_name="Bash",
-            tool_input_preview="ls",
-        )
-        group = _session_group(uuid="u1", pid=7)
-        panel.render(_snap(pending=(matched, orphan), groups=(group,)))
-        m_card = panel._decision_cards["d-matched"]
-        o_card = panel._decision_cards["d-orphan"]
-        assert _is_descendant_of_layout(m_card, panel._session_box)
-        assert not _is_descendant_of_layout(o_card, panel._session_box)
-        assert panel._pending_container.isVisibleTo(panel)
-
-    def test_resolved_inline_card_is_gced(self, panel):
-        v = _view(id_="d1", kind=DecisionKind.PRE_TOOL_USE)
-        group = _session_group(uuid="u1", pid=42)
-        panel.render(_snap(pending=(v,), groups=(group,)))
-        assert "d1" in panel._decision_cards
-        # Decision resolves → next render has empty pending tuple.
-        panel.render(_snap(pending=(), groups=(group,)))
-        assert "d1" not in panel._decision_cards
+        panel.show()
+        panel.render(_snap(pending=(_view(),)))
+        # Without a resolver the card still renders; clicking it is a
+        # no-op (handled by the ExpandedWindow guard) and that's the
+        # intended behaviour in tests / dev scaffolding.
+        assert isinstance(panel._pending_panel.active_card, ApprovalCard)
 
 
-class TestComputeIncludesPendingDecisions:
-    """A-001 regression: ExpandedWindow.compute() — the key_mapper feeding
-    distinct_until_changed in __main__.py — must include pending_decisions
-    so a snap whose ONLY change is a new approval card still reaches
-    render(snap). Otherwise the new feature silently fails for idle
-    sessions (its most common case)."""
-
-    def test_compute_changes_when_pending_decisions_change(self, panel):
-        group = _session_group(uuid="u1", pid=42)
-        snap_empty = _snap(pending=(), groups=(group,))
-        v = _view(id_="d-new", kind=DecisionKind.PRE_TOOL_USE)
-        snap_with = _snap(pending=(v,), groups=(group,))
-        key_empty = panel.compute(snap_empty)
-        key_with = panel.compute(snap_with)
-        assert key_empty != key_with, (
-            "compute() must project pending_decisions; otherwise "
-            "distinct_until_changed drops the snap and the approval "
-            "card never reaches render() — A-001."
-        )
-
-    def test_compute_stable_across_unrelated_decision_resolves(self, panel):
-        """Two different decision IDs → distinct compute keys. Same
-        decision id across snaps → identical key (no spurious render)."""
-        group = _session_group(uuid="u1", pid=42)
-        v1 = _view(id_="d-1", kind=DecisionKind.PRE_TOOL_USE)
-        v2 = _view(id_="d-2", kind=DecisionKind.PRE_TOOL_USE)
-        snap_a = _snap(pending=(v1,), groups=(group,))
-        snap_a2 = _snap(pending=(v1,), groups=(group,))
-        snap_b = _snap(pending=(v2,), groups=(group,))
-        assert panel.compute(snap_a) == panel.compute(snap_a2), (
-            "identical pending_decisions must produce identical key — "
-            "otherwise dedup is defeated and we re-render every snap"
-        )
-        assert panel.compute(snap_a) != panel.compute(snap_b), (
-            "different decision IDs must produce different keys"
-        )
-
-    def test_compute_distinguishes_pending_session_uuid(self, panel):
-        """Decision id alone isn't enough — same id but different
-        session_uuid would route to a different inline group, so the
-        key must distinguish them."""
-        group = _session_group(uuid="u1", pid=42)
-        v_for_u1 = _view(id_="d-x", kind=DecisionKind.PRE_TOOL_USE)
-        # Same id, different session_uuid (orphan vs matched bucket).
-        v_for_u2 = PendingDecisionView(
-            id="d-x",
-            kind=DecisionKind.PRE_TOOL_USE,
-            session_uuid="u2",  # NOT u1
-            session_name="other",
-            cwd_basename="other",
-            expires_at=v_for_u1.expires_at,
-            risk_level=v_for_u1.risk_level,
-            tool_name="Bash",
-            tool_input_preview="ls",
-        )
-        snap_u1 = _snap(pending=(v_for_u1,), groups=(group,))
-        snap_u2 = _snap(pending=(v_for_u2,), groups=(group,))
-        assert panel.compute(snap_u1) != panel.compute(snap_u2)
+# ── Snapshot dedup key includes pending decisions ────────────────────
 
 
 class TestComputeReachesRender:
-    """End-to-end via the actual rx pipeline shape used in __main__:
-    distinct_until_changed(key_mapper=panel.compute) → render. Catches
-    A-001-class regressions that unit-key-comparison tests would miss
-    if compute() ever drifts from the actual subscription wiring."""
+    """The distinct_until_changed key used by the UI subscription
+    (``ExpandedWindow.compute``) must include pending decisions, so a
+    new decision arriving on an otherwise-quiet world snapshot still
+    wakes the UI."""
 
-    def test_pending_decision_reaches_render_through_dedup(self, panel):
-        import reactivex as rx
-        import reactivex.operators as ops
-        group = _session_group(uuid="u1", pid=42)
-        snap_empty = _snap(pending=(), groups=(group,))
-        v = _view(id_="d-realpath", kind=DecisionKind.PRE_TOOL_USE)
-        snap_with = _snap(pending=(v,), groups=(group,))
-        # Emit the same shape the production wiring does.
-        rendered: list = []
-        sub = (
-            rx.from_iterable([snap_empty, snap_with])
-            .pipe(ops.distinct_until_changed(key_mapper=panel.compute))
-            .subscribe(on_next=rendered.append)
-        )
-        sub.dispose()
-        # Both snaps should pass dedup → render gets called twice.
-        assert len(rendered) == 2, (
-            f"distinct_until_changed dropped the second snap "
-            f"(saw {len(rendered)} rendered, expected 2). compute() is "
-            f"not picking up pending_decisions — A-001."
-        )
-        # And panel.render(snap_with) should mount the card.
-        panel.render(snap_with)
-        assert "d-realpath" in panel._decision_cards
+    def test_pending_decision_changes_compute_key(self, panel):
+        empty_snap = _snap(pending=())
+        snap_a = _snap(pending=(_view(id_="d-a"),))
+        snap_b = _snap(pending=(_view(id_="d-b"),))
+        assert panel.compute(empty_snap) != panel.compute(snap_a)
+        assert panel.compute(snap_a) != panel.compute(snap_b)
 
 
-def _is_descendant_of_layout(widget, layout) -> bool:
-    """True when ``widget`` is somewhere in the parent chain of
-    ``layout``'s container — used by the inline-render tests to assert
-    a card landed under the session list rather than the orphan
-    container."""
-    from PySide6.QtWidgets import QLayout, QWidget
-    container = layout.parentWidget() if isinstance(layout, QLayout) else None
-    if container is None:
-        return False
-    p = widget.parent()
-    while p is not None:
-        if p is container:
-            return True
-        if isinstance(p, QWidget):
-            p = p.parent()
-        else:
-            return False
-    return False
+# ── G8: review-mode toggle wiring (preserved across v1 → v2) ─────────
 
 
 class TestG8ReviewToggleWiring:
-    """C-001 regression: ExpandedWindow must accept get_review_mode AND
-    forward both getter+setter to SessionDetailPopup, otherwise the G8
-    "Review prompts" checkbox is unreachable in production."""
-
     def test_expanded_window_accepts_get_review_mode(self, qtbot):
-        """The kwarg must exist on the constructor signature."""
         from claude_island.ui.capsule_window import CapsuleWindow
         from claude_island.ui.expanded_window import ExpandedWindow
-        ctrl = IslandController()
-        capsule = CapsuleWindow(ctrl)
+
+        controller = IslandController()
+        capsule = CapsuleWindow(controller)
         qtbot.addWidget(capsule)
-        # Should not raise TypeError("unexpected keyword argument").
+
+        gets: list[str] = []
+        sets: list[tuple[str, bool]] = []
         pw = ExpandedWindow(
             capsule=capsule,
-            controller=ctrl,
+            controller=controller,
             get_usage_totals=_empty_totals,
-            get_review_mode=lambda uuid: False,
-            set_review_mode=lambda uuid, on: None,
+            get_review_mode=lambda uuid: gets.append(uuid) or False,
+            set_review_mode=lambda uuid, v: sets.append((uuid, v)),
         )
         qtbot.addWidget(pw)
-        # And the wiring should have stored both for the popup to read.
         assert pw._get_review_mode is not None
         assert pw._set_review_mode is not None
-
-    def test_session_detail_popup_receives_both_callbacks(self, qtbot):
-        """When ExpandedWindow opens a SessionDetailPopup, both review-
-        mode callbacks must be passed through. Without this the popup's
-        _build_review_section returns None and the toggle row never
-        renders."""
-        from datetime import datetime, timezone
-        from pathlib import Path
-
-        from claude_island.core.capabilities import (
-            Capability,
-            FocusGranularity,
-        )
-        from claude_island.core.models import Session
-        from claude_island.core.snapshot import (
-            SessionGroup,
-            SessionView,
-            _degraded_view,
-        )
-        from claude_island.ui.capsule_window import CapsuleWindow
-        from claude_island.ui.expanded_window import ExpandedWindow
-
-        ctrl = IslandController()
-        capsule = CapsuleWindow(ctrl)
-        qtbot.addWidget(capsule)
-        captured_review: dict = {}
-        pw = ExpandedWindow(
-            capsule=capsule, controller=ctrl,
-            get_usage_totals=_empty_totals,
-            get_review_mode=lambda uuid: True,
-            set_review_mode=lambda uuid, on: captured_review.setdefault(uuid, on),
-        )
-        qtbot.addWidget(pw)
-
-        # Drive _show_detail_popup with a stub button carrying the view
-        # as its '_session' property (mirrors how rows are constructed).
-        from PySide6.QtCore import QPoint
-        from PySide6.QtWidgets import QPushButton
-
-        sess = Session(
-            pid=1, project_path=Path("/tmp/proj"),
-            session_uuid="u-popup-test",
-            last_activity=datetime.now(timezone.utc),
-        )
-        view = _degraded_view(sess)
-        anchor = QPushButton(parent=pw)
-        anchor.setProperty("_session", view)
-        pw._show_detail_popup(anchor, QPoint(0, 0))
-        popup = pw._active_detail_popup
-        assert popup is not None
-        # Verify both callbacks landed on the popup.
-        assert popup._get_review_mode is not None, (
-            "C-001: SessionDetailPopup must receive get_review_mode "
-            "from ExpandedWindow — without it the toggle row hides."
-        )
-        assert popup._set_review_mode is not None

@@ -78,6 +78,37 @@ _PROMPT_MAX = 200
 _ASSISTANT_MAX = 300
 _TOOL_INPUT_MAX = 200
 
+# Keys to probe in a tool_input dict, in priority order, to extract a
+# single human-readable preview string. Mirrors open-vibe-island's
+# ``ClaudeHooks.swift`` toolInputPreview probe order — every well-known
+# tool (Bash, Edit, Glob, Grep, Read, WebFetch, …) exposes one of
+# these. Tools that don't fall through to the AskUserQuestion shape
+# check and finally to a JSON fallback (with ensure_ascii=False so CJK
+# / non-ASCII stays human-readable).
+_TOOL_INPUT_PREVIEW_KEYS: tuple[str, ...] = (
+    "command", "file_path", "pattern", "query",
+    "prompt", "description", "skill", "url",
+)
+
+# AskUserQuestion uses an MCP-style tool_input shape that has no
+# single-string field. The questions list carries the human-readable
+# text; we surface the first question here so the UI preview is
+# meaningful instead of raw JSON.
+_ASK_USER_QUESTION_KEY = "questions"
+_ASK_USER_QUESTION_TEXT_FIELD = "question"
+_ASK_USER_QUESTION_HEADER_FIELD = "header"
+_ASK_USER_QUESTION_OPTIONS_FIELD = "options"
+_ASK_USER_QUESTION_OPTION_LABEL_FIELD = "label"
+_ASK_USER_QUESTION_OPTION_DESC_FIELD = "description"
+_ASK_USER_QUESTION_MULTISELECT_FIELD = "multiSelect"
+
+# Tool names whose PermissionRequest should be routed to the question
+# (option-picker) UI instead of the standard Allow/Deny approval card.
+# Frozen for thread-safety and to signal "extend by editing here".
+_QUESTION_TOOL_NAMES: frozenset[str] = frozenset({
+    "AskUserQuestion",
+})
+
 # Bidirectional-hook timeouts (Bidirectional Hooks v1, 2026-05-14).
 #
 # Claude Code's command-hook timeout defaults to 600 s. We wait that
@@ -309,9 +340,47 @@ class HookServer:
         if hook_name == "SessionEnd":
             self._handle_session_end(payload)
             return b"{}"
+        if hook_name in ("PostToolUse", "PostToolUseFailure", "PermissionDenied"):
+            # An external resolution happened — Claude finished the
+            # tool (PostToolUse / PostToolUseFailure) or the user
+            # denied in the terminal (PermissionDenied). Either way,
+            # the matching island card is stale and must disappear
+            # so the user isn't asked to decide what's already
+            # decided. See open-vibe-island/BridgeServer.swift:774.
+            self._maybe_mark_resolved_by_post(payload, hook_name)
+            return b"{}"
         return b"{}"
 
     # ── bidirectional handlers ──────────────────────────────────────────
+
+    def _maybe_mark_resolved_by_post(
+        self, payload: dict, hook_name: str,
+    ) -> None:
+        """Bridge PostToolUse / PostToolUseFailure into the pending
+        registry so the UI card disappears as soon as Claude reports
+        the tool finished.
+
+        Errors are swallowed: this is best-effort UI cleanup. The
+        state-machine apply already ran upstream in ``_handle_post``;
+        a registry failure here must not break that path."""
+        if self._pending is None:
+            return
+        try:
+            session_uuid = _safe_str(payload.get("session_id"))
+            if not session_uuid:
+                return
+            tool_use_id = _str_or_none(payload.get("tool_use_id"))
+            tool_name = _str_or_none(payload.get("tool_name"))
+            if not tool_use_id and not tool_name:
+                return
+            self._pending.mark_externally_resolved_by_tool(
+                session_uuid,
+                tool_use_id=tool_use_id,
+                tool_name=tool_name,
+                observed=hook_name.lower(),
+            )
+        except Exception:
+            log.exception("mark_externally_resolved_by_tool raised; ignored")
 
     def _handle_permission_request(self, payload: dict) -> bytes:
         """Decide allow / deny for a PermissionRequest event.
@@ -345,21 +414,56 @@ class HookServer:
 
         cwd = _safe_path(payload.get("cwd"))
         session_name = self._resolve_session_name(uuid, cwd)
-        preview = _extract_tool_input_preview(payload.get("tool_input"))
+        tool_input = payload.get("tool_input")
+        preview = _extract_tool_input_preview(tool_input)
+        tool_use_id = _str_or_none(payload.get("tool_use_id"))
+
+        # Tools shaped like AskUserQuestion get routed to the question
+        # (option-picker) UI variant; everything else goes through the
+        # standard PRE_TOOL_USE (Allow/Deny) approval card. Malformed
+        # question payloads fall back to the PRE_TOOL_USE path so the
+        # server never hard-fails on a partial input.
+        parsed_question = (
+            _parse_question_input(tool_input)
+            if tool_name in _QUESTION_TOOL_NAMES
+            else None
+        )
 
         try:
-            req = build_request(
-                kind=DecisionKind.PRE_TOOL_USE,
-                session_uuid=uuid,
-                session_name=session_name,
-                cwd=cwd,
-                hook_event="PermissionRequest",
-                timeout_s=_BLOCKING_HOOK_TIMEOUT_S,
-                tool_name=tool_name,
-                # _extract_tool_input_preview already truncates to
-                # _TOOL_INPUT_MAX upstream; no second cap needed.
-                tool_input_preview=preview or None,
-            )
+            if parsed_question is not None:
+                req = build_request(
+                    kind=DecisionKind.ASK_QUESTION,
+                    session_uuid=uuid,
+                    session_name=session_name,
+                    cwd=cwd,
+                    hook_event="PermissionRequest",
+                    timeout_s=_BLOCKING_HOOK_TIMEOUT_S,
+                    tool_name=tool_name,
+                    tool_input_preview=preview or None,
+                    tool_use_id=tool_use_id,
+                    question_text=parsed_question.text,
+                    question_header=parsed_question.header,
+                    question_options=parsed_question.options,
+                    question_option_descriptions=parsed_question.option_descriptions,
+                    multi_select=parsed_question.multi_select,
+                )
+            else:
+                req = build_request(
+                    kind=DecisionKind.PRE_TOOL_USE,
+                    session_uuid=uuid,
+                    session_name=session_name,
+                    cwd=cwd,
+                    hook_event="PermissionRequest",
+                    timeout_s=_BLOCKING_HOOK_TIMEOUT_S,
+                    tool_name=tool_name,
+                    # _extract_tool_input_preview already truncates to
+                    # _TOOL_INPUT_MAX upstream; no second cap needed.
+                    tool_input_preview=preview or None,
+                    # Carried so a later PostToolUse / PostToolUseFailure
+                    # can be correlated back to this entry and clear the
+                    # UI card without waiting out the 598 s timeout.
+                    tool_use_id=tool_use_id,
+                )
             decision_id = self._pending.register(req)
         except RegistryFull:
             log.warning(
@@ -749,25 +853,114 @@ def _encode_userpromptsubmit_inject(context: str) -> bytes:
     }).encode("utf-8")
 
 
+@dataclass(frozen=True, slots=True)
+class _ParsedQuestion:
+    """Structured projection of AskUserQuestion's first question.
+    Returned by ``_parse_question_input`` so the caller doesn't have to
+    re-walk the JSON shape."""
+    text: str
+    header: str | None
+    options: tuple[str, ...]
+    option_descriptions: tuple[str, ...]
+    multi_select: bool
+
+
+def _parse_question_input(tool_input: Any) -> _ParsedQuestion | None:
+    """Pull the structured question out of an AskUserQuestion payload.
+
+    Returns None if the shape doesn't match — caller falls back to
+    regular PRE_TOOL_USE handling so a malformed payload never blocks
+    the hook server entirely.
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    questions = tool_input.get(_ASK_USER_QUESTION_KEY)
+    if not isinstance(questions, list) or not questions:
+        return None
+    first = questions[0]
+    if not isinstance(first, dict):
+        return None
+    text = first.get(_ASK_USER_QUESTION_TEXT_FIELD)
+    if not isinstance(text, str) or not text:
+        return None
+
+    raw_options = first.get(_ASK_USER_QUESTION_OPTIONS_FIELD)
+    if not isinstance(raw_options, list) or not raw_options:
+        return None
+    labels: list[str] = []
+    descs: list[str] = []
+    for opt in raw_options:
+        if not isinstance(opt, dict):
+            continue
+        label = opt.get(_ASK_USER_QUESTION_OPTION_LABEL_FIELD)
+        if not isinstance(label, str) or not label:
+            continue
+        labels.append(label)
+        desc = opt.get(_ASK_USER_QUESTION_OPTION_DESC_FIELD)
+        descs.append(desc if isinstance(desc, str) else "")
+    if not labels:
+        return None
+    # All descs empty → drop the tuple entirely so the view doesn't
+    # carry a parallel array of "" that the validator would still let
+    # through but the UI would render as empty subtitle slots.
+    descriptions_tuple: tuple[str, ...] = (
+        tuple(descs) if any(d for d in descs) else ()
+    )
+    header = first.get(_ASK_USER_QUESTION_HEADER_FIELD)
+    return _ParsedQuestion(
+        text=text,
+        header=header if isinstance(header, str) and header else None,
+        options=tuple(labels),
+        option_descriptions=descriptions_tuple,
+        multi_select=bool(first.get(_ASK_USER_QUESTION_MULTISELECT_FIELD, False)),
+    )
+
+
+def _extract_ask_user_question_preview(tool_input: dict) -> str | None:
+    """Surface the first question text from an AskUserQuestion tool_input.
+
+    Shape: ``{"questions": [{"question": str, ...}, ...]}``. Returns
+    ``None`` when the shape doesn't match (caller falls through to the
+    generic preview path). When multiple questions are present, the
+    first one's text is suffixed with ``(+N more)``.
+    """
+    questions = tool_input.get(_ASK_USER_QUESTION_KEY)
+    if not isinstance(questions, list) or not questions:
+        return None
+    first = questions[0]
+    if not isinstance(first, dict):
+        return None
+    text = first.get(_ASK_USER_QUESTION_TEXT_FIELD)
+    if not isinstance(text, str) or not text:
+        return None
+    extra = len(questions) - 1
+    return f"{text}  (+{extra} more)" if extra > 0 else text
+
+
 def _extract_tool_input_preview(tool_input: Any) -> str | None:
     """Pull the most renderable single string out of tool_input.
 
-    Mirrors open-vibe-island's logic (ClaudeHooks.swift toolInputPreview):
-    for an object, prefer command / file_path / pattern / query / prompt /
-    description / skill / url. For other types, render to string.
+    Probe order:
+      1. Well-known single-string keys (``_TOOL_INPUT_PREVIEW_KEYS``).
+      2. AskUserQuestion shape (first question text).
+      3. JSON fallback with ``ensure_ascii=False`` — keeps CJK / Unicode
+         human-readable instead of ``\\u6307\\u6570`` escapes the
+         default ``json.dumps`` emits.
     """
     if tool_input is None:
         return None
     if isinstance(tool_input, dict):
-        for key in (
-            "command", "file_path", "pattern", "query",
-            "prompt", "description", "skill", "url",
-        ):
+        for key in _TOOL_INPUT_PREVIEW_KEYS:
             v = tool_input.get(key)
             if isinstance(v, str) and v:
                 return _truncate(v, _TOOL_INPUT_MAX)
-        # Fallback: stringify
-        return _truncate(json.dumps(tool_input, default=str), _TOOL_INPUT_MAX)
+        question_text = _extract_ask_user_question_preview(tool_input)
+        if question_text is not None:
+            return _truncate(question_text, _TOOL_INPUT_MAX)
+        return _truncate(
+            json.dumps(tool_input, default=str, ensure_ascii=False),
+            _TOOL_INPUT_MAX,
+        )
     if isinstance(tool_input, str):
         return _truncate(tool_input, _TOOL_INPUT_MAX) if tool_input else None
     return _truncate(repr(tool_input), _TOOL_INPUT_MAX)
