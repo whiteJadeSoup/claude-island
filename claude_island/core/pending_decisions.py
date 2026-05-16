@@ -155,6 +155,16 @@ class Decision:
     reason: str | None = None              # required when DENY/BLOCK
     additional_context: str | None = None  # required when INJECT
     remember: bool = False                 # only meaningful for ALLOW + PRE_TOOL_USE
+    # ASK_QUESTION answer relay: maps each question's text → the picked
+    # option(s). HookServer merges this into the original ``tool_input``
+    # as ``answers`` and returns it via ``hookSpecificOutput.decision
+    # .updatedInput`` so Claude's AskUserQuestion tool sees the user's
+    # choice on its first read and skips the terminal stdin prompt.
+    # Mirrors open-vibe-island ``BridgeServer.swift:2434-2481``.
+    # Modelled as a tuple of (question_text, answer) pairs instead of a
+    # dict so the dataclass stays frozen + hashable; HookServer rebuilds
+    # the dict at merge time.
+    answers: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.result in (DecisionResult.DENY, DecisionResult.BLOCK) and not self.reason:
@@ -163,6 +173,8 @@ class Decision:
             raise ValueError("INJECT requires non-empty additional_context")
         if self.remember and self.result is not DecisionResult.ALLOW:
             raise ValueError("remember=True only valid with ALLOW")
+        if self.answers and self.result is not DecisionResult.ALLOW:
+            raise ValueError("answers only valid with ALLOW")
 
 
 @dataclass(frozen=True, slots=True)

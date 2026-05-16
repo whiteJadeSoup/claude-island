@@ -401,6 +401,63 @@ class TestAskUserQuestionRouting:
                 )
             t.join(timeout=2.0)
 
+    def test_answer_relay_emits_updated_input_for_askuserquestion(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        """When the user picks an option in island, the hook response
+        must carry the picked label back to Claude as updatedInput so
+        AskUserQuestion's tool body skips the terminal stdin prompt.
+        Mirrors open-vibe-island BridgeServer.swift:2434-2481."""
+        from claude_island.core.pending_decisions import Decision, DecisionResult
+        srv, port = server
+        responses: dict = {}
+
+        def _send():
+            try:
+                status, body = _post(port, {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "u-relay",
+                    "tool_name": "AskUserQuestion",
+                    "tool_input": {
+                        "questions": [{
+                            "question": "Size?",
+                            "options": [{"label": "S"}, {"label": "M"}],
+                            "multiSelect": False,
+                        }],
+                    },
+                    "cwd": "/tmp/proj",
+                }, timeout=10.0)
+                responses["status"] = status
+                responses["body"] = body
+            except Exception as e:
+                responses["error"] = repr(e)
+
+        t = threading.Thread(target=_send, daemon=True)
+        t.start()
+        try:
+            self._wait_for_pending(registry)
+            snap = registry.snapshot()
+            registry.resolve(snap[0].id, Decision(
+                result=DecisionResult.ALLOW,
+                reason="picked: M",
+                answers=(("Size?", "M"),),
+            ))
+            t.join(timeout=3.0)
+            assert "status" in responses
+            assert responses["status"] == 200
+            inner = responses["body"]["hookSpecificOutput"]
+            # Nested form: hookSpecificOutput.decision.{behavior, updatedInput}
+            assert inner["hookEventName"] == "PermissionRequest"
+            decision_obj = inner["decision"]
+            assert decision_obj["behavior"] == "allow"
+            updated = decision_obj["updatedInput"]
+            # Original input preserved + answers added
+            assert "questions" in updated
+            assert updated["answers"] == {"Size?": "M"}
+        finally:
+            t.join(timeout=1.0)
+
+
     def test_malformed_question_falls_back_to_pre_tool_use(
         self, server, registry: PendingDecisionRegistry,
     ):

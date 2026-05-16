@@ -125,6 +125,72 @@ def test_single_select_pick_resolves_immediately_with_reason(app):
     assert "picked" in (dec.reason or "")
 
 
+def test_single_select_decision_carries_answers(app):
+    """The hook layer needs decision.answers populated to build
+    updatedInput; the reason field alone isn't enough."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.question_card import QuestionCard
+
+    calls, cb = _captured_resolve()
+    card = QuestionCard(
+        _view(question="Pick size?", options=("S", "M", "L")),
+        on_resolve=cb,
+    )
+    app.addWidget(card)
+    options = [
+        b for b in card.findChildren(QPushButton)
+        if b.objectName() == "questionOption"
+    ]
+    options[1].click()   # M
+    _, dec = calls[0]
+    assert dec.answers == (("Pick size?", "M"),)
+
+
+def test_multi_select_decision_carries_comma_list_answer(app):
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.question_card import QuestionCard
+
+    calls, cb = _captured_resolve()
+    card = QuestionCard(
+        _view(multi_select=True, question="Features?",
+              options=("A", "B", "C")),
+        on_resolve=cb,
+    )
+    app.addWidget(card)
+    options = [
+        b for b in card.findChildren(QPushButton)
+        if b.objectName() == "questionOption"
+    ]
+    options[0].click()
+    options[2].click()
+    submit = next(
+        b for b in card.findChildren(QPushButton)
+        if b.objectName() == "questionSubmit"
+    )
+    submit.click()
+    _, dec = calls[0]
+    assert dec.answers == (("Features?", "A, C"),)
+
+
+def test_skip_does_not_carry_answers(app):
+    """Skip path is "user will answer in terminal" — the decision
+    must NOT pretend an answer was given, or the hook layer would
+    relay an empty/wrong answer back to Claude."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.question_card import QuestionCard
+
+    calls, cb = _captured_resolve()
+    card = QuestionCard(_view(), on_resolve=cb)
+    app.addWidget(card)
+    skip = next(
+        b for b in card.findChildren(QPushButton)
+        if b.objectName() == "questionSkip"
+    )
+    skip.click()
+    _, dec = calls[0]
+    assert dec.answers == ()
+
+
 def test_single_select_focus_terminal_invoked_with_session_uuid(app):
     from PySide6.QtWidgets import QPushButton
     from claude_island.ui.question_card import QuestionCard

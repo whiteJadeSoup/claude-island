@@ -492,6 +492,19 @@ class HookServer:
             self._perm.grant(uuid, tool_name)
 
         if decision.result is DecisionResult.ALLOW:
+            if decision.answers:
+                # Answer relay for AskUserQuestion: merge the user's
+                # picks into the original tool_input under "answers"
+                # and return them via updatedInput so Claude's tool
+                # sees the choice on its first read and skips the
+                # stdin prompt. Mirrors open-vibe-island
+                # mergedClaudeQuestionInput (BridgeServer.swift:2434).
+                merged = _merge_answers_into_tool_input(
+                    tool_input, decision.answers,
+                )
+                return _encode_permission_request(
+                    "allow", updated_input=merged,
+                )
             return _encode_permission_request("allow")
         if decision.result is DecisionResult.DENY:
             return _encode_permission_request(
@@ -818,19 +831,46 @@ def _truncate(s: str, max_len: int) -> str:
 
 
 def _encode_permission_request(
-    permission: str, *, reason: str | None = None,
+    permission: str,
+    *,
+    reason: str | None = None,
+    updated_input: dict | None = None,
 ) -> bytes:
-    """PermissionRequest directive: ``permissionDecision`` ∈
-    {"allow", "deny", "ask", "defer"} inside ``hookSpecificOutput``.
-    Same shape as PreToolUse — Claude Code uses the same decision schema
-    on every permission-bearing hook event; ``hookEventName`` is the only
-    field that varies. See Claude Code spec §PermissionRequest."""
-    inner: dict = {
-        "hookEventName": "PermissionRequest",
-        "permissionDecision": permission,
-    }
+    """PermissionRequest directive.
+
+    Two output shapes — both accepted by Claude Code:
+
+    * **Legacy (default)** — ``hookSpecificOutput.permissionDecision``
+      ∈ {"allow", "deny", "ask", "defer"}. Same shape as PreToolUse.
+
+    * **Nested (when ``updated_input`` is given)** —
+      ``hookSpecificOutput.decision = {behavior, reason?, updatedInput}``.
+      Required to carry ``updatedInput``, which Claude merges into
+      ``tool_input`` before executing the tool. Used by the
+      AskUserQuestion answer-relay so the user's island-side pick
+      reaches Claude without re-prompting on stdin. See
+      https://code.claude.com/docs/en/hooks for the schema.
+
+    Kept as one helper because every caller already routes its
+    ``allow``/``deny``/``defer`` through here — splitting would
+    duplicate the JSON envelope.
+    """
+    if updated_input is None:
+        inner: dict = {
+            "hookEventName": "PermissionRequest",
+            "permissionDecision": permission,
+        }
+        if reason:
+            inner["permissionDecisionReason"] = reason
+        return json.dumps({"hookSpecificOutput": inner}).encode("utf-8")
+    decision: dict = {"behavior": permission}
     if reason:
-        inner["permissionDecisionReason"] = reason
+        decision["reason"] = reason
+    decision["updatedInput"] = updated_input
+    inner = {
+        "hookEventName": "PermissionRequest",
+        "decision": decision,
+    }
     return json.dumps({"hookSpecificOutput": inner}).encode("utf-8")
 
 
@@ -914,6 +954,26 @@ def _parse_question_input(tool_input: Any) -> _ParsedQuestion | None:
         option_descriptions=descriptions_tuple,
         multi_select=bool(first.get(_ASK_USER_QUESTION_MULTISELECT_FIELD, False)),
     )
+
+
+def _merge_answers_into_tool_input(
+    tool_input: Any,
+    answers: tuple[tuple[str, str], ...],
+) -> dict:
+    """Build the ``updatedInput`` payload for an AskUserQuestion allow.
+
+    Copies the original ``tool_input`` (defensively defaulting to ``{}``
+    if it wasn't a dict) and adds an ``answers`` key mapping each
+    question's text to the user's pick — keys mirror what Claude's
+    AskUserQuestion tool expects so it skips the stdin prompt and
+    emits the tool result directly.
+
+    Shape matches open-vibe-island ``mergedClaudeQuestionInput``
+    (BridgeServer.swift:2434-2481).
+    """
+    merged: dict = dict(tool_input) if isinstance(tool_input, dict) else {}
+    merged["answers"] = {q: a for q, a in answers}
+    return merged
 
 
 def _extract_ask_user_question_preview(tool_input: dict) -> str | None:

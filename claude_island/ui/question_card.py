@@ -435,8 +435,18 @@ class QuestionCard(QFrame):
     def _emit_picked(self, indices: list[int]) -> None:
         labels = [self._view.question_options[i] for i in indices]
         reason = f"{_REASON_PICKED_PREFIX} " + " | ".join(labels)
+        # Pack the answer for the hook layer's updatedInput merge —
+        # comma list mirrors open-vibe-island for multi-select.
+        answer_value = ", ".join(labels)
+        answers: tuple[tuple[str, str], ...] = (
+            (self._view.question_text or "", answer_value),
+        ) if self._view.question_text else ()
         self._emit_decision(
-            Decision(result=DecisionResult.ALLOW, reason=reason),
+            Decision(
+                result=DecisionResult.ALLOW,
+                reason=reason,
+                answers=answers,
+            ),
             focus_terminal=True,
         )
 
