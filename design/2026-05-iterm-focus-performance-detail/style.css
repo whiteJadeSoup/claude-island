@@ -1,0 +1,222 @@
+/* Shared style for iTerm Focus Performance — Detail Design sections */
+:root {
+  --fg: #1f2328;
+  --muted: #6e7781;
+  --bg: #ffffff;
+  --bg-alt: #f6f8fa;
+  --border: #d0d7de;
+  --accent: #0969da;
+  --accent-bg: #ddf4ff;
+  --warn-bg: #fff8c5;
+  --warn-border: #d4a72c;
+  --new: #1a7f37;
+  --new-bg: #dafbe1;
+  --mod: #9a6700;
+  --mod-bg: #fff8c5;
+  --code: #24292f;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.55 -apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC",
+        "Microsoft YaHei", sans-serif;
+}
+
+main {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 36px 32px 80px;
+}
+
+header.section-head {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 14px;
+  margin-bottom: 24px;
+}
+header.section-head .crumb {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+header.section-head h1 {
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: -0.01em;
+}
+header.section-head .trace {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+header.section-head .trace b { color: var(--fg); }
+
+h2 {
+  margin-top: 32px;
+  font-size: 19px;
+  letter-spacing: -0.01em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+h3 {
+  margin-top: 22px;
+  font-size: 16px;
+}
+
+p { margin: 10px 0; }
+
+code, pre, kbd, .mono {
+  font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: var(--code);
+}
+:not(pre) > code {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+pre {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 14px;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+th { background: var(--bg-alt); }
+td.center { text-align: center; }
+
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  vertical-align: middle;
+  margin-left: 4px;
+  letter-spacing: 0.02em;
+}
+.tag.new { color: var(--new); background: var(--new-bg); border-color: #b4e2c1; }
+.tag.mod { color: var(--mod); background: var(--mod-bg); border-color: #e6c668; }
+.tag.unc { color: var(--muted); background: var(--bg-alt); border-color: var(--border); }
+
+.callout {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-bg);
+  padding: 10px 14px;
+  margin: 14px 0;
+  border-radius: 0 6px 6px 0;
+}
+.callout.warn {
+  border-left-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+.callout h4 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.legend {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+ul, ol { padding-left: 22px; }
+li { margin: 4px 0; }
+
+.contract {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin: 14px 0;
+}
+.contract h4 {
+  margin: 0 0 6px;
+  font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+  font-size: 14px;
+  color: var(--code);
+}
+.contract dl { margin: 6px 0 0; }
+.contract dt {
+  font-weight: 600;
+  font-size: 13px;
+  margin-top: 8px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.contract dd { margin: 2px 0 0; }
+
+nav.section-nav {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 48px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 14px;
+}
+nav.section-nav a {
+  color: var(--accent);
+  text-decoration: none;
+}
+nav.section-nav a:hover { text-decoration: underline; }
+nav.section-nav .disabled { color: var(--muted); }
+
+/* ── Mermaid figure ─────────────────────────────────────── */
+
+figure.mermaid-fig {
+  margin: 18px 0 8px;
+  padding: 18px 12px 8px;
+  background: #fbfcfe;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-align: center;
+  overflow-x: auto;
+}
+figure.mermaid-fig .mermaid {
+  display: inline-block;
+  min-width: 320px;
+}
+figure.mermaid-fig figcaption {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* ── Inline legend chips for in-prose component refs ──── */
+
+.chip {
+  display: inline-block;
+  font-size: 12px;
+  font-family: "SF Mono", Menlo, monospace;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+}
+.chip.new { color: #0a3d1e; background: #dafbe1; border-color: #b4e2c1; }
+.chip.mod { color: #3b2300; background: #fff8c5; border-color: #e6c668; }
+.chip.unc { color: #24292f; background: var(--bg-alt); border-color: var(--border); }
+.chip.ext { color: #0a2540; background: #ddf4ff; border-color: #a0c8f0; }

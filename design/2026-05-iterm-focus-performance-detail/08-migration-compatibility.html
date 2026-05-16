@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Detail §8 · Migration &amp; Compatibility</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+
+<header class="section-head">
+  <div class="crumb">iTerm Focus Performance — Detail Design</div>
+  <h1>§8 · Migration &amp; Compatibility</h1>
+  <div class="trace">
+    Traces to Overview · <b>G4</b>（PyObjC 不可用降级）· <b>G5</b>（其他 dispatch 不变）
+    + §1 契约演化的可观察影响
+  </div>
+</header>
+
+<div class="callout">
+<h4>一句话总结</h4>
+本变更<b>无数据迁移、无配置变更、无 API 破坏</b>。
+落地方式 = 单次合并；回滚方式 = git revert。
+真正需要讨论的"兼容性"集中在<b>运行时降级</b>（PyObjC 缺失）与<b>契约语义演化</b>
+（<code>focus()</code> 返回 True 的含义微调）。
+</div>
+
+<h2>8.1 没有 schema migration ── 为什么</h2>
+
+<table>
+<tr><th>常见 migration 触发点</th><th>本变更</th></tr>
+<tr><td>数据库 schema 改动</td><td>无任何数据库</td></tr>
+<tr><td>持久化 JSON / TOML 文件格式</td><td>无文件读写</td></tr>
+<tr><td>环境变量 / 配置项新增</td><td>不新增（明确决定，§3.3 reject 阈值硬编码）</td></tr>
+<tr><td>命令行参数</td><td>不变</td></tr>
+<tr><td>IPC 协议（hook ↔ daemon）</td><td>不变；fast-path 只读已有 <code>jump_target</code></td></tr>
+<tr><td>包依赖</td><td><code>pyobjc-framework-Cocoa</code> 已声明在 <code>pyproject.toml:31</code>；不需新增</td></tr>
+</table>
+
+<h2>8.2 落地步骤（部署视角）</h2>
+
+<figure class="mermaid-fig">
+<div class="mermaid">
+flowchart LR
+  classDef step fill:#dafbe1,stroke:#1a7f37,color:#0a3d1e
+  classDef gate fill:#ddf4ff,stroke:#0969da,color:#0a2540
+
+  A[1 · Detail Design 评审通过]:::gate
+  B[2 · 实现 + unit/integration 测试]:::step
+  C[3 · 本地 e2e 验证 G2 p95]:::step
+  D[4 · PR 评审 / ultrareview]:::gate
+  E[5 · 合并到 master]:::step
+  F[6 · 生产观察 1 周]:::step
+  G[7 · 如有问题 git revert<br/>否则关闭]:::gate
+
+  A --> B --> C --> D --> E --> F --> G
+</div>
+<figcaption>图 10 · 落地步骤（无 canary / dual-write / backfill / version flag）</figcaption>
+</figure>
+
+<p>
+对照 design-plan-guide 给的模板"add column → dual-write → backfill → switch readers → drop old"：
+本变更<b>每一步都不需要</b>。原因是 fast-path 是"前置叠加层"，
+失败时退到与改动前完全一致的代码路径 —— 不存在"老数据要迁过来 / 新读者要切过去"的状态。
+</p>
+
+<h2>8.3 回滚路径</h2>
+
+<table>
+<tr><th>回滚触发条件</th><th>动作</th><th>恢复时间</th></tr>
+<tr>
+  <td>生产观察 G1 / G2 不达标</td>
+  <td><code>git revert</code> + 重新发版</td>
+  <td>分钟级</td>
+</tr>
+<tr>
+  <td>个别用户机器 fast-path 异常</td>
+  <td>无需 revert：fast-path 自动 fallback 到现有路径（§4 设计）</td>
+  <td>瞬时</td>
+</tr>
+<tr>
+  <td>NSAppleScript 在某 macOS 版本上整体不可用</td>
+  <td>同上 —— cache invalidate 阈值触发后该机器 worker 走 subprocess 兜底</td>
+  <td>3 次点击后自动降级</td>
+</tr>
+<tr>
+  <td>FocusWorker 线程在某机器上死锁累计崩溃</td>
+  <td>引入 module-level <code>CLAUDE_ISLAND_DISABLE_ITERM_FAST_FOCUS=1</code> 环境变量（v2 才加）<br>
+      v1 应对方案 = 用户 revert 到上一版</td>
+  <td>v2 加：瞬时；v1：等待新版本</td>
+</tr>
+</table>
+
+<div class="callout warn">
+<h4>为什么 v1 不加 kill-switch 环境变量</h4>
+项目 CLAUDE.md 设计原则反对"未触发的需求驱动的 feature flag"。
+fast-path 的失败是<b>per-call 自动降级</b>到现有 fallback，不需要全局开关。
+如果出现"整个 fast-path 在某机器上必须禁用"的需求且 fallback 机制不足以应对，再补 kill-switch 也来得及。
+</div>
+
+<h2>8.4 契约演化的影响面（详）</h2>
+
+<p>
+§1 已说明 <code>focus()</code> 返回 <code>True</code> 的含义演化。本节做完整影响面盘点。
+</p>
+
+<table>
+<tr><th>消费者</th><th>读返回值</th><th>读后做什么</th><th>语义改动后是否仍正确</th></tr>
+<tr>
+  <td><code>TerminalDispatcher.dispatch</code></td>
+  <td>是</td>
+  <td>仅 <code>log.info("dispatch: ... returned False")</code></td>
+  <td>仍正确 ── 语义"宿主前置"比"pane 精度落地"是更弱保证，但 dispatch 不区分</td>
+</tr>
+<tr>
+  <td><code>ExpandedWindow._on_row_clicked</code></td>
+  <td><b>否</b></td>
+  <td>不读返回值；靠 <code>WindowDeactivate</code> 自动隐藏面板</td>
+  <td>仍正确</td>
+</tr>
+<tr>
+  <td><code>CapsuleWindow</code></td>
+  <td>否</td>
+  <td>不调 FOCUS</td>
+  <td>不涉及</td>
+</tr>
+<tr>
+  <td>测试 stub <code>StubDispatcher.dispatch</code> 在 <code>test_dispatcher.py</code></td>
+  <td>是</td>
+  <td>用于断言"是否触发"</td>
+  <td>仍正确（True 仍代表"路径走通"）</td>
+</tr>
+<tr>
+  <td>任何未来想根据 "pane 精度真落地" 决策的消费者</td>
+  <td>不存在</td>
+  <td>—</td>
+  <td>未来若需要，应在 worker 侧暴露独立 Signal，<b>不</b>改 <code>focus()</code> 同步返回值</td>
+</tr>
+</table>
+
+<h2>8.5 运行时降级矩阵</h2>
+
+<p>枚举"用户机器上哪些条件不满足 → fast-path 哪一段会被降级"，便于运维诊断。</p>
+
+<table>
+<tr><th>条件</th><th>检测点</th><th>降级范围</th><th>用户感知</th></tr>
+<tr>
+  <td>PyObjC 完全缺失</td>
+  <td>模块首次 import</td>
+  <td>整个 fast-path</td>
+  <td>退回 ~250 ms 同步行为</td>
+</tr>
+<tr>
+  <td>PyObjC 部分（AppKit 有，Foundation 缺）</td>
+  <td>NSAppleScript 模块 import 时</td>
+  <td>worker pane select；fast-path 主线程仍工作</td>
+  <td>宿主前置 fast，pane 精度退回 subprocess</td>
+</tr>
+<tr>
+  <td>System Events 权限被吊销</td>
+  <td>worker 收到 errno=-1743</td>
+  <td>fast-path worker；fallback 也将失败</td>
+  <td>点击无响应；log.error 引导用户去设置</td>
+</tr>
+<tr>
+  <td>iTerm Automation 权限被吊销</td>
+  <td>同上但 errno 在 <code>tell application "iTerm"</code> 块内</td>
+  <td>同上</td>
+  <td>同上</td>
+</tr>
+<tr>
+  <td>jump_target 缺失（旧 hook.py / 非 hook 进 session）</td>
+  <td>fast-path 入口</td>
+  <td>多 ~0.3 ms 的 <code>_iterm_host_pid</code> 调用</td>
+  <td>无感（仍在 G1 预算内）</td>
+</tr>
+<tr>
+  <td>iTerm 进程僵死</td>
+  <td>worker backlog &gt; 10</td>
+  <td>reject 新提交（§3.3）</td>
+  <td>面板隐藏正常，pane 精度停在旧位置</td>
+</tr>
+<tr>
+  <td>iTerm 未运行</td>
+  <td>NSRunningApplication 返回 nil</td>
+  <td>fast-path 转 fallback</td>
+  <td>fallback 也会失败（iTerm 不存在）；点击无响应 = 与现状一致</td>
+</tr>
+</table>
+
+<h2>8.6 与其他终端适配器的关系</h2>
+
+<table>
+<tr><th>适配器</th><th>是否受本变更影响</th><th>说明</th></tr>
+<tr>
+  <td><code>ITerm2Adapter</code></td>
+  <td>是</td>
+  <td>本设计的主体</td>
+</tr>
+<tr>
+  <td><code>TerminalApp</code>（macOS Terminal.app）</td>
+  <td>否</td>
+  <td>独立 <code>focus()</code> 实现；用 Terminal.app 自己的 AppleScript 字典；不在本次范围（Non-Goal）</td>
+</tr>
+<tr>
+  <td><code>GenericMacAdapter</code></td>
+  <td>否</td>
+  <td>调 <code>focus_host_app</code>，与 iTerm 不重叠</td>
+  </tr>
+<tr>
+  <td><code>WindowsTerminalAdapter</code> / <code>GenericWindowsAdapter</code></td>
+  <td>否</td>
+  <td>Windows-only；模块级 import guard 已确保 macOS 代码不会被 import 到 Windows 进程</td>
+</tr>
+</table>
+
+<h2>8.7 配置 / 文档变更</h2>
+
+<table>
+<tr><th>文件</th><th>是否需要更新</th><th>内容</th></tr>
+<tr>
+  <td><code>CLAUDE.md</code></td>
+  <td>否</td>
+  <td>架构层面无变化；fast-path 是 <code>platform_/terminals/iterm2.py</code> 内部细化，
+      不触动三层架构 / WorldSnapshot / capability framework</td>
+</tr>
+<tr>
+  <td><code>README.md</code></td>
+  <td>否</td>
+  <td>用户视角不变</td>
+</tr>
+<tr>
+  <td><code>pyproject.toml</code> 依赖声明</td>
+  <td>否</td>
+  <td>pyobjc-framework-Cocoa 已存在</td>
+</tr>
+<tr>
+  <td><code>pyproject.toml</code> import-linter 规则</td>
+  <td>否</td>
+  <td>无新增跨层 import；fast-path 全部在 <code>platform_/</code> 内</td>
+</tr>
+<tr>
+  <td>本设计文档</td>
+  <td>归档</td>
+  <td>合并后将 Detail Design HTML 作为产物档案保留在 <code>design/</code>，
+      不要把 detail 内容反向同步进 CLAUDE.md（避免文档漂移）</td>
+</tr>
+</table>
+
+<h2>8.8 验证清单（合并前必过）</h2>
+
+<table>
+<tr><th></th><th>项</th><th>负责</th></tr>
+<tr><td>☐</td><td>§7 所列 unit + integration 测试全绿</td><td>实现者</td></tr>
+<tr><td>☐</td><td>本地 e2e 验证 G1 / G2 达标</td><td>实现者</td></tr>
+<tr><td>☐</td><td><code>python -m import_linter</code> 通过</td><td>CI</td></tr>
+<tr><td>☐</td><td>现有 <code>test_iterm2_adapter.py</code> / <code>test_dispatcher.py</code> 零修改通过</td><td>CI</td></tr>
+<tr><td>☐</td><td>code review 覆盖 §1 契约演化是否被任何消费者 break</td><td>reviewer</td></tr>
+<tr><td>☐</td><td><code>/ultrareview</code> 跑完无 blocking issue</td><td>用户触发</td></tr>
+<tr><td>☐</td><td>手测：双 iTerm 实例场景下 host_pid 路由仍正确（G3 不退化）</td><td>实现者</td></tr>
+<tr><td>☐</td><td>手测：System Events 权限拒绝时 error log 引导用户到设置</td><td>实现者</td></tr>
+</table>
+
+<h2>8.9 验收完成定义</h2>
+
+<ol>
+  <li>所有 §7 测试用例通过</li>
+  <li>本地 4-session 真实 iTerm 上 G1 / G2 达标</li>
+  <li>双 iTerm 实例切换不退化（与最近的多实例修复一致）</li>
+  <li>PyObjC ImportError 模拟下 fallback 行为字节一致</li>
+  <li>PR review 通过 + ultrareview 通过</li>
+</ol>
+
+<nav class="section-nav">
+  <a href="07-testing-strategy.html">← §7 · Testing Strategy</a>
+  <a href="index.html">索引 →</a>
+</nav>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif',
+      fontSize: '13px',
+      primaryColor: '#ffffff',
+      primaryBorderColor: '#d0d7de',
+      lineColor: '#57606a',
+      tertiaryColor: '#f6f8fa'
+    },
+    flowchart: { curve: 'basis', padding: 14 }
+  });
+</script>
+</body>
+</html>

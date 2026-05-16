@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Detail §3 · Core Algorithms / State Machines</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+
+<header class="section-head">
+  <div class="crumb">iTerm Focus Performance — Detail Design</div>
+  <h1>§3 · Core Algorithms / State Machines</h1>
+  <div class="trace">
+    Traces to Overview · <b>G2</b>（p95 ≤ 50 ms wall-time）· <b>G3</b>（pane 精度不退化）
+    + §2 遗留的 4 个策略问题
+  </div>
+</header>
+
+<div class="callout">
+<h4>本节回答 4 个 §2 遗留问题</h4>
+<ol>
+  <li>AppleScriptCache <b>何时</b>从 READY 滑入 INVALIDATED（阈值与计数语义）</li>
+  <li><b>id → tty</b> 回退的决策链（含异常路径）</li>
+  <li>FocusWorker backlog 溢出怎么办（reject vs drop）</li>
+  <li>连续点击要不要 coalescing（明确不做的论证）</li>
+</ol>
+</div>
+
+<h2>3.1 AppleScriptCache 生命周期状态机</h2>
+
+<figure class="mermaid-fig">
+<div class="mermaid">
+stateDiagram-v2
+direction LR
+
+[*] --> UNCOMPILED : module import
+
+UNCOMPILED --> READY : get_handler()<br/>编译成功
+UNCOMPILED --> COMPILE_FAILED : NSAppleScript<br/>compileAndReturnError 失败
+
+COMPILE_FAILED --> [*] : 不重试<br/>worker 降级 subprocess
+
+READY --> READY : execute → "ok"<br/>note_success()<br/>counter ← 0
+READY --> FAILING : execute → 异常 / nil<br/>note_failure()<br/>counter ← 1
+
+FAILING --> READY : execute → "ok"<br/>note_success()<br/>counter ← 0
+FAILING --> FAILING : execute → 异常<br/>counter += 1<br/>(counter &lt; 3)
+FAILING --> INVALIDATED : counter ≥ 3<br/>invalidate()
+
+INVALIDATED --> UNCOMPILED : 下次 get_handler()<br/>清空 _id_script / _tty_script
+</div>
+<figcaption>图 3 · AppleScriptCache 状态机（per-handler，id 与 tty 各持一份）</figcaption>
+</figure>
+
+<table>
+<tr><th>状态</th><th>不变量</th><th>下一步可能性</th></tr>
+<tr><td><code>UNCOMPILED</code></td><td><code>_*_script is None</code></td><td>触发懒编译</td></tr>
+<tr><td><code>READY</code></td><td><code>_*_script is not None</code> 且 <code>counter == 0</code></td><td>正常执行</td></tr>
+<tr><td><code>FAILING</code></td><td><code>_*_script is not None</code> 且 <code>0 &lt; counter &lt; 3</code></td><td>下一次 ok 恢复 / 再失败累计</td></tr>
+<tr><td><code>INVALIDATED</code></td><td>瞬态：单一 task 帧内由 <code>note_failure</code> 触发 <code>invalidate</code>，紧接着进入 <code>UNCOMPILED</code></td><td>下次访问重编译</td></tr>
+<tr><td><code>COMPILE_FAILED</code></td><td>终态（per process）。worker 跳过该 handler 走 subprocess 兜底</td><td>—</td></tr>
+</table>
+
+<h3>3.1.1 阈值 = 3 的取舍</h3>
+
+<table>
+<tr><th>候选</th><th>过紧（=1）</th><th>过松（=10）</th><th><b>=3</b>（采用）</th></tr>
+<tr>
+  <td>误触发率</td>
+  <td>高 —— 一次偶发 iTerm 锁死就重编译，浪费 ~50 ms × 后续每次首调用</td>
+  <td>低</td>
+  <td>低 —— 连续 3 次失败属于"系统态确实变了"信号</td>
+</tr>
+<tr>
+  <td>恢复延迟</td>
+  <td>≤ 1 次点击后恢复</td>
+  <td>~10 次点击后才恢复</td>
+  <td>~3 次点击后恢复，用户感受不到滞后</td>
+</tr>
+<tr>
+  <td>实现复杂度</td>
+  <td>无</td>
+  <td>无</td>
+  <td>同 ── 单 int 计数</td>
+</tr>
+</table>
+
+<p>
+<b>计数粒度</b>：per-handler 独立（<code>_id_script</code> 与 <code>_tty_script</code> 各持各的计数）。
+理由：tty handler 失败往往来自 psutil 给的 tty 已过期，与 id handler 的脚本健康度无关；
+共享计数会让两个独立健康度互相污染。
+</p>
+
+<p>
+<b>恢复</b>：任一次成功 (<code>execute → "ok"</code>) 立即归零。
+"miss" <b>不</b>算失败 —— 那是脚本健康但目标确实不在 iTerm 里（id 过期 / tty 不属于该 iTerm）；
+对应路径是回退到下一 handler 或放弃，不应惩罚 cache。
+</p>
+
+<h2>3.2 Pane select 决策链</h2>
+
+<figure class="mermaid-fig">
+<div class="mermaid">
+flowchart TB
+  classDef ok fill:#dafbe1,stroke:#1a7f37,color:#0a3d1e
+  classDef bad fill:#ffebe9,stroke:#cf222e,color:#82071e
+  classDef neu fill:#f6f8fa,stroke:#6e7781,color:#24292f
+
+  S(["_PaneSelectTask.run()"]):::neu
+  Q1{session_id 非空?}:::neu
+  E1["id_handler.executeAppleEvent_error_"]:::neu
+  R1{ret}:::neu
+  Q2{tty 非空?}:::neu
+  E2["tty_handler.executeAppleEvent_error_"]:::neu
+  R2{ret}:::neu
+  DONE_OK[log.debug<br/>note_success]:::ok
+  DONE_MISS[log.info<br/>pane select miss]:::bad
+  NOTE_FAIL[note_failure<br/>counter++]:::bad
+
+  S --> Q1
+  Q1 -- yes --> E1
+  E1 --> R1
+  R1 -- ok --> DONE_OK
+  R1 -- miss --> Q2
+  R1 -- exception/nil --> NOTE_FAIL
+  NOTE_FAIL --> Q2
+  Q1 -- no --> Q2
+  Q2 -- yes --> E2
+  E2 --> R2
+  R2 -- ok --> DONE_OK
+  R2 -- miss --> DONE_MISS
+  R2 -- exception/nil --> NOTE_FAIL2[note_failure<br/>counter++]:::bad
+  NOTE_FAIL2 --> DONE_MISS
+  Q2 -- no --> DONE_MISS
+</div>
+<figcaption>图 4 · _PaneSelectTask.run() 决策链（绿 = 用户得到正确 pane，红 = 仅宿主前置）</figcaption>
+</figure>
+
+<h3>3.2.1 为什么 id miss 后还试 tty</h3>
+
+<p>
+id 是 hook 在 <code>SessionStart</code> 时捕获、写进 <code>view.jump_target</code> 的"档案值"。
+它可能过期的场景：iTerm 重启、session 窗口被关、用户主动 detach 后又 attach 到新 session
+（iTerm 重用 id 概率极低，但 tty 的过期场景更常见）。tty 是<b>主线程构造 task 时</b>
+通过 <code>psutil.Process(pid).terminal()</code> 实时取的，所以新鲜度更高。
+两条线索互补 —— 一个偏稳定但可能陈旧，一个偏新鲜但可能不存在（pid 已死）。
+</p>
+
+<h3>3.2.2 为什么 miss 与 exception 走不同路径</h3>
+
+<table>
+<tr><th>返回</th><th>归属</th><th>处理</th></tr>
+<tr><td><code>"ok"</code></td><td>成功</td><td>note_success（健康度归零）+ 立即返回</td></tr>
+<tr><td><code>"miss"</code></td><td>脚本健康，目标不在</td><td>不动 cache 计数，进入下一条线索</td></tr>
+<tr><td>抛 PyObjC 异常 / 返回 nil + errorDict</td><td>脚本本身出问题</td><td>note_failure（健康度恶化）+ 进入下一条线索</td></tr>
+</table>
+
+<p>
+区分两者的目的：避免把"目标真的不存在"误判为"脚本坏了"。
+前者每次冷启动 / iTerm 重启都会发生一次，是正常波动；
+后者意味着脚本对象需要重建（极少见，但发生时缓存就该 invalidate）。
+</p>
+
+<h2>3.3 FocusWorker backlog 溢出策略</h2>
+
+<table>
+<tr><th>backlog</th><th>含义</th><th>策略</th></tr>
+<tr>
+  <td><code>0 – 1</code></td>
+  <td>稳态（人类点击间隔 ≫ 100 ms）</td>
+  <td>正常入队</td>
+</tr>
+<tr>
+  <td><code>2 – 3</code></td>
+  <td>iTerm 偶发慢（GC / 多窗口刷新）</td>
+  <td>正常入队，DEBUG 日志</td>
+</tr>
+<tr>
+  <td><code>4 – 9</code></td>
+  <td>异常：iTerm 卡死或用户暴击点击</td>
+  <td>正常入队 + <code>log.warning("FocusWorker backlog=%d")</code></td>
+</tr>
+<tr>
+  <td><code>≥ 10</code></td>
+  <td>系统抖动 / iTerm 进程僵死</td>
+  <td><b>reject</b> 新提交 + <code>log.error</code>，调用方直接走 <code>focus_host_app</code> 兜底</td>
+</tr>
+</table>
+
+<h3>3.3.1 为什么 reject 而不是 drop-oldest</h3>
+
+<p>
+两种策略的语义差别：
+</p>
+
+<ul>
+  <li><b>drop-oldest</b>：保留最新点击，丢弃过期请求。"用户最后看见的应当是他最后点击的 pane"。<br>
+    <span style="color:var(--muted)">但 Qt 的 <code>QThreadPool</code> 没有"从队列中取出任意 task"的 API；
+    实现要么是给每个 task 加 generation 序号 + run() 首行自检（额外的 main-thread 写共享变量），
+    要么自己实现一个带锁的 deque + worker 线程 —— 这是大改动。</span></li>
+  <li><b>reject-newest</b>（采用）：新提交被拒，前面排队的任务不变。<br>
+    <span style="color:var(--muted)">天然契合 QThreadPool API：在 submit 前检查 <code>activeThreadCount + queueLen</code>，
+    超阈值直接 return False。零额外状态、零跨线程协议。</span></li>
+</ul>
+
+<p>
+<b>对用户的可观察影响</b>：触发 reject 时 <code>focus()</code> 在主线程已经成功
+<code>NSRunningApplication.activate</code>，所以宿主仍然到前台，
+只是 pane 精度可能停留在前一次的位置 —— 与今日"iTerm 慢一拍"的体验完全一致，不构成新退化。
+</p>
+
+<h2>3.4 连续点击的 coalescing 决策 ── <span style="color:var(--muted)">v1 不实现</span></h2>
+
+<table>
+<tr><th>场景</th><th>不做 coalescing 的实际后果</th><th>结论</th></tr>
+<tr>
+  <td>用户连续点同一 view</td>
+  <td>多个 task 排队跑同一 (host_pid, id) 上的 select；
+    AppleScript 引擎对幂等命令的处理是 O(1) 重复。</td>
+  <td>无感</td>
+</tr>
+<tr>
+  <td>用户在 view A → view B 间快速切换</td>
+  <td>A 的 task 跑完后 select A 的 pane；
+    B 的 task 跑完后 select B 的 pane，覆盖 A。
+    主线程的 <code>NSRunningApplication.activate(B)</code> 已让 B 的宿主前置，
+    所以 user 最终看到的就是 B 的 pane。</td>
+  <td>无感</td>
+</tr>
+<tr>
+  <td>用户在两个 iTerm 实例之间反复切换</td>
+  <td>worker 串行执行；最后一次 task 决定终态。</td>
+  <td>无感</td>
+</tr>
+<tr>
+  <td>路径过载（backlog ≥ 10）</td>
+  <td>触发 §3.3 的 reject 策略 —— 与 coalescing 不重叠。</td>
+  <td>覆盖了</td>
+</tr>
+</table>
+
+<p>
+<b>结论</b>：v1 不做 task-level coalescing。
+若 §7 的 e2e 用例或后续生产观察显示需要，可在 worker 内加一个轻量的
+"latest generation per host_pid" 计数器 —— 但目前没有任何证据这是必要的。
+</p>
+
+<h2>3.5 主线程内 fast-path 的决策序列</h2>
+
+<p>本图与图 4 区分开 —— 这一段全部在 <b>Qt 主线程</b>跑，且必须维持 §1 给的 ≤ 5 ms 预算。</p>
+
+<figure class="mermaid-fig">
+<div class="mermaid">
+flowchart TB
+  classDef ok fill:#dafbe1,stroke:#1a7f37,color:#0a3d1e
+  classDef bad fill:#fff8c5,stroke:#9a6700,color:#3b2300
+  classDef neu fill:#f6f8fa,stroke:#6e7781,color:#24292f
+
+  IN([focus·view]):::neu
+  P1{PyObjC import 成功?}:::neu
+  P2{view 有可解析的 host_pid?<br/>jump_target.terminal_pid<br/>or _iterm_host_pid·pid}:::neu
+  P3[NSRunningApplication<br/>.runningApplicationWithProcessIdentifier]:::neu
+  P4{nil?}:::neu
+  P5[".activate·IgnoringOtherApps"]:::neu
+  P6{返回 YES?}:::neu
+
+  S1{view 提供 session_id 或 tty?}:::neu
+  S2["FocusWorker.submit·_PaneSelectTask"]:::neu
+
+  OK([return True · 宿主已前置]):::ok
+  FB1([degrade: subprocess osascript<br/>focus_host_app·pid]):::bad
+  FB2([degrade: 同上 · pid path]):::bad
+
+  IN --> P1
+  P1 -- 是 --> P2
+  P1 -- 否·ImportError --> FB1
+  P2 -- 是 --> P3
+  P2 -- 否 --> FB2
+  P3 --> P4
+  P4 -- 是 --> FB2
+  P4 -- 否 --> P5
+  P5 --> P6
+  P6 -- 否 --> FB2
+  P6 -- 是 --> S1
+  S1 -- 是 --> S2
+  S1 -- 否 --> OK
+  S2 --> OK
+</div>
+<figcaption>图 5 · focus() 主线程决策序列（黄色 = 退到 ~250 ms 同步兜底；绿色 = fast-path 命中）</figcaption>
+</figure>
+
+<h3>3.5.1 PyObjC 与 host_pid 的检测时机</h3>
+
+<p>
+<b>PyObjC import</b>：<code>focus()</code> 第一次被调用时执行 <code>try: from AppKit import NSRunningApplication</code>，
+结果缓存到模块级 <code>_HAS_PYOBJC: bool</code>。一次性成本 ~30 ms 出现在<b>用户首次点击</b>，
+但此时面板已经显示完毕，用户感知不到（输入响应在 Qt 内部已 ack）；
+后续每次点击是模块级布尔判断（~ns）。
+</p>
+
+<p>
+<b>host_pid 解析</b>：优先用 <code>view.jump_target.terminal_pid</code>（hook 已捕获，命中率高），
+落到 <code>_iterm_host_pid(view.session.pid)</code> 兜底，~0.3 ms 量级，主线程可承受。
+</p>
+
+<h2>3.6 不变量小结（供 §7 测试用）</h2>
+
+<table>
+<tr><th>#</th><th>不变量</th><th>违反的可观察症状</th></tr>
+<tr>
+  <td>I-1</td>
+  <td>同一时刻最多 1 个 <code>_PaneSelectTask</code> 在 <code>NSAppleScript.executeAppleEvent</code> 内</td>
+  <td>偶发 <code>NSInternalInconsistencyException</code> 崩溃（Apple 文档预警）</td>
+</tr>
+<tr>
+  <td>I-2</td>
+  <td><code>AppleScriptCache._consecutive_failures</code> 单调上限 ≤ 3，"ok" 必归零</td>
+  <td>RAM 中数字漂移到大值；后续 task 永远在重编译路径，性能退化</td>
+</tr>
+<tr>
+  <td>I-3</td>
+  <td>主线程 fast-path 的 <code>focus()</code> 总耗时 &lt; 5 ms（warm）</td>
+  <td>面板隐藏视觉延迟回归到现状</td>
+</tr>
+<tr>
+  <td>I-4</td>
+  <td><code>focus()</code> 返回 <code>True</code> ⇔ 用户能在 ≤ 100 ms 内看见目标 iTerm 实例的某个窗口前置</td>
+  <td>panel hide 但宿主没起来 —— 比当前更差</td>
+</tr>
+<tr>
+  <td>I-5</td>
+  <td>所有 fallback 路径（PyObjC 缺失 / host_pid 解析失败）走的代码与当前完全一致</td>
+  <td>降级路径出现新 bug</td>
+</tr>
+</table>
+
+<nav class="section-nav">
+  <a href="02-data-model.html">← §2 · Data Model</a>
+  <a href="04-error-handling.html">§4 · Error Handling →</a>
+</nav>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif',
+      fontSize: '13px',
+      primaryColor: '#ffffff',
+      primaryBorderColor: '#d0d7de',
+      lineColor: '#57606a',
+      tertiaryColor: '#f6f8fa'
+    },
+    flowchart: { curve: 'basis', padding: 14 }
+  });
+</script>
+</body>
+</html>
