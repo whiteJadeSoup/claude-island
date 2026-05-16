@@ -48,6 +48,7 @@ Failure modes
 """
 from __future__ import annotations
 
+import logging
 import shlex
 import subprocess
 from dataclasses import replace
@@ -65,12 +66,15 @@ from claude_island.core.capabilities import (
 )
 from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionGroup, SessionView
-from claude_island.platform_.terminals import adapter
+from claude_island.platform_.terminals import _iterm_fast_path, adapter
 from claude_island.platform_.terminals._macos_common import (
     focus_host_app,
     prewarm_ui_pid_cache,
 )
 from claude_island.platform_.terminals.protocols import TerminalAdapter
+
+
+log = logging.getLogger(__name__)
 
 # Process-ancestry detection. iTerm2 spawns shells whose parents
 # (eventually) reach the iTerm2.app helper; psutil exposes the chain.
@@ -337,40 +341,108 @@ class ITerm2Adapter(_CapabilityProvider):
         ``siblings`` is accepted for kwargs uniformity with the WT
         adapter, but ignored — iTerm2 exposes pane-level identity
         directly via tty matching, so there's no need for a sibling
-        fallback. Selecting the right pane + tab + activating the
-        app is one round-trip.
+        fallback.
 
-        Falls back to "raise iTerm2 to front" (no pane precision) on
-        any tty-match miss: psutil failure, no controlling terminal,
-        AppleScript error, or "miss" return. Common when the session
-        runs in tmux inside iTerm2 (the claude pid's tty is the tmux
-        pty, not in iTerm2's session tree) or when AppleScript
-        enumeration permission is denied for iTerm but not for System
-        Events. Without this fallback, those clicks were silent
-        no-ops; with it, the user at least gets the app raised.
+        Two-tier strategy
+        -----------------
+        1. **Fast path** (PyObjC + in-process AppKit): main thread
+           calls ``NSRunningApplication.activate`` on the resolved iTerm
+           host pid (~0.3 ms warm), then schedules a worker-thread
+           ``NSAppleScript`` pane select. The host raise is what the
+           user perceives — the panel's WindowDeactivate fires
+           immediately and iTerm appears in front.
+        2. **Legacy fallback** (subprocess osascript): preserved
+           verbatim from the pre-fast-path implementation. Triggers
+           when PyObjC is unavailable, host pid can't be resolved, or
+           ``NSRunningApplication.activate`` reports failure.
+
+        Returns ``True`` if either path put iTerm in front. The
+        "True" semantics shifted slightly between paths — fast-path
+        returns True after host raise (pane select is fire-and-forget),
+        legacy returns True after a full subprocess round-trip
+        including pane select. No caller distinguishes (dispatcher
+        only logs on False; UI doesn't read the return value).
         """
         del siblings
-        # ── Fast path: hook-captured identifiers ────────────────────
-        # When the SessionStart hook ran inside the claude process it
-        # may have populated ``view.jump_target`` with the iTerm
-        # session id (stable across tty drift) and the host iTerm2
-        # pid (stable across multi-install ambiguity). When both are
-        # present we skip all psutil walks entirely — one osascript
-        # round-trip and we're done.
         jt = view.jump_target
-        if jt is not None and jt.iterm_session_id and jt.terminal_pid > 0:
+
+        # ── Fast path ──────────────────────────────────────────────
+        host_pid = self._resolve_host_pid(view, jt)
+        if host_pid is not None and host_pid > 0:
+            # Prefer hook-captured iterm_session_id when present — it's
+            # stable across tty drift and avoids the click-time psutil
+            # syscall. Only fall back to a psutil tty lookup when the
+            # hook didn't capture an id (older hook.py, capture race,
+            # session that started outside iTerm).
+            session_id: str | None = (
+                jt.iterm_session_id
+                if jt is not None and jt.iterm_session_id
+                else None
+            )
+            tty: str | None = None if session_id else self._resolve_tty(view)
+            try:
+                if _iterm_fast_path.try_fast_path(
+                    host_pid=host_pid,
+                    session_id=session_id,
+                    tty=tty,
+                ):
+                    return True
+            except Exception as e:
+                # Fast-path module should never raise — it has its own
+                # exception boundary — but if it does, log and fall
+                # through to legacy so the click is never silent.
+                log.warning("iterm2 fast-path raised; falling back: %s", e)
+
+        # ── Legacy fallback (unchanged behaviour) ──────────────────
+        return self._legacy_focus(view, jt)
+
+    def _resolve_host_pid(
+        self, view: SessionView, jt: object | None,
+    ) -> int | None:
+        """Pick the iTerm2 host pid for ``view``.
+
+        Prefers hook-captured ``jump_target.terminal_pid``; falls back
+        to the runtime ancestor walk. Returns None when neither yields
+        a valid pid (placeholder session, no iTerm ancestor)."""
+        if jt is not None and getattr(jt, "terminal_pid", 0) > 0:
+            return int(jt.terminal_pid)  # type: ignore[attr-defined]
+        if view.session.pid > 0:
+            return _iterm_host_pid(view.session.pid)
+        return None
+
+    def _resolve_tty(self, view: SessionView) -> str | None:
+        """psutil-based tty lookup, defensively swallowing all failures.
+
+        Returns None for placeholder pids, dead processes, or psutil
+        absence — caller treats None as "no tty signal available"."""
+        if view.session.pid <= 0:
+            return None
+        try:
+            import psutil
+        except ImportError:
+            return None
+        try:
+            return psutil.Process(view.session.pid).terminal()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return None
+
+    def _legacy_focus(self, view: SessionView, jt: object | None) -> bool:
+        """Pre-fast-path implementation, preserved verbatim.
+
+        Used when the PyObjC fast-path can't run (ImportError, host pid
+        unresolvable, activate failure). Same subprocess osascript
+        chain we shipped before fast-path: id-match → tty-match →
+        ``focus_host_app`` (just raise the app, no pane precision)."""
+        if jt is not None and getattr(jt, "iterm_session_id", "") and getattr(jt, "terminal_pid", 0) > 0:
             if _focus_by_session_id(
-                jt.iterm_session_id, host_pid=jt.terminal_pid,
+                jt.iterm_session_id,  # type: ignore[attr-defined]
+                host_pid=jt.terminal_pid,  # type: ignore[attr-defined]
             ):
                 return True
             # Captured id didn't resolve (iTerm restarted, session
             # closed). Fall through to the slow path which re-derives
-            # everything from psutil. Don't return False yet —
-            # focus_host_app via the slow path may still raise the
-            # right app to the front.
+            # everything from psutil.
 
-        # Placeholder pid (<=0): no real process → no tty to match. Fall
-        # straight to the host-app raise so the click isn't a silent no-op.
         if view.session.pid <= 0:
             return focus_host_app(view.session.pid)
         try:
@@ -381,19 +453,12 @@ class ITerm2Adapter(_CapabilityProvider):
             tty = psutil.Process(view.session.pid).terminal()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return focus_host_app(view.session.pid)
-        # Resolve the host iTerm2 pid. Prefer the hook-captured value
-        # on the jump_target; fall back to walking the ancestor chain
-        # at click time. The runtime walk handles older hook scripts
-        # and the macOS-Terminal.app path where capture didn't run.
         host_pid = (
-            jt.terminal_pid
-            if jt is not None and jt.terminal_pid > 0
+            jt.terminal_pid  # type: ignore[attr-defined]
+            if jt is not None and getattr(jt, "terminal_pid", 0) > 0
             else _iterm_host_pid(view.session.pid)
         )
         if host_pid is None:
-            # No iTerm2 ancestor found (race / unusual chain). Skip the
-            # tty-precision script entirely and fall back to the
-            # generic host-app raise, which walks System Events itself.
             return focus_host_app(view.session.pid)
         if tty and _focus_by_tty(tty, host_pid=host_pid):
             return True
