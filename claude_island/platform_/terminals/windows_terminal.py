@@ -53,6 +53,27 @@ _MAX_ANCESTOR_DEPTH = 10
 _WT_CLASS_PREFIX = "CASCADIA_HOSTING_WINDOW_CLASS"
 
 
+def _is_wt_window(hwnd: int, win32gui_mod) -> bool:
+    """Return True iff ``hwnd`` has the Windows Terminal window class.
+
+    Used by the fast-path before calling ``SetForegroundWindow`` to
+    defend against hwnd recycle — a stale ``conhost_hwnd`` from a
+    JumpTarget whose original window has been closed might GW_OWNER-
+    walk to a hwnd whose value has been reissued to an unrelated
+    process. Without this check we'd raise the wrong window
+    (review finding C-004 / D-5).
+
+    Cheap: one win32gui.GetClassName syscall (~50 µs).
+    """
+    if hwnd <= 0:
+        return False
+    try:
+        cls = win32gui_mod.GetClassName(hwnd)
+    except Exception:
+        return False
+    return bool(cls and cls.startswith(_WT_CLASS_PREFIX))
+
+
 def _wt_window_signature(win32gui_mod) -> int:
     """Hash the current set of WT top-level HWNDs.
 
@@ -521,12 +542,119 @@ class WindowsTerminalAdapter(_CapabilityProvider):
             ):
                 prehook_conhost = view.jump_target.conhost_hwnd
 
+        sib_sentinels_tuple = tuple(sib_sentinels)
+
+        # Fast path (2026-05): resolve wt_hwnd from prehook or
+        # adapter cache, raise WT on the main thread, then defer the
+        # UIA tab-select chain to the worker thread. See
+        # ``design/2026-05-wt-focus-performance.md`` for the rationale.
+        # Falls through to the legacy synchronous chain when:
+        #   * fast-path module deps are missing (non-Win, no pywin32,
+        #     no uiautomation, no pythoncom),
+        #   * neither prehook nor cache yields a valid wt_hwnd,
+        #   * the resolved hwnd is no longer a WT class window
+        #     (defends against hwnd recycle — review finding C-004),
+        #   * SetForegroundWindow fails (lets the legacy chain's
+        #     AttachThreadInput / SwitchToThisWindow passes run).
+        if self._try_fast_path(
+            view=view,
+            expected=expected,
+            sib_sentinels=sib_sentinels_tuple,
+            prehook_conhost=prehook_conhost,
+        ):
+            return True
+
+        # Legacy fallback (unchanged behaviour).
         return _activate_windows(
             view.session.pid,
             expected_title=expected,
-            sibling_sentinels=tuple(sib_sentinels),
+            sibling_sentinels=sib_sentinels_tuple,
             prehook_conhost_hwnd=prehook_conhost,
         )
+
+    def _try_fast_path(
+        self,
+        *,
+        view: SessionView,
+        expected: str,
+        sib_sentinels: tuple[str, ...],
+        prehook_conhost: int,
+    ) -> bool:
+        """Fast-path orchestrator. Returns True iff the WT window was
+        raised on the main thread AND the worker task was scheduled.
+
+        Main-thread budget (G1):
+          * wt_hwnd resolve (~1–5 ms)
+          * GetClassName validation (~50 µs)
+          * ``_force_foreground`` happy path (~5 ms warm)
+          * Task submit (~50 µs)
+          ≈ 6–11 ms total in the prehook-hit cohort.
+        """
+        try:
+            import win32con
+            import win32gui
+            import win32process
+        except ImportError:
+            return False
+
+        wt_hwnd = self._resolve_wt_hwnd_fast(
+            view, prehook_conhost, win32gui,
+        )
+        if wt_hwnd is None or wt_hwnd <= 0:
+            return False
+        if not _is_wt_window(wt_hwnd, win32gui):
+            return False
+
+        from claude_island.platform_.window_activator import _force_foreground
+        if not _force_foreground(wt_hwnd, win32con, win32gui, win32process):
+            return False
+
+        # Schedule async tab-select. If submission fails (deps missing,
+        # backlog full, construction error) the window is still raised —
+        # the user sees WT in front; the tab just stays where it was.
+        from claude_island.platform_.terminals import _wt_fast_path
+        _wt_fast_path.try_schedule(
+            pid=view.session.pid,
+            wt_hwnd=wt_hwnd,
+            expected_title=expected,
+            sibling_sentinels=sib_sentinels,
+        )
+        return True
+
+    def _resolve_wt_hwnd_fast(
+        self,
+        view: SessionView,
+        prehook_conhost: int,
+        win32gui,
+    ) -> int | None:
+        """Resolve wt_hwnd without an AttachConsole round-trip.
+
+        Resolution order (per review B-001 / Q-1):
+          1. ``prehook_conhost_hwnd`` (hook-captured) → GW_OWNER walk
+          2. ``self._wt_hwnd_cache`` (populated by group()) → direct hit
+          3. None — caller falls back to the legacy synchronous chain
+        """
+        from claude_island.platform_.window_activator import walk_to_visible_host
+
+        if prehook_conhost > 0:
+            try:
+                if win32gui.IsWindow(prehook_conhost):
+                    host = walk_to_visible_host(prehook_conhost, win32gui)
+                    if host is not None:
+                        return host
+            except Exception:
+                pass
+
+        if view.session.pid > 0:
+            cached = self._wt_hwnd_cache.get(view.session.pid)
+            if cached:
+                try:
+                    if win32gui.IsWindow(cached):
+                        return cached
+                except Exception:
+                    pass
+
+        return None
 
     # ── LAUNCH ───────────────────────────────────────────────────────────
 
