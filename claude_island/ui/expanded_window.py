@@ -566,7 +566,13 @@ _DOT_GRAY = "#52525b"     # ≥ 24h
 # Brighter, more saturated green for the running state — distinct from
 # _DOT_GREEN (freshness) so the pulsing animation reads as "live now"
 # rather than "recent". Tested at 12 px and 14 px font sizes.
-_DOT_RUNNING = "#22c55e"
+#
+# v3: sourced from lab_palette so the glyph and the capsule's mini-wave
+# can't drift — both now resolve to Color.phosphor.  Behaviour-equivalent
+# default for legacy ``set_state(STATE_RUNNING)`` callers that don't
+# pass a bar_color.
+from claude_island.ui.lab_palette import Color as _LabColor
+_DOT_RUNNING = _LabColor.phosphor
 
 
 class _RowStatusGlyph(QWidget):
@@ -694,6 +700,36 @@ class _RowStatusGlyph(QWidget):
         elif prev == self.STATE_RUNNING and state != self.STATE_RUNNING:
             self._anim.stop()
         self.update()
+
+    def set_phase(
+        self,
+        phase: "SessionPhase",
+        *,
+        idle_dot_color: str | None = None,
+    ) -> None:
+        """v3 entry point: drive both the wave-vs-dot state AND the
+        bar's tint from a SessionPhase.
+
+        Phase → behaviour:
+          IDLE / ENDED         → static dot (uses idle_dot_color, default grey)
+          THINKING             → amber wave
+          TOOL_USE             → phosphor wave
+          WAITING_APPROVAL     → red-warm wave
+          COMPACTING           → amber-dim wave
+
+        Underneath this just dispatches to ``set_state`` with the
+        appropriate bar_color — so legacy bool callers and v3 phase
+        callers compete for the same single-source-of-truth animation.
+        """
+        from claude_island.core.session_phase import SessionPhase as _SP
+        if phase in (_SP.IDLE, _SP.ENDED):
+            self.set_state(self.STATE_IDLE, dot_color=idle_dot_color)
+            return
+        try:
+            bar = _LabColor.for_phase(phase)
+        except KeyError:
+            bar = _DOT_RUNNING
+        self.set_state(self.STATE_RUNNING, bar_color=bar)
 
     def state(self) -> str:
         """Currently-displayed state (one of STATE_*)."""
@@ -5095,7 +5131,21 @@ class ExpandedWindow(QWidget):
         # Mint pattern: the expensive value highlights itself).
         glyph: _RowStatusGlyph | None = getattr(btn, "_status_glyph", None)
         if glyph is not None:
-            if running:
+            # v3: drive wave-vs-dot AND the wave's tint from view.phase.
+            # set_phase routes IDLE/ENDED to the dot path with the
+            # freshness colour we'd pick anyway, and active phases to
+            # the wave with the phase-specific tint.  Legacy bool
+            # glyphs that don't have set_phase fall back to set_state.
+            if hasattr(glyph, "set_phase"):
+                glyph.set_phase(
+                    view.phase,
+                    idle_dot_color=_activity_color(view.last_activity),
+                )
+                glyph.setToolTip(
+                    "Currently running — JSONL recently updated"
+                    if running else ""
+                )
+            elif running:
                 glyph.set_state(_RowStatusGlyph.STATE_RUNNING)
                 glyph.setToolTip("Currently running — JSONL recently updated")
             else:

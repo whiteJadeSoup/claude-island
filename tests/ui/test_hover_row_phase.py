@@ -112,3 +112,59 @@ class TestSetRunningBackwardsCompat:
         row.set_running(False)
         row.set_running(False)
         assert row._running is False
+
+
+class TestRowStatusGlyphSetPhase:
+    """Same phase → tint mapping, but for the row's 5-bar equaliser
+    glyph rather than the row's left-edge pulse bar.  The two surfaces
+    must agree on tint per phase — otherwise a "thinking" session
+    would show amber on the bar and green on the glyph, which would
+    erase the visual link between them."""
+
+    def _glyph(self, qtbot):
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = _RowStatusGlyph()
+        qtbot.addWidget(g)
+        return g
+
+    def test_idle_uses_dot_path_not_wave(self, qtbot):
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = self._glyph(qtbot)
+        g.set_phase(SessionPhase.IDLE)
+        assert g.state() == _RowStatusGlyph.STATE_IDLE
+
+    def test_ended_uses_dot_path(self, qtbot):
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = self._glyph(qtbot)
+        g.set_phase(SessionPhase.ENDED)
+        assert g.state() == _RowStatusGlyph.STATE_IDLE
+
+    def test_thinking_uses_wave_with_amber(self, qtbot):
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = self._glyph(qtbot)
+        g.set_phase(SessionPhase.THINKING)
+        assert g.state() == _RowStatusGlyph.STATE_RUNNING
+        assert g._bar_color == Color.amber
+
+    def test_tool_use_uses_phosphor(self, qtbot):
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = self._glyph(qtbot)
+        g.set_phase(SessionPhase.TOOL_USE)
+        assert g._bar_color == Color.phosphor
+
+    def test_waiting_approval_uses_red_warm(self, qtbot):
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = self._glyph(qtbot)
+        g.set_phase(SessionPhase.WAITING_APPROVAL)
+        assert g._bar_color == Color.red_warm
+
+    def test_compacting_uses_amber_dim(self, qtbot):
+        from claude_island.ui.expanded_window import _RowStatusGlyph
+        g = self._glyph(qtbot)
+        g.set_phase(SessionPhase.COMPACTING)
+        assert g._bar_color == Color.amber_dim
+
+    def test_idle_with_explicit_dot_color(self, qtbot):
+        g = self._glyph(qtbot)
+        g.set_phase(SessionPhase.IDLE, idle_dot_color="#4ade80")
+        assert g._dot_color == "#4ade80"

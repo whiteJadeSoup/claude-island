@@ -2809,9 +2809,12 @@ class TestHighCostRowAlert:
         assert btn._running is True
         meta = btn.findChild(QLabel, "meta_label")
         assert "facc15" in meta.styleSheet()
-        # Glyph bar colour stays standard green — cost colour now
-        # owns the high-cost signal, the equalizer doesn't.
-        assert btn._status_glyph._bar_color == "#22c55e"
+        # v3: equalizer bar tint follows view.phase (THINKING → amber)
+        # via lab_palette.Color.for_phase.  The high-cost signal still
+        # rides on the cost label colour — the two channels remain
+        # independent ("running" on the left, "expensive" on the right).
+        from claude_island.ui.lab_palette import Color as _Lab
+        assert btn._status_glyph._bar_color == _Lab.amber
 
     def test_low_cost_idle_keeps_default_cost_color(self, qtbot):
         """Low-cost session: cost label uses the default dim grey,
