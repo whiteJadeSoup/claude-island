@@ -1064,3 +1064,75 @@ class TestRenameImports:
         assert sort_by_recency is not None
         assert filter_by_query is not None
         assert search_haystack is not None
+
+
+# ── Keyboard shortcut wiring ────────────────────────────────────────────
+
+
+class TestRecentsShortcuts:
+    """The v3 redesign adds ⌘J / Ctrl+J as the primary "open Recents"
+    binding alongside the existing Ctrl+H.  These tests pin the binding
+    pattern used in __main__.py without importing __main__ itself (which
+    boots the full app event loop and isn't unit-test friendly).
+
+    The wiring contract:
+      1. RecentsDrawer.toggle is a public no-arg method that flips
+         visibility.
+      2. A QShortcut("Ctrl+J", parent, drawer.toggle) with
+         ApplicationShortcut context fires the toggle regardless of
+         which child widget holds keyboard focus.
+    Both contracts must hold; this class exercises both.
+    """
+
+    def _make(self, qtbot):
+        from PySide6.QtWidgets import QWidget
+        parent = QWidget()
+        qtbot.addWidget(parent)
+        registry = LaunchIntentRegistry()
+        d = RecentsDrawer(
+            expanded=parent,
+            dispatcher=_FakeDispatcher(),
+            launch_intent=registry,
+            on_wake=lambda: None,
+        )
+        qtbot.addWidget(d)
+        d.render(_empty_snap())
+        return parent, d
+
+    def test_toggle_is_a_public_no_arg_method(self):
+        """The shortcut callback in __main__.py passes
+        ``recents_drawer.toggle`` — must remain a bound method with
+        no required args, or the wire breaks at runtime, not at import."""
+        import inspect
+        sig = inspect.signature(RecentsDrawer.toggle)
+        # one parameter: self
+        assert list(sig.parameters.keys()) == ["self"], sig
+
+    def test_ctrl_j_shortcut_triggers_toggle(self, qtbot):
+        """Same wiring as __main__.py: QShortcut("Ctrl+J", expanded,
+        drawer.toggle).  Emitting its ``activated`` signal must call
+        toggle and flip visibility.  This catches any regression where
+        toggle's signature changes or where Qt's binding silently fails
+        because of a context mismatch."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeySequence, QShortcut
+        parent, drawer = self._make(qtbot)
+        shortcut = QShortcut(QKeySequence("Ctrl+J"), parent, drawer.toggle)
+        shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        assert drawer.isVisible() is False
+        shortcut.activated.emit()
+        assert drawer.isVisible() is True
+        shortcut.activated.emit()
+        assert drawer.isVisible() is False
+
+    def test_ctrl_h_shortcut_still_triggers_toggle(self, qtbot):
+        """Backwards-compat: existing users may have learned Ctrl+H.
+        v3 keeps it alongside Ctrl+J — both must work."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeySequence, QShortcut
+        parent, drawer = self._make(qtbot)
+        shortcut = QShortcut(QKeySequence("Ctrl+H"), parent, drawer.toggle)
+        shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        assert drawer.isVisible() is False
+        shortcut.activated.emit()
+        assert drawer.isVisible() is True

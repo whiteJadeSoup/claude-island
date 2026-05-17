@@ -959,14 +959,20 @@ def _periodic_evict() -> None:
 _evict_timer.timeout.connect(_periodic_evict)
 _evict_timer.start()
 
-# Ctrl+H toggles the drawer. Parented on `expanded` so the shortcut
-# context follows the panel; the WindowShortcut hint means Qt fires it
-# whenever any of expanded's child widgets has focus (typical case).
-# macOS users may want Ctrl+Shift+H to avoid Cmd+H "hide app" mapping;
-# that's listed in the plan's Open Decisions and can be revisited.
+# Recents drawer shortcuts.  Two bindings sit alongside each other:
+#   · Ctrl+H — kept for backwards compat with existing user muscle memory.
+#   · Ctrl+J — added by the v3 redesign so the binding matches the
+#     prototype's "open Recents" affordance ("⌘J" label on the capsule).
+#     Qt's QKeySequence maps "Ctrl+..." to ⌘+... on macOS automatically;
+#     same string works cross-platform.
+# Both share the ApplicationShortcut context so they fire regardless of
+# which capsule / panel widget currently has keyboard focus.  Parent is
+# `expanded` so the shortcut's lifetime tracks the panel object.
 from PySide6.QtGui import QKeySequence as _QKeySeq, QShortcut as _QShortcut
-_recents_shortcut = _QShortcut(_QKeySeq("Ctrl+H"), expanded, recents_drawer.toggle)
-_recents_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+_recents_shortcut_h = _QShortcut(_QKeySeq("Ctrl+H"), expanded, recents_drawer.toggle)
+_recents_shortcut_h.setContext(Qt.ShortcutContext.ApplicationShortcut)
+_recents_shortcut_j = _QShortcut(_QKeySeq("Ctrl+J"), expanded, recents_drawer.toggle)
+_recents_shortcut_j.setContext(Qt.ShortcutContext.ApplicationShortcut)
 
 # Wake hooks: every legacy event source also pokes the snapshotter so a
 # JSONL write / process scan triggers a snap rebuild within the debounce
