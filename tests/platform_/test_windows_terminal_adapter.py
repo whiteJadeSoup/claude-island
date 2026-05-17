@@ -937,21 +937,25 @@ class TestActivateWindowsReconcile:
         # Only the primary call.
         assert patched_activate.select_tab_by_title.call_count == 1
 
-    def test_sibling_fallback_skipped_when_multiple_ci_tabs_visible(
+    def test_sibling_fallback_tried_when_multiple_ci_tabs_visible(
         self, patched_activate,
     ):
-        """Bug C (2026-05-13): two separate claude sessions in the same
-        WT window + same cwd. One's sentinel got OSC-clobbered by Claude.
-        select_tab_by_title for OUR sentinel fails. The OLD code would
-        fall back to a sibling sentinel — but the sibling is a DIFFERENT
-        session's tab, so the click would land on the wrong tab.
+        """build-mini-cc fix (2026-05-17): when the target's tab is an
+        inactive pane in a sibling's tab AND WT has 2+ ci:* tabs visible
+        elsewhere, the OLD code went straight to smart_guess and abstained
+        on multi-candidate. The NEW code tries same-cwd sibling sentinels
+        FIRST (regardless of visible_ci_tabs count) — same-cwd +
+        same-WT-window is a strong "pane-mates in the same tab" signal,
+        so selecting any sibling lands the user on the right tab.
 
-        New behaviour: when WT shows 2+ ci:* tabs, the missing sentinel
-        is almost certainly OSC-clobbered (not a hidden inactive pane;
-        that case shows at most 1 ci:* tab). Skip the sibling fallback
-        and just force-foreground the window — keeping the user on
-        whatever tab is currently active rather than navigating to a
-        wrong tab."""
+        Concrete trigger (production): build-mini-cc + mini-cc-opus-dev
+        share cwd ``D:\\coding projects\\build-mini-cc`` as panes of
+        one tab. Click on build-mini-cc → siblings include
+        mini-cc-opus-dev's sentinel → selecting it lands the tab.
+
+        Note: the ``sibling_sentinels`` ARG IS ALREADY CWD-FILTERED by
+        ``focus(view, siblings=...)`` (see TestFocusCwdFilteredSiblings),
+        so cross-cwd false-positives can't reach here."""
         from claude_island.platform_.terminals.windows_terminal import (
             _activate_windows,
         )
@@ -959,12 +963,13 @@ class TestActivateWindowsReconcile:
         patched_activate.get_console_info.return_value = (
             0xAA, "⠐ Claude Code",  # Claude OSC overwrote our sentinel
         )
-        # wait_for_tab_name times out for every retry attempt
-        # (suppressApplicationTitle profile or Claude OSC racing too fast).
         patched_activate.wait_for_tab_name.return_value = False
-        # Primary select misses — our title isn't visible to UIA
-        patched_activate.select_tab_by_title.return_value = False
-        # But WT has MULTIPLE ci:* tabs visible (other sessions' sentinels)
+        # All select_tab_by_title returns: False (primary), False
+        # (current_title race-loser), True (sibling fallback) — the
+        # third call is the new behaviour.
+        patched_activate.select_tab_by_title.side_effect = [False, False, True]
+        # Multiple ci:* tabs visible — the OLD code would have skipped
+        # siblings here; NEW code tries them anyway.
         patched_activate.list_ci_tab_names.return_value = {
             "ci:other_session_1", "ci:other_session_2",
         }
@@ -975,22 +980,78 @@ class TestActivateWindowsReconcile:
             sibling_sentinels=("ci:sib_a",),
         )
 
-        # With the optimistic-first flow (2026-05-14) + current_title
-        # race-loser fallback (2026-05-14, mini-cc-opus-dev fix):
-        #   1. select(expected) → False (sentinel not in TabItem.Name)
+        # Net flow:
+        #   1. select(expected) → False (sentinel not in any TabItem.Name)
         #   2. set_console_title + wait_for_tab_name → False (timeout)
-        #      → no post-set select
-        #   3. select(current_title='⠐ Claude Code') → False (mock; in
-        #      production this often hits because WT mirrors Claude's
-        #      titles, but the mock represents a case where even
-        #      current_title isn't there yet)
-        #   4. smart_guess + force_foreground
-        # Net: 2 select_tab_by_title calls. Neither navigated, since
-        # the mock returns False for everything — that's the test's
-        # safety: NO wrong-sibling navigation.
-        assert patched_activate.select_tab_by_title.call_count == 2
-        # Window still brought to foreground.
+        #   3. select(current_title='⠐ Claude Code') → False
+        #   4. NEW: select(ci:sib_a) → True (sibling lands the tab)
+        # Net: 3 select_tab_by_title calls. The third one navigates.
+        assert patched_activate.select_tab_by_title.call_count == 3
+        calls = [c.args for c in patched_activate.select_tab_by_title.call_args_list]
+        assert calls[2] == (0xCAFE, "ci:sib_a")
+        # Window still brought to foreground (sibling select doesn't
+        # subsume that — _force_foreground always runs).
         patched_activate.force_foreground.assert_called_once()
+
+    def test_smart_guess_only_runs_when_siblings_exhausted_multi_ci(
+        self, patched_activate, monkeypatch,
+    ):
+        """smart_guess is now strictly last-resort: it only fires when
+        sibling fallback didn't resolve AND multiple ci:* tabs are
+        visible. Verifies the call order: siblings → smart_guess →
+        diagnostic emit."""
+        from claude_island.platform_.terminals.windows_terminal import (
+            _activate_windows,
+        )
+
+        patched_activate.get_console_info.return_value = (0xAA, "Windows PowerShell")
+        patched_activate.wait_for_tab_name.return_value = False
+        # All selects (including sibling) return False — forces fall
+        # through to smart_guess.
+        patched_activate.select_tab_by_title.return_value = False
+        patched_activate.list_ci_tab_names.return_value = {
+            "ci:sib_a", "ci:agent_self",
+        }
+
+        from unittest.mock import MagicMock
+        import uiautomation as auto
+
+        # smart_guess UIA mock: single lone candidate (a 'Windows
+        # PowerShell' tab) so it succeeds.
+        def make_tab(name):
+            t = MagicMock()
+            t.Name = name
+            t.ControlTypeName = "TabItemControl"
+            sel = MagicMock()
+            sel.Select = MagicMock()
+            t.GetSelectionItemPattern = MagicMock(return_value=sel)
+            return t, sel
+
+        ta, sa = make_tab("ci:sib_a")
+        tb, sb = make_tab("ci:agent_self")
+        tc, sc = make_tab("Windows PowerShell")
+        list_ctrl = MagicMock()
+        list_ctrl.ControlTypeName = "ListControl"
+        list_ctrl.GetChildren.return_value = [ta, tb, tc]
+        tab_control = MagicMock()
+        tab_control.GetChildren.return_value = [list_ctrl]
+        tab_control.Exists = MagicMock(return_value=True)
+        root = MagicMock()
+        root.TabControl = MagicMock(return_value=tab_control)
+        monkeypatch.setattr(auto, "ControlFromHandle", lambda h: root)
+
+        _activate_windows(
+            pid=999,
+            expected_title=self.EXPECTED,
+            sibling_sentinels=("ci:sib_a",),
+        )
+
+        # Sibling select attempted (3rd call after primary + race-loser)
+        # but returned False per the mock; then smart_guess kicked in
+        # and selected the lone candidate.
+        sc.Select.assert_called_once()
+        sa.Select.assert_not_called()
+        sb.Select.assert_not_called()
 
     def test_smart_guess_selects_lone_candidate(self, patched_activate, monkeypatch):
         """Bug C deep-fix (2026-05-13): when WT shows multiple ci:* tabs

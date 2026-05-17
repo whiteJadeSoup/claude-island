@@ -31,6 +31,10 @@ Thumbs.db
 *.db
 *.sqlite
 *.log
+# uiautomation's library log — gets written to cwd whenever a probe
+# script under scripts/ imports the package. Pure noise, never useful
+# to track.
+@AutomationLog.txt
 
 # Local dependency-resolver lockfiles (project ships with setuptools;
 # uv / pdm / poetry locks are personal and shouldn't enter VCS).

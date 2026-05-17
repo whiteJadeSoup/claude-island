@@ -896,45 +896,56 @@ def _activate_windows(
             #   (c) WT profile has suppressApplicationTitle:true and
             #       silently drops every kernel-set title.
             #
-            # Strategy: a "smart guess" using the tab list.
+            # Strategy: same-cwd sibling fallback first (works for
+            # (a) + the (b)/(c) inactive-pane sub-case), then a
+            # "smart guess" using the tab list.
             visible_ci_tabs = wt_uia.list_ci_tab_names(hwnd)
 
-            # Case (a): only 1 ci:* tab visible → likely active pane of
-            # the split tab. Sibling fallback is correct here.
-            if len(visible_ci_tabs) <= 1:
-                for sib_name in sibling_sentinels:
-                    if sib_name and sib_name != target_title and \
-                            wt_uia.select_tab_by_title(hwnd, sib_name):
-                        break
-            else:
-                # Case (b)/(c): multiple ci:* tabs visible (= sentinels
-                # WT respects). Try smart guess: enumerate ALL TabItems
-                # and find ones whose Name is NOT a known sentinel
-                # (= candidates for our suppressed target). If EXACTLY
-                # one candidate exists, Select it — it's almost
-                # certainly our target. If 0 or 2+, abstain (force
-                # foreground only).
+            # Step 1: same-cwd siblings → likely pane-mates in the
+            # target's tab. Same-cwd + same-WT-window is a strong "same
+            # tab, different pane" signal — selecting any sibling lands
+            # the user on the right tab; they finish with Alt+arrow.
+            # Tried in BOTH the "≤1 ci:* visible" and ">1 ci:* visible"
+            # cases (2026-05-17 fix): an earlier revision only tried
+            # siblings when ≤1 ci:* was visible, which abandoned the
+            # right answer when the target was a sub-pane in a tab
+            # whose sibling pane still has its sentinel mirrored by WT.
+            # Concrete trigger: build-mini-cc shares cwd + WT window
+            # with mini-cc-opus-dev as panes of one tab. Click on
+            # build-mini-cc → siblings = (mini-cc-opus-dev,) →
+            # selecting mini-cc-opus-dev's sentinel lands the tab,
+            # user uses Alt+arrow to switch panes.
+            for sib_name in sibling_sentinels:
+                if sib_name and sib_name != target_title and \
+                        wt_uia.select_tab_by_title(hwnd, sib_name):
+                    selected = True
+                    break
+
+            # Step 2: when siblings didn't resolve AND multiple ci:*
+            # are visible (case (b)/(c) territory), try smart_guess —
+            # enumerate all TabItems, find ones whose Name is NOT a
+            # known sentinel (= candidates for our suppressed target).
+            # If EXACTLY one candidate exists, Select it. 0 or 2+ →
+            # abstain (foreground-only + diagnostic).
+            #
+            # The earlier ``content_match`` approach cycled visibly
+            # through candidates reading each tab's terminal text.
+            # User correctly identified this as bad UX (2026-05-13).
+            # Per open-vibe-island's architecture: hooks should
+            # capture terminal-identifying info at SessionStart and
+            # click uses it directly. For WT specifically, no
+            # outside-process API maps conpty hwnd → UIA TabItem
+            # reliably (verified 2026-05-17 via UIA probe — TabItem's
+            # ProcessId is WT's own pid, NativeWindowHandle is 0,
+            # AutomationId is empty), so for ambiguous cases we
+            # surface a clear diagnostic and fall back to
+            # force_foreground.
+            if not selected and len(visible_ci_tabs) > 1:
                 known = set(visible_ci_tabs) | set(sibling_sentinels)
                 # Our own expected_title belongs in candidates too —
                 # remove only OTHER sentinels.
                 if expected_title:
                     known.discard(expected_title)
-
-                # Try smart_guess: lone non-sentinel candidate → Select
-                # it (instant, no cycling). For multi-candidate cases
-                # (user has 2+ tabs with non-claude names), we ABSTAIN
-                # rather than cycle visibly — bring WT to foreground
-                # and let user pick the tab themselves.
-                #
-                # The earlier `content_match` approach cycled visibly
-                # through candidates reading each tab's terminal text.
-                # User correctly identified this as bad UX (2026-05-13).
-                # Per open-vibe-island's architecture: hooks should
-                # capture terminal-identifying info at SessionStart and
-                # click uses it directly. For WT specifically, no
-                # outside-process API maps conpty hwnd → UIA TabItem
-                # reliably, so for ambiguous cases we surface a clear
-                # diagnostic and fall back to force_foreground.
                 if not _try_smart_guess_select(hwnd, exclude_names=known):
                     if expected_title:
                         _emit_suppress_title_diagnostic(
