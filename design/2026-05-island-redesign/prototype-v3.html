@@ -1,0 +1,2452 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Claude · Island — Lab Console v3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300..800;1,400..700&display=swap">
+<style>
+/* ──────────────────────────────────────────────────────────────────────
+   Lab Console v3.
+   Reaction to v2's AI-slop tells (wax stamps, blinking red lamps, "急"
+   字, warm-paper aesthetic).  v3 keeps the v2 information architecture —
+   capsule → card → Decision Deck → sessions → dials — but throws out
+   colour-as-urgency, dramatic typography, and friendly copy.
+   Visual rules:
+     1. Everything in JetBrains Mono.  Hierarchy via size + weight + tint.
+     2. Urgency = rule weight (dashed → solid → thicker), never colour.
+     3. No "lamps", no glow, no animation that loops > 1.5s.
+     4. Copy reads like stderr: terse, lowercase, factual.
+   ────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* surfaces — matte near-black, never pure #000 */
+  --ink:          #0e0e10;
+  --surface:      #16161a;
+  --surface-hi:   #1d1d22;
+  --surface-warm: #1a1816;     /* card body, very slight warmth */
+
+  /* rules / dividers */
+  --rule:         #2a2a31;
+  --rule-bright:  #3d3d46;
+  --rule-active:  #5c5c66;
+
+  /* type tints (warm paper white → neutral grey → faint) */
+  --paper:        #e8e3d6;
+  --paper-dim:    #98948a;
+  --paper-faint:  #5c5a55;
+  --paper-deep:   #36352f;
+
+  /* status tints — used sparingly */
+  --amber:        #d4a460;     /* counters, key readings */
+  --amber-dim:    #8a6a3e;
+  --phosphor:     #6db580;     /* running */
+  --phosphor-dim: #466652;
+  --red-warm:     #c46a55;     /* waiting — warm, not screaming */
+  --red-warm-dim: #7a3a30;
+
+  /* type */
+  --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+[data-theme="day"] {
+  --ink:          #f5f2e9;
+  --surface:      #ece8db;
+  --surface-hi:   #e3dec8;
+  --surface-warm: #efebe0;
+  --rule:         #c9c2af;
+  --rule-bright:  #a89e85;
+  --rule-active:  #6c6452;
+  --paper:        #1a1814;
+  --paper-dim:    #5a564b;
+  --paper-faint:  #8a8576;
+  --paper-deep:   #c9c2af;
+  --amber:        #8a5d18;
+  --phosphor:     #3e6b4d;
+  --red-warm:     #8a3d2a;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--paper);
+  background: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  font-feature-settings: "ss01" on, "ss02" on, "zero" on, "calt" on;
+}
+
+/* ── backplate: dotted measurement grid, very low contrast ─────────── */
+.desk {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  background:
+    radial-gradient(60% 50% at 70% 30%,
+      color-mix(in oklab, var(--amber) 6%, transparent) 0%,
+      transparent 60%),
+    var(--ink);
+  overflow: hidden;
+}
+.desk::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image:
+    radial-gradient(circle, color-mix(in oklab, var(--paper-faint) 35%, transparent) 0.6px, transparent 1px);
+  background-size: 24px 24px;
+  background-position: 0 0;
+  opacity: 0.6;
+  pointer-events: none;
+}
+.desk::after {
+  content: "claude-island · v3.lab-console · 2026.05";
+  position: absolute;
+  bottom: 12px; right: 16px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--paper-faint);
+  pointer-events: none;
+}
+
+/* ── left rail: lab-bench style ────────────────────────────────────── */
+.controls {
+  padding: 28px 22px;
+  border-right: 1px solid var(--rule);
+  background:
+    linear-gradient(180deg,
+      color-mix(in oklab, var(--surface) 80%, transparent) 0%,
+      color-mix(in oklab, var(--ink) 95%, transparent) 100%);
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  overflow-y: auto;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--rule);
+}
+.brand .name {
+  font-size: 11px;
+  letter-spacing: 0.3em;
+  color: var(--paper);
+  text-transform: uppercase;
+  font-weight: 500;
+}
+.brand .name b {
+  color: var(--amber);
+  font-weight: 600;
+}
+.brand .ver {
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  color: var(--paper-faint);
+  padding: 2px 5px;
+  border: 1px solid var(--rule);
+}
+
+/* section header — "01 · STATUS" indexed by column */
+.section-label {
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--paper-faint);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section-label::before {
+  content: attr(data-num);
+  color: var(--amber);
+  letter-spacing: 0;
+}
+.section-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+.btn-group { display: flex; flex-direction: column; gap: 2px; }
+.btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--paper-dim);
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.btn::before {
+  content: "·";
+  color: var(--paper-faint);
+  font-weight: 700;
+  margin-right: 2px;
+  transition: color 0.15s;
+}
+.btn:hover { color: var(--paper); }
+.btn:hover::before { color: var(--amber); }
+.btn[aria-pressed="true"] {
+  background: var(--surface);
+  border-color: var(--rule);
+  color: var(--paper);
+}
+.btn[aria-pressed="true"]::before { content: "▸"; color: var(--amber); }
+.btn .count {
+  margin-left: auto;
+  color: var(--red-warm);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.theme-toggle {
+  display: flex;
+  border: 1px solid var(--rule);
+}
+.theme-toggle .btn {
+  flex: 1;
+  border: none;
+  padding: 7px 0;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.2em;
+}
+.theme-toggle .btn::before { display: none; }
+.theme-toggle .btn + .btn { border-left: 1px solid var(--rule); }
+.theme-toggle .btn[aria-pressed="true"] { background: var(--paper); color: var(--ink); }
+
+/* note block: faint, indexed, no flourish */
+.notes {
+  margin-top: auto;
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--paper-faint);
+  padding: 12px 0 0;
+  border-top: 1px dashed var(--rule);
+}
+.notes b { color: var(--amber); font-weight: 500; }
+.notes em { color: var(--paper-dim); font-style: normal; }
+
+/* ── stage ─────────────────────────────────────────────────────────── */
+.stage {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 40px 32px 0;
+  overflow-y: auto;
+}
+
+.island {
+  position: relative;
+  width: min(580px, 100%);
+  display: flex;
+  flex-direction: column;
+  /* drop-shadow, no glow */
+  filter: drop-shadow(0 22px 40px rgba(0, 0, 0, 0.55))
+          drop-shadow(0 1px 0 rgba(255, 255, 255, 0.02));
+  animation: island-drop 0.6s cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes island-drop {
+  from { transform: translateY(-12px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   DOT — the smallest persistent surface.
+   When the user collapses everything, the island shrinks to a 22×22 dark
+   stamp.  Composed from the same vocabulary as the capsule: monogram
+   "CI" in faint amber, no glow, no gradient ball, no shadow drop.
+   urgent → 1px red outline + a tiny mono digit replaces the monogram.
+   Hover → slight surface lift; click → expands to capsule.
+   ────────────────────────────────────────────────────────────────────── */
+.dot {
+  display: none;
+  position: relative;
+  width: 22px;
+  height: 22px;
+  background: var(--ink);
+  border: 1px solid var(--rule-bright);
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--amber);
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.18s, border-color 0.2s, background 0.18s;
+  align-self: flex-start;
+  /* tally tick on the rim */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.02),
+    0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.dot:hover { transform: scale(1.06); background: var(--surface); }
+.dot:active { transform: scale(0.98); }
+.dot::after {
+  /* a very thin slot at 5 o'clock — the same notch a real stamp would
+     leave on the wax.  Reads as "marked" rather than "decorative". */
+  content: "";
+  position: absolute;
+  bottom: 3px;
+  right: 4px;
+  width: 4px;
+  height: 1px;
+  background: var(--rule-active);
+}
+.dot[data-status="active"]  { border-color: var(--phosphor-dim); color: var(--phosphor); }
+.dot[data-status="urgent"]  {
+  border-color: var(--red-warm);
+  color: var(--red-warm);
+  /* one extra outer ring at the same wavelength as the row strip-mark */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.02),
+    0 0 0 2px var(--ink),
+    0 0 0 3px var(--red-warm-dim),
+    0 2px 8px rgba(120, 30, 30, 0.45);
+}
+.dot[data-status="urgent"] .dot-text::before { content: attr(data-count); }
+.dot[data-status="urgent"] .dot-text .ci    { display: none; }
+
+/* dot tally — appears top-right when there are queued decisions.
+   sits OUTSIDE the dot rim so it doesn't crowd the monogram. */
+.dot .dot-tally {
+  position: absolute;
+  top: -7px; right: -8px;
+  font-size: 9px;
+  background: var(--ink);
+  color: var(--red-warm);
+  border: 1px solid var(--red-warm-dim);
+  padding: 0 4px;
+  line-height: 1.4;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  display: none;
+}
+.island[data-pending="1"] .dot .dot-tally,
+.island[data-pending="3"] .dot .dot-tally { display: inline-block; }
+
+/* surface = "dot" → only the dot renders; capsule + card hidden */
+.island[data-surface="dot"] .capsule,
+.island[data-surface="dot"] .card { display: none; }
+.island[data-surface="dot"]      .dot { display: inline-flex; }
+.island[data-surface="capsule"]  .dot { display: none; }
+.island[data-surface="expanded"] .dot { display: none; }
+/* in capsule / expanded mode the existing .island[data-expanded] gates
+   capsule.card visibility — kept for backwards compat */
+
+/* ──────────────────────────────────────────────────────────────────────
+   CAPSULE — matte nameplate, no brass, no glow
+   ────────────────────────────────────────────────────────────────────── */
+.capsule {
+  height: 48px;
+  background:
+    linear-gradient(180deg,
+      color-mix(in oklab, var(--surface) 70%, var(--surface-hi)) 0%,
+      var(--surface) 100%);
+  border: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule-bright);
+  border-radius: 3px 3px 0 0;
+  display: grid;
+  /* monogram | title | wave | pending | recents-hit | strip */
+  grid-template-columns: 48px 1fr auto auto auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px 0 0;
+  position: relative;
+  cursor: pointer;
+  user-select: none;
+  z-index: 2;
+  transition: background 0.2s, border-color 0.2s;
+}
+.capsule:hover { background: var(--surface-hi); }
+
+/* recents-hit — small mono affordance on the right edge of the capsule.
+   Clicking it opens the Recents drawer; ⌘J does the same globally so
+   keyboard users don't need to chase the pointer to the capsule first. */
+.capsule .recents-hit {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--paper-faint);
+  font-family: inherit;
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  padding: 4px 6px;
+  cursor: pointer;
+  line-height: 1;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.capsule .recents-hit:hover {
+  background: var(--ink);
+  color: var(--amber);
+  border-color: var(--paper-dim);
+}
+.capsule .recents-hit kbd {
+  font: inherit;
+  border: none;
+  padding: 0;
+  color: inherit;
+}
+/* badge bumps when there are dormant sessions worth showing — same red-warm
+   tint we use elsewhere, just a hairline */
+.capsule .recents-hit::after {
+  content: "";
+  display: inline-block;
+  width: 4px; height: 4px;
+  background: var(--phosphor);
+  margin-left: 5px;
+  vertical-align: middle;
+  border-radius: 1px;
+  opacity: 0.7;
+}
+
+.capsule .monogram {
+  height: 48px;
+  width: 48px;
+  display: grid;
+  place-items: center;
+  border-right: 1px solid var(--rule);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--amber);
+  position: relative;
+}
+.capsule .monogram::after {
+  /* tiny tally mark above the monogram, like a serial-number reference */
+  content: "01";
+  position: absolute;
+  top: 4px; right: 6px;
+  font-size: 8px;
+  color: var(--paper-faint);
+  letter-spacing: 0.1em;
+}
+
+.capsule .title { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.capsule .title .now {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--paper);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.capsule .title .now b { color: var(--amber); font-weight: 500; }
+.capsule .title .sub {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--paper-faint);
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   WAVE — 5 narrow bars that wave like an equaliser.
+   Mirrors the existing _RowStatusGlyph in claude_island/ui/expanded_window.py:
+   5 bars, ~1200ms period, linear loop, phase offset of 1/5 between bars
+   so the wave travels left → right.  No JS — pure CSS animation-delay.
+   ────────────────────────────────────────────────────────────────────── */
+.wave {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 18px;
+}
+.wave i {
+  display: block;
+  width: 2px;
+  height: 20%;
+  background: var(--wave-color, var(--phosphor));
+  animation: wave 1200ms linear infinite;
+  transform-origin: bottom center;
+}
+.wave i:nth-child(1) { animation-delay: 0ms; }
+.wave i:nth-child(2) { animation-delay: 240ms; }
+.wave i:nth-child(3) { animation-delay: 480ms; }
+.wave i:nth-child(4) { animation-delay: 720ms; }
+.wave i:nth-child(5) { animation-delay: 960ms; }
+@keyframes wave {
+  0%, 100% { height: 20%; }
+  50%      { height: 100%; }
+}
+
+/* wave tints by phase — only the dominant phase paints in the capsule */
+.wave[data-phase="thinking"]    { --wave-color: var(--amber); }
+.wave[data-phase="tool_use"]    { --wave-color: var(--phosphor); }
+.wave[data-phase="compacting"]  { --wave-color: var(--amber-dim); }
+.wave[data-phase="compacting"] i { animation-duration: 2000ms; }   /* slower */
+.wave[data-phase="idle"] i       { animation: none; height: 12%; background: var(--rule-active); }
+.wave[data-phase="ended"] i      { animation: none; height: 6%;  background: var(--paper-faint); opacity: 0.4; }
+/* waiting doesn't paint the wave — the red strip + MM:SS clock carry it */
+.wave[data-phase="waiting_approval"] i { animation: none; height: 0; }
+
+/* pending indicator: monospace counter, no badge, no animation */
+.capsule .pending {
+  display: none;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--red-warm);
+  padding: 0 0 0 12px;
+  border-left: 1px solid var(--rule);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.capsule .pending::before {
+  content: "▸ ";
+  color: var(--red-warm-dim);
+}
+.island[data-pending="1"] .capsule .pending,
+.island[data-pending="3"] .capsule .pending { display: inline-block; }
+
+/* status indicator strip — 2px-wide vertical line, no glow */
+.capsule .strip {
+  width: 2px;
+  height: 24px;
+  background: var(--rule-bright);
+  transition: background 0.25s;
+}
+.island[data-status="idle"]   .capsule .strip { background: var(--rule-bright); }
+.island[data-status="active"] .capsule .strip { background: var(--phosphor); }
+.island[data-status="urgent"] .capsule .strip {
+  background: var(--red-warm);
+  animation: strip-mark 1.4s steps(2) infinite;
+}
+@keyframes strip-mark {
+  /* a single hard step every 0.7s — reads as morse, not as blinking */
+  0%, 49%   { opacity: 1; }
+  50%, 100% { opacity: 0.35; }
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   CARD — single-rule drawer
+   ────────────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--surface-warm);
+  border: 1px solid var(--rule);
+  border-top: none;
+  border-radius: 0 0 3px 3px;
+  margin-top: -1px;
+  position: relative;
+  transform-origin: top center;
+  overflow: hidden;
+}
+
+.island[data-expanded="false"] .card {
+  max-height: 0;
+  border-top: 0;
+  border-bottom-width: 0;
+  opacity: 0;
+  transition: max-height 0.4s cubic-bezier(.4,0,.2,1),
+              opacity 0.25s ease;
+}
+.island[data-expanded="true"] .card {
+  max-height: 1400px;
+  opacity: 1;
+  transition: max-height 0.55s cubic-bezier(.2,.8,.2,1),
+              opacity 0.35s ease 0.08s;
+}
+
+.card-inner { padding: 18px 20px 18px; position: relative; z-index: 1; }
+
+/* card header — single row, factual */
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 11px;
+  color: var(--paper-dim);
+  letter-spacing: 0.06em;
+}
+.card-head .left {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+.card-head .left .count {
+  font-size: 22px;
+  color: var(--paper);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.card-head .left .count b { color: var(--amber); font-weight: 500; }
+.card-head .left .verb {
+  text-transform: lowercase;
+  letter-spacing: 0.06em;
+  color: var(--paper-dim);
+}
+.card-head time {
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: var(--paper-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   DECISION DECK — lab console panel.
+   No wax stamps, no big colour blocks.  A bordered panel with a thin
+   pip strip up top, then a monospace block that reads like a stderr
+   transcript with one strong typographic anchor: the elapsed-time
+   counter on the left.  Buttons are outline-only, small, with key hints.
+   ────────────────────────────────────────────────────────────────────── */
+.deck {
+  background:
+    linear-gradient(180deg,
+      color-mix(in oklab, var(--surface-hi) 60%, var(--ink)) 0%,
+      var(--ink) 100%);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--red-warm);
+  margin-bottom: 16px;
+  position: relative;
+}
+
+/* top strip: pips + counter, all on one row */
+.deck-strip {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px 9px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+.deck-strip .label { color: var(--paper-faint); }
+.deck-strip .label::before { content: "// "; color: var(--rule-active); }
+.deck-strip .pips {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-start;
+  padding-left: 14px;
+  border-left: 1px solid var(--rule);
+}
+.deck-strip .pips i {
+  width: 6px; height: 2px;
+  background: var(--rule-active);
+  display: inline-block;
+  transition: background 0.18s, height 0.18s, transform 0.18s;
+}
+.deck-strip .pips i.on     { background: var(--paper-faint); }
+.deck-strip .pips i.active { background: var(--amber); height: 4px; }
+.deck-strip .counter {
+  color: var(--paper);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+.deck-strip .counter b   { color: var(--amber); font-weight: 500; }
+.deck-strip .counter span{ color: var(--paper-faint); }
+
+/* main body: monospace 'log line' header + giant elapsed time + command preview */
+.deck-main {
+  padding: 16px 14px 14px;
+  display: grid;
+  grid-template-columns: 100px 1fr auto;
+  gap: 18px;
+  align-items: stretch;
+}
+
+/* big elapsed-time counter — the visual anchor that says "act now" */
+.deck-elapsed {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding-right: 14px;
+  border-right: 1px solid var(--rule);
+}
+.deck-elapsed .clock {
+  font-size: 30px;
+  font-weight: 300;
+  color: var(--amber);
+  letter-spacing: -0.02em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+.deck-elapsed .label {
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--paper-faint);
+}
+
+.deck-body { min-width: 0; }
+.deck-body .head {
+  font-size: 10.5px;
+  color: var(--paper-faint);
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: baseline;
+}
+.deck-body .head .sym { color: var(--rule-active); }
+.deck-body .head .tool {
+  color: var(--paper);
+  letter-spacing: 0.04em;
+}
+.deck-body .head .session { color: var(--amber-dim); }
+.deck-body .head .session b { color: var(--paper); font-weight: 500; }
+.deck-body .head .verb {
+  color: var(--red-warm);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-size: 9.5px;
+}
+
+.deck-body .what {
+  font-size: 13.5px;
+  color: var(--paper);
+  letter-spacing: 0.01em;
+  line-height: 1.45;
+  margin-bottom: 8px;
+}
+.deck-body .preview {
+  font-size: 11.5px;
+  color: var(--paper-dim);
+  background: var(--ink);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--rule-bright);
+  padding: 8px 10px;
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  position: relative;
+}
+.deck-body .preview::before {
+  content: "$";
+  color: var(--phosphor);
+  margin-right: 8px;
+  opacity: 0.8;
+}
+.deck-body .preview b { color: var(--red-warm); font-weight: 500; }
+.deck-body .preview::after {
+  content: "▎";
+  color: var(--phosphor);
+  margin-left: 4px;
+  animation: cursor-blink 1.1s steps(2) infinite;
+}
+@keyframes cursor-blink {
+  0%, 49%   { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* buttons — outline-only, key hint inline */
+.deck-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  min-width: 130px;
+  justify-content: center;
+}
+.deck-btn {
+  appearance: none;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: lowercase;
+  padding: 9px 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: transparent;
+  font-variant-numeric: tabular-nums;
+}
+.deck-btn .key {
+  font-size: 10px;
+  color: var(--paper-faint);
+  padding: 1px 5px;
+  border: 1px solid var(--rule);
+  letter-spacing: 0.1em;
+}
+.deck-btn.allow {
+  color: var(--paper);
+  border: 1px solid var(--paper-dim);
+}
+.deck-btn.allow:hover {
+  background: var(--paper);
+  color: var(--ink);
+  border-color: var(--paper);
+}
+.deck-btn.allow:hover .key {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+.deck-btn.deny {
+  color: var(--red-warm);
+  border: 1px solid var(--red-warm-dim);
+}
+.deck-btn.deny:hover {
+  background: var(--red-warm-dim);
+  color: var(--paper);
+}
+
+/* stack: list of queued items, mono table with a leading row index */
+.deck-stack {
+  border-top: 1px solid var(--rule);
+  padding: 8px 14px 10px;
+  font-size: 11px;
+}
+.deck-stack-label {
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--paper-faint);
+  margin-bottom: 6px;
+}
+.deck-stack-label::before { content: "// "; color: var(--rule-active); }
+.mini {
+  display: grid;
+  grid-template-columns: 26px 26px 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 5px 0;
+  cursor: pointer;
+  color: var(--paper-dim);
+  border-top: 1px dashed transparent;
+  transition: color 0.15s, background 0.15s, padding 0.15s;
+}
+.mini + .mini { border-top: 1px dashed var(--rule); }
+.mini:hover {
+  color: var(--paper);
+  background: var(--surface);
+  padding-left: 6px;
+}
+.mini .mini-q {
+  color: var(--paper-faint);
+  font-size: 10px;
+  text-align: right;
+}
+.mini .mini-num {
+  color: var(--amber-dim);
+  font-weight: 500;
+  text-align: center;
+}
+.mini .mini-name { letter-spacing: 0.02em; }
+.mini .mini-tool {
+  color: var(--paper-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+.mini .mini-wait {
+  color: var(--red-warm);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  min-width: 36px;
+  text-align: right;
+}
+.island[data-pending="1"] .deck-stack { display: none; }
+
+/* keyboard hint */
+.deck-hint {
+  padding: 7px 14px 9px;
+  border-top: 1px solid var(--rule);
+  font-size: 10px;
+  color: var(--paper-faint);
+  letter-spacing: 0.06em;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.deck-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  color: var(--paper);
+  background: transparent;
+  border: 1px solid var(--rule);
+  padding: 1px 5px;
+  letter-spacing: 0.1em;
+  margin: 0 2px;
+}
+.island[data-pending="1"] .deck-hint .multi-only { display: none; }
+
+/* ──────────────────────────────────────────────────────────────────────
+   SESSION LIST — flat mono rows, no card frames
+   ────────────────────────────────────────────────────────────────────── */
+.sessions {
+  list-style: none;
+  border-top: 1px solid var(--rule);
+  margin-bottom: 14px;
+}
+.row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 44px 1fr auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0 11px;
+  border-bottom: 1px dashed var(--rule);
+  border-left: 2px solid transparent;
+  padding-left: 10px;
+  margin-left: -10px;
+  transition: background 0.15s, border-color 0.2s;
+  cursor: pointer;
+}
+.row:hover { background: var(--surface); }
+
+.row .idx {
+  font-size: 11px;
+  color: var(--paper-faint);
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+}
+
+.row .info { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.row .info .name {
+  font-size: 13px;
+  color: var(--paper);
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+.row .info .cwd {
+  font-size: 10.5px;
+  color: var(--paper-faint);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row .info .meta {
+  font-size: 10px;
+  color: var(--paper-faint);
+  margin-top: 2px;
+  display: flex;
+  gap: 14px;
+  letter-spacing: 0.02em;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.row .info .meta b { color: var(--paper-dim); font-weight: 500; }
+.row .info .meta .sep { color: var(--rule-active); }
+.row .info .meta .live {
+  color: var(--phosphor);
+  letter-spacing: 0.08em;
+}
+.row .info .meta .live::before { content: "▸ "; }
+
+.row .cost {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--paper);
+  letter-spacing: 0;
+  text-align: right;
+}
+.row .cost small {
+  display: block;
+  font-size: 9.5px;
+  color: var(--paper-faint);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-weight: 400;
+  margin-top: 1px;
+}
+.row[data-flag="high"] .cost { color: var(--amber); }
+
+/* tiny vertical strip on the right edge — matches the capsule strip motif.
+   Strip colour follows data-phase, NOT data-status, so the strip carries
+   one source of truth across rows / capsule / dot. */
+.row .strip {
+  width: 2px;
+  height: 22px;
+  background: var(--rule-active);
+}
+.row[data-phase="idle"]            .strip { background: var(--rule); }
+.row[data-phase="thinking"]        .strip { background: var(--amber); }
+.row[data-phase="tool_use"]        .strip { background: var(--phosphor); }
+.row[data-phase="compacting"]      .strip { background: var(--amber-dim); }
+.row[data-phase="waiting_approval"] .strip { background: var(--red-warm); }
+.row[data-phase="ended"]           .strip { background: var(--paper-deep); opacity: 0.5; }
+
+/* mini-wave slot — 18px wide, lives between info and cost */
+.row .row-wave {
+  width: 18px;
+  height: 16px;
+}
+.row .row-wave .wave i {
+  width: 1.5px;
+  animation-duration: 1200ms;
+}
+/* hide the row-wave on idle/ended/waiting (waiting has its own MM:SS clock) */
+.row[data-phase="idle"] .row-wave,
+.row[data-phase="ended"] .row-wave,
+.row[data-phase="waiting_approval"] .row-wave { display: none; }
+/* and waiting still uses the rule-weight visuals — keep that grid */
+.row[data-status="waiting"] {
+  grid-template-columns: 64px 1fr auto auto;
+}
+.row:not([data-status="waiting"]) {
+  grid-template-columns: 44px 1fr 18px auto auto;
+}
+
+/* phase label in the meta line */
+.row .info .meta .phase {
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 9.5px;
+  font-weight: 500;
+}
+.row[data-phase="thinking"]   .info .meta .phase { color: var(--amber); }
+.row[data-phase="tool_use"]   .info .meta .phase { color: var(--phosphor); }
+.row[data-phase="compacting"] .info .meta .phase { color: var(--amber-dim); }
+.row[data-phase="idle"]       .info .meta .phase { color: var(--paper-faint); }
+.row[data-phase="ended"]      .info .meta .phase { color: var(--paper-deep); }
+
+/* ──────────────────────────────────────────────────────────────────────
+   WAITING ROW — urgency via rule weight, not colour
+     · row border bottom changes from dashed → solid + 2px
+     · the dashed left rail becomes a solid 2px red-warm
+     · the index column is replaced by a giant monospace MM:SS counter
+     · the meta line shows a square-bracketed tool tag and live elapsed
+     · the right strip turns red-warm
+     · hover slides out a "→ resolve" affordance, no background fill
+   ────────────────────────────────────────────────────────────────────── */
+.row[data-status="waiting"] {
+  border-left-color: var(--red-warm);
+  border-bottom-style: solid;
+  border-bottom-width: 2px;
+  border-bottom-color: var(--red-warm-dim);
+}
+.row[data-status="waiting"]:hover {
+  background: color-mix(in oklab, var(--surface) 70%, var(--red-warm) 4%);
+}
+
+/* enlarge the idx column to hold the MM:SS clock */
+.row[data-status="waiting"] {
+  grid-template-columns: 64px 1fr auto auto;
+}
+.row[data-status="waiting"] .idx {
+  font-size: 18px;
+  color: var(--red-warm);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-weight: 500;
+}
+
+.row[data-status="waiting"] .info .name {
+  color: var(--paper);
+}
+.row[data-status="waiting"] .info .meta {
+  gap: 12px;
+}
+.row[data-status="waiting"] .info .meta .tool-chip {
+  font-size: 10px;
+  color: var(--red-warm);
+  letter-spacing: 0.08em;
+  font-weight: 500;
+  text-transform: lowercase;
+}
+.row[data-status="waiting"] .info .meta .tool-chip::before { content: "["; color: var(--red-warm-dim); }
+.row[data-status="waiting"] .info .meta .tool-chip::after  { content: "]"; color: var(--red-warm-dim); }
+
+.row[data-status="waiting"] .info .meta .wait-since {
+  color: var(--paper-dim);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+.row[data-status="waiting"] .info .meta .wait-since::before {
+  content: "// awaiting consent · ";
+  color: var(--paper-faint);
+}
+
+.row[data-status="waiting"] .strip { background: var(--red-warm); }
+
+/* hover-reveal jump: no fill, just outlined text that slides right */
+.row[data-status="waiting"] .jump {
+  position: absolute;
+  top: 50%;
+  right: 24px;
+  transform: translateY(-50%) translateX(6px);
+  opacity: 0;
+  pointer-events: none;
+  font-family: inherit;
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  background: var(--ink);
+  color: var(--paper);
+  border: 1px solid var(--paper-dim);
+  padding: 6px 11px;
+  cursor: pointer;
+  text-transform: lowercase;
+  transition: opacity 0.18s ease, transform 0.22s cubic-bezier(.2,.8,.2,1);
+}
+.row[data-status="waiting"] .jump::after { content: "  →"; }
+.row[data-status="waiting"]:hover .jump {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) translateX(0);
+}
+.row[data-status="waiting"]:hover .cost,
+.row[data-status="waiting"]:hover > .strip {
+  opacity: 0.2;
+  transition: opacity 0.18s ease;
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   DIALS — VU gauge (5h) + ASCII horizon (7d)
+   ────────────────────────────────────────────────────────────────────── */
+.dials {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 22px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+  align-items: stretch;
+}
+
+.gauge {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto auto;
+  align-items: end;
+  justify-items: center;
+  gap: 4px;
+  padding: 8px 0 4px;
+  border-right: 1px solid var(--rule);
+  padding-right: 16px;
+}
+.gauge svg { display: block; }
+.gauge .needle {
+  transform-origin: 100px 95px;
+  animation: needle-jitter 6s ease-in-out infinite;
+}
+@keyframes needle-jitter {
+  0%, 100% { transform: rotate(var(--deg, 22deg)); }
+  47%      { transform: rotate(calc(var(--deg, 22deg) + 1.2deg)); }
+  62%      { transform: rotate(calc(var(--deg, 22deg) - 0.4deg)); }
+}
+.gauge .label {
+  font-size: 9px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--paper-faint);
+}
+.gauge .reading {
+  font-size: 22px;
+  color: var(--amber);
+  letter-spacing: -0.02em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+}
+.gauge .reading sup {
+  font-size: 11px;
+  color: var(--paper-faint);
+  letter-spacing: 0.04em;
+  margin-left: 2px;
+  vertical-align: super;
+  font-weight: 400;
+}
+
+/* ASCII horizon for 7d — block characters drawn in JS for accuracy.
+   Pattern: ▓▒░ with the filled portion using ▓, the rest ░. */
+.horizon {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding-left: 2px;
+}
+.horizon .heading {
+  font-size: 9px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--paper-faint);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.horizon .heading b {
+  color: var(--paper);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  font-size: 11px;
+}
+.horizon .ascii-bar {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  line-height: 1;
+  letter-spacing: 0;
+  color: var(--phosphor);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.horizon .ascii-bar .fill { color: var(--amber); }
+.horizon .ascii-bar .dim  { color: var(--rule-bright); }
+.horizon .figures {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--paper-dim);
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+.horizon .figures b {
+  color: var(--paper);
+  font-weight: 500;
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   RECENTS DRAWER — lab-console v3.
+   Same two-column model as the current Python widget (spotlight-style
+   search-led list on the left, full preview pane on the right), but
+   the visual lexicon swaps:
+     · no emoji icons (🆔 📁 🌿 💰) — replaced with mono key prefixes
+     · no rounded blue "Resume" button — outline-only mono button
+     · no rounded red "bypassPermissions" pill — square red-outlined chip
+     · no rounded search input — single-rule field, monospace placeholder
+   Keyboard semantics preserved: ↑ ↓ select, Enter resume, Esc close,
+   Ctrl+O open, Ctrl+C copy uuid, Tab toggle preview pane.
+   ────────────────────────────────────────────────────────────────────── */
+.drawer {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 580px;
+  max-width: 100%;
+  background:
+    linear-gradient(180deg,
+      var(--surface-warm) 0%,
+      color-mix(in oklab, var(--surface) 80%, var(--ink)) 100%);
+  border-left: 1px solid var(--rule);
+  box-shadow: -24px 0 48px rgba(0, 0, 0, 0.45);
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  transform: translateX(100%);
+  transition: transform 0.32s cubic-bezier(.2,.8,.2,1);
+  z-index: 10;
+}
+.drawer[data-open="true"] { transform: translateX(0); }
+
+.drawer-head {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--paper-faint);
+}
+.drawer-head .title { color: var(--paper); letter-spacing: 0.24em; }
+.drawer-head .title b { color: var(--amber); font-weight: 500; }
+.drawer-head .sym { color: var(--rule-active); }
+.drawer-head .close {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--paper-dim);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 8px;
+  cursor: pointer;
+  letter-spacing: 0;
+  line-height: 1;
+}
+.drawer-head .close:hover { background: var(--surface); color: var(--paper); }
+
+.drawer-search {
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.drawer-search .field {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--rule);
+  background: var(--ink);
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.drawer-search .field::before {
+  content: "/";
+  color: var(--amber);
+}
+.drawer-search input {
+  appearance: none;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--paper);
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  width: 100%;
+}
+.drawer-search input::placeholder {
+  color: var(--paper-faint);
+  letter-spacing: 0.04em;
+}
+.drawer-search .count {
+  font-size: 10px;
+  color: var(--paper-faint);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.drawer-body {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  overflow: hidden;
+}
+.drawer-list {
+  border-right: 1px solid var(--rule);
+  overflow-y: auto;
+}
+.drawer-list .item {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 9px 14px;
+  border-bottom: 1px dashed var(--rule);
+  cursor: pointer;
+  font-size: 11.5px;
+  letter-spacing: 0;
+  transition: background 0.15s, padding 0.15s, color 0.15s;
+}
+.drawer-list .item:hover {
+  background: var(--surface);
+}
+.drawer-list .item[aria-selected="true"] {
+  background: var(--surface-hi);
+  border-left: 2px solid var(--amber);
+  padding-left: 12px;
+}
+.drawer-list .item .n {
+  font-size: 9.5px;
+  color: var(--paper-faint);
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+}
+.drawer-list .item[aria-selected="true"] .n { color: var(--amber); }
+.drawer-list .item .name {
+  color: var(--paper);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.drawer-list .item .spend {
+  font-variant-numeric: tabular-nums;
+  color: var(--paper-dim);
+  font-size: 11px;
+}
+.drawer-list .item[data-flag="high"] .spend { color: var(--amber); }
+.drawer-list .item[data-flag="huge"] .spend { color: var(--red-warm); }
+
+.drawer-preview {
+  padding: 16px 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.preview-title {
+  font-size: 16px;
+  letter-spacing: -0.005em;
+  color: var(--paper);
+  line-height: 1.3;
+  margin-bottom: 4px;
+}
+.preview-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.preview-actions .btn-action {
+  appearance: none;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: lowercase;
+  padding: 7px 12px;
+  background: transparent;
+  border: 1px solid var(--paper-dim);
+  color: var(--paper);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.15s, color 0.15s;
+}
+.preview-actions .btn-action::before {
+  content: "▸";
+  color: var(--amber);
+}
+.preview-actions .btn-action.secondary { border-color: var(--rule); color: var(--paper-dim); }
+.preview-actions .btn-action.secondary::before { content: "·"; color: var(--paper-faint); }
+.preview-actions .btn-action:hover {
+  background: var(--paper);
+  color: var(--ink);
+}
+.preview-actions .btn-action:hover::before { color: var(--ink); }
+
+.preview-kv {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 6px 14px;
+  font-size: 11px;
+  letter-spacing: 0.01em;
+  padding: 6px 0;
+  border-top: 1px dashed var(--rule);
+}
+.preview-kv .k {
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--paper-faint);
+  padding-top: 2px;
+}
+.preview-kv .v { color: var(--paper); word-break: break-all; line-height: 1.45; }
+.preview-kv .v.uuid { font-size: 11px; color: var(--paper-dim); }
+.preview-kv .v b   { color: var(--amber); font-weight: 500; }
+.preview-kv .v .copy {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--paper-dim);
+  font-family: inherit;
+  font-size: 9.5px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.preview-kv .v .copy:hover { background: var(--surface); color: var(--paper); }
+
+/* bypassPermissions style chip — square, outlined, no fill */
+.chip-perm {
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px solid var(--red-warm-dim);
+  color: var(--red-warm);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
+.chip-perm.safe   { border-color: var(--phosphor-dim); color: var(--phosphor); }
+.chip-perm.ask    { border-color: var(--amber-dim);    color: var(--amber); }
+
+.preview-last {
+  margin-top: 4px;
+  padding: 8px 10px;
+  background: var(--ink);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--rule-active);
+  font-size: 11.5px;
+  color: var(--paper-dim);
+  letter-spacing: 0;
+  max-height: 64px;
+  overflow: hidden;
+}
+.preview-last::before {
+  content: "// last prompt";
+  display: block;
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--paper-faint);
+  margin-bottom: 3px;
+}
+.preview-last code { color: var(--paper); }
+
+.drawer-foot {
+  padding: 8px 16px 10px;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  color: var(--paper-faint);
+  letter-spacing: 0.06em;
+}
+.drawer-foot kbd {
+  font-family: inherit;
+  font-size: 10px;
+  background: transparent;
+  border: 1px solid var(--rule);
+  padding: 1px 5px;
+  color: var(--paper);
+  margin: 0 2px;
+  letter-spacing: 0.1em;
+}
+
+/* ── idle pane ─────────────────────────────────────────────────────── */
+.idle-pane {
+  padding: 32px 4px 16px;
+  text-align: left;
+  font-size: 11.5px;
+  color: var(--paper-dim);
+  letter-spacing: 0.04em;
+  line-height: 1.7;
+}
+.idle-pane .row-line {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 12px;
+  padding: 3px 0;
+}
+.idle-pane .row-line .k {
+  color: var(--paper-faint);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+.idle-pane .row-line .v { color: var(--paper); font-variant-numeric: tabular-nums; }
+.idle-pane .row-line .v b { color: var(--amber); font-weight: 500; }
+.idle-pane .hint {
+  margin-top: 14px;
+  font-size: 10px;
+  color: var(--paper-faint);
+  letter-spacing: 0.06em;
+}
+.idle-pane .hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  background: transparent;
+  border: 1px solid var(--rule);
+  padding: 1px 5px;
+  color: var(--paper);
+  margin: 0 2px;
+  letter-spacing: 0.1em;
+}
+
+/* state-conditional visibility */
+.island[data-state="idle"] .sessions,
+.island[data-state="idle"] .dials,
+.island[data-state="idle"] .deck { display: none; }
+.island:not([data-state="idle"]) .idle-pane { display: none; }
+.island:not([data-pending="1"]):not([data-pending="3"]) .deck { display: none; }
+
+@media (max-width: 880px) {
+  .desk { grid-template-columns: 1fr; }
+  .controls { border-right: none; border-bottom: 1px solid var(--rule); }
+  .controls .notes { display: none; }
+  .stage { padding: 28px 16px 0; }
+}
+</style>
+</head>
+<body data-theme="dark">
+<div class="desk">
+
+  <!-- ── LEFT RAIL ───────────────────────────────────────────── -->
+  <aside class="controls">
+    <div class="brand">
+      <span class="name">claude<b>·</b>island</span>
+      <span class="ver">V3</span>
+    </div>
+
+    <div>
+      <div class="section-label" data-num="01">status</div>
+      <div class="btn-group" data-group="state">
+        <button class="btn" data-state="idle"        data-pending="0" aria-pressed="false">no sessions</button>
+        <button class="btn" data-state="active"      data-pending="0" aria-pressed="false">6 live</button>
+        <button class="btn" data-state="approval-1"  data-pending="1" aria-pressed="true">1 awaiting<span class="count">01</span></button>
+        <button class="btn" data-state="approval-3"  data-pending="3" aria-pressed="false">3 awaiting<span class="count">03</span></button>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label" data-num="02">surface</div>
+      <div class="btn-group" data-group="surface">
+        <button class="btn" data-surface="dot"      aria-pressed="false">dot</button>
+        <button class="btn" data-surface="capsule"  aria-pressed="false">capsule</button>
+        <button class="btn" data-surface="expanded" aria-pressed="true">expanded</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label" data-num="03">recents</div>
+      <div class="btn-group">
+        <button class="btn" id="btn-recents-open">open drawer<span class="count">6</span></button>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label" data-num="04">theme</div>
+      <div class="theme-toggle" data-group="theme">
+        <button class="btn" data-theme="dark" aria-pressed="true">DARK</button>
+        <button class="btn" data-theme="day"  aria-pressed="false">LIGHT</button>
+      </div>
+    </div>
+
+    <div class="notes">
+      v3 · urgency via <b>rule weight</b>, not colour.<br>
+      no lamps, no stamps, no exclamation. just <em>monospace</em> and
+      a few hard lines.
+    </div>
+  </aside>
+
+  <!-- ── STAGE ───────────────────────────────────────────────── -->
+  <section class="stage">
+    <div class="island"
+         data-state="approval-1"
+         data-status="urgent"
+         data-expanded="true"
+         data-pending="1"
+         data-surface="expanded">
+
+      <!-- DOT — the smallest surface; only renders when surface=dot -->
+      <div class="dot" id="dot" data-status="urgent">
+        <span class="dot-text"><span class="ci">CI</span></span>
+        <span class="dot-tally" id="dot-tally" data-count="1">1</span>
+      </div>
+
+      <!-- CAPSULE -->
+      <div class="capsule" id="capsule">
+        <div class="monogram">CI</div>
+        <div class="title">
+          <div class="now" id="capsule-now"><b>vibe-ipad</b> · awaiting consent</div>
+          <div class="sub" id="capsule-sub">6 live · 38% · 5h</div>
+        </div>
+        <div class="wave" id="capsule-wave" data-phase="thinking">
+          <i></i><i></i><i></i><i></i><i></i>
+        </div>
+        <div class="pending" id="capsule-pending">
+          <span id="capsule-pending-count">1</span> q
+        </div>
+        <button class="recents-hit" id="capsule-recents-hit"
+                title="open recents · ⌘J"><kbd>⌘J</kbd></button>
+        <div class="strip"></div>
+      </div>
+
+      <!-- CARD -->
+      <div class="card">
+        <div class="card-inner">
+
+          <div class="card-head">
+            <div class="left">
+              <span class="count"><b id="head-live">6</b> sessions</span>
+              <span class="verb">/ <span id="head-q">1 awaiting consent</span></span>
+            </div>
+            <time datetime="2026-05-17T21:47:32">2026·05·17 — 21:47:32</time>
+          </div>
+
+          <!-- DECISION DECK -->
+          <div class="deck" id="deck">
+            <div class="deck-strip">
+              <span class="label">decision · queue</span>
+              <span class="pips" id="deck-pips">
+                <i class="on active"></i><i class="on"></i><i class="on"></i>
+              </span>
+              <span class="counter"><b id="deck-idx">1</b><span> / </span><span id="deck-total">3</span></span>
+            </div>
+
+            <div class="deck-main">
+              <div class="deck-elapsed">
+                <div class="clock" id="deck-clock">00:14</div>
+                <div class="label">elapsed</div>
+              </div>
+
+              <div class="deck-body">
+                <div class="head">
+                  <span class="verb">awaiting consent</span>
+                  <span class="sym">/</span>
+                  <span class="tool" id="deck-tool">PreToolUse · Bash</span>
+                  <span class="sym">/</span>
+                  <span class="session">session <b id="deck-session">vibe-ipad</b></span>
+                </div>
+                <div class="what" id="deck-what">
+                  destructive removal of dependency tree, followed by clean install
+                </div>
+                <div class="preview">
+                  <code id="deck-preview">rm -rf node_modules &amp;&amp; <b>pnpm install --frozen-lockfile</b></code>
+                </div>
+              </div>
+
+              <div class="deck-actions">
+                <button class="deck-btn allow" id="btn-allow">
+                  allow once<span class="key">A</span>
+                </button>
+                <button class="deck-btn deny" id="btn-deny">
+                  deny<span class="key">D</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="deck-stack" id="deck-stack">
+              <div class="deck-stack-label">queued · 2 more</div>
+              <div class="mini" data-idx="1">
+                <span class="mini-q">02</span>
+                <span class="mini-num">02</span>
+                <span class="mini-name">claude-island · master</span>
+                <span class="mini-tool">Write · .github/workflows/ci.yml</span>
+                <span class="mini-wait">00:04</span>
+              </div>
+              <div class="mini" data-idx="2">
+                <span class="mini-q">03</span>
+                <span class="mini-num">04</span>
+                <span class="mini-name">design-review · feat/perf</span>
+                <span class="mini-tool">Bash · git push</span>
+                <span class="mini-wait">01:04</span>
+              </div>
+            </div>
+
+            <div class="deck-hint">
+              <span><kbd>A</kbd>allow　<kbd>D</kbd>deny</span>
+              <span class="multi-only"><kbd>←</kbd><kbd>→</kbd>cycle</span>
+              <span><kbd>Esc</kbd>collapse</span>
+            </div>
+          </div>
+
+          <!-- session list -->
+          <ul class="sessions" id="sessions">
+
+            <li class="row" data-status="running" data-phase="thinking" data-flag="normal" data-sid="01">
+              <span class="idx">01</span>
+              <div class="info">
+                <div class="name">build-mini-cc</div>
+                <div class="cwd">~/coding-projects/build-mini-cc</div>
+                <div class="meta">
+                  <span class="phase">thinking</span>
+                  <span class="sep">·</span>
+                  <span>turn 3 · 0.4s last token</span>
+                  <span class="sep">·</span>
+                  <span><b>opus-4.7</b></span>
+                  <span class="sep">·</span>
+                  <span>1.4k tk/min</span>
+                </div>
+              </div>
+              <span class="row-wave"><div class="wave" data-phase="thinking"><i></i><i></i><i></i><i></i><i></i></div></span>
+              <div class="cost">$3.42<small>spend</small></div>
+              <span class="strip"></span>
+            </li>
+
+            <li class="row" data-status="running" data-phase="tool_use" data-flag="high" data-sid="02">
+              <span class="idx">02</span>
+              <div class="info">
+                <div class="name">claude-island · master</div>
+                <div class="cwd">~/coding-projects/claude-island</div>
+                <div class="meta">
+                  <span class="phase">tool_use</span>
+                  <span class="sep">·</span>
+                  <span>Bash · 1.2s</span>
+                  <span class="sep">·</span>
+                  <span><b>opus-4.7</b></span>
+                  <span class="sep">·</span>
+                  <span>2.1k tk/min</span>
+                </div>
+              </div>
+              <span class="row-wave"><div class="wave" data-phase="tool_use"><i></i><i></i><i></i><i></i><i></i></div></span>
+              <div class="cost">$11.07<small>spend</small></div>
+              <span class="strip"></span>
+            </li>
+
+            <!-- row 03: baseline is THINKING.  The JS state machine flips
+                 it to waiting on boot when the queue contains its sid, and
+                 ensureWaitingChildren() rewrites idx + meta in place. -->
+            <li class="row" data-status="running" data-phase="thinking" data-flag="normal" data-sid="03">
+              <span class="idx">03</span>
+              <div class="info">
+                <div class="name">vibe-ipad</div>
+                <div class="cwd">~/coding-projects/open-vibe-island/ipad</div>
+                <div class="meta">
+                  <span class="phase">thinking</span>
+                  <span class="sep">·</span>
+                  <span>turn 12 · 1.2s last token</span>
+                  <span class="sep">·</span>
+                  <span><b>sonnet-4.6</b></span>
+                  <span class="sep">·</span>
+                  <span>0.8k tk/min</span>
+                </div>
+              </div>
+              <span class="row-wave"><div class="wave" data-phase="thinking"><i></i><i></i><i></i><i></i><i></i></div></span>
+              <div class="cost">$0.84<small>spend</small></div>
+              <span class="strip"></span>
+            </li>
+
+            <li class="row" data-status="running" data-phase="compacting" data-flag="normal" data-sid="04">
+              <span class="idx">04</span>
+              <div class="info">
+                <div class="name">design-review · feat/perf</div>
+                <div class="cwd">~/coding-projects/cc-review</div>
+                <div class="meta">
+                  <span class="phase">compacting</span>
+                  <span class="sep">·</span>
+                  <span>142 KB · 8s</span>
+                  <span class="sep">·</span>
+                  <span><b>haiku-4.5</b></span>
+                </div>
+              </div>
+              <span class="row-wave"><div class="wave" data-phase="compacting"><i></i><i></i><i></i><i></i><i></i></div></span>
+              <div class="cost">$0.12<small>spend</small></div>
+              <span class="strip"></span>
+            </li>
+
+            <li class="row" data-status="idle" data-phase="idle" data-flag="normal" data-sid="05">
+              <span class="idx">05</span>
+              <div class="info">
+                <div class="name">notes · drafting reply</div>
+                <div class="cwd">~/Documents/notes</div>
+                <div class="meta">
+                  <span class="phase">idle</span>
+                  <span class="sep">·</span>
+                  <span>1h 4m</span>
+                  <span class="sep">·</span>
+                  <span><b>opus-4.7</b></span>
+                </div>
+              </div>
+              <span class="row-wave"><div class="wave" data-phase="idle"><i></i><i></i><i></i><i></i><i></i></div></span>
+              <div class="cost">$0.31<small>spend</small></div>
+              <span class="strip"></span>
+            </li>
+
+            <li class="row" data-status="idle" data-phase="ended" data-flag="normal" data-sid="06">
+              <span class="idx">06</span>
+              <div class="info">
+                <div class="name">prototype-review · v2</div>
+                <div class="cwd">~/coding-projects/claude-island/design</div>
+                <div class="meta">
+                  <span class="phase">ended</span>
+                  <span class="sep">·</span>
+                  <span>4s ago · 247 turns</span>
+                  <span class="sep">·</span>
+                  <span><b>opus-4.7</b></span>
+                </div>
+              </div>
+              <span class="row-wave"><div class="wave" data-phase="ended"><i></i><i></i><i></i><i></i><i></i></div></span>
+              <div class="cost">$5.18<small>spend</small></div>
+              <span class="strip"></span>
+            </li>
+
+          </ul>
+
+          <!-- dials: 5h VU + 7d ASCII horizon -->
+          <div class="dials" id="dials">
+            <div class="gauge">
+              <svg viewBox="0 0 200 110" width="200" height="110" aria-hidden="true">
+                <!-- baseline arc -->
+                <path d="M10 95 A 90 90 0 0 1 190 95" fill="none"
+                      stroke="var(--rule)" stroke-width="10" stroke-linecap="butt"/>
+                <!-- active arc, amber only — no green/yellow/red gradient -->
+                <path d="M10 95 A 90 90 0 0 1 190 95" fill="none"
+                      stroke="var(--amber)" stroke-width="3" stroke-linecap="butt"
+                      stroke-dasharray="283" stroke-dashoffset="108"/>
+                <!-- tick marks every 22.5° -->
+                <g stroke="var(--paper-faint)" stroke-width="1">
+                  <line x1="20"  y1="78" x2="26"  y2="84"/>
+                  <line x1="46"  y1="44" x2="50"  y2="51"/>
+                  <line x1="80"  y1="22" x2="82"  y2="30"/>
+                  <line x1="120" y1="22" x2="118" y2="30"/>
+                  <line x1="154" y1="44" x2="150" y2="51"/>
+                  <line x1="180" y1="78" x2="174" y2="84"/>
+                </g>
+                <!-- needle -->
+                <g class="needle" style="--deg: 22deg;">
+                  <line x1="100" y1="95" x2="100" y2="24"
+                        stroke="var(--paper)" stroke-width="1.5" stroke-linecap="butt"/>
+                  <circle cx="100" cy="95" r="4" fill="var(--amber)" stroke="var(--ink)" stroke-width="1"/>
+                </g>
+              </svg>
+              <div class="label">5-hour window</div>
+              <div class="reading">62<sup>%</sup></div>
+            </div>
+
+            <div class="horizon">
+              <div class="heading">
+                <span>7-day window</span>
+                <b>41%</b>
+              </div>
+              <div class="ascii-bar" id="horizon-bar"><!-- filled by JS --></div>
+              <div class="figures">
+                <span>resets <b>thu · 18:00</b></span>
+                <span>$48.20 / $120.00</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- idle pane: factual key/value lines, no poetry -->
+          <div class="idle-pane" id="idle-pane">
+            <div class="row-line"><span class="k">status</span><span class="v">idle</span></div>
+            <div class="row-line"><span class="k">live</span><span class="v">0 sessions</span></div>
+            <div class="row-line"><span class="k">last seen</span><span class="v">1h 23m ago · <b>build-mini-cc</b></span></div>
+            <div class="row-line"><span class="k">5h window</span><span class="v">38% · resets in 2h 14m</span></div>
+            <div class="row-line"><span class="k">7d window</span><span class="v">41% · resets thu 18:00</span></div>
+            <div class="hint">press <kbd>⌘</kbd><kbd>J</kbd> to resume a recent session</div>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── RECENTS DRAWER ──────────────────────────────────────── -->
+    <aside class="drawer" id="drawer" data-open="false">
+      <div class="drawer-head">
+        <span class="title">recents <b id="recents-count">6</b></span>
+        <span class="sym">/</span>
+        <span class="hint">⌘J · spotlight resume</span>
+        <button class="close" id="btn-recents-close" aria-label="close">esc</button>
+      </div>
+
+      <div class="drawer-search">
+        <div class="field">
+          <input type="text" id="recents-search"
+                 placeholder="search · title, path, branch">
+          <span class="count" id="recents-filtered">6 / 6</span>
+        </div>
+      </div>
+
+      <div class="drawer-body">
+        <div class="drawer-list" id="recents-list" role="listbox">
+          <!-- populated by JS -->
+        </div>
+
+        <div class="drawer-preview" id="recents-preview">
+          <div class="preview-title" id="pv-title">debug quota display issue</div>
+          <div class="preview-actions">
+            <button class="btn-action" id="pv-resume">resume</button>
+            <button class="btn-action secondary" id="pv-open">open folder</button>
+          </div>
+          <div class="preview-kv">
+            <span class="k">uuid</span>
+            <span class="v uuid" id="pv-uuid">0f2ec035-a899-474c-9697-978f62c05dd3
+              <button class="copy">copy</button></span>
+          </div>
+          <div class="preview-kv">
+            <span class="k">cwd</span>
+            <span class="v" id="pv-cwd">~/coding-projects/claude-island</span>
+          </div>
+          <div class="preview-kv">
+            <span class="k">branch</span>
+            <span class="v" id="pv-branch"><b>master</b> · last seen 1d ago</span>
+          </div>
+          <div class="preview-kv">
+            <span class="k">spend</span>
+            <span class="v" id="pv-spend"><b>$98.42</b> · 557 turns · opus-4.7</span>
+          </div>
+          <div class="preview-kv">
+            <span class="k">perm</span>
+            <span class="v"><span class="chip-perm" id="pv-perm">bypassPermissions</span></span>
+          </div>
+          <div class="preview-last" id="pv-last">
+            <code>git push</code>
+          </div>
+        </div>
+      </div>
+
+      <div class="drawer-foot">
+        <span>
+          <kbd>↑</kbd><kbd>↓</kbd>select　<kbd>↵</kbd>resume　<kbd>⌘O</kbd>open　<kbd>⌘C</kbd>uuid
+        </span>
+        <span><kbd>Esc</kbd>close</span>
+      </div>
+    </aside>
+
+  </section>
+
+</div>
+
+<script>
+/* ──────────────────────────────────────────────────────────────────────
+   v3 state machine — same shape as v2 but with cold copy & no colour-
+   based feedback.  Behaviour:
+     · rail buttons flip data-state / data-pending / data-theme
+     · queue array drives the Deck; rows whose sid is queued become waiting
+     · live tick updates every monospace clock label
+     · keyboard:  A allow · D deny · ← → cycle · Esc collapse
+   ────────────────────────────────────────────────────────────────────── */
+const $ = sel => document.querySelector(sel);
+const island  = $('.island');
+const capsule = $('#capsule');
+const body    = document.body;
+
+const QUEUE_TEMPLATES = [
+  { sid: '03', session: 'vibe-ipad',                 tool: 'PreToolUse · Bash',  what: 'destructive removal of dependency tree, followed by clean install', preview: 'rm -rf node_modules &amp;&amp; <b>pnpm install --frozen-lockfile</b>', since: 14 },
+  { sid: '02', session: 'claude-island · master',    tool: 'PreToolUse · Write', what: 'overwrite of CI workflow file (84 lines changed)',                  preview: 'Write · <b>.github/workflows/ci.yml</b>', since: 4 },
+  { sid: '04', session: 'design-review · feat/perf', tool: 'PreToolUse · Bash',  what: 'push of local branch to origin',                                      preview: 'git push origin <b>feat/perf-iterm-focus</b>', since: 64 },
+];
+let queue = [];
+let idx = 0;
+
+/* MM:SS — capped at 59:59, then mm prefix grows */
+function fmtClock(s) {
+  if (s < 3600) {
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${String(m).padStart(2,'0')}:${String(r).padStart(2,'0')}`;
+  }
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return `${h}h${String(m).padStart(2,'0')}`;
+}
+function fmtElapsed(s) {
+  if (s < 60) return `${s}s elapsed`;
+  if (s < 3600) return `${Math.floor(s/60)}m ${s%60}s elapsed`;
+  return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m elapsed`;
+}
+
+/* ── Decision Deck rendering ──────────────────────────────────────── */
+function rebuildPips() {
+  const pips = $('#deck-pips');
+  pips.innerHTML = '';
+  queue.forEach((_, i) => {
+    const dot = document.createElement('i');
+    dot.classList.add('on');
+    if (i === idx) dot.classList.add('active');
+    pips.appendChild(dot);
+  });
+}
+function rebuildStack() {
+  const stack = $('#deck-stack');
+  stack.querySelectorAll('.mini').forEach(n => n.remove());
+  // Update the stack label
+  const label = stack.querySelector('.deck-stack-label');
+  if (label) {
+    const others = queue.length - 1;
+    label.textContent = others > 0 ? `queued · ${others} more` : '';
+  }
+  queue.forEach((item, i) => {
+    if (i === idx) return;
+    const el = document.createElement('div');
+    el.className = 'mini';
+    el.innerHTML = `
+      <span class="mini-q">${String(i + 1).padStart(2, '0')}</span>
+      <span class="mini-num">${item.sid}</span>
+      <span class="mini-name">${item.session}</span>
+      <span class="mini-tool">${item.tool}</span>
+      <span class="mini-wait" data-wait-clock data-since="${item.since}">${fmtClock(item.since)}</span>
+    `;
+    el.addEventListener('click', () => { idx = i; renderDeck(); });
+    stack.appendChild(el);
+  });
+}
+function renderDeck() {
+  if (queue.length === 0) return;
+  const cur = queue[idx];
+  $('#deck-idx').textContent   = String(idx + 1).padStart(2, '0');
+  $('#deck-total').textContent = String(queue.length).padStart(2, '0');
+  $('#deck-tool').textContent  = cur.tool;
+  $('#deck-session').textContent = cur.session;
+  $('#deck-what').textContent    = cur.what;
+  $('#deck-preview').innerHTML   = cur.preview;
+  const clock = $('#deck-clock');
+  clock.textContent     = fmtClock(cur.since);
+  clock.dataset.since   = cur.since;
+  rebuildPips();
+  rebuildStack();
+  refreshRowWaitingState();
+}
+
+/* Sync row data-status: every row whose sid is in the queue becomes
+   waiting, others revert to their original status. */
+function refreshRowWaitingState() {
+  const queuedSids = new Set(queue.map(q => q.sid));
+  document.querySelectorAll('#sessions .row').forEach(row => {
+    if (!row.dataset.baseStatus) row.dataset.baseStatus = row.dataset.status;
+    if (!row.dataset.basePhase)  row.dataset.basePhase  = row.dataset.phase || 'idle';
+    const sid = row.dataset.sid;
+    if (queuedSids.has(sid)) {
+      row.dataset.status = 'waiting';
+      row.dataset.phase  = 'waiting_approval';
+      ensureWaitingChildren(row, queue.find(q => q.sid === sid));
+    } else {
+      row.dataset.status = row.dataset.baseStatus;
+      row.dataset.phase  = row.dataset.basePhase;
+      restoreOriginalRow(row);
+    }
+  });
+}
+
+function snapshotInitialRow(row) {
+  if (row.dataset.rowSnapshot) return;
+  const idxEl = row.querySelector('.idx');
+  const metaEl = row.querySelector('.info .meta');
+  if (idxEl && metaEl) {
+    row.dataset.rowSnapshot = JSON.stringify({
+      idx: idxEl.textContent,
+      meta: metaEl.innerHTML,
+    });
+  }
+}
+function restoreOriginalRow(row) {
+  if (!row.dataset.rowSnapshot) return;
+  const snap = JSON.parse(row.dataset.rowSnapshot);
+  const idxEl = row.querySelector('.idx');
+  const metaEl = row.querySelector('.info .meta');
+  if (idxEl)  idxEl.textContent  = snap.idx;
+  if (metaEl) metaEl.innerHTML = snap.meta;
+  const j = row.querySelector('.jump'); if (j) j.remove();
+  // strip resets via CSS based on data-status, no JS needed
+}
+function ensureWaitingChildren(row, item) {
+  const idxEl  = row.querySelector('.idx');
+  const metaEl = row.querySelector('.info .meta');
+  const model  = (row.dataset.rowSnapshot
+                  ? (JSON.parse(row.dataset.rowSnapshot).meta.match(/<b>([^<]+)<\/b>/) || [,'sonnet-4.6'])[1]
+                  : 'sonnet-4.6');
+  if (idxEl) {
+    idxEl.textContent = fmtClock(item.since);
+    idxEl.dataset.since = item.since;
+    idxEl.dataset.waitClock = '1';
+  }
+  if (metaEl) {
+    metaEl.innerHTML = `
+      <span class="tool-chip">${item.tool}</span>
+      <span class="wait-since" data-wait-elapsed data-since="${item.since}">${item.since}s elapsed</span>
+      <span class="sep">·</span>
+      <span><b>${model}</b></span>
+    `;
+  }
+  if (!row.querySelector('.jump')) {
+    const btn = document.createElement('button');
+    btn.className = 'jump';
+    btn.dataset.jumpSid = row.dataset.sid;
+    btn.textContent = 'resolve';
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const i = queue.findIndex(q => q.sid === row.dataset.sid);
+      if (i >= 0) { idx = i; renderDeck(); }
+    });
+    row.appendChild(btn);
+  }
+}
+
+/* ── 7-day ASCII horizon bar ─────────────────────────────────────── */
+function renderHorizon(pct) {
+  const total = 40;
+  const filled = Math.round((pct / 100) * total);
+  const fillChars = '▓'.repeat(filled);
+  const dimChars  = '░'.repeat(total - filled);
+  $('#horizon-bar').innerHTML =
+    `<span class="fill">${fillChars}</span><span class="dim">${dimChars}</span>`;
+}
+renderHorizon(41);
+
+/* ── live tick ────────────────────────────────────────────────────── */
+setInterval(() => {
+  queue.forEach(q => { q.since += 1; });
+  // Update the main clock + every wait label in the DOM
+  document.querySelectorAll('[data-since]').forEach(el => {
+    const s = parseInt(el.dataset.since || '0', 10) + 1;
+    el.dataset.since = s;
+    if (el.id === 'deck-clock' || el.dataset.waitClock === '1' || el.dataset.waitClock != null) {
+      el.textContent = fmtClock(s);
+    } else if (el.dataset.waitElapsed != null) {
+      el.textContent = fmtElapsed(s);
+    } else if (el.classList.contains('mini-wait')) {
+      el.textContent = fmtClock(s);
+    } else if (el.classList.contains('idx')) {
+      el.textContent = fmtClock(s);
+    } else if (el.classList.contains('wait-since')) {
+      el.textContent = fmtElapsed(s);
+    }
+  });
+  // also bump the wall clock in the card head once per second
+  const t = new Date();
+  const hh = String(t.getHours()).padStart(2,'0');
+  const mm = String(t.getMinutes()).padStart(2,'0');
+  const ss = String(t.getSeconds()).padStart(2,'0');
+  const head = document.querySelector('.card-head time');
+  if (head) head.textContent = `2026·05·17 — ${hh}:${mm}:${ss}`;
+}, 1000);
+
+/* ── rail / state transitions ─────────────────────────────────────── */
+function applyState(state, pending) {
+  island.dataset.state   = state;
+  island.dataset.pending = pending;
+  island.dataset.status  =
+    state === 'idle'           ? 'idle'  :
+    pending === '1' || pending === '3' ? 'urgent' :
+                                  'active';
+
+  if (pending === '0') {
+    queue = [];
+  } else if (pending === '1') {
+    queue = [ {...QUEUE_TEMPLATES[0]} ];
+  } else if (pending === '3') {
+    queue = QUEUE_TEMPLATES.map(t => ({...t}));
+  }
+  idx = 0;
+  if (queue.length > 0) renderDeck();
+  else refreshRowWaitingState();
+
+  $('#capsule-pending-count').textContent = pending;
+  $('#capsule-sub').textContent =
+    state === 'idle' ? '0 live · idle' :
+    pending === '0'  ? '6 live · 38% · 5h' :
+                       `6 live · ${pending} q`;
+  $('#capsule-now').innerHTML = state === 'idle'
+    ? '<b>idle</b> · no live sessions'
+    : pending === '0'
+      ? '<b>build-mini-cc</b> · thinking · turn 3'
+      : '<b>vibe-ipad</b> · awaiting consent';
+  $('#head-live').textContent = state === 'idle' ? '0' : '6';
+  $('#head-q').textContent = pending === '0' ? 'all clear' : `${pending} awaiting consent`;
+  // capsule wave follows the most-prominent session's phase:
+  // waiting > tool_use > thinking > compacting > idle
+  const wavePhase =
+    state === 'idle'                ? 'idle' :
+    pending === '1' || pending === '3' ? 'waiting_approval' :
+                                          'thinking';
+  $('#capsule-wave').dataset.phase = wavePhase;
+
+  // dot mirrors the island status + carries the pending tally
+  const dot = $('#dot');
+  dot.dataset.status =
+    state === 'idle'           ? 'idle' :
+    pending === '1' || pending === '3' ? 'urgent' :
+                                  'active';
+  const tally = $('#dot-tally');
+  tally.textContent = pending;
+  tally.dataset.count = pending;
+}
+
+/* surface state machine: dot → capsule → expanded.
+     dot       : only the 22×22 stamp shows
+     capsule   : nameplate visible, card hidden
+     expanded  : nameplate + card both visible
+   Internally we keep data-expanded for backwards compat with v2 CSS
+   that gated card visibility. */
+function applySurface(surface) {
+  island.dataset.surface = surface;
+  island.dataset.expanded = (surface === 'expanded') ? 'true' : 'false';
+}
+function applyTheme(theme) { body.dataset.theme = theme; }
+
+document.querySelectorAll('.controls .btn-group, .controls .theme-toggle')
+  .forEach(group => {
+    group.addEventListener('click', e => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      group.querySelectorAll('button')
+        .forEach(b => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'));
+      if (btn.dataset.state)    applyState(btn.dataset.state, btn.dataset.pending);
+      if (btn.dataset.surface)  applySurface(btn.dataset.surface);
+      if (btn.dataset.theme)    applyTheme(btn.dataset.theme);
+    });
+  });
+
+/* click any surface to expand to the next bigger one */
+$('#dot').addEventListener('click', () => {
+  applySurface('capsule');
+  document.querySelectorAll('[data-group="surface"] button').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.surface === 'capsule'));
+});
+capsule.addEventListener('click', () => {
+  const cur = island.dataset.surface || 'expanded';
+  const next = cur === 'expanded' ? 'capsule' : 'expanded';
+  applySurface(next);
+  document.querySelectorAll('[data-group="surface"] button').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.surface === next));
+});
+
+/* ── deck actions + keyboard ──────────────────────────────────────── */
+function resolveTop(_verdict) {
+  if (queue.length === 0) return;
+  queue.splice(idx, 1);
+  if (idx >= queue.length) idx = Math.max(0, queue.length - 1);
+  if (queue.length === 0) {
+    island.dataset.pending = '0';
+    island.dataset.status  = 'active';
+    $('#capsule-pending-count').textContent = '0';
+    $('#capsule-sub').textContent = '6 live · 38% · 5h';
+    $('#capsule-now').innerHTML = '<b>build-mini-cc</b> · live';
+    $('#head-q').textContent = 'all clear';
+    document.querySelectorAll('[data-group="state"] button').forEach(b =>
+      b.setAttribute('aria-pressed',
+        b.dataset.pending === '0' && b.dataset.state === 'active' ? 'true' : 'false'));
+    refreshRowWaitingState();
+  } else {
+    renderDeck();
+  }
+}
+$('#btn-allow').addEventListener('click', () => resolveTop('allow'));
+$('#btn-deny').addEventListener('click',  () => resolveTop('deny'));
+
+window.addEventListener('keydown', e => {
+  if (['INPUT','TEXTAREA'].includes(e.target.tagName)) return;
+  // drawer owns the keyboard while open — early-return so the deck
+  // doesn't steal Enter / ←→ / Esc from list navigation.
+  if ($('#drawer').dataset.open === 'true') return;
+  if (queue.length > 0) {
+    if (e.key === 'a' || e.key === 'A') { e.preventDefault(); resolveTop('allow'); return; }
+    if (e.key === 'd' || e.key === 'D') { e.preventDefault(); resolveTop('deny');  return; }
+    if (e.key === 'ArrowLeft')          { e.preventDefault(); idx = (idx - 1 + queue.length) % queue.length; renderDeck(); return; }
+    if (e.key === 'ArrowRight')         { e.preventDefault(); idx = (idx + 1) % queue.length; renderDeck(); return; }
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    applyExpanded(island.dataset.expanded === 'true' ? 'false' : 'true');
+    document.querySelectorAll('[data-group="expanded"] button').forEach(b =>
+      b.setAttribute('aria-pressed', b.dataset.expanded === island.dataset.expanded));
+  }
+});
+
+/* ──────────────────────────────────────────────────────────────────────
+   Recents drawer — list + preview + keyboard
+   ────────────────────────────────────────────────────────────────────── */
+const RECENTS = [
+  { uuid: '0f2ec035-a899-474c-9697-978f62c05dd3', title: 'debug quota display issue',           cwd: '~/coding-projects/claude-island',          branch: 'master',         seen: '1d ago',  spend: 98.42, turns: 557, model: 'opus-4.7',  perm: 'bypassPermissions', last: 'git push' },
+  { uuid: '4b2d11e7-cccc-44a1-9be0-90b3f87ef091', title: 'create detail design — iterm focus',  cwd: '~/coding-projects/claude-island/design',   branch: 'feat/perf',      seen: '2d ago',  spend: 33.18, turns: 211, model: 'opus-4.7',  perm: 'ask',               last: 'write Detail Design section 5' },
+  { uuid: '88f99dba-eeee-401e-86b6-a132ccca4567', title: 'sync folder content',                 cwd: '~/Documents/notes',                        branch: '—',              seen: '6h ago',  spend: 0.45,  turns: 24,  model: 'haiku-4.5', perm: 'safe',              last: 'list the unsynced files' },
+  { uuid: '12345678-1111-2222-3333-444455556666', title: 'constantine.dev personal site',       cwd: '~/coding-projects/constantine-dev',        branch: 'main',           seen: '3d ago',  spend: 0.001, turns: 3,   model: 'haiku-4.5', perm: 'safe',              last: 'preview' },
+  { uuid: '90abc123-7777-8888-9999-aaaaaaaaaaaa', title: 'claude-island terminal existence',    cwd: '~/coding-projects/claude-island',          branch: 'fix/orphan',     seen: '4d ago',  spend: 0.001, turns: 2,   model: 'opus-4.7',  perm: 'ask',               last: 'check process orphan filter' },
+  { uuid: 'fedcba98-bbbb-cccc-dddd-eeeeeeeeeeee', title: 'fix terminal pane grouping',          cwd: '~/coding-projects/claude-island',          branch: 'fix/grouping',   seen: '5d ago',  spend: 9.10,  turns: 87,  model: 'opus-4.7',  perm: 'bypassPermissions', last: 'group by wt_hwnd, not cwd' },
+];
+let recentsIdx = 0;
+let recentsFiltered = RECENTS.slice();
+
+function fmtSpend(v) {
+  if (v < 0.01) return '$0.000';
+  if (v < 1)    return `$${v.toFixed(2)}`;
+  return `$${v.toFixed(2)}`;
+}
+function recentsFlag(v) {
+  if (v >= 50) return 'huge';
+  if (v >= 5)  return 'high';
+  return 'normal';
+}
+function permClass(p) {
+  if (p === 'safe') return 'safe';
+  if (p === 'ask')  return 'ask';
+  return '';   // bypassPermissions → red default
+}
+function shortTitle(t, n=22) { return t.length > n ? t.slice(0,n-1) + '…' : t; }
+
+function renderRecentsList() {
+  const list = $('#recents-list');
+  list.innerHTML = '';
+  recentsFiltered.forEach((item, i) => {
+    const el = document.createElement('div');
+    el.className = 'item';
+    el.role = 'option';
+    el.dataset.flag = recentsFlag(item.spend);
+    el.setAttribute('aria-selected', i === recentsIdx ? 'true' : 'false');
+    el.innerHTML = `
+      <span class="n">${String(i+1).padStart(2,'0')}</span>
+      <span class="name">${shortTitle(item.title, 22)}</span>
+      <span class="spend">${fmtSpend(item.spend)}</span>
+    `;
+    el.addEventListener('click', () => { recentsIdx = i; renderRecents(); });
+    el.addEventListener('dblclick', () => { /* resume */ closeDrawer(); });
+    list.appendChild(el);
+  });
+  $('#recents-filtered').textContent = `${recentsFiltered.length} / ${RECENTS.length}`;
+  $('#recents-count').textContent = String(RECENTS.length);
+}
+function renderRecentsPreview() {
+  if (recentsFiltered.length === 0) return;
+  const item = recentsFiltered[recentsIdx];
+  $('#pv-title').textContent = item.title;
+  $('#pv-cwd').textContent = item.cwd;
+  $('#pv-branch').innerHTML = `<b>${item.branch}</b> · last seen ${item.seen}`;
+  $('#pv-spend').innerHTML  = `<b>${fmtSpend(item.spend)}</b> · ${item.turns} turns · ${item.model}`;
+  const perm = $('#pv-perm');
+  perm.textContent = item.perm;
+  perm.className = `chip-perm ${permClass(item.perm)}`;
+  $('#pv-last').innerHTML = `<code>${item.last}</code>`;
+  // uuid keeps the copy button inside it
+  $('#pv-uuid').innerHTML = `${item.uuid}<button class="copy">copy</button>`;
+}
+function renderRecents() { renderRecentsList(); renderRecentsPreview(); }
+
+function applyRecentsFilter(q) {
+  q = (q || '').trim().toLowerCase();
+  recentsFiltered = !q ? RECENTS.slice() :
+    RECENTS.filter(it =>
+      it.title.toLowerCase().includes(q) ||
+      it.cwd.toLowerCase().includes(q) ||
+      it.branch.toLowerCase().includes(q));
+  recentsIdx = 0;
+  renderRecents();
+}
+function openDrawer() {
+  $('#drawer').dataset.open = 'true';
+  setTimeout(() => $('#recents-search').focus(), 50);
+}
+function closeDrawer() {
+  $('#drawer').dataset.open = 'false';
+  $('#recents-search').blur();
+}
+
+$('#btn-recents-open').addEventListener('click', openDrawer);
+$('#btn-recents-close').addEventListener('click', closeDrawer);
+
+/* capsule's ⌘J hit-button — stop propagation so capsule click doesn't
+   also fire (which would toggle the surface in the background). */
+$('#capsule-recents-hit').addEventListener('click', e => {
+  e.stopPropagation();
+  openDrawer();
+});
+
+/* Global ⌘J / Ctrl+J — works in any surface (dot / capsule / expanded)
+   and is the primary keyboard-first way to open Recents.  Captures so
+   it fires even when the deck or drawer is consuming other keys.       */
+window.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'j' || e.key === 'J')) {
+    e.preventDefault();
+    if ($('#drawer').dataset.open === 'true') {
+      closeDrawer();
+    } else {
+      openDrawer();
+    }
+  }
+}, true);
+$('#recents-search').addEventListener('input', e => applyRecentsFilter(e.target.value));
+
+/* drawer keyboard — only when drawer is open */
+window.addEventListener('keydown', e => {
+  const drawerOpen = $('#drawer').dataset.open === 'true';
+  if (!drawerOpen) return;
+  if (e.key === 'Escape')      { e.preventDefault(); closeDrawer(); return; }
+  if (e.key === 'ArrowDown')   { e.preventDefault(); recentsIdx = Math.min(recentsIdx + 1, recentsFiltered.length - 1); renderRecents(); return; }
+  if (e.key === 'ArrowUp')     { e.preventDefault(); recentsIdx = Math.max(recentsIdx - 1, 0); renderRecents(); return; }
+  if (e.key === 'Enter')       { e.preventDefault(); /* resume */ closeDrawer(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'o') { e.preventDefault(); /* open folder */ }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'c' && e.target !== $('#recents-search')) {
+    e.preventDefault();
+    navigator.clipboard?.writeText(recentsFiltered[recentsIdx].uuid);
+  }
+}, true);   // capture so we beat the global handler
+
+/* boot */
+document.querySelectorAll('#sessions .row').forEach(snapshotInitialRow);
+applyState('approval-1', '1');
+renderRecents();
+</script>
+</body>
+</html>

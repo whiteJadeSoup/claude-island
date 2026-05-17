@@ -1,0 +1,1890 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Claude · Island — Stationery Desk v2 (Decision Deck)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=IBM+Plex+Mono:wght@300;400;500;600&display=swap">
+<style>
+/* ──────────────────────────────────────────────────────────────────────
+   Stationery Desk — v2.
+   v1 baseline: paper + ink + brass nameplate that opens into a card.
+   v2 adds: a Decision Deck for many pending approvals at once, and a
+   red-wax-stamp visual for any session row waiting on the user.
+   ────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* paper */
+  --paper:        #f3ead4;
+  --paper-deep:   #e8dcc0;
+  --paper-edge:   #d6c9a9;
+  --rule:         #c8bb9d;
+
+  /* urgent paper — for waiting rows */
+  --carmine-paper:#f3dcd3;
+  --carmine-rule: #d8a89a;
+
+  /* ink */
+  --ink:          #1f1d18;
+  --ink-soft:     #4a4640;
+  --ink-faded:    #8a8273;
+
+  /* metalwork */
+  --brass:        #b08755;
+  --brass-glint:  #e3c594;
+  --brass-deep:   #6f5230;
+
+  /* status / sealing wax */
+  --moss:         #4f6b5a;
+  --moss-glow:    #8fb59c;
+  --carmine:      #9c3030;
+  --wax:          #7a1818;       /* red wax stamp deepest */
+  --wax-glint:    #c64242;       /* highlight on the stamp */
+  --ribbon:       #c44b4b;
+  --citrine:      #d9a441;
+
+  /* type */
+  --font-display: 'Fraunces', 'IBM Plex Serif', Georgia, serif;
+  --font-mono:    'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+[data-theme="dusk"] {
+  --paper:        #1c1a17;
+  --paper-deep:   #25221d;
+  --paper-edge:   #100f0c;
+  --rule:         #3a352b;
+  --carmine-paper:#3a1f1a;
+  --carmine-rule: #6b2e26;
+  --ink:          #f0e6cf;
+  --ink-soft:     #b8ad96;
+  --ink-faded:    #6f6757;
+  --brass:        #d4a865;
+  --brass-glint:  #f3d59a;
+  --brass-deep:   #8a6841;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+/* ── desktop wallpaper ─────────────────────────────────────────────── */
+.desk {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 248px 1fr;
+  background:
+    radial-gradient(80% 60% at 50% -10%,
+      color-mix(in oklab, var(--brass-glint) 25%, transparent) 0%,
+      transparent 70%),
+    repeating-linear-gradient(45deg,
+      transparent 0 8px,
+      color-mix(in oklab, var(--paper-edge) 35%, transparent) 8px 9px),
+    repeating-linear-gradient(-45deg,
+      transparent 0 8px,
+      color-mix(in oklab, var(--paper-edge) 35%, transparent) 8px 9px),
+    var(--paper);
+  overflow: hidden;
+}
+.desk::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.12  0 0 0 0 0.10  0 0 0 0 0.08  0 0 0 0.5 0'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.35'/></svg>");
+  mix-blend-mode: multiply;
+  opacity: 0.45;
+  pointer-events: none;
+}
+[data-theme="dusk"] .desk::before { mix-blend-mode: screen; opacity: 0.22; }
+.desk::after {
+  content: "claude · island  ·  redesign 2026.05  ·  v2 decision deck";
+  position: absolute;
+  bottom: 14px; left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-faded);
+  pointer-events: none;
+}
+
+/* ── left rail ─────────────────────────────────────────────────────── */
+.controls {
+  padding: 30px 24px;
+  border-right: 1px solid var(--rule);
+  background: color-mix(in oklab, var(--paper) 60%, transparent);
+  backdrop-filter: blur(4px);
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  overflow-y: auto;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.brand .mark {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variation-settings: "SOFT" 0, "opsz" 144;
+  font-size: 28px;
+  color: var(--brass);
+  text-shadow:
+    0 1px 0 var(--brass-glint),
+    0 -1px 0 var(--brass-deep);
+  letter-spacing: -0.02em;
+}
+.brand .mark em {
+  font-style: italic;
+  font-variation-settings: "SOFT" 100, "opsz" 144;
+  color: var(--ink);
+}
+.brand .ver {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: var(--ink-faded);
+  text-transform: uppercase;
+  margin-left: auto;
+  padding: 3px 6px;
+  border: 1px solid var(--rule);
+}
+
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--ink-faded);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+.btn-group { display: flex; flex-direction: column; gap: 4px; }
+.btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  padding: 11px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: background 0.18s, color 0.18s, transform 0.18s;
+}
+.btn::before {
+  content: "";
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--rule);
+  flex-shrink: 0;
+  transition: background 0.18s, box-shadow 0.18s;
+}
+.btn:hover { color: var(--ink); transform: translateX(2px); }
+.btn[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+.btn[aria-pressed="true"]::before {
+  background: var(--brass-glint);
+  box-shadow: 0 0 8px var(--brass);
+}
+/* approval buttons get a wax dot when pressed */
+.btn[data-state="approval-1"][aria-pressed="true"]::before,
+.btn[data-state="approval-3"][aria-pressed="true"]::before {
+  background: var(--wax-glint);
+  box-shadow: 0 0 10px var(--wax);
+}
+.btn .count {
+  margin-left: auto;
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: "SOFT" 30, "opsz" 24;
+  font-size: 14px;
+  color: var(--wax);
+}
+.btn[aria-pressed="true"] .count { color: var(--wax-glint); }
+
+.theme-toggle {
+  display: flex;
+  border: 1px solid var(--rule);
+}
+.theme-toggle .btn {
+  flex: 1;
+  border: none;
+  padding: 9px 0;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+}
+.theme-toggle .btn::before { display: none; }
+.theme-toggle .btn + .btn { border-left: 1px solid var(--rule); }
+
+.notes {
+  margin-top: auto;
+  font-family: var(--font-display);
+  font-style: italic;
+  font-variation-settings: "SOFT" 100, "opsz" 12, "wght" 400;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  padding: 14px 16px;
+  border-left: 2px solid var(--brass);
+  background: color-mix(in oklab, var(--paper-deep) 50%, transparent);
+}
+.notes em { color: var(--brass); font-style: normal; }
+.notes b { color: var(--wax); font-weight: 500; font-style: normal; }
+
+/* ── stage ─────────────────────────────────────────────────────────── */
+.stage {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 48px 40px 0;
+  overflow-y: auto;
+}
+
+.island {
+  position: relative;
+  width: min(580px, 100%);
+  display: flex;
+  flex-direction: column;
+  filter: drop-shadow(0 18px 30px rgba(28, 24, 18, 0.18))
+          drop-shadow(0 2px 4px rgba(28, 24, 18, 0.12));
+  animation: island-drop 0.7s cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes island-drop {
+  from { transform: translateY(-18px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   CAPSULE — brass nameplate
+   ────────────────────────────────────────────────────────────────────── */
+.capsule {
+  height: 56px;
+  background: linear-gradient(180deg,
+    color-mix(in oklab, var(--brass-glint) 60%, var(--brass)) 0%,
+    var(--brass) 45%,
+    color-mix(in oklab, var(--brass) 70%, var(--brass-deep)) 100%);
+  border-radius: 14px 14px 4px 4px;
+  border-top: 1px solid var(--brass-glint);
+  border-bottom: 1px solid var(--brass-deep);
+  display: grid;
+  grid-template-columns: 56px 1fr auto auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 0 18px 0 0;
+  position: relative;
+  cursor: pointer;
+  user-select: none;
+  z-index: 2;
+  transition: transform 0.25s cubic-bezier(.2,.8,.2,1);
+}
+.capsule:hover { transform: translateY(-1px); }
+.capsule:active { transform: translateY(0); }
+
+.capsule .monogram {
+  height: 56px;
+  width: 56px;
+  display: grid;
+  place-items: center;
+  border-right: 1px solid color-mix(in oklab, var(--brass-deep) 60%, transparent);
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-variation-settings: "SOFT" 0, "opsz" 144, "wght" 900;
+  font-size: 22px;
+  color: var(--brass-deep);
+  letter-spacing: 0.04em;
+  text-shadow:
+    0  1px 0 color-mix(in oklab, var(--brass-glint) 80%, white),
+    0 -1px 0 color-mix(in oklab, var(--brass-deep) 70%, black);
+}
+
+.capsule .title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.capsule .title .now {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: "SOFT" 50, "opsz" 24;
+  font-size: 16px;
+  color: #2a1f10;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.capsule .title .sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--brass-deep) 60%, black);
+}
+
+.capsule .meter {
+  width: 70px;
+  height: 22px;
+  border: 1px solid var(--brass-deep);
+  background: color-mix(in oklab, var(--brass-deep) 25%, transparent);
+  border-radius: 2px;
+  padding: 3px;
+  position: relative;
+  overflow: hidden;
+}
+.capsule .meter::before {
+  content: "";
+  display: block;
+  height: 100%;
+  width: var(--pct, 38%);
+  background: repeating-linear-gradient(90deg,
+    #2a1f10 0 3px,
+    color-mix(in oklab, #2a1f10 70%, var(--brass-glint)) 3px 6px);
+  transition: width 0.6s cubic-bezier(.2,.8,.2,1);
+}
+
+/* pending badge on the brass — only shown when there are decisions queued */
+.capsule .pending {
+  display: none;
+  height: 28px;
+  padding: 0 9px;
+  background: var(--wax);
+  color: #fff;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-variation-settings: "SOFT" 0, "opsz" 24;
+  font-size: 14px;
+  border: 1px solid var(--wax-glint);
+  border-radius: 2px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.3),
+    inset 0 -1px 0 rgba(0,0,0,0.3),
+    0 0 12px color-mix(in oklab, var(--wax) 60%, transparent);
+  align-items: center;
+  gap: 6px;
+  animation: pending-throb 1.2s ease-in-out infinite;
+}
+.capsule .pending .word {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+@keyframes pending-throb {
+  0%, 100% { box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.3),
+    inset 0 -1px 0 rgba(0,0,0,0.3),
+    0 0 12px color-mix(in oklab, var(--wax) 60%, transparent); }
+  50%      { box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.3),
+    inset 0 -1px 0 rgba(0,0,0,0.3),
+    0 0 22px var(--wax); }
+}
+.island[data-pending="1"] .capsule .pending,
+.island[data-pending="3"] .capsule .pending { display: inline-flex; }
+
+/* status lamp — small glass jewel */
+.lamp {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%,
+    var(--lamp-hi, var(--moss-glow)) 0%,
+    var(--lamp, var(--moss)) 55%,
+    color-mix(in oklab, var(--lamp, var(--moss)) 60%, black) 100%);
+  box-shadow:
+    inset 0 1px 1px rgba(255,255,255,0.7),
+    inset 0 -2px 3px rgba(0,0,0,0.35),
+    0 0 0 1px color-mix(in oklab, var(--brass-deep) 60%, transparent),
+    0 0 14px var(--lamp-glow, var(--moss-glow));
+  position: relative;
+  animation: lamp-breathe 4s ease-in-out infinite;
+}
+.lamp::after {
+  content: "";
+  position: absolute;
+  top: 18%; left: 26%;
+  width: 4px; height: 3px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.9);
+  filter: blur(0.4px);
+}
+@keyframes lamp-breathe {
+  0%, 100% { filter: brightness(1); }
+  50%      { filter: brightness(1.25); }
+}
+@keyframes lamp-flash {
+  0%, 100% { transform: scale(1); filter: brightness(1); }
+  50%      { transform: scale(1.18); filter: brightness(1.4); }
+}
+
+.island[data-status="idle"]    { --lamp: var(--ink-faded); --lamp-hi: #d8cfb8; --lamp-glow: transparent; }
+.island[data-status="active"]  { --lamp: var(--moss);      --lamp-hi: var(--moss-glow); --lamp-glow: var(--moss-glow); }
+.island[data-status="urgent"]  { --lamp: var(--wax);       --lamp-hi: var(--wax-glint); --lamp-glow: var(--wax-glint); }
+.island[data-status="urgent"] .capsule .lamp { animation: lamp-flash 0.9s ease-in-out infinite; }
+
+/* ──────────────────────────────────────────────────────────────────────
+   CARD — paper drawer
+   ────────────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--paper-deep);
+  border-radius: 0 0 18px 18px;
+  border: 1px solid var(--rule);
+  border-top: none;
+  margin-top: -4px;
+  position: relative;
+  transform-origin: top center;
+  overflow: hidden;
+}
+.card::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='p'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.12  0 0 0 0 0.10  0 0 0 0 0.08  0 0 0 0.4 0'/></filter><rect width='100%' height='100%' filter='url(%23p)' opacity='0.4'/></svg>");
+  mix-blend-mode: multiply;
+  opacity: 0.55;
+  pointer-events: none;
+}
+[data-theme="dusk"] .card::before { mix-blend-mode: screen; opacity: 0.18; }
+
+.island[data-expanded="false"] .card {
+  max-height: 0;
+  border-top: 0;
+  border-bottom-width: 0;
+  opacity: 0;
+  transform: scaleY(0.94);
+  transition: max-height 0.45s cubic-bezier(.4,0,.2,1),
+              opacity 0.3s ease,
+              transform 0.45s cubic-bezier(.4,0,.2,1);
+}
+.island[data-expanded="true"] .card {
+  max-height: 1200px;
+  opacity: 1;
+  transform: scaleY(1);
+  transition: max-height 0.6s cubic-bezier(.2,.8,.2,1),
+              opacity 0.4s ease 0.1s,
+              transform 0.55s cubic-bezier(.2,.8,.2,1);
+}
+
+.card-inner { padding: 20px 22px 22px; position: relative; z-index: 1; }
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px dashed var(--rule);
+}
+.card-head h1 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-variation-settings: "SOFT" 30, "opsz" 36;
+  font-size: 22px;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+.card-head h1 em {
+  font-style: italic;
+  font-variation-settings: "SOFT" 100, "opsz" 36, "wght" 500;
+  color: var(--brass);
+  margin: 0 4px;
+}
+.card-head time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faded);
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   DECISION DECK — many pending approvals at once.
+   Layout: queue strip on top  →  main decision card (with wax stamp,
+   countdown, command preview, big Deny / Allow buttons)  →  rest of
+   the queue as compact mini-cards stacked underneath  →  keyboard
+   hint footer.  Single decision: queue strip + stack collapse.
+   ────────────────────────────────────────────────────────────────────── */
+.deck {
+  margin-bottom: 18px;
+  border: 1px solid var(--carmine-rule);
+  border-radius: 4px;
+  background:
+    linear-gradient(180deg,
+      var(--carmine-paper) 0%,
+      color-mix(in oklab, var(--carmine-paper) 70%, var(--paper-deep)) 100%);
+  position: relative;
+  overflow: hidden;
+}
+/* tape edge along the top — like the deck is held down by office tape */
+.deck::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 12%;
+  width: 76%; height: 6px;
+  background: linear-gradient(180deg,
+    color-mix(in oklab, var(--brass-glint) 80%, transparent) 0%,
+    color-mix(in oklab, var(--brass) 50%, transparent) 100%);
+  opacity: 0.55;
+  border-radius: 0 0 2px 2px;
+}
+
+.deck-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 16px 9px;
+  border-bottom: 1px dashed var(--carmine-rule);
+}
+.deck-strip .qtitle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.deck-strip .qtitle .label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--wax);
+  font-weight: 500;
+}
+/* dot pips for the queue */
+.deck-strip .pips {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+.deck-strip .pips i {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--carmine-rule) 50%, transparent);
+  display: inline-block;
+  transition: background 0.2s, transform 0.2s;
+}
+.deck-strip .pips i.on {
+  background: var(--wax);
+  box-shadow: 0 0 6px var(--wax);
+}
+.deck-strip .pips i.active {
+  background: var(--wax-glint);
+  transform: scale(1.45);
+  box-shadow: 0 0 10px var(--wax);
+}
+.deck-strip .counter {
+  font-family: var(--font-display);
+  font-variation-settings: "SOFT" 30, "opsz" 24, "wght" 500;
+  font-size: 18px;
+  color: var(--wax);
+  letter-spacing: -0.01em;
+}
+.deck-strip .counter b {
+  font-variation-settings: "SOFT" 0, "opsz" 36, "wght" 700;
+  font-size: 22px;
+  color: var(--ink);
+  margin: 0 3px;
+}
+
+/* main decision card */
+.deck-main {
+  position: relative;
+  padding: 18px 20px 16px 80px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 16px;
+  align-items: flex-end;
+}
+
+/* red wax stamp absolutely placed in the upper-left of the card */
+.wax-stamp {
+  position: absolute;
+  top: 14px; left: 14px;
+  width: 56px; height: 56px;
+  background:
+    radial-gradient(circle at 30% 30%,
+      var(--wax-glint) 0%,
+      var(--wax) 55%,
+      color-mix(in oklab, var(--wax) 70%, black) 100%);
+  border-radius: 50%;
+  border: 2px solid color-mix(in oklab, var(--wax) 70%, black);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variation-settings: "SOFT" 0, "opsz" 144, "wght" 800;
+  font-size: 18px;
+  color: rgba(255, 235, 230, 0.92);
+  letter-spacing: 0.04em;
+  line-height: 1;
+  text-shadow:
+    0 1px 1px rgba(0,0,0,0.45),
+    0 -0.5px 0 rgba(255,255,255,0.18);
+  box-shadow:
+    inset 0 2px 3px rgba(255,255,255,0.18),
+    inset 0 -3px 4px rgba(0,0,0,0.4),
+    inset 0 0 0 6px color-mix(in oklab, var(--wax) 50%, transparent),
+    2px 3px 5px rgba(80,10,10,0.35);
+  transform: rotate(-8deg);
+  animation: stamp-throb 1.4s ease-in-out infinite;
+}
+.wax-stamp::before {
+  /* circular cord ring inside the wax */
+  content: "";
+  position: absolute; inset: 6px;
+  border: 1px dashed rgba(255,235,230,0.5);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.wax-stamp .count {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-variation-settings: "SOFT" 100, "opsz" 24, "wght" 400;
+  font-style: italic;
+  display: block;
+  letter-spacing: 0;
+  margin-top: 2px;
+  opacity: 0.92;
+}
+@keyframes stamp-throb {
+  0%, 100% { transform: rotate(-8deg) scale(1); }
+  50%      { transform: rotate(-8deg) scale(1.06); }
+}
+
+.deck-main .body { min-width: 0; }
+.deck-main .body .tool-line {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--wax);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.deck-main .body .tool-line .session {
+  color: var(--ink-soft);
+  letter-spacing: 0.18em;
+}
+.deck-main .body .tool-line .session b {
+  font-weight: 600;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-variation-settings: "SOFT" 30, "opsz" 18;
+  font-size: 13px;
+  letter-spacing: -0.005em;
+  text-transform: none;
+}
+
+.deck-main .body .what {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: "SOFT" 30, "opsz" 36;
+  font-size: 19px;
+  color: var(--ink);
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  margin-bottom: 8px;
+}
+
+.deck-main .body .preview {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  background: color-mix(in oklab, var(--paper-deep) 50%, transparent);
+  border-left: 2px solid var(--wax);
+  padding: 7px 10px;
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.01em;
+}
+.deck-main .body .preview b {
+  color: var(--carmine);
+  font-weight: 500;
+}
+
+.deck-main .body .countdown {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--wax);
+  letter-spacing: 0.16em;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.deck-main .body .countdown::before {
+  content: "⌛";
+  filter: sepia(0.6) saturate(1.2) hue-rotate(-15deg);
+  font-size: 11px;
+}
+
+.deck-main .actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  min-width: 132px;
+}
+.deck-btn {
+  appearance: none;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 11px 14px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, transform 0.15s, box-shadow 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.deck-btn .key {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-variation-settings: "SOFT" 30, "opsz" 18;
+  font-size: 13px;
+  letter-spacing: 0;
+  padding: 1px 6px;
+  border-radius: 1px;
+  opacity: 0.7;
+}
+.deck-btn.allow {
+  background: var(--ink);
+  color: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: 0 2px 0 var(--brass-deep);
+}
+.deck-btn.allow .key {
+  background: color-mix(in oklab, var(--brass-glint) 70%, transparent);
+  color: var(--ink);
+}
+.deck-btn.allow:hover {
+  background: color-mix(in oklab, var(--ink) 90%, var(--brass));
+  transform: translateY(-1px);
+  box-shadow: 0 3px 0 var(--brass-deep);
+}
+.deck-btn.deny {
+  background: transparent;
+  color: var(--wax);
+  border: 1px solid var(--wax);
+}
+.deck-btn.deny .key {
+  background: color-mix(in oklab, var(--wax) 18%, transparent);
+  color: var(--wax);
+}
+.deck-btn.deny:hover {
+  background: color-mix(in oklab, var(--wax) 10%, transparent);
+  transform: translateY(-1px);
+}
+
+/* the stack — other pending decisions below the main one */
+.deck-stack {
+  border-top: 1px dashed var(--carmine-rule);
+  padding: 10px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.deck-stack-label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--ink-faded);
+  margin-bottom: 4px;
+}
+.mini {
+  display: grid;
+  grid-template-columns: 28px 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+.mini:hover {
+  background: color-mix(in oklab, var(--wax) 6%, transparent);
+  transform: translateX(2px);
+}
+.mini .mini-num {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: "SOFT" 30, "opsz" 24;
+  font-size: 16px;
+  color: var(--wax);
+  text-align: center;
+}
+.mini .mini-name {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: "SOFT" 30, "opsz" 18;
+  font-size: 13px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: -0.005em;
+}
+.mini .mini-tool {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-soft);
+  letter-spacing: 0.04em;
+}
+.mini .mini-wait {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--wax);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  min-width: 36px;
+  text-align: right;
+}
+/* stack hidden when there's only one pending decision */
+.island[data-pending="1"] .deck-stack { display: none; }
+
+/* keyboard hint */
+.deck-hint {
+  padding: 8px 16px 10px;
+  border-top: 1px dashed var(--carmine-rule);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-faded);
+  letter-spacing: 0.06em;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.deck-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  background: var(--paper);
+  border: 1px solid var(--carmine-rule);
+  border-bottom-width: 2px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  color: var(--wax);
+  margin: 0 2px;
+}
+.island[data-pending="1"] .deck-hint .multi-only { display: none; }
+
+/* ── session list — same baseline as v1; waiting state in Task 3 ───── */
+.sessions {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 52px 1fr auto 26px;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 14px 14px 0;
+  background: color-mix(in oklab, var(--paper) 80%, transparent);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  transition: transform 0.22s cubic-bezier(.2,.8,.2,1),
+              box-shadow 0.22s ease,
+              background 0.18s;
+  cursor: pointer;
+  opacity: 0;
+  animation: row-in 0.45s cubic-bezier(.2,.8,.2,1) forwards;
+}
+.row:hover {
+  transform: translateY(-3px);
+  background: var(--paper);
+  box-shadow:
+    0 4px 12px rgba(28,24,18,0.10),
+    0 1px 0 var(--paper-edge);
+}
+.island[data-expanded="true"] .row:nth-child(1) { animation-delay: 0.18s; }
+.island[data-expanded="true"] .row:nth-child(2) { animation-delay: 0.24s; }
+.island[data-expanded="true"] .row:nth-child(3) { animation-delay: 0.30s; }
+.island[data-expanded="true"] .row:nth-child(4) { animation-delay: 0.36s; }
+.island[data-expanded="true"] .row:nth-child(5) { animation-delay: 0.42s; }
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.row .num {
+  font-family: var(--font-display);
+  font-variation-settings: "SOFT" 100, "opsz" 144, "wght" 300;
+  font-size: 38px;
+  line-height: 1;
+  color: var(--brass);
+  text-align: center;
+  border-right: 1px dashed var(--rule);
+  padding: 0 8px;
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  position: relative;
+}
+.row[data-flag="high"] .num { color: var(--carmine); }
+
+.row .title { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.row .title .name {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: "SOFT" 30, "opsz" 24;
+  font-size: 15px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row .title .cwd {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faded);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row .title .meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-faded);
+  margin-top: 2px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.row .title .meta b { color: var(--ink-soft); font-weight: 500; }
+.row .title .meta .live { color: var(--moss); font-weight: 500; }
+
+.row .cost {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.row .cost .num-cost {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-variation-settings: "SOFT" 30, "opsz" 18;
+  font-size: 15px;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+.row[data-flag="high"] .cost .num-cost { color: var(--carmine); }
+.row .cost .dial {
+  width: 60px; height: 4px;
+  background: var(--paper-edge);
+  border-radius: 2px;
+  position: relative;
+  overflow: hidden;
+}
+.row .cost .dial::after {
+  content: "";
+  position: absolute; inset: 0;
+  width: var(--pct, 30%);
+  background: var(--brass);
+  border-radius: 2px;
+}
+.row[data-flag="high"] .cost .dial::after { background: var(--carmine); }
+
+.row .lamp { width: 12px; height: 12px; animation: none; }
+.row[data-status="running"]  { --lamp: var(--moss);      --lamp-hi: var(--moss-glow); --lamp-glow: var(--moss-glow); }
+.row[data-status="running"] .lamp { animation: lamp-breathe 3.2s ease-in-out infinite; }
+.row[data-status="idle"]     { --lamp: var(--ink-faded); --lamp-hi: var(--paper-edge); --lamp-glow: transparent; }
+
+/* ──────────────────────────────────────────────────────────────────────
+   WAITING ROW — the "this session is begging for your attention" state.
+   Whole row swaps to carmine paper with a wax stamp covering the number,
+   a tool/tag chip in the meta, a fast-blinking lamp, and a hover-revealed
+   "立刻处理 →" jump button.
+   ────────────────────────────────────────────────────────────────────── */
+.row[data-status="waiting"] {
+  background: var(--carmine-paper);
+  border-color: var(--carmine-rule);
+  border-left: 4px solid var(--wax);
+  padding-left: 0;  /* the 4px border replaces the left padding */
+}
+.row[data-status="waiting"]:hover {
+  background: color-mix(in oklab, var(--carmine-paper) 88%, white);
+  box-shadow:
+    0 4px 16px rgba(120, 24, 24, 0.18),
+    0 1px 0 var(--carmine-rule);
+}
+.row[data-status="waiting"] .num {
+  border-right-color: var(--carmine-rule);
+}
+/* the wax stamp sits ON TOP of the number — same as the Deck stamp but
+   smaller, slightly tilted the OPPOSITE way for visual variety */
+.row[data-status="waiting"] .num::before {
+  content: "急";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variation-settings: "SOFT" 0, "opsz" 144, "wght" 800;
+  font-size: 17px;
+  color: rgba(255, 235, 230, 0.95);
+  background: radial-gradient(circle at 32% 30%,
+      var(--wax-glint) 0%,
+      var(--wax) 55%,
+      color-mix(in oklab, var(--wax) 70%, black) 100%);
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in oklab, var(--wax) 70%, black);
+  text-shadow:
+    0 0.5px 1px rgba(0,0,0,0.4),
+    0 -0.4px 0 rgba(255,255,255,0.18);
+  box-shadow:
+    inset 0 1px 2px rgba(255,255,255,0.18),
+    inset 0 -2px 3px rgba(0,0,0,0.4),
+    inset 0 0 0 4px color-mix(in oklab, var(--wax) 45%, transparent),
+    1.5px 2px 3px rgba(80,10,10,0.4);
+  width: 36px; height: 36px;
+  margin: auto;
+  transform: rotate(5deg);
+  animation: row-stamp-throb 1.2s ease-in-out infinite;
+}
+/* hide the original numeral when we've stamped over it */
+.row[data-status="waiting"] .num { color: transparent; }
+@keyframes row-stamp-throb {
+  0%, 100% { transform: rotate(5deg) scale(1); }
+  50%      { transform: rotate(5deg) scale(1.08); }
+}
+
+/* meta row: pin a "Tool · 待批" chip + show wait time as the dominant fact */
+.row[data-status="waiting"] .title .name { color: var(--wax); }
+.row[data-status="waiting"] .title .cwd  { color: color-mix(in oklab, var(--ink-soft) 70%, var(--wax)); }
+.row[data-status="waiting"] .title .meta {
+  margin-top: 4px;
+  gap: 8px;
+  align-items: center;
+}
+.row[data-status="waiting"] .title .meta .tool-chip {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  background: var(--wax);
+  color: #fff5f1;
+  padding: 3px 7px;
+  border-radius: 1px;
+  font-weight: 500;
+}
+.row[data-status="waiting"] .title .meta .wait-since {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-variation-settings: "SOFT" 30, "opsz" 18;
+  font-size: 13px;
+  color: var(--wax);
+  letter-spacing: -0.005em;
+}
+.row[data-status="waiting"] .title .meta .model {
+  color: var(--ink-soft);
+}
+
+/* fast pulsing lamp on the right edge */
+.row[data-status="waiting"] { --lamp: var(--wax); --lamp-hi: var(--wax-glint); --lamp-glow: var(--wax-glint); }
+.row[data-status="waiting"] .lamp { animation: lamp-flash 0.9s ease-in-out infinite; }
+
+/* hover-reveal jump button — slides out from the right edge */
+.row[data-status="waiting"] .jump {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  transform: translateY(-50%) translateX(8px);
+  opacity: 0;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  background: var(--wax);
+  color: #fff5f1;
+  border: 1px solid color-mix(in oklab, var(--wax) 60%, black);
+  padding: 7px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: opacity 0.18s ease, transform 0.22s cubic-bezier(.2,.8,.2,1);
+  box-shadow: 0 2px 6px rgba(80, 10, 10, 0.25);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.row[data-status="waiting"]:hover .jump {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) translateX(0);
+}
+.row[data-status="waiting"]:hover .cost,
+.row[data-status="waiting"]:hover > .lamp {
+  /* fade the right-side widgets out a touch so the jump button reads as primary */
+  opacity: 0.25;
+  pointer-events: none;
+}
+.row[data-status="waiting"]:hover .cost,
+.row[data-status="waiting"]:hover > .lamp {
+  transition: opacity 0.18s ease;
+}
+
+/* ── dials footer ──────────────────────────────────────────────────── */
+.dials {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 22px;
+  padding-top: 18px;
+  border-top: 1px dashed var(--rule);
+  align-items: stretch;
+}
+.gauge { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.gauge svg { display: block; overflow: visible; }
+.gauge .needle { transform-origin: 100px 95px; animation: needle-jitter 5s ease-in-out infinite; }
+@keyframes needle-jitter {
+  0%, 100% { transform: rotate(var(--deg, 22deg)); }
+  47%      { transform: rotate(calc(var(--deg, 22deg) + 1.6deg)); }
+  62%      { transform: rotate(calc(var(--deg, 22deg) - 0.6deg)); }
+}
+.gauge .label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--ink-faded);
+  margin-top: -4px;
+}
+.gauge .reading {
+  font-family: var(--font-display);
+  font-variation-settings: "SOFT" 0, "opsz" 60, "wght" 500;
+  font-size: 26px;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+.gauge .reading sup {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ink-faded);
+  letter-spacing: 0.1em;
+  margin-left: 4px;
+  vertical-align: super;
+}
+
+.horizon { display: flex; flex-direction: column; gap: 10px; justify-content: space-between; }
+.horizon h3 {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--ink-faded);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.horizon h3::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+.horizon .strip {
+  height: 22px;
+  background: var(--paper-edge);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 3px;
+  display: flex;
+  align-items: center;
+}
+.horizon .strip::after {
+  content: "";
+  display: block;
+  height: 100%;
+  width: var(--pct, 35%);
+  background: repeating-linear-gradient(90deg,
+    var(--brass) 0 6px,
+    var(--brass-deep) 6px 7px);
+  border-radius: 1px;
+  transition: width 0.6s cubic-bezier(.2,.8,.2,1);
+}
+.horizon .strip-label {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-soft);
+  letter-spacing: 0.04em;
+}
+.horizon .strip-label b {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: "SOFT" 30, "opsz" 18;
+  color: var(--ink);
+}
+
+/* ── idle pane ─────────────────────────────────────────────────────── */
+.idle-pane { padding: 22px 6px 8px; text-align: center; }
+.idle-pane .quill {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-variation-settings: "SOFT" 100, "opsz" 60, "wght" 300;
+  font-size: 24px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+  letter-spacing: -0.01em;
+  margin-bottom: 14px;
+}
+.idle-pane .quill em {
+  font-style: normal;
+  color: var(--brass);
+  font-variation-settings: "SOFT" 30, "opsz" 60, "wght" 500;
+}
+.idle-pane .hint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faded);
+  letter-spacing: 0.1em;
+}
+.idle-pane .hint kbd {
+  display: inline-block;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  padding: 2px 7px;
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: 10px;
+  margin: 0 2px;
+  color: var(--ink-soft);
+}
+
+/* state-conditional visibility */
+.island[data-state="idle"] .sessions,
+.island[data-state="idle"] .dials,
+.island[data-state="idle"] .deck { display: none; }
+.island:not([data-state="idle"]) .idle-pane { display: none; }
+
+/* deck visibility: only show in approval states */
+.island:not([data-pending="1"]):not([data-pending="3"]) .deck { display: none; }
+
+@media (max-width: 880px) {
+  .desk { grid-template-columns: 1fr; }
+  .controls {
+    border-right: none;
+    border-bottom: 1px solid var(--rule);
+    flex-direction: row;
+    flex-wrap: wrap;
+    padding: 20px;
+    gap: 16px;
+  }
+  .controls .notes { display: none; }
+  .stage { padding: 32px 18px 0; }
+}
+</style>
+</head>
+<body data-theme="day">
+<div class="desk">
+
+  <!-- ── LEFT RAIL ───────────────────────────────────────────── -->
+  <aside class="controls">
+    <div class="brand">
+      <span class="mark">CI<em>·</em></span>
+      <span class="ver">v2</span>
+    </div>
+
+    <div>
+      <div class="section-label">状态</div>
+      <div class="btn-group" data-group="state">
+        <button class="btn" data-state="idle"        data-pending="0" aria-pressed="false">无 session</button>
+        <button class="btn" data-state="active"      data-pending="0" aria-pressed="false">活跃 · 5 个 session</button>
+        <button class="btn" data-state="approval-1"  data-pending="1" aria-pressed="true">权限·1 条待批<span class="count">1</span></button>
+        <button class="btn" data-state="approval-3"  data-pending="3" aria-pressed="false">权限·3 条待批<span class="count">3</span></button>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label">折叠</div>
+      <div class="btn-group" data-group="expanded">
+        <button class="btn" data-expanded="false" aria-pressed="false">铭牌（折叠）</button>
+        <button class="btn" data-expanded="true"  aria-pressed="true">完整卡片</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label">主题</div>
+      <div class="theme-toggle" data-group="theme">
+        <button class="btn" data-theme="day"  aria-pressed="true">DAY</button>
+        <button class="btn" data-theme="dusk" aria-pressed="false">DUSK</button>
+      </div>
+    </div>
+
+    <div class="notes">
+      v2：当 <b>多个会话同时等批</b>，
+      把它们摞成一摞案牍。
+      <em>急件用红蜡章戳一下</em>，
+      眼睛立刻能看见。
+    </div>
+  </aside>
+
+  <!-- ── STAGE ───────────────────────────────────────────────── -->
+  <section class="stage">
+    <div class="island"
+         data-state="approval-1"
+         data-status="urgent"
+         data-expanded="true"
+         data-pending="1">
+
+      <!-- CAPSULE -->
+      <div class="capsule" id="capsule">
+        <div class="monogram">CI</div>
+        <div class="title">
+          <div class="now">claude · island</div>
+          <div class="sub" id="capsule-sub">5 sessions · 1 待批</div>
+        </div>
+        <div class="meter" style="--pct: 38%;"></div>
+        <div class="pending" id="capsule-pending">
+          <span class="word">待批</span>
+          <span id="capsule-pending-count">1</span>
+        </div>
+        <div class="lamp"></div>
+      </div>
+
+      <!-- CARD -->
+      <div class="card">
+        <div class="card-inner">
+
+          <div class="card-head">
+            <h1>当前 <em>5</em> 个会话在飞</h1>
+            <time datetime="2026-05-17T21:47:00">2026·05·17 — 21:47</time>
+          </div>
+
+          <!-- DECISION DECK -->
+          <div class="deck" id="deck">
+            <div class="deck-strip">
+              <div class="qtitle">
+                <span class="label">Decision Deck</span>
+                <span class="pips" id="deck-pips">
+                  <i class="on active"></i>
+                  <i class="on"></i>
+                  <i class="on"></i>
+                </span>
+              </div>
+              <div class="counter">
+                <b id="deck-idx">1</b> / <span id="deck-total">3</span>
+              </div>
+            </div>
+
+            <div class="deck-main">
+              <div class="wax-stamp" aria-hidden="true">
+                急<span class="count" id="wax-count">14秒</span>
+              </div>
+
+              <div class="body">
+                <div class="tool-line">
+                  <span id="deck-tool">PreToolUse · Bash</span>
+                  <span class="session">session <b id="deck-session">build-mini-cc</b></span>
+                </div>
+                <div class="what" id="deck-what">
+                  想要运行一个会清空依赖的命令
+                </div>
+                <div class="preview">
+                  <code id="deck-preview">rm -rf node_modules &amp;&amp; <b>pnpm install --frozen-lockfile</b></code>
+                </div>
+                <div class="countdown" id="deck-countdown">已等待 14 秒</div>
+              </div>
+
+              <div class="actions">
+                <button class="deck-btn allow" id="btn-allow">
+                  允许一次<span class="key">A</span>
+                </button>
+                <button class="deck-btn deny" id="btn-deny">
+                  拒绝<span class="key">D</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="deck-stack" id="deck-stack">
+              <div class="deck-stack-label">队列里还有</div>
+              <!-- mini rows populated by JS in Task 4; static fallback for now: -->
+              <div class="mini" data-idx="1">
+                <span class="mini-num">02</span>
+                <span class="mini-name">claude-island · master</span>
+                <span class="mini-tool">Write · settings.json</span>
+                <span class="mini-wait">4 秒</span>
+              </div>
+              <div class="mini" data-idx="2">
+                <span class="mini-num">04</span>
+                <span class="mini-name">design-review · feat/perf</span>
+                <span class="mini-tool">Bash · git push</span>
+                <span class="mini-wait">1 分</span>
+              </div>
+            </div>
+
+            <div class="deck-hint">
+              <span><kbd>A</kbd> 允许　<kbd>D</kbd> 拒绝</span>
+              <span class="multi-only"><kbd>←</kbd><kbd>→</kbd> 切换队列</span>
+              <span><kbd>Esc</kbd> 折叠</span>
+            </div>
+          </div>
+
+          <!-- session list (Task 3 will reshape the waiting rows) -->
+          <ul class="sessions" id="sessions">
+            <li class="row" data-status="running" data-flag="normal" data-sid="01">
+              <div class="num">01</div>
+              <div class="title">
+                <div class="name">build-mini-cc</div>
+                <div class="cwd">~/coding-projects/build-mini-cc</div>
+                <div class="meta">
+                  <span class="live">●  active now</span>
+                  <span><b>opus-4.7</b></span>
+                  <span>1.4k tk/min</span>
+                </div>
+              </div>
+              <div class="cost">
+                <div class="num-cost">$3.42</div>
+                <div class="dial" style="--pct: 64%;"></div>
+              </div>
+              <div class="lamp"></div>
+            </li>
+
+            <li class="row" data-status="running" data-flag="high" data-sid="02">
+              <div class="num">02</div>
+              <div class="title">
+                <div class="name">claude-island · master</div>
+                <div class="cwd">~/coding-projects/claude-island</div>
+                <div class="meta">
+                  <span class="live">●  active now</span>
+                  <span><b>opus-4.7</b></span>
+                  <span>2.1k tk/min</span>
+                </div>
+              </div>
+              <div class="cost">
+                <div class="num-cost">$11.07</div>
+                <div class="dial" style="--pct: 92%;"></div>
+              </div>
+              <div class="lamp"></div>
+            </li>
+
+            <!-- canonical "waiting" row — red wax stamp covers the number,
+                 carmine paper background, tool chip + live wait counter,
+                 hover-reveal jump button. -->
+            <li class="row" data-status="waiting" data-flag="normal" data-sid="03"
+                data-wait-since="0" data-tool="Bash">
+              <div class="num">03</div>
+              <div class="title">
+                <div class="name">vibe-ipad</div>
+                <div class="cwd">~/coding-projects/open-vibe-island/ipad</div>
+                <div class="meta">
+                  <span class="tool-chip">Bash · 待批</span>
+                  <span class="wait-since" data-wait-label>等 14 秒</span>
+                  <span class="model"><b>sonnet-4.6</b></span>
+                </div>
+              </div>
+              <div class="cost">
+                <div class="num-cost">$0.84</div>
+                <div class="dial" style="--pct: 18%;"></div>
+              </div>
+              <div class="lamp"></div>
+              <button class="jump" data-jump-sid="03">立刻处理 →</button>
+            </li>
+
+            <li class="row" data-status="idle" data-flag="normal" data-sid="04">
+              <div class="num">04</div>
+              <div class="title">
+                <div class="name">design-review · feat/perf</div>
+                <div class="cwd">~/coding-projects/cc-review</div>
+                <div class="meta">
+                  <span>idle 14m</span>
+                  <span><b>haiku-4.5</b></span>
+                </div>
+              </div>
+              <div class="cost">
+                <div class="num-cost">$0.12</div>
+                <div class="dial" style="--pct: 4%;"></div>
+              </div>
+              <div class="lamp"></div>
+            </li>
+
+            <li class="row" data-status="idle" data-flag="normal" data-sid="05">
+              <div class="num">05</div>
+              <div class="title">
+                <div class="name">notes · 写邮件</div>
+                <div class="cwd">~/Documents/notes</div>
+                <div class="meta">
+                  <span>idle 1h 4m</span>
+                  <span><b>opus-4.7</b></span>
+                </div>
+              </div>
+              <div class="cost">
+                <div class="num-cost">$0.31</div>
+                <div class="dial" style="--pct: 9%;"></div>
+              </div>
+              <div class="lamp"></div>
+            </li>
+          </ul>
+
+          <div class="dials">
+            <div class="gauge">
+              <svg viewBox="0 0 200 110" width="200" height="110" aria-hidden="true">
+                <path d="M10 95 A 90 90 0 0 1 190 95" fill="none"
+                      stroke="var(--paper-edge)" stroke-width="14" stroke-linecap="round"/>
+                <defs>
+                  <linearGradient id="vu-grad" x1="0" x2="1" y1="0" y2="0">
+                    <stop offset="0%"  stop-color="var(--moss)"/>
+                    <stop offset="55%" stop-color="var(--citrine)"/>
+                    <stop offset="100%" stop-color="var(--carmine)"/>
+                  </linearGradient>
+                </defs>
+                <path d="M10 95 A 90 90 0 0 1 190 95" fill="none"
+                      stroke="url(#vu-grad)" stroke-width="6" stroke-linecap="round"
+                      stroke-dasharray="283" stroke-dashoffset="105"/>
+                <g stroke="var(--ink-faded)" stroke-width="1">
+                  <line x1="22"  y1="80" x2="28"  y2="86"/>
+                  <line x1="55"  y1="40" x2="60"  y2="48"/>
+                  <line x1="100" y1="20" x2="100" y2="30"/>
+                  <line x1="145" y1="40" x2="140" y2="48"/>
+                  <line x1="178" y1="80" x2="172" y2="86"/>
+                </g>
+                <g class="needle" style="--deg: 22deg;">
+                  <line x1="100" y1="95" x2="100" y2="22"
+                        stroke="var(--ink)" stroke-width="2.5" stroke-linecap="round"/>
+                  <circle cx="100" cy="95" r="6" fill="var(--brass)" stroke="var(--brass-deep)" stroke-width="1.5"/>
+                </g>
+              </svg>
+              <div class="label">5-Hour Window</div>
+              <div class="reading">62<sup>%</sup></div>
+            </div>
+
+            <div class="horizon">
+              <h3>7-Day Quota</h3>
+              <div class="strip" style="--pct: 41%;"></div>
+              <div class="strip-label">
+                <span>已用 <b>41%</b> · 重置于 周四 18:00</span>
+                <span>$48.20 / $120.00</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="idle-pane">
+            <p class="quill">
+              <em>桌面安静。</em><br>
+              没有正在飞的会话——<br>
+              按下 <kbd>⌘</kbd><kbd>J</kbd> 唤起最近的项目。
+            </p>
+            <p class="hint">island 仍在守候 · 5 分钟前已确认配额</p>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+</div>
+
+<script>
+/* ──────────────────────────────────────────────────────────────────────
+   State machine for the v2 prototype.
+   - rail buttons flip data-state / data-pending / data-theme on the island
+   - the queue array drives the Decision Deck; ← → cycle, A allows, D denies
+   - rows whose sid is in the queue get data-status="waiting" so the
+     row-level wax stamp / chip / jump button apply
+   - one tick/sec updates every "wait Xs" label
+   - Esc collapses the card
+   ────────────────────────────────────────────────────────────────────── */
+const $ = sel => document.querySelector(sel);
+const island  = $('.island');
+const capsule = $('#capsule');
+const body    = document.body;
+
+// Demo queue.  In production, each entry corresponds to a real pending
+// decision id; here the `since` clocks are seeded with realistic spreads
+// (the most recent first so the active item ages most slowly).
+const QUEUE_TEMPLATES = [
+  { sid: '03', session: 'vibe-ipad',              tool: 'Bash',           what: '想要运行一个会清空依赖的命令', preview: 'rm -rf node_modules && <b>pnpm install --frozen-lockfile</b>', since: 14 },
+  { sid: '02', session: 'claude-island · master', tool: 'Write',          what: '修改一个工作流配置文件',     preview: 'Write · <b>.github/workflows/ci.yml</b> (84 lines changed)', since: 4 },
+  { sid: '04', session: 'design-review · feat/perf', tool: 'Bash',        what: '把分支推到远端',             preview: 'git push origin <b>feat/perf-iterm-focus</b>', since: 64 },
+];
+let queue = [];           // active queue (subset of templates)
+let idx = 0;              // current main decision
+
+function fmtWait(seconds) {
+  if (seconds < 60) return `${seconds} 秒`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s === 0 ? `${m} 分` : `${m}分${s}秒`;
+}
+
+function rebuildPips() {
+  const pips = $('#deck-pips');
+  pips.innerHTML = '';
+  queue.forEach((_, i) => {
+    const dot = document.createElement('i');
+    dot.classList.add('on');
+    if (i === idx) dot.classList.add('active');
+    pips.appendChild(dot);
+  });
+}
+
+function rebuildStack() {
+  const stack = $('#deck-stack');
+  // Keep the label; clear mini rows.
+  stack.querySelectorAll('.mini').forEach(n => n.remove());
+  queue.forEach((item, i) => {
+    if (i === idx) return;  // skip the one in main slot
+    const el = document.createElement('div');
+    el.className = 'mini';
+    el.dataset.targetIdx = i;
+    el.innerHTML = `
+      <span class="mini-num">${item.sid}</span>
+      <span class="mini-name">${item.session}</span>
+      <span class="mini-tool">${item.tool}</span>
+      <span class="mini-wait" data-wait-label data-since="${item.since}">${fmtWait(item.since)}</span>
+    `;
+    el.addEventListener('click', () => { idx = i; renderDeck(); });
+    stack.appendChild(el);
+  });
+}
+
+function renderDeck() {
+  if (queue.length === 0) return;
+  const cur = queue[idx];
+  $('#deck-idx').textContent   = idx + 1;
+  $('#deck-total').textContent = queue.length;
+  $('#deck-tool').textContent  = `PreToolUse · ${cur.tool}`;
+  $('#deck-session').textContent = cur.session;
+  $('#deck-what').textContent    = cur.what;
+  $('#deck-preview').innerHTML   = cur.preview;
+  const waitLabel = fmtWait(cur.since);
+  $('#deck-countdown').textContent = `已等待 ${waitLabel}`;
+  $('#wax-count').textContent      = `${cur.since}秒`;
+  // Bind wait counters for the main slot (so tick() updates them).
+  $('#deck-countdown').dataset.since = cur.since;
+  $('#wax-count').dataset.since      = cur.since;
+  rebuildPips();
+  rebuildStack();
+  refreshRowWaitingState();
+}
+
+/* Sync row data-status: every row whose sid is in the queue becomes
+   "waiting", others restore to their baseline status read from a
+   stashed data attribute on the row. */
+function refreshRowWaitingState() {
+  const queuedSids = new Set(queue.map(q => q.sid));
+  document.querySelectorAll('#sessions .row').forEach(row => {
+    if (!row.dataset.baseStatus) row.dataset.baseStatus = row.dataset.status;
+    const sid = row.dataset.sid;
+    if (queuedSids.has(sid)) {
+      row.dataset.status = 'waiting';
+      // ensure waiting-only children exist (tool-chip / wait-since / jump)
+      ensureWaitingChildren(row, queue.find(q => q.sid === sid));
+    } else {
+      row.dataset.status = row.dataset.baseStatus;
+      removeWaitingChildren(row);
+    }
+  });
+}
+
+function ensureWaitingChildren(row, item) {
+  const meta = row.querySelector('.title .meta');
+  if (!meta) return;
+  // Replace meta contents with the waiting layout — keeps it deterministic.
+  meta.innerHTML = `
+    <span class="tool-chip">${item.tool} · 待批</span>
+    <span class="wait-since" data-wait-label data-since="${item.since}">等 ${fmtWait(item.since)}</span>
+    <span class="model"><b>${rowModel(row)}</b></span>
+  `;
+  if (!row.querySelector('.jump')) {
+    const btn = document.createElement('button');
+    btn.className = 'jump';
+    btn.dataset.jumpSid = row.dataset.sid;
+    btn.textContent = '立刻处理 →';
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const i = queue.findIndex(q => q.sid === row.dataset.sid);
+      if (i >= 0) { idx = i; renderDeck(); }
+    });
+    row.appendChild(btn);
+  }
+}
+function removeWaitingChildren(row) {
+  // Restore the row's static idle/active meta from a stashed snapshot.
+  const meta = row.querySelector('.title .meta');
+  if (meta && row.dataset.metaSnapshot) {
+    meta.innerHTML = row.dataset.metaSnapshot;
+  }
+  const jump = row.querySelector('.jump');
+  if (jump) jump.remove();
+}
+
+/* On first run, capture each row's original meta innerHTML so we can
+   put it back when the row drops out of the queue. */
+function snapshotInitialMeta() {
+  document.querySelectorAll('#sessions .row').forEach(row => {
+    const meta = row.querySelector('.title .meta');
+    if (meta && !row.dataset.metaSnapshot) {
+      row.dataset.metaSnapshot = meta.innerHTML;
+    }
+  });
+}
+function rowModel(row) {
+  // Best-effort: pull the <b> from the row's snapshot meta if present.
+  const snap = row.dataset.metaSnapshot || '';
+  const m = snap.match(/<b>([^<]+)<\/b>/);
+  return m ? m[1] : 'sonnet-4.6';
+}
+
+/* ── tick: bump every "等 Xs" label every second ──────────────────── */
+setInterval(() => {
+  queue.forEach(q => { q.since += 1; });
+  document.querySelectorAll('[data-wait-label]').forEach(el => {
+    const s = parseInt(el.dataset.since || '0', 10) + 1;
+    el.dataset.since = s;
+    if (el.id === 'wax-count') {
+      el.textContent = `${s}秒`;
+    } else if (el.id === 'deck-countdown') {
+      el.textContent = `已等待 ${fmtWait(s)}`;
+    } else if (el.classList.contains('wait-since')) {
+      el.textContent = `等 ${fmtWait(s)}`;
+    } else {
+      // mini-wait
+      el.textContent = fmtWait(s);
+    }
+  });
+}, 1000);
+
+/* ── rail / state transitions ─────────────────────────────────────── */
+function applyState(state, pending) {
+  island.dataset.state   = state;
+  island.dataset.pending = pending;
+  island.dataset.status  =
+    state === 'idle'           ? 'idle'  :
+    pending === '1' || pending === '3' ? 'urgent' :
+                                  'active';
+
+  // Build the queue from templates based on pending count.
+  if (pending === '0') {
+    queue = [];
+  } else if (pending === '1') {
+    queue = [ {...QUEUE_TEMPLATES[0]} ];   // just the Bash one
+  } else if (pending === '3') {
+    queue = QUEUE_TEMPLATES.map(t => ({...t}));
+  }
+  idx = 0;
+  if (queue.length > 0) renderDeck();
+  else refreshRowWaitingState();
+
+  $('#capsule-pending-count').textContent = pending;
+  $('#capsule-sub').textContent =
+    state === 'idle'  ? '0 sessions' :
+    pending === '0'   ? '5 sessions · 38% · 5h' :
+                        `5 sessions · ${pending} 待批`;
+}
+
+function applyExpanded(open) { island.dataset.expanded = open; }
+function applyTheme(theme)   { body.dataset.theme = theme; }
+
+document.querySelectorAll('.controls .btn-group, .controls .theme-toggle')
+  .forEach(group => {
+    group.addEventListener('click', e => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      group.querySelectorAll('button')
+        .forEach(b => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'));
+      if (btn.dataset.state)    applyState(btn.dataset.state, btn.dataset.pending);
+      if (btn.dataset.expanded) applyExpanded(btn.dataset.expanded);
+      if (btn.dataset.theme)    applyTheme(btn.dataset.theme);
+    });
+  });
+
+capsule.addEventListener('click', () => {
+  const next = island.dataset.expanded === 'true' ? 'false' : 'true';
+  applyExpanded(next);
+  document.querySelectorAll('[data-group="expanded"] button').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.expanded === next));
+});
+
+/* ── Deck action buttons + keyboard ───────────────────────────────── */
+function resolveTop(_verdict) {
+  // Pop the current decision, advance idx (stay at 0 if we're at the end).
+  if (queue.length === 0) return;
+  queue.splice(idx, 1);
+  if (idx >= queue.length) idx = Math.max(0, queue.length - 1);
+  if (queue.length === 0) {
+    // queue drained → back to plain active state
+    island.dataset.pending = '0';
+    island.dataset.status  = 'active';
+    $('#capsule-pending-count').textContent = '0';
+    $('#capsule-sub').textContent = '5 sessions · 38% · 5h';
+    document.querySelectorAll('[data-group="state"] button').forEach(b =>
+      b.setAttribute('aria-pressed', b.dataset.pending === '0' && b.dataset.state === 'active' ? 'true' : 'false'));
+    refreshRowWaitingState();
+  } else {
+    renderDeck();
+  }
+}
+
+$('#btn-allow').addEventListener('click', () => resolveTop('allow'));
+$('#btn-deny').addEventListener('click',  () => resolveTop('deny'));
+
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (queue.length > 0) {
+    if (e.key === 'a' || e.key === 'A') { e.preventDefault(); resolveTop('allow'); return; }
+    if (e.key === 'd' || e.key === 'D') { e.preventDefault(); resolveTop('deny');  return; }
+    if (e.key === 'ArrowLeft')          { e.preventDefault(); idx = (idx - 1 + queue.length) % queue.length; renderDeck(); return; }
+    if (e.key === 'ArrowRight')         { e.preventDefault(); idx = (idx + 1) % queue.length; renderDeck(); return; }
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    applyExpanded(island.dataset.expanded === 'true' ? 'false' : 'true');
+    document.querySelectorAll('[data-group="expanded"] button').forEach(b =>
+      b.setAttribute('aria-pressed', b.dataset.expanded === island.dataset.expanded));
+  }
+});
+
+/* boot */
+snapshotInitialMeta();
+applyState('approval-1', '1');
+</script>
+</body>
+</html>
