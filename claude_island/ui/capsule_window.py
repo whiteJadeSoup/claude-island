@@ -17,10 +17,22 @@ from PySide6.QtWidgets import (
 
 from claude_island.core.snapshot import SessionView, WorldSnapshot
 from .fonts import UI_FONT_FAMILY, UI_FONT_STACK
+from .lab_palette import Color as _C, FontStack as _F
 from .controller import IslandController
 from .expanded_window import _RowStatusGlyph
 from .window_position import load_position as _load_saved_position
 from .window_position import save_position as _save_position
+
+
+def _qcolor_from_hex(hex_str: str, alpha: int = 255) -> QColor:
+    """``"#0e0e10"`` → ``QColor(14, 14, 16, alpha)``.
+
+    Single helper so the capsule (which paints with QColor objects, not
+    QSS strings) can consume the same hex tokens as the QSS surfaces.
+    Keeps both worlds in sync without re-declaring colours by RGB tuple.
+    """
+    h = hex_str.lstrip("#")
+    return QColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), alpha)
 
 # Two widths: normal (no quota mini-bar) vs warning (quota mini-bar
 # appended on the right). Switching between them happens on every
@@ -121,42 +133,48 @@ _ACTIVE_THRESHOLD_SECONDS = 30
 # inside _RowStatusGlyph and runs as the equalizer-bar wave there.
 # Capsule no longer owns a QPropertyAnimation directly.)
 
-_STYLE_LABEL = f"color: white; font-size: 12px; font-family: {UI_FONT_STACK};"
-# Cost label uses a slightly muted colour so the eye lands on the
-# session name first; the cost is glanceable secondary info. Same
-# size + weight as the name so the two regions read as one component.
-_STYLE_COST = (
-    f"color: #d4d4d4; font-size: 12px; font-family: {UI_FONT_STACK};"
+# v3 lab-console: all text in mono.  Primary text is paper-tinted (warm
+# white), cost is paper-dim so the name reads as the primary anchor.
+_STYLE_LABEL = (
+    f"color: {_C.paper}; font-size: 12px; font-family: {_F.mono_stack};"
 )
-# Active = green equalizer bars; idle = static grey dot. Same colour
-# mapping the panel rows use, just rendered through _RowStatusGlyph
-# instead of a styled QLabel.
-_DOT_RUNNING_COLOR = "#22c55e"
-_DOT_IDLE_COLOR = "#6b7280"
-_BG_COLOR = QColor(18, 18, 18, 230)
-# Capsule background swap when quota crosses the critical threshold —
-# amber that reads "warning, not failure" against the dark text. The
-# RGB matches the row chip's amber so the warning vocabulary stays
-# consistent across panel + pill.
-_BG_COLOR_WARN = QColor(120, 53, 15, 230)
-_BG_COLOR_CRITICAL = QColor(127, 29, 29, 230)
-_DOT_COLOR = QColor(80, 80, 80, 200)
-# Mini quota bar pen / brush colours. Resolved from core's shared
-# palette via ``_quota_bar_color()`` at paint time — never define
-# bar colours here directly (would re-open the cross-surface drift
-# this module's import block warns about).
-_QUOTA_BAR_TRACK = QColor(255, 255, 255, 40)
-# BG wash colours for the pill body, keyed by severity name. Dark
-# variants of the bar palette so the wash stays a contextual cue
-# rather than competing with the bar for attention. The ok variant
-# is the standard dark grey — no quota wash below the warn band.
+_STYLE_COST = (
+    f"color: {_C.paper_dim}; font-size: 12px; font-family: {_F.mono_stack};"
+)
+# Equalizer-bar colours.  Kept aligned with the row glyph so the same
+# wave shows up identically in the pill and the panel.  Values sourced
+# from lab_palette so a future palette tweak propagates in one edit.
+_DOT_RUNNING_COLOR = _C.phosphor
+_DOT_IDLE_COLOR    = _C.paper_faint
+# Capsule body background — v3 matte near-black.
+_BG_COLOR          = _qcolor_from_hex(_C.ink, 230)
+# Warn / critical washes — still amber / carmine in spirit, but tinted
+# darker so they read as "the body has been stained, not painted" against
+# the v3 ink baseline.  The row chip's amber/red stay vibrant on hover;
+# the pill wash is the ambient cue.
+_BG_COLOR_WARN     = _qcolor_from_hex(_C.amber_dim,    230)
+_BG_COLOR_CRITICAL = _qcolor_from_hex(_C.red_warm_dim, 230)
+_DOT_COLOR         = _qcolor_from_hex(_C.paper_faint, 200)
+# Mini quota bar track.  Paper-faint at low alpha — visible against the
+# ink wash, never bright enough to compete with the filled portion.
+_QUOTA_BAR_TRACK = _qcolor_from_hex(_C.paper_faint, 60)
+# BG wash colours keyed by severity name.  Dark variants of the bar
+# palette so the wash stays a contextual cue rather than competing with
+# the bar for attention.  The ok variant uses the same ink as _BG_COLOR
+# — no quota wash below the warn band.
 _BG_BY_SEVERITY: dict[str, QColor] = {
-    "ok":       QColor(18, 18, 18, 230),
+    "ok":       _BG_COLOR,
     "warn":     _BG_COLOR_WARN,
     "critical": _BG_COLOR_CRITICAL,
 }
-_STYLE_QUOTA_PCT = "color: #fde68a; font-size: 11px; font-weight: 600;"
-_STYLE_QUOTA_PCT_CRITICAL = "color: #fee2e2; font-size: 11px; font-weight: 600;"
+_STYLE_QUOTA_PCT = (
+    f"color: {_C.amber}; font-size: 11px; font-weight: 600; "
+    f"font-family: {_F.mono_stack};"
+)
+_STYLE_QUOTA_PCT_CRITICAL = (
+    f"color: {_C.red_warm}; font-size: 11px; font-weight: 600; "
+    f"font-family: {_F.mono_stack};"
+)
 
 
 def _pos_visible_on_any_screen(x: int, y: int, w: int, h: int) -> bool:
@@ -212,17 +230,21 @@ class CapsuleData(NamedTuple):
     cost_str: str                        # "" if cost <= 0, else _fmt_money(cost)
     quota_pct: int | None                # None if no quota, else 0..100 truncated
 
-_STYLE_MENU = """
-    QMenu {
-        background: #1e1e1e;
-        color: #e0e0e0;
-        border: 1px solid #333;
+# Right-click menu — v3 surface tints + mono font.  No rounded corners
+# on items (v3 reserves rounded for the wax-stamp / red shock visuals
+# we explicitly removed); the menu reads as a flat lab-bench panel.
+_STYLE_MENU = f"""
+    QMenu {{
+        background: {_C.surface};
+        color: {_C.paper};
+        border: 1px solid {_C.rule};
         padding: 4px;
         font-size: 12px;
-    }
-    QMenu::item { padding: 6px 18px; border-radius: 4px; }
-    QMenu::item:selected { background: #2e2e2e; }
-    QMenu::separator { height: 1px; background: #333; margin: 4px 6px; }
+        font-family: {_F.mono_stack};
+    }}
+    QMenu::item {{ padding: 6px 18px; border-radius: 0; }}
+    QMenu::item:selected {{ background: {_C.surface_hi}; }}
+    QMenu::separator {{ height: 1px; background: {_C.rule}; margin: 4px 6px; }}
 """
 
 
