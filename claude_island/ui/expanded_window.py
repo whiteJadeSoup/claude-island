@@ -1001,6 +1001,21 @@ _STYLE_MODEL_CHIP = (
     " font-weight: 600;"
     "}}"
 )
+# Empty / unset chip: transparent border + transparent text so an empty
+# QLabel doesn't paint a pill-shaped void on rows where the model isn't
+# resolved yet. Layout still reserves zero width (empty text) — the
+# crucial property is that the widget stays visible so subsequent
+# ``setText`` updates trigger a normal relayout. See `_update_row` for
+# why this matters (was masked by a hide()/show() pattern that left the
+# chip permanently collapsed after the first JSONL backfill cycle).
+_STYLE_MODEL_CHIP_EMPTY = (
+    "QLabel {"
+    " color: transparent;"
+    " background: transparent;"
+    " border: 1px solid transparent;"
+    " padding: 0px;"
+    "}"
+)
 # Status line typography: same dimmer grey as _STYLE_AGE so the text
 # settles into the secondary tier; size matched to chip height.
 _STYLE_STATUS = "color: #9ca3af; font-size: 10px;"
@@ -5082,19 +5097,38 @@ class ExpandedWindow(QWidget):
                         break
         chip_label = btn.findChild(QLabel, "model_chip")
         if chip_label is not None:
+            # NEVER use hide()/show() on this chip. The row is first
+            # rendered while the JSONL backfill is still running for
+            # sessions whose uuid was only just resolved (e.g. the
+            # ``--resume <name>`` reverse-lookup path). On that first
+            # tick ``model_id == ""`` — an earlier revision hid the
+            # chip widget then, and Qt cached the resulting zero-width
+            # layout slot. Once backfill completed and ``show()`` ran,
+            # the chip was marked visible but its slot stayed
+            # collapsed, leaving the chip permanently invisible.
+            # Instead, drive the chip with text + style only and poke
+            # the layout to recompute on every tick so the slot grows
+            # from 0 to the chip's real sizeHint as soon as the model
+            # arrives. Caught 2026-05-17 on cc-learning.
             if model_id:
                 chip_text = _resolve_model_short_name(model_id)
                 chip_color = _resolve_model_color(model_id)
                 target_chip_style = _STYLE_MODEL_CHIP.format(color=chip_color)
-                if chip_label.text() != chip_text:
-                    chip_label.setText(chip_text)
-                if chip_label.styleSheet() != target_chip_style:
-                    chip_label.setStyleSheet(target_chip_style)
-                if chip_label.isHidden():
-                    chip_label.show()
             else:
-                if not chip_label.isHidden():
-                    chip_label.hide()
+                chip_text = ""
+                target_chip_style = _STYLE_MODEL_CHIP_EMPTY
+            if chip_label.text() != chip_text:
+                chip_label.setText(chip_text)
+            if chip_label.styleSheet() != target_chip_style:
+                chip_label.setStyleSheet(target_chip_style)
+            chip_label.adjustSize()
+            chip_label.updateGeometry()
+            parent = chip_label.parentWidget()
+            if parent is not None:
+                if parent.layout() is not None:
+                    parent.layout().invalidate()
+                    parent.layout().activate()
+                parent.updateGeometry()
 
         status_label = btn.findChild(QLabel, "status_label")
         if status_label is not None:

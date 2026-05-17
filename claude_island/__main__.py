@@ -173,7 +173,7 @@ jsonl_parser.start_backfill_pool()
 # Section 2: Platform layer (psutil, watchdog, pywin32/pyobjc)
 # ---------------------------------------------------------------------------
 from claude_island.platform_.file_watcher import FileWatcher
-from claude_island.platform_.process_scanner import ProcessScanner
+from claude_island.platform_.process_scanner import ProcessScanner, resume_uuid_for_pid
 from claude_island.platform_.providers import (
     ProviderEngine,
     all_providers,
@@ -199,6 +199,20 @@ from claude_island.platform_.app_backend import LocalAppBackend
 from claude_island.platform_.dispatcher import TerminalDispatcher
 from claude_island.platform_.terminals import build_registry
 from claude_island.platform_.os import get_os_backend
+
+
+def _resume_uuid_reader(pid: int) -> str | None:
+    """Production helper threaded into every consumer of the OLD-uuid
+    lookup (Snapshotter / compose_session_view, _build_session_details,
+    HookServer). Wraps :func:`resume_uuid_for_pid` so the names-store
+    reverse lookup is injected once here — the helper's two-step
+    resolution (cmdline UUID, then ``--resume <name>`` → uuid via
+    session_names.json) stays internal to platform_, and callers just
+    pass this single callable around."""
+    return resume_uuid_for_pid(
+        pid, names_lookup=session_names_store.get_uuid_by_name,
+    )
+
 
 process_scanner = ProcessScanner()
 file_watcher = FileWatcher()
@@ -435,10 +449,22 @@ def _build_session_details(session):
     """
     from claude_island.core.models import SessionDetails
     state = session_state_reader.read_session_state(session.pid) or {}
-    # Prefer sessionId from the per-pid state file (always present for
-    # a live Claude Code process) over Session.session_uuid (which
-    # ProcessScanner leaves empty).
-    sess_uuid = state.get("sessionId") if isinstance(state.get("sessionId"), str) else session.session_uuid
+    # uuid resolution mirrors ``core.snapshot.compose_session_view``:
+    # ``claude --resume <OLD_UUID>`` makes claude.exe assign a NEW
+    # in-memory uuid (visible in pid.json) but keep writing transcripts
+    # to OLD's JSONL — so UsageRegistry's records live under OLD. We
+    # must check the cmdline FIRST or the per-row $ aggregate +
+    # latest_model lookup miss entirely.
+    pid_json_uuid = (
+        state.get("sessionId")
+        if isinstance(state.get("sessionId"), str)
+        else None
+    )
+    try:
+        cmdline_resume_uuid = _resume_uuid_reader(session.pid)
+    except Exception:
+        cmdline_resume_uuid = None
+    sess_uuid = cmdline_resume_uuid or pid_json_uuid or session.session_uuid
     meta = jsonl_parser.get_session_metadata(sess_uuid) or {}
     cost, turns, sides = usage_registry.get_session_summary(sess_uuid)
     per_model = usage_registry.get_session_per_model(sess_uuid)
@@ -694,11 +720,17 @@ try:
         # Continue anyway — listener still works if user pre-installed hooks
 
     # Step 4: start the HTTP listener with bidirectional deps.
+    # ``resume_uuid_reader`` makes the server rewrite incoming session_id
+    # to the OLD uuid recovered from cmdline (``--resume <UUID>`` directly
+    # or ``--resume <name>`` via session_names reverse lookup) so the
+    # state machine ends up keyed on the same uuid UsageRegistry uses.
+    # See ``platform_.process_scanner.resume_uuid_for_pid``.
     hook_server = HookServer(
         state_machine,
         pending_registry=pending_registry,
         permission_cache=permission_cache,
         notify_queue=notify_queue,
+        resume_uuid_reader=_resume_uuid_reader,
     )
     try:
         bound_port = hook_server.start()
@@ -730,6 +762,11 @@ snapshotter = Snapshotter(
     usage_registry=usage_registry,
     names_store=session_names_store,
     live_state_reader=state_machine.read,
+    # ``resume_uuid_reader`` lets compose_session_view surface the OLD
+    # uuid (recovered from ``claude --resume <UUID>`` cmdline or from
+    # ``--resume <name>`` via the session_names store) so the
+    # UsageRegistry lookup hits the right key after a resume.
+    resume_uuid_reader=_resume_uuid_reader,
     get_quota=_get_quota_snapshot,
     get_available_providers=_resolve_available_providers,
     get_selected_provider=lambda: (

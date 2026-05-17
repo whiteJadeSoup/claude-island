@@ -651,3 +651,121 @@ def test_stop_idempotent(tmp_port_file: Path):
     server.stop()
     # Second stop is a no-op
     server.stop()
+
+
+# ---------------------------------------------------------------------------
+# Resume-uuid remap (2026-05-17): claude.exe assigns a NEW in-memory uuid
+# after ``--resume <OLD_UUID>``. The hook server rewrites incoming
+# session_id back to OLD using the host_pid + a cmdline-reading helper.
+# ---------------------------------------------------------------------------
+
+
+class TestResumeUuidRemap:
+    def test_remaps_session_id_when_host_pid_has_resume_uuid(
+        self, tmp_port_file: Path
+    ):
+        sm = SessionStateMachine()
+        old = "413eda01-6271-43cb-934b-035b236c0154"
+        new = "f56fb0ca-649d-4708-8c24-76a18857a0c6"
+        server = HookServer(
+            sm,
+            preferred_port=0,
+            port_file=tmp_port_file,
+            # Stand-in resume reader: any positive pid → OLD uuid.
+            resume_uuid_reader=lambda pid: old if pid > 0 else None,
+        )
+        port = server.start()
+        try:
+            payload = {
+                "hook_event_name": "SessionStart",
+                "session_id": new,            # claude sends NEW
+                "cwd": "D:\\proj",
+                "source": "resume",
+                "jump_target": {"host_pid": 97372},
+            }
+            assert _post_hook(port, payload) == 200
+            # State machine got OLD uuid, not NEW.
+            assert sm.read(old) is not None
+            assert sm.read(new) is None
+        finally:
+            server.stop()
+
+    def test_passthrough_when_reader_returns_none(self, tmp_port_file: Path):
+        """Fresh / name-resume sessions: reader returns None ⇒ payload's
+        session_id is used verbatim. Preserves legacy behaviour."""
+        sm = SessionStateMachine()
+        server = HookServer(
+            sm,
+            preferred_port=0,
+            port_file=tmp_port_file,
+            resume_uuid_reader=lambda _pid: None,
+        )
+        port = server.start()
+        try:
+            payload = {
+                "hook_event_name": "SessionStart",
+                "session_id": "fresh-uuid",
+                "cwd": "D:\\proj",
+                "source": "startup",
+                "jump_target": {"host_pid": 1234},
+            }
+            assert _post_hook(port, payload) == 200
+            assert sm.read("fresh-uuid") is not None
+        finally:
+            server.stop()
+
+    def test_passthrough_when_reader_raises(self, tmp_port_file: Path):
+        """Reader exception must not break the hook ingest — fall through
+        with the original session_id rather than 500ing."""
+        sm = SessionStateMachine()
+
+        def explode(_pid):
+            raise RuntimeError("psutil race")
+
+        server = HookServer(
+            sm,
+            preferred_port=0,
+            port_file=tmp_port_file,
+            resume_uuid_reader=explode,
+        )
+        port = server.start()
+        try:
+            payload = {
+                "hook_event_name": "SessionStart",
+                "session_id": "kept-uuid",
+                "cwd": "D:\\proj",
+                "source": "resume",
+                "jump_target": {"host_pid": 1234},
+            }
+            assert _post_hook(port, payload) == 200
+            assert sm.read("kept-uuid") is not None
+        finally:
+            server.stop()
+
+    def test_passthrough_when_jump_target_missing(self, tmp_port_file: Path):
+        """Older hook.py (pre-jump_target) ⇒ host_pid unknown ⇒ no remap
+        attempted. Backwards-compatible."""
+        sm = SessionStateMachine()
+        server = HookServer(
+            sm,
+            preferred_port=0,
+            port_file=tmp_port_file,
+            # Reader would return OLD, but we must never call it without a
+            # host_pid (no way to know which process the payload belongs
+            # to). Assert by raising if it's invoked.
+            resume_uuid_reader=lambda _pid: (_ for _ in ()).throw(
+                AssertionError("must not be called without host_pid")
+            ),
+        )
+        port = server.start()
+        try:
+            payload = {
+                "hook_event_name": "SessionStart",
+                "session_id": "no-jump-target-uuid",
+                "cwd": "D:\\proj",
+                "source": "startup",
+            }
+            assert _post_hook(port, payload) == 200
+            assert sm.read("no-jump-target-uuid") is not None
+        finally:
+            server.stop()

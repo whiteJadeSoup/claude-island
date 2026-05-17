@@ -331,6 +331,99 @@ class TestComposeSessionView:
         assert view.is_high_cost is False
 
 
+class TestComposeResumeUuidOverride:
+    """``claude --resume <UUID>`` bug (2026-05-17): claude.exe assigns a
+    NEW in-memory session uuid (written to pid.json and forwarded on every
+    hook ``session_id``) but keeps writing transcripts to the OLD JSONL.
+    UsageRegistry indexes records under OLD; the WT tab title sentinel
+    was locked at launch with OLD too. Without recovering OLD from
+    cmdline, ``get_latest_model(NEW)`` returns None (no model chip) and
+    ``sentinel_title(NEW)`` never matches the tab (click → wrong tab)."""
+
+    def test_resume_uuid_overrides_pid_json_session_id(self):
+        """Mirrors the live build-mini-cc situation: pid.json reports
+        f56fb0ca (NEW) but cmdline says --resume 413eda01 (OLD). The
+        composed view must surface OLD so the UsageRegistry lookup
+        returns the model recorded against 413eda01."""
+        s = _session(pid=97372, uuid="")
+        old = "413eda01-6271-43cb-934b-035b236c0154"
+        new = "f56fb0ca-649d-4708-8c24-76a18857a0c6"
+        view = compose_session_view(
+            s,
+            state_reader=FakeStateReader({97372: {"sessionId": new, "status": "idle"}}),
+            metadata_provider=FakeMetadataProvider(),
+            usage_registry=FakeUsageRegistry(
+                summaries={old: (12.34, 5, 1)},
+                latest_models={old: "claude-opus-4-7"},
+            ),
+            names_store=FakeNamesStore(),
+            resume_uuid_reader=lambda pid: old if pid == 97372 else None,
+        )
+        assert view.session_uuid == old
+        assert view.cost_usd == 12.34
+        assert view.latest_model == "claude-opus-4-7"
+
+    def test_no_resume_uuid_falls_back_to_pid_json(self):
+        """Fresh session / name-resume: resume_uuid_reader returns None.
+        Composed view uses pid.json's sessionId — preserves legacy
+        behaviour for sessions that don't have the UUID divergence."""
+        s = _session(pid=1, uuid="")
+        view = compose_session_view(
+            s,
+            state_reader=FakeStateReader({1: {"sessionId": "fresh-uuid"}}),
+            metadata_provider=FakeMetadataProvider(),
+            usage_registry=FakeUsageRegistry(
+                summaries={"fresh-uuid": (1.0, 1, 0)},
+                latest_models={"fresh-uuid": "claude-sonnet-4-6"},
+            ),
+            names_store=FakeNamesStore(),
+            resume_uuid_reader=lambda _: None,
+        )
+        assert view.session_uuid == "fresh-uuid"
+        assert view.latest_model == "claude-sonnet-4-6"
+
+    def test_resume_uuid_used_when_pid_json_missing(self):
+        """pid.json read failed (file vanished, permission denied)
+        but cmdline still has --resume <UUID>: prefer it so lookups
+        still hit the right uuid instead of going empty."""
+        s = _session(pid=1, uuid="")
+        old = "11111111-1111-1111-1111-111111111111"
+        view = compose_session_view(
+            s,
+            state_reader=FakeStateReader(),  # pid.json missing
+            metadata_provider=FakeMetadataProvider(),
+            usage_registry=FakeUsageRegistry(
+                latest_models={old: "claude-opus-4-7"},
+            ),
+            names_store=FakeNamesStore(),
+            resume_uuid_reader=lambda _: old,
+        )
+        assert view.session_uuid == old
+        assert view.latest_model == "claude-opus-4-7"
+
+    def test_resume_uuid_reader_exception_does_not_fail_compose(self):
+        """Per-source exception isolation also applies to the new reader.
+        psutil race / access denied must not blow up the whole snapshot."""
+        s = _session(pid=1, uuid="")
+
+        def explode(_pid):
+            raise RuntimeError("psutil race")
+
+        view = compose_session_view(
+            s,
+            state_reader=FakeStateReader({1: {"sessionId": "pid-json-uuid"}}),
+            metadata_provider=FakeMetadataProvider(),
+            usage_registry=FakeUsageRegistry(
+                latest_models={"pid-json-uuid": "claude-sonnet-4-6"},
+            ),
+            names_store=FakeNamesStore(),
+            resume_uuid_reader=explode,
+        )
+        # Falls through to pid.json's sessionId — view still constructs.
+        assert view.session_uuid == "pid-json-uuid"
+        assert view.latest_model == "claude-sonnet-4-6"
+
+
 class TestHookLivePhaseIdleOverride:
     """Phase resolution cross-references pid.json against hook live_state.
 
@@ -675,9 +768,16 @@ class TestSnapshotterBuildNow:
         same sessionId into their respective pid.json. The composer
         resolves both to the same session_uuid; the snapshot pipeline
         must collapse them so the UI renders one row per session, not
-        per pid."""
-        t_old = datetime(2026, 5, 14, 10, 0, tzinfo=timezone.utc)
-        t_new = datetime(2026, 5, 14, 11, 0, tzinfo=timezone.utc)
+        per pid.
+
+        Timestamps must be fresh (well within _STALE_LIVE_VIEW_S = 30 min)
+        so the staleness filter (2026-05-16) doesn't drop both views
+        before dedup runs.
+        """
+        from datetime import timedelta
+        now = datetime.now(timezone.utc)
+        t_old = now - timedelta(minutes=5)
+        t_new = now - timedelta(minutes=2)
         cwd = "/Users/x/proj"
         older = _session(pid=100, cwd=cwd, last_activity=t_old)
         newer = _session(pid=200, cwd=cwd, last_activity=t_new)
@@ -696,6 +796,126 @@ class TestSnapshotterBuildNow:
         # Newer pid (more recent last_activity) wins.
         assert flat[0].pid == 200
         assert flat[0].session_uuid == "shared-uuid"
+
+    def test_os_alive_process_always_shows_regardless_of_age(self):
+        """Policy 2026-05-16 (revised): an OS-confirmed alive
+        claude.exe (pid > 0 from ProcessScanner) appears in the live
+        list regardless of last_activity age.
+
+        Why: ``session.last_activity`` is populated with the process
+        create_time, which can be days old for a long-running session.
+        Filtering by age would hide the user's current conversation
+        whenever they pause between turns. The user decides what to
+        click; UI shows phase via the activity-dot glyph."""
+        from datetime import timedelta
+        now = datetime.now(timezone.utc)
+        fresh = _session(pid=10, cwd="/a", last_activity=now - timedelta(minutes=5))
+        old = _session(pid=20, cwd="/b", last_activity=now - timedelta(hours=24))
+        snap, _ = _make_snapshotter(sessions=[fresh, old])
+        result = snap.build_now()
+        flat = [v for g in result.session_groups for v in g.views]
+        assert {v.pid for v in flat} == {10, 20}
+
+    def test_stale_hook_placeholder_dropped_from_live_list(self):
+        """Hook bridge upserted a placeholder (pid=PLACEHOLDER_PID) for
+        a uuid the scanner never confirmed AND no hook live state
+        exists (state machine ENDED/empty). Drop so it doesn't appear
+        as an unclickable row.
+
+        Bug fix 2026-05-16: placeholders with no scanner backup and
+        no live hook activity were rendering as ghost rows because
+        _build_snapshot included every SessionRegistry entry."""
+        from claude_island.core.session_registry import PLACEHOLDER_PID
+        ghost = _session(
+            pid=PLACEHOLDER_PID, cwd="/x",
+            last_activity=datetime.now(timezone.utc),
+        )
+        snap, _ = _make_snapshotter(sessions=[ghost])
+        # No live_state_reader injection → state machine has no entry
+        # for this session → view degrades to phase=IDLE without prompt.
+        result = snap.build_now()
+        flat = [v for g in result.session_groups for v in g.views]
+        assert flat == [], (
+            f"ghost placeholder leaked into live list: "
+            f"pids={[v.pid for v in flat]}"
+        )
+
+    def test_current_conversation_kept_when_hook_recent_jsonl_stale(self):
+        """Regression 2026-05-16: between turns the live conversation
+        sits at phase=IDLE and JSONL may not have been appended for
+        minutes (user reading the reply). But the hook stream's
+        last_hook_at is fresh — every PreToolUse, PostToolUse,
+        Notification, Stop bumps it. compose_session_view must fold
+        last_hook_at into last_activity so the staleness filter does
+        NOT drop the live conversation."""
+        from datetime import timedelta
+        from claude_island.core.hook_events import SessionLiveState
+        from claude_island.core.session_phase import SessionPhase
+        now = datetime.now(timezone.utc)
+        # JSONL hasn't been updated in 2 hours (the user has been
+        # reading). Scanner sees this as last_activity.
+        session_jsonl_stale = _session(
+            pid=42, cwd="/proj",
+            last_activity=now - timedelta(hours=2),
+        )
+        state = FakeStateReader({42: {"sessionId": "uuid-live"}})
+        # Hook live state: phase IDLE (between turns) but last_hook_at
+        # is fresh (PreToolUse just fired).
+        live_states = {
+            "uuid-live": SessionLiveState(
+                session_uuid="uuid-live",
+                phase=SessionPhase.IDLE,
+                cwd=Path("/proj"),
+                started_at=now - timedelta(hours=2),
+                last_hook_at=now - timedelta(seconds=10),
+            ),
+        }
+        snap, _ = _make_snapshotter(
+            sessions=[session_jsonl_stale],
+            state_reader=state,
+        )
+        snap._live_state_reader = lambda uuid: live_states.get(uuid)
+        result = snap.build_now()
+        flat = [v for g in result.session_groups for v in g.views]
+        assert {v.pid for v in flat} == {42}, (
+            f"current conversation lost: pids={[v.pid for v in flat]}"
+        )
+
+    def test_view_with_active_hook_phase_kept_regardless_of_age(self):
+        """Hook live state is authoritative — if SessionStateMachine
+        reports a non-IDLE phase, the view stays in the live list even
+        if JSONL's last_activity is stale. Covers the case where the
+        user is reading Claude output without typing, so JSONL hasn't
+        been written, but the hook stream shows TOOL_USE."""
+        from datetime import timedelta
+        from claude_island.core.hook_events import SessionLiveState
+        from claude_island.core.session_phase import SessionPhase
+        now = datetime.now(timezone.utc)
+        stale_but_live = _session(
+            pid=30, cwd="/c", last_activity=now - timedelta(hours=24),
+        )
+        # Match pid.json's sessionId so composer assigns this uuid.
+        state = FakeStateReader({30: {"sessionId": "uuid-active"}})
+        # Provide a live state with TOOL_USE phase.
+        live_states = {
+            "uuid-active": SessionLiveState(
+                session_uuid="uuid-active",
+                phase=SessionPhase.TOOL_USE,
+                cwd=Path("/c"),
+                started_at=now,
+                last_hook_at=now,
+                current_tool="Bash",
+            ),
+        }
+        snap, _ = _make_snapshotter(
+            sessions=[stale_but_live],
+            state_reader=state,
+        )
+        # Inject the live state reader directly.
+        snap._live_state_reader = lambda uuid: live_states.get(uuid)
+        result = snap.build_now()
+        flat = [v for g in result.session_groups for v in g.views]
+        assert {v.pid for v in flat} == {30}
 
 
 class TestSnapshotterPipeline:

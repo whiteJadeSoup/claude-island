@@ -2221,10 +2221,15 @@ class TestRowStatusLine:
         assert _ROW_HEIGHT == 52
         assert panel._rows[1].height() == 52
 
-    def test_chip_hidden_when_no_per_model_data(self, qtbot):
+    def test_chip_visually_empty_when_no_per_model_data(self, qtbot):
         """A freshly-discovered session has no UsageRecords yet ⇒
-        per_model is empty ⇒ rendering "[]" or a blank pill would
-        read as a bug. The chip must hide entirely."""
+        per_model is empty ⇒ no visible chip. Under the layout-stable
+        rendering (2026-05-17): the chip widget stays in the layout but
+        carries empty text + transparent style so it occupies no pixels.
+
+        (Prior implementation used ``hide()`` here; that left the chip
+        layout slot collapsed permanently on the next ``show()`` — see
+        the bug fix comment in expanded_window.py:_update_row.)"""
         from PySide6.QtWidgets import QLabel
         from claude_island.core.models import SessionDetails
 
@@ -2251,7 +2256,11 @@ class TestRowStatusLine:
         p._render_sessions([_session(1, "/a")])
         chip = p._rows[1].findChild(QLabel, "model_chip")
         assert chip is not None
-        assert chip.isHidden()
+        # Empty text means the chip occupies zero visual width; transparent
+        # style means even if the layout reserves padding, the pill border
+        # / fill don't paint. Both together = visually absent.
+        assert chip.text() == ""
+        assert "transparent" in chip.styleSheet()
 
     def test_chip_shows_model_short_name_and_color(self, qtbot):
         """When per_model has entries, the chip uses the highest-cost

@@ -160,6 +160,15 @@ class HookServer:
         pending_registry: PendingDecisionRegistry | None = None,
         permission_cache: SessionPermissionCache | None = None,
         notify_queue: NotifyEventQueue | None = None,
+        # ``--resume <UUID>`` recovery (2026-05-17). When set, every
+        # incoming hook event is rewritten to key on the OLD uuid from
+        # cmdline instead of the NEW in-memory uuid Claude sends. Without
+        # this, the SessionStateMachine + SessionRegistry end up keyed on
+        # the NEW uuid while UsageRegistry / sentinel are keyed on OLD —
+        # split-brain that hides the model chip and breaks click-to-focus.
+        # Default None ⇒ legacy behaviour (no remap), so existing tests
+        # / boot paths that don't yet wire the helper still work.
+        resume_uuid_reader: Callable[[int], str | None] | None = None,
     ) -> None:
         self._sm = state_machine
         self._preferred_port = preferred_port
@@ -179,6 +188,7 @@ class HookServer:
         self._pending = pending_registry
         self._perm = permission_cache
         self._notify = notify_queue
+        self._resume_uuid_reader = resume_uuid_reader
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -300,6 +310,28 @@ class HookServer:
             raise ParseError(f"invalid JSON body: {e}") from e
         if not isinstance(payload, dict):
             raise ParseError("hook payload must be a JSON object")
+
+        # --resume <UUID> remap (2026-05-17): when claude.exe was launched
+        # with ``--resume <OLD_UUID>``, it assigns a NEW uuid for the
+        # in-memory session and forwards NEW on every hook event. Rewrite
+        # session_id to OLD here so the SessionStateMachine and the
+        # SessionRegistry-via-hook-bridge end up keyed on the same uuid
+        # UsageRegistry + WT sentinel use. Defensive: never raise if the
+        # reader misbehaves, never replace with falsy value.
+        if self._resume_uuid_reader is not None:
+            jt_raw = payload.get("jump_target")
+            host_pid = 0
+            if isinstance(jt_raw, dict):
+                hp = jt_raw.get("host_pid")
+                if isinstance(hp, int) and not isinstance(hp, bool):
+                    host_pid = hp
+            if host_pid > 0:
+                try:
+                    old_uuid = self._resume_uuid_reader(host_pid)
+                except Exception:
+                    old_uuid = None
+                if old_uuid and old_uuid != payload.get("session_id"):
+                    payload["session_id"] = old_uuid
 
         event = parse_claude_payload(payload)
         if event is not None:

@@ -163,6 +163,14 @@ class SessionView:
     # JumpTarget pattern). None when no hook coverage or capture failed.
     # The WT click handler uses this to skip syscalls at click time.
     jump_target: JumpTarget | None = None
+    # True iff compose_session_view found a SessionLiveState in the
+    # state machine for this uuid (the hook bridge has acknowledged
+    # this session). Used by the live-list staleness filter to keep
+    # hook-known placeholders (pid<=0 + hook saw it) while dropping
+    # ghost placeholders (pid<=0 + state machine empty). Distinct from
+    # ``phase`` because phase defaults to IDLE for both cases — only
+    # this flag tells them apart.
+    has_live_state: bool = False
 
     def __post_init__(self) -> None:
         # Self-consistency invariant — guards against the UI and the
@@ -371,6 +379,19 @@ class _StateReaderProto(Protocol):
     def read_session_state(self, pid: int) -> dict | None: ...
 
 
+# Callable signature for the cmdline-derived ``--resume <UUID>`` lookup.
+# Production wires ``platform_.process_scanner.resume_uuid_for_pid``;
+# tests/boot default to ``_noop_resume_uuid`` so existing callers don't
+# need the platform layer. Return None when no UUID-shaped --resume arg
+# is present (fresh session, name-resume, pid invalid).
+class _ResumeUuidReaderProto(Protocol):
+    def __call__(self, pid: int) -> str | None: ...
+
+
+def _noop_resume_uuid(_: int) -> str | None:
+    return None
+
+
 class _MetadataProviderProto(Protocol):
     def get_session_metadata(self, uuid: str) -> dict | None: ...
 
@@ -465,6 +486,7 @@ def compose_session_view(
     usage_registry: _UsageRegistryProto,
     names_store: _NamesStoreProto,
     live_state_reader: LiveStateProto = _noop_live_state,
+    resume_uuid_reader: _ResumeUuidReaderProto = _noop_resume_uuid,
     high_cost_threshold: float = HIGH_COST_USD_THRESHOLD,
     active_threshold_s: float = ACTIVE_THRESHOLD_SECONDS,
 ) -> SessionView:
@@ -492,11 +514,29 @@ def compose_session_view(
     field rather than failing the whole compose.
     """
     state = _safe(state_reader.read_session_state, session.pid) or {}
-    sess_uuid = (
+    # Priority for the canonical session uuid (used for UsageRegistry
+    # lookups, live state lookups, and the WT focus sentinel):
+    #
+    #   1. ``--resume <UUID>`` arg from the process cmdline. When the
+    #      user resumes by UUID (the path Claude Island's launcher
+    #      always takes), claude.exe assigns a NEW in-memory uuid
+    #      (visible in pid.json + every hook event) but keeps writing
+    #      transcripts to the OLD JSONL file and the WT tab title is
+    #      locked to the OLD uuid. The cmdline UUID is the only
+    #      reliable recovery path for the OLD uuid.
+    #   2. ``pid.json`` ``sessionId``. Correct for fresh sessions and
+    #      for name-resume (claude resolves the name and writes the
+    #      resolved uuid here).
+    #   3. The registry's own ``session.session_uuid`` — populated by
+    #      the hook bridge from the hook payload (NEW uuid for
+    #      uuid-resume, OK otherwise). Final fallback.
+    pid_json_uuid = (
         state.get("sessionId")
         if isinstance(state.get("sessionId"), str)
-        else session.session_uuid
+        else None
     )
+    resume_uuid = _safe(resume_uuid_reader, session.pid)
+    sess_uuid = resume_uuid or pid_json_uuid or session.session_uuid
     meta = _safe(metadata_provider.get_session_metadata, sess_uuid) or {}
 
     cost, _turns, _sides = _safe_or(
@@ -535,7 +575,23 @@ def compose_session_view(
 
     # ── phase resolution: hook > pid.json > activity heuristic ──
     live = _safe(live_state_reader, sess_uuid) if sess_uuid else None
+
     if live is not None and live.phase != SessionPhase.ENDED:
+        # Fold the hook stream's last_hook_at into last_activity. This
+        # is the freshest "session is alive" signal we have — every
+        # hook event (PreToolUse, PostToolUse, Stop, even Notification)
+        # bumps it, even when no JSONL line is written (e.g. between
+        # turns while the user is reading). Without folding this in,
+        # the live-list staleness filter would drop a current Claude
+        # session whose hook keeps firing but whose JSONL was last
+        # appended >30 min ago — bug observed 2026-05-16 (live list
+        # went empty after the turn-boundary IDLE transition).
+        try:
+            if live.last_hook_at > last_activity:
+                last_activity = live.last_hook_at
+        except (TypeError, AttributeError):
+            pass
+
         # Cross-reference with pid.json: if claude itself reports the
         # session as idle, trust that over a potentially-stale active
         # hook phase. The hook chain can lose its closing event
@@ -604,6 +660,7 @@ def compose_session_view(
         last_prompt=last_prompt,
         last_assistant_message=last_assistant_message,
         jump_target=jump_target,
+        has_live_state=live is not None,
     )
 
 
@@ -737,6 +794,51 @@ def _degraded_view(session: Session) -> SessionView:
     )
 
 
+def _filter_stale_views(views: list[SessionView]) -> list[SessionView]:
+    """Drop views that have no proof of being alive.
+
+    A view is "alive" iff any one of:
+      1. Has an OS-confirmed pid (``view.pid > 0`` — ProcessScanner saw
+         the process this tick; OS guarantees it exists).
+      2. Has a hook live state in a non-ENDED phase (state machine is
+         tracking activity for this uuid — hook bridge confirmed
+         existence in the recent past).
+
+    A view with ``pid <= 0`` AND no live hook state is a STALE
+    placeholder — the hook bridge upserted it, the scanner never
+    confirmed, and the miss-counter tombstone hasn't fired yet. Drop
+    so it doesn't appear in the live list.
+
+    Why we do NOT use last_activity / staleness windows:
+    ``ProcessScanner._build`` populates ``session.last_activity`` with
+    the process create_time. A claude.exe that started 2 days ago and
+    has been idle since is still a real, OS-alive process — the user
+    can click its row and switch to that terminal. Filtering it by
+    age would (a) hide the entire current conversation on Windows
+    when the user is reading between turns, and (b) require a per-
+    session "last seen" signal we don't reliably have for the no-hook
+    fallback path. Phase IDLE alone is the correct "not active right
+    now" signal — UI surfaces it via the dimmed-dot glyph; users
+    decide what to click.
+    """
+    kept: list[SessionView] = []
+    for v in views:
+        # OS-confirmed alive process: keep regardless of phase or age.
+        if v.pid > 0:
+            kept.append(v)
+            continue
+        # Placeholder (pid <= 0): keep iff state machine has a live
+        # state for this uuid (compose sets has_live_state=True). That
+        # signal is independent of phase value, so it correctly admits
+        # the "just-started, phase=IDLE, no prompts yet" case AND
+        # rejects ghost placeholders whose only evidence is a stale
+        # registry entry that the heuristic phase derivation flips to
+        # THINKING based on a fresh last_activity.
+        if v.has_live_state and v.phase != SessionPhase.ENDED:
+            kept.append(v)
+    return kept
+
+
 def _dedup_views_by_session_uuid(views: list[SessionView]) -> list[SessionView]:
     """Collapse duplicates that share a non-empty ``session_uuid``.
 
@@ -843,6 +945,11 @@ class Snapshotter:
         # state" so legacy tests / boot paths that pre-date the hook
         # work unchanged. Production injects ``SessionStateMachine.read``.
         live_state_reader: LiveStateProto = _noop_live_state,
+        # Cmdline ``--resume <UUID>`` lookup. Defaults to "always None" so
+        # tests pre-dating the fix don't need to wire it. Production
+        # injects ``platform_.process_scanner.resume_uuid_for_pid``.
+        # See compose_session_view's docstring for why this matters.
+        resume_uuid_reader: _ResumeUuidReaderProto = _noop_resume_uuid,
         # Resume-offline sources. Both default to None so existing
         # tests that don't use the History drawer still work — when None,
         # dormant_sessions and launching_sessions in the published
@@ -873,6 +980,7 @@ class Snapshotter:
         self._usage_registry = usage_registry
         self._names_store = names_store
         self._live_state_reader = live_state_reader
+        self._resume_uuid_reader = resume_uuid_reader
         self._get_quota = get_quota
         self._get_available_providers = get_available_providers
         self._get_selected_provider = get_selected_provider
@@ -1019,6 +1127,7 @@ class Snapshotter:
                         usage_registry=self._usage_registry,
                         names_store=self._names_store,
                         live_state_reader=self._live_state_reader,
+                        resume_uuid_reader=self._resume_uuid_reader,
                     )
                 )
             except Exception:
@@ -1032,6 +1141,26 @@ class Snapshotter:
         # otherwise render as two identical-looking rows. Keep one row
         # per session_uuid (the most recently active pid).
         views = _dedup_views_by_session_uuid(views)
+
+        # Staleness filter (2026-05-16): drop views the user reports as
+        # "this terminal has no claude session" out of the LIVE list.
+        # A session counts as live iff EITHER (a) it has a hook-derived
+        # live state with a non-IDLE/non-ENDED phase, OR (b) its JSONL
+        # activity timestamp is fresh.
+        #
+        # Why: SessionRegistry can hold entries the OS still reports
+        # as live (claude.exe sitting idle for days in a forgotten WT
+        # tab) or stale hook-bridge placeholders that no scanner tick
+        # has been able to tombstone yet (e.g. user disabled scanner,
+        # cwd shared between live + dead sessions). Without a freshness
+        # gate those entries pollute the "CLAUDE SESSIONS" list with
+        # rows whose click takes the user to an empty terminal.
+        #
+        # The filter is upstream of grouping so adapters never see the
+        # stale view (no wasted UIA queries on a dead conhost). The
+        # dormant_sessions list is unaffected — it's populated from
+        # JsonlParser directly, not from this views collection.
+        views = _filter_stale_views(views)
 
         # Adapter-driven grouping (dispatcher → chain → sessions bucketed
         # into SessionGroups). If the grouper raises (bug in an adapter),
