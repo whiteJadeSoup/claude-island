@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from claude_island.ui.fonts import MONO_FONT_STACK, UI_FONT_STACK
+from claude_island.ui.lab_palette import Color as _LabColor
 from claude_island.ui.tooltip_style import TOOLTIP_QSS
 
 from PySide6.QtCore import (
@@ -310,11 +311,17 @@ _STYLE_SEP = "background: #2a2a2a;"
 # 3. one row per line — name on the left, age on the right, no second line;
 #    rows are 36px tall so the whole list scans top-to-bottom in one motion
 
-_BG_SINGLE = "#1e1e1e"
-_BG_GROUP = "#181818"          # darker → "this is a container, not a row"
-_BG_HOVER_SINGLE = "#2a2a2a"
-_BG_HOVER_IN_GROUP = "#222222"  # subtle hover that keeps the card identity
-_BG_PRESSED = "#333333"
+# v3: panel surfaces resolve through lab_palette so the panel ↔ capsule
+# ↔ recents trio share a vocabulary.  Hover/pressed tones inherit one
+# step lighter than the rest position, matching the prototype's
+# surface / surface_hi pair.  Group cards keep a slight warmth (the
+# surface_warm token, the only place in lab_palette where warmth exists)
+# so two adjacent cards still read as distinct containers vs row.
+_BG_SINGLE          = _LabColor.surface         # was "#1e1e1e"
+_BG_GROUP           = _LabColor.surface_warm    # was "#181818"
+_BG_HOVER_SINGLE    = _LabColor.surface_hi      # was "#2a2a2a"
+_BG_HOVER_IN_GROUP  = _LabColor.surface_hi      # was "#222222" — collapse the two
+_BG_PRESSED         = _LabColor.surface_hi      # was "#333333"
 
 # Per-group accent palette. Multi-session groups (sessions sharing a
 # WT tab) get a subtle hue tint so the user can tell two adjacent
@@ -332,7 +339,7 @@ _BG_PRESSED = "#333333"
 # tier of visual hierarchy that dividers and outlines belong to.
 # Uniform across all groups (no per-group hue) — group identity is
 # conveyed by which rows the outline contains, not by colour.
-_GROUP_OUTLINE_COLOR = "#3a3a3a"
+_GROUP_OUTLINE_COLOR = _LabColor.rule  # v3 — was "#3a3a3a"
 # Inner padding inside the group outline so rows don't touch the
 # border. 4 px on all sides keeps the rows breathing without
 # inflating the group's footprint much.
@@ -571,7 +578,6 @@ _DOT_GRAY = "#52525b"     # ≥ 24h
 # can't drift — both now resolve to Color.phosphor.  Behaviour-equivalent
 # default for legacy ``set_state(STATE_RUNNING)`` callers that don't
 # pass a bar_color.
-from claude_island.ui.lab_palette import Color as _LabColor
 _DOT_RUNNING = _LabColor.phosphor
 
 
@@ -1059,7 +1065,9 @@ _STYLE_GROUP_ROW = f"""
 # Separator between rows of the same group. With the group sitting on
 # #181818, a #2a2a2a hairline is just barely visible — enough to read
 # as "two distinct rows" without competing with the dot/name typography.
-_STYLE_GROUP_ROW_SEP = "background: #2a2a2a; margin-left: 12px; margin-right: 12px;"
+_STYLE_GROUP_ROW_SEP = (
+    f"background: {_LabColor.rule}; margin-left: 12px; margin-right: 12px;"
+)
 # Px gap between top-level entries (cards / standalone rows). Bigger than
 # the in-group row spacing so "next card" reads as a different chunk.
 _GROUP_GAP = 8
