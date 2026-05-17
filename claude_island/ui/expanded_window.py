@@ -386,7 +386,10 @@ class HoverRow(QPushButton):
                          # out next to the hover bar without overlap
 
     # Bright green that reads "alive". Same hex as the capsule's active
-    # dot so the colour story is unified across surfaces.
+    # dot so the colour story is unified across surfaces.  Now sourced
+    # from lab_palette so a future palette tweak doesn't drift between
+    # row and pill.  ``set_phase`` rebinds this per-instance based on
+    # the live SessionPhase.
     _RUNNING_COLOR = "#22c55e"
 
     def __init__(self, base_bg: str, parent_card: "QFrame | None" = None, **kwargs):
@@ -396,6 +399,12 @@ class HoverRow(QPushButton):
         self._hovered = False
         self._running = False
         self._running_alpha = 0.0  # 0..1; driven by _running_anim
+        # Per-instance pulse colour — defaults to the class-level green
+        # so legacy code paths that only call ``set_running(True)`` get
+        # exactly the same paint output as before.  ``set_phase`` rebinds
+        # this so the pulse tint matches view.phase (amber for thinking,
+        # phosphor for tool_use, red-warm for waiting_approval, etc).
+        self._pulse_color = self._RUNNING_COLOR
         # Accent colour: brightened version of the group bg for in-card
         # rows (reinforces group identity); neutral grey for standalone.
         if parent_card is not None:
@@ -429,7 +438,12 @@ class HoverRow(QPushButton):
 
     def set_running(self, running: bool) -> None:
         """Toggle the persistent left-edge pulse. Idempotent — calling
-        with the same value twice is a no-op."""
+        with the same value twice is a no-op.
+
+        Kept as the legacy entry point; v3 callers should prefer
+        ``set_phase`` so the pulse tint matches the session's live phase.
+        ``set_running(True)`` keeps the historical green colour by NOT
+        touching ``_pulse_color`` — bool callers get the same pixels."""
         if self._running == running:
             return
         self._running = running
@@ -439,6 +453,41 @@ class HoverRow(QPushButton):
             self._running_anim.stop()
             self._running_alpha = 0.0
             self.update()
+
+    def set_phase(self, phase: "SessionPhase") -> None:
+        """v3 entry point: drive the left-edge pulse colour AND on/off
+        state from a SessionPhase.
+
+        Phase → behaviour:
+          IDLE / ENDED         → pulse off (no left-edge bar)
+          THINKING             → amber pulse
+          TOOL_USE             → phosphor (green) pulse
+          WAITING_APPROVAL     → red-warm pulse
+          COMPACTING           → amber-dim pulse
+
+        Falls back to ``set_running(True)`` semantics for any phase value
+        we don't recognise, so a future SessionPhase addition still
+        renders something visible rather than silently going inert.
+        """
+        from claude_island.core.session_phase import SessionPhase as _SP
+        from claude_island.ui.lab_palette import Color as _LC
+        if phase in (_SP.IDLE, _SP.ENDED):
+            self.set_running(False)
+            return
+        # Rebind the pulse tint BEFORE flipping running on, so the first
+        # paint after the animation starts already uses the new colour.
+        try:
+            self._pulse_color = _LC.for_phase(phase)
+        except KeyError:
+            self._pulse_color = self._RUNNING_COLOR
+        # Force a repaint even if _running was already True (a phase
+        # transition from THINKING → TOOL_USE doesn't change _running
+        # but does change the colour).
+        was_running = self._running
+        self._running = True
+        if not was_running:
+            self._running_anim.start()
+        self.update()
 
     def set_parent_card(self, card: "QFrame | None") -> None:
         """Re-bind to a new card (or detach). Recomputes accent colour
@@ -471,8 +520,11 @@ class HoverRow(QPushButton):
         # Running pulse first (drawn behind the hover bar so a hover
         # over an active row reads as "hover on something running"
         # rather than the hover overwriting the live indicator).
+        # ``_pulse_color`` defaults to _RUNNING_COLOR for legacy
+        # set_running(True) callers; v3 set_phase callers rebind it to
+        # the phase-specific tint before the animation starts.
         if self._running:
-            color = QColor(self._RUNNING_COLOR)
+            color = QColor(self._pulse_color)
             color.setAlphaF(self._running_alpha)
             painter.setBrush(color)
             x = 0
@@ -5053,8 +5105,15 @@ class ExpandedWindow(QWidget):
                 )
                 glyph.setToolTip("")
 
-        # Left-edge running accent bar — animates while running.
-        if hasattr(btn, "set_running"):
+        # Left-edge accent bar — animates while phase is active.
+        # v3: tint follows view.phase (amber for thinking, phosphor for
+        # tool_use, red-warm for waiting_approval, etc).  set_phase
+        # internally turns the animation off for IDLE/ENDED.  Fall back
+        # to the legacy bool entry point on row classes that haven't
+        # added set_phase (e.g. test stubs).
+        if hasattr(btn, "set_phase"):
+            btn.set_phase(view.phase)
+        elif hasattr(btn, "set_running"):
             btn.set_running(running)
 
         name_label = btn.findChild(QLabel, "name_label")
