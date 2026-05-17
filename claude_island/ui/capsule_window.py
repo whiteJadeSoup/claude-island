@@ -287,6 +287,27 @@ class CapsuleWindow(QWidget):
         self._is_dragging: bool = False
         self._persisted_pos: tuple[int, int] | None = _load_saved_position()
 
+        # ── Target geometry (authoritative position-and-size record) ──
+        # Updated by ``_set_target_geometry`` (the single entry point
+        # for capsule geometry changes) and by ``moveEvent`` (catches
+        # user drag, which goes through ``self.move()``).
+        #
+        # Why this exists: ``controller.state_changed`` fans out to
+        # *both* this widget and the ExpandedWindow. When the user
+        # clicks to expand, the capsule's slot runs first and calls
+        # setGeometry to switch dot→pill (18×18 → 200×36, sometimes
+        # the X also shifts); then the panel's slot runs and needs
+        # to anchor below the capsule. Reading ``self.frameGeometry()``
+        # at that moment is unsafe — Qt's reported frame can lag the
+        # most recent setGeometry call by an event-loop tick on macOS,
+        # so the panel sees stale (dot-sized) geometry and positions
+        # itself overlapping the actually-rendered pill. ``target_geometry``
+        # is updated synchronously inside setGeometry's caller, so the
+        # panel always reads what the capsule *just decided* to be,
+        # regardless of when the OS finishes the resize.
+        from PySide6.QtCore import QRect as _QRect  # local — not at file top to keep import set minimal
+        self._target_geom: _QRect | None = None
+
         # ── Free-drag state (long-press to unlock 2D drag + edge snap) ──
         # A press-and-hold of _LONG_PRESS_MS unlocks "free drag mode"
         # (Y axis unlocked, capsule renders semi-transparent so the
@@ -403,13 +424,54 @@ class CapsuleWindow(QWidget):
             x, y = self._persisted_pos
             x = self._clamp_x(x, w)
             if _pos_visible_on_any_screen(x, y, w, h):
-                self.setGeometry(x, y, w, h)
+                self._set_target_geometry(x, y, w, h)
                 return
         # Default — primary-screen top centre, original behaviour.
         screen = QApplication.primaryScreen()
         geom = screen.geometry()
         x = geom.center().x() - w // 2
-        self.setGeometry(x, geom.top() + _TOP_MARGIN, w, h)
+        self._set_target_geometry(x, geom.top() + _TOP_MARGIN, w, h)
+
+    def _set_target_geometry(self, x: int, y: int, w: int, h: int) -> None:
+        """Single entry point for capsule geometry changes.
+
+        Records the new ``(x, y, w, h)`` as the authoritative
+        ``_target_geom`` *before* delegating to ``setGeometry``.
+        Sibling windows (ExpandedWindow) read this via
+        ``target_geometry()`` instead of ``frameGeometry()``, so they
+        see the latest intended geometry even when ``state_changed``
+        fans out to both windows and Qt's frame report hasn't caught
+        up to the most recent ``setGeometry`` call yet.
+        """
+        from PySide6.QtCore import QRect
+        self._target_geom = QRect(x, y, w, h)
+        self.setGeometry(x, y, w, h)
+
+    def target_geometry(self):  # -> QRect
+        """Authoritative current geometry of the capsule.
+
+        Returns the most recently applied target geometry rather than
+        ``frameGeometry()``, which on macOS can return a one-tick-stale
+        value during the ``state_changed`` signal fanout (capsule
+        resizes, then expanded panel anchors below — the second slot
+        must see the new size, not the old one).
+
+        Falls back to ``frameGeometry()`` only before any
+        ``_set_target_geometry`` call has happened (extremely
+        narrow window during __init__).
+        """
+        return self._target_geom if self._target_geom is not None else self.frameGeometry()
+
+    def moveEvent(self, event) -> None:  # type: ignore[override]
+        # Keep ``_target_geom`` in sync when the user drags the capsule —
+        # drag handlers go through ``self.move()`` (position-only), which
+        # fires moveEvent. setGeometry-driven changes also fire moveEvent
+        # but ``_set_target_geometry`` already populated ``_target_geom``
+        # with the correct rect; this is idempotent.
+        super().moveEvent(event)
+        from PySide6.QtCore import QRect
+        g = self.geometry()
+        self._target_geom = QRect(g.x(), g.y(), g.width(), g.height())
 
     def _clamp_x(self, x: int, w: int) -> int:
         """Clamp x so the capsule (width w) stays within the union
@@ -1096,7 +1158,7 @@ class CapsuleWindow(QWidget):
             # anchored, so shrinking the width pulls the left edge
             # rightwards (towards the visible edge).
             new_x = self.x() + (self.width() - _IDLE_W)
-        self.setGeometry(new_x, self.y(), _IDLE_W, _CAPSULE_H)
+        self._set_target_geometry(new_x, self.y(), _IDLE_W, _CAPSULE_H)
         self.setWindowOpacity(_IDLE_OPACITY)
         self._label.hide()
         self._cost_label.hide()

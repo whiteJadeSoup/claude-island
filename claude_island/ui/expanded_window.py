@@ -201,7 +201,14 @@ class _HoverRevealRow(QFrame):
 
 
 _PANEL_W = 400
-_GAP = 6  # px gap between capsule bottom and panel top
+# Visible gap (in px) between the capsule's bottom and the panel's top.
+# 6 px ≈ 12 physical px on Retina — small but clearly perceived.
+# The historical "6 px gap collapses to 0 visible px" bug was *not*
+# about this value being too small — it was about the panel reading
+# the wrong capsule geometry across the controller's state_changed
+# signal fanout (see ``_position`` and CapsuleWindow.target_geometry
+# for the fix). Once that race is gone, 6 px is enough.
+_GAP = 6
 
 # Bound the sessions list so a heavy user with 20+ sessions doesn't
 # get a panel taller than the screen. Computed as an *exact* multiple
@@ -3153,10 +3160,81 @@ class ExpandedWindow(QWidget):
         return QSize(_PANEL_W, h)
 
     def _position(self) -> None:
-        cap = self._capsule.frameGeometry()
-        x = cap.center().x() - self.width() // 2
-        y = cap.bottom() + _GAP
+        # Anchor the panel below the capsule. Capsule stays visible as
+        # the header; panel renders the body below it.
+        #
+        # Read the capsule's **target_geometry** (its authoritative
+        # position-and-size record) rather than ``frameGeometry()``.
+        # The controller's ``state_changed`` signal fans out to the
+        # capsule first (which calls setGeometry to switch dot→pill)
+        # and then to this slot. On macOS, ``frameGeometry()`` can
+        # still report the pre-resize bounds at this point, which
+        # would put the panel's top above the capsule's actually-
+        # rendered bottom edge — that's the visible-overlap bug.
+        # ``target_geometry()`` is set synchronously inside the
+        # capsule's own setGeometry caller, so it always reflects
+        # what the capsule just decided to be.
+        #
+        # Use ``y() + height()`` (exclusive) instead of ``bottom()``
+        # (inclusive: top + height − 1) so the math stays consistent
+        # with _GAP semantics.
+        #
+        # ``_clamp_to_screen`` keeps the panel on-screen even on a
+        # capsule that was dragged to an off-screen monitor and is
+        # falling back to a default position.
+        # Duck-type: real CapsuleWindow exposes target_geometry(); tests
+        # inject a plain QWidget as a stand-in satellite, which only has
+        # frameGeometry(). Falling back keeps the test fakes simple.
+        get_geom = getattr(self._capsule, "target_geometry", None)
+        cap = get_geom() if callable(get_geom) else self._capsule.frameGeometry()
+        x = cap.center().x() - _PANEL_W // 2
+        y = cap.y() + cap.height() + _GAP
+        x, y = self._clamp_to_screen(cap, x, y)
         self.move(x, y)
+
+    def _clamp_to_screen(self, cap: "QRect", x: int, y: int) -> tuple[int, int]:
+        """Clamp ``(x, y)`` so the panel stays inside the screen that
+        contains the capsule. Picks the screen by capsule center —
+        works for negative-Y monitors and odd multi-monitor layouts.
+
+        Y-clamp invariant: the panel's top must stay at or below
+        ``cap.y() + cap.height() + _GAP``. If clamping into the screen
+        would push the panel up into the capsule (panel too tall for
+        the remaining space below the capsule), we keep it anchored
+        just below the capsule and accept that the bottom may extend
+        off-screen — the inner scroll area handles overflow. Visual
+        overlap with the capsule is the worse outcome here; off-screen
+        bottom is fine.
+
+        Caller passes ``cap`` from ``CapsuleWindow.target_geometry()``
+        (not ``frameGeometry``) so cap.height() here is the freshly
+        applied capsule height, not whatever Qt's last frame report
+        said.
+        """
+        from PySide6.QtGui import QGuiApplication
+        center = cap.center()
+        screen = QGuiApplication.screenAt(center) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return x, y
+        avail = screen.availableGeometry()
+        w = _PANEL_W
+        h = self.sizeHint().height() or self.height()
+        # Horizontal: keep panel fully on-screen if it fits, else align left.
+        if w <= avail.width():
+            x = max(avail.left(), min(x, avail.right() - w + 1))
+        else:
+            x = avail.left()
+        # Vertical: clamp into the screen, but never above the anchor
+        # (cap.y() + cap.height() + _GAP). The max(min_y, ...) at the
+        # bottom is what prevents the tall-panel-on-short-screen case
+        # from pushing the panel up into the capsule.
+        min_y = cap.y() + cap.height() + _GAP
+        if h <= avail.height():
+            y = max(avail.top(), min(y, avail.bottom() - h + 1))
+        else:
+            y = avail.top()
+        y = max(min_y, y)
+        return x, y
 
     # ------------------------------------------------------------------
     # UI construction
