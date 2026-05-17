@@ -220,3 +220,33 @@ class TestToolTip:
     def test_tooltip_for_zero_running_uses_count_form(self, capsule):
         _render(capsule, _snap(today_cost_usd=0.0))
         assert "0 session" in capsule.toolTip()
+
+
+class TestDotRim:
+    """v3 dot rim contract — the dot mode's only chrome.
+
+    Pins three things:
+      1. The dot fills with ink (matte near-black), not the older
+         paper_faint grey — required to read as a stamp.
+      2. The rim colour module-level constant tracks lab_palette so a
+         palette tweak propagates without grepping the painter code.
+      3. The urgent rim is wired up as a separate constant so a future
+         slice can pick it up without re-introducing a hex literal.
+    """
+
+    def test_dot_color_resolves_to_lab_ink(self):
+        from claude_island.ui.capsule_window import _DOT_COLOR
+        from claude_island.ui.lab_palette import Color
+        # _DOT_COLOR is a QColor; lab stores hex strings.  Compare via
+        # name() so alpha doesn't enter the equation (lab is RGB-only).
+        assert _DOT_COLOR.name() == Color.ink
+
+    def test_rim_color_tracks_rule_bright(self):
+        from claude_island.ui.capsule_window import _DOT_RIM_COLOR
+        from claude_island.ui.lab_palette import Color
+        assert _DOT_RIM_COLOR.name() == Color.rule_bright
+
+    def test_urgent_rim_color_tracks_red_warm(self):
+        from claude_island.ui.capsule_window import _DOT_RIM_URGENT
+        from claude_island.ui.lab_palette import Color
+        assert _DOT_RIM_URGENT.name() == Color.red_warm

@@ -154,7 +154,18 @@ _BG_COLOR          = _qcolor_from_hex(_C.ink, 230)
 # the pill wash is the ambient cue.
 _BG_COLOR_WARN     = _qcolor_from_hex(_C.amber_dim,    230)
 _BG_COLOR_CRITICAL = _qcolor_from_hex(_C.red_warm_dim, 230)
-_DOT_COLOR         = _qcolor_from_hex(_C.paper_faint, 200)
+# v3 dot is the smallest persistent surface — render as a near-black
+# "stamp" rather than a grey pill so it sits as a deliberate desk
+# object (matches prototype-v3.html's .dot baseline) instead of looking
+# like a faded badge.  The rim stroke (drawn in paintEvent) supplies
+# the v3 "tally tick" — the dot's only chrome.
+_DOT_COLOR         = _qcolor_from_hex(_C.ink, 230)
+# Rim stroke around the dot — 1 px of rule_bright reads as the stamp's
+# edge, not as a focus indicator.
+_DOT_RIM_COLOR     = _qcolor_from_hex(_C.rule_bright, 220)
+# Urgent rim — kicks in when there are queued decisions.  red_warm
+# matches the row strip + glyph wave when waiting_approval.
+_DOT_RIM_URGENT    = _qcolor_from_hex(_C.red_warm, 220)
 # Mini quota bar track.  Paper-faint at low alpha — visible against the
 # ink wash, never bright enough to compete with the filled portion.
 _QUOTA_BAR_TRACK = _qcolor_from_hex(_C.paper_faint, 60)
@@ -898,6 +909,26 @@ class CapsuleWindow(QWidget):
 
         path.addRoundedRect(0, 0, self.width(), self.height(), r, r)
         painter.fillPath(path, color)
+
+        # v3 dot rim — 1 px stroke around the dot so it reads as a
+        # stamp on the desk rather than a flat blob.  Urgent variant
+        # (red_warm) is wired up but not currently emitted — the
+        # CapsuleData view-model doesn't carry pending-decision count
+        # yet; that's a separate slice once the field lands upstream.
+        if self._is_dot:
+            from PySide6.QtCore import QRectF
+            from PySide6.QtGui import QPen
+            pen = QPen(_DOT_RIM_COLOR)
+            pen.setWidth(1)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            # inset by half a pixel so the stroke renders inside the
+            # widget rect (the AA path otherwise gets clipped on one side)
+            painter.drawRoundedRect(
+                QRectF(0.5, 0.5, self.width() - 1, self.height() - 1),
+                r - 0.5, r - 0.5,
+            )
 
         # Mini quota bar — drawn directly on the pill (no QWidget
         # overhead) for two reasons: it shares lifecycle with the pill
