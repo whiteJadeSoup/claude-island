@@ -72,6 +72,7 @@ from claude_island.core.launch_intent import LaunchIntent, LaunchIntentRegistry
 from claude_island.core.models import DormantSession
 from claude_island.core.snapshot import WorldSnapshot
 from claude_island.ui.fonts import UI_FONT_STACK
+from claude_island.ui.lab_palette import Color as _C, FontStack as _F
 from claude_island.ui.tooltip_style import TOOLTIP_QSS
 from claude_island.ui.expanded_window import (
     _BG_HOVER_SINGLE,
@@ -112,48 +113,63 @@ _TITLE_HARD_CAP = 200
 # LAST PROMPT collapsing now lives in LastPromptSection (shared with
 # SessionDetailPopup) — no per-surface threshold here.
 
-_ACCENT_COLOR = QColor("#9ca3af")  # selected row left-side accent
+_ACCENT_COLOR = QColor(_C.amber)  # selected row left-side accent → v3 amber
 
-# Visual tokens specific to this surface (not reused from expanded_window
-# because they only apply here — duplicating ~6 lines is cheaper than
-# polluting the main panel's stylesheet vocabulary).
-_STYLE_PREVIEW_BODY = "color: #c9c9c9; font-size: 12px;"
-_STYLE_PREVIEW_TITLE = "color: #ffffff; font-size: 14px; font-weight: 500;"
-
-_STYLE_MODE_CHIP = (
-    "color: #f59e0b; font-size: 10px; padding: 1px 6px;"
-    "border: 1px solid #f59e0b40; border-radius: 4px; "
-    "background: #f59e0b14;"
+# v3 lab-console: all tokens resolve through lab_palette so the drawer
+# shares its visual vocabulary with the capsule / panel / glyph.  Old
+# blue Resume button + amber-fill chip are replaced with outline-only,
+# square-cornered, mono-typeset surfaces matching prototype-v3.html.
+_STYLE_PREVIEW_BODY = (
+    f"color: {_C.paper_dim}; font-size: 12px; font-family: {_F.mono_stack};"
+)
+_STYLE_PREVIEW_TITLE = (
+    f"color: {_C.paper}; font-size: 14px; font-weight: 500; "
+    f"font-family: {_F.mono_stack};"
 )
 
+# Permission-mode chip — squared (no border-radius), red-warm outline,
+# no fill.  Reads as "this session was given elevated authority" without
+# the screaming red pill v2 used to paint.
+_STYLE_MODE_CHIP = (
+    f"color: {_C.red_warm}; font-size: 10px; padding: 1px 6px;"
+    f"border: 1px solid {_C.red_warm_dim}; border-radius: 0; "
+    f"background: transparent; font-family: {_F.mono_stack};"
+    f"letter-spacing: 0.08em;"
+)
+
+# Resume button — v3 outline style, no blue, no rounded.  Hover inverts
+# colour (paper bg + ink fg) to keep "primary action" loudly readable.
 _STYLE_PRIMARY_BTN = f"""
     QPushButton {{
-        color: #e8efff;
-        background: #1d4ed8;
-        border: 1px solid #1e3a8a;
-        border-radius: 14px;
-        padding: 4px 12px;
+        color: {_C.paper};
+        background: transparent;
+        border: 1px solid {_C.paper_dim};
+        border-radius: 0;
+        padding: 6px 14px;
         font-size: 11px;
         font-weight: 500;
+        font-family: {_F.mono_stack};
+        letter-spacing: 0.12em;
     }}
-    QPushButton:hover {{ background: #2563eb; border-color: #1d4ed8; }}
+    QPushButton:hover {{ background: {_C.paper}; color: {_C.ink}; border-color: {_C.paper}; }}
     QPushButton:disabled {{
-        color: #6b7280; background: {_BG_SINGLE};
-        border-color: {_GROUP_OUTLINE_COLOR};
+        color: {_C.paper_faint}; background: transparent;
+        border-color: {_C.rule};
     }}
 """
 
-# Header close glyph — matches the panel's mute palette; only takes
-# colour on hover so it stays unobtrusive at rest.
-_STYLE_CLOSE_BTN = """
-    QPushButton {
-        color: #6b7280;
+# Header close glyph — flat, monospace, no chrome.  Colour stays muted
+# at rest, jumps to paper on hover.
+_STYLE_CLOSE_BTN = f"""
+    QPushButton {{
+        color: {_C.paper_faint};
         background: transparent;
         border: none;
         font-size: 16px;
+        font-family: {_F.mono_stack};
         padding: 0;
-    }
-    QPushButton:hover { color: #e8e8e8; }
+    }}
+    QPushButton:hover {{ color: {_C.paper}; }}
 """
 
 
@@ -433,7 +449,8 @@ class RecentsDrawer(QWidget):
         # the rule MUST also live in this widget's stylesheet to take
         # effect. Single source: claude_island.ui.tooltip_style.
         self.setStyleSheet(
-            f"RecentsDrawer {{ color: white; font-family: {UI_FONT_STACK}; }}"
+            # v3: paper warm-white on the dark surfaces, mono throughout.
+            f"RecentsDrawer {{ color: {_C.paper}; font-family: {_F.mono_stack}; }}"
             + TOOLTIP_QSS
         )
 
@@ -543,17 +560,21 @@ class RecentsDrawer(QWidget):
         # search
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search title, path, branch")
+        # v3: flat search field — single rule outline, no radius, mono.
+        # Amber focus border so the focused field reads as "this is where
+        # your typing lands" without flashing colour.
         self._search.setStyleSheet(
             f"""
             QLineEdit {{
-                background: {_BG_SINGLE};
-                color: #e8e8e8;
-                border: 1px solid {_GROUP_OUTLINE_COLOR};
-                border-radius: 6px;
-                padding: 5px 8px;
-                font-size: 11px;
+                background: {_C.ink};
+                color: {_C.paper};
+                border: 1px solid {_C.rule};
+                border-radius: 0;
+                padding: 6px 10px;
+                font-size: 12px;
+                font-family: {_F.mono_stack};
             }}
-            QLineEdit:focus {{ border-color: #6b7280; }}
+            QLineEdit:focus {{ border-color: {_C.amber}; }}
             """
         )
         self._search.textChanged.connect(self._on_search_changed)
@@ -596,7 +617,7 @@ class RecentsDrawer(QWidget):
         # vertical 1 px divider
         self._divider = QFrame()
         self._divider.setFrameShape(QFrame.Shape.VLine)
-        self._divider.setStyleSheet("background: #2a2a2a;")
+        self._divider.setStyleSheet(f"background: {_C.rule};")
         self._divider.setFixedWidth(1)
         body_h.addWidget(self._divider)
 
@@ -626,15 +647,20 @@ class RecentsDrawer(QWidget):
 
         # toast
         self._toast = QLabel("")
+        # v3 error toast — flat surface + red-warm outline + paper text,
+        # no rounded corners (rounded reads as "decorative", v3 wants
+        # "this is the lab telling you something").
         self._toast.setStyleSheet(
             f"""
             QLabel {{
-                background: {_BG_SINGLE};
-                color: #fecaca;
-                border: 1px solid #b91c1c;
-                border-radius: 6px;
+                background: {_C.surface};
+                color: {_C.paper};
+                border: 1px solid {_C.red_warm};
+                border-left: 2px solid {_C.red_warm};
+                border-radius: 0;
                 padding: 6px 10px;
                 font-size: 11px;
+                font-family: {_F.mono_stack};
             }}
             """
         )
@@ -1000,7 +1026,7 @@ class RecentsDrawer(QWidget):
     def _mk_divider(self) -> QFrame:
         f = QFrame()
         f.setFrameShape(QFrame.Shape.HLine)
-        f.setStyleSheet("background: #2a2a2a; max-height: 1px;")
+        f.setStyleSheet(f"background: {_C.rule}; max-height: 1px;")
         return f
 
     def _on_prompt_section_toggled(self, expanded: bool) -> None:
@@ -1216,7 +1242,7 @@ class RecentsDrawer(QWidget):
 _SCROLLAREA_STYLE = (
     "QScrollArea { background: transparent; border: none; }"
     "QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }"
-    "QScrollBar::handle:vertical { background: #3a3a3a; "
+    f"QScrollBar::handle:vertical {{ background: {_C.rule_bright}; "
     "  border-radius: 3px; min-height: 20px; }"
     "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
 )
