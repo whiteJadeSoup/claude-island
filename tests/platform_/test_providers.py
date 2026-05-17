@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1133,14 +1133,25 @@ class TestQuotaCacheState:
     # ---- Exponential backoff -----------------------------------------------
 
     def test_backoff_window_doubles_then_clamps(self):
-        """5m → 10m → 20m → 40m → 60m (cap) → 60m. Catches a future
-        refactor that changes the schedule or forgets to clamp."""
+        """Doubling schedule, capped at POLL_TTL_MAX (= 5 h).
+
+        5m → 10m → 20m → 40m → 80m → 160m → 300m (cap).
+        Catches a future refactor that changes the schedule or forgets
+        to clamp. ``failures ≥ 5`` is also where the circuit-breaker
+        opens (see TestCircuitBreaker), but ``_backoff_window_seconds``
+        itself remains a pure schedule function that keeps doubling
+        until the cap — the gate decision happens separately in
+        ``is_fetch_due``."""
         from claude_island.platform_.providers import (
             POLL_TTL, POLL_TTL_MAX, QuotaCacheState,
         )
+        assert POLL_TTL_MAX == 18000  # sanity-pin the new cap (5 h)
         s = QuotaCacheState.empty("anthropic")
-        cases = [(0, POLL_TTL), (1, 600), (2, 1200), (3, 2400),
-                 (4, POLL_TTL_MAX), (10, POLL_TTL_MAX), (30, POLL_TTL_MAX)]
+        cases = [
+            (0, POLL_TTL), (1, 600), (2, 1200), (3, 2400),
+            (4, 4800), (5, 9600),
+            (6, POLL_TTL_MAX), (10, POLL_TTL_MAX), (30, POLL_TTL_MAX),
+        ]
         for failures, expected in cases:
             got = replace(s, consecutive_failures=failures)._backoff_window_seconds()
             assert got == expected, f"failures={failures}: {got} != {expected}"
@@ -1236,6 +1247,120 @@ class TestQuotaCacheState:
             fallback_provider="anthropic",
         )
         assert s.consecutive_failures == 0
+
+
+class TestCircuitBreaker:
+    """Auto-refresh stops issuing HTTP once a streak of failures crosses
+    ``AUTO_REFRESH_FAILURE_THRESHOLD``. The manual ⟳ path bypasses this
+    at the provider level (``bypass_cache=True``), so the user can probe
+    on demand — a manual success resets the counter and resumes auto.
+
+    These tests pin the gate semantics at the state level. Provider-
+    level integration (auto-fetch path actually skipping HTTP) is
+    exercised through the existing anthropic-provider tests below.
+    """
+
+    def _now(self) -> datetime:
+        return datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_is_auto_refresh_paused_threshold(self):
+        from claude_island.platform_.providers import (
+            AUTO_REFRESH_FAILURE_THRESHOLD, QuotaCacheState,
+        )
+        assert AUTO_REFRESH_FAILURE_THRESHOLD == 5
+        s = QuotaCacheState.empty("anthropic")
+        # Threshold = inclusive: 5 failures → paused; 4 → still active.
+        assert not replace(s, consecutive_failures=4).is_auto_refresh_paused
+        assert replace(s, consecutive_failures=5).is_auto_refresh_paused
+        assert replace(s, consecutive_failures=10).is_auto_refresh_paused
+
+    def test_is_fetch_due_returns_false_once_circuit_open(self):
+        """Even with the backoff window elapsed long ago, auto-refresh
+        must not re-issue HTTP after the failure threshold."""
+        from claude_island.platform_.providers import QuotaCacheState
+        ancient_last_attempt = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        s = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=None,
+            last_attempt_at=ancient_last_attempt,
+            five_hour=None, seven_day=None,
+            consecutive_failures=5,  # circuit open
+        )
+        # 6 years past the last attempt — natural backoff would have
+        # opened the gate ages ago. Circuit breaker keeps it shut.
+        assert s.is_fetch_due(now=self._now()) is False
+
+    def test_is_fetch_due_still_true_just_below_threshold(self):
+        """failures=4 with backoff window elapsed → gate opens normally.
+        Verifies the breaker hasn't accidentally pre-fired one count too
+        early."""
+        from claude_island.platform_.providers import QuotaCacheState
+        ancient_last_attempt = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        s = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=None,
+            last_attempt_at=ancient_last_attempt,
+            five_hour=None, seven_day=None,
+            consecutive_failures=4,
+        )
+        assert s.is_fetch_due(now=self._now()) is True
+
+    def test_successful_fetch_closes_circuit_and_resumes_auto(self):
+        """A manual ⟳ that succeeds (counter resets to 0) leaves the
+        gate in its normal time-based state — auto can run again after
+        POLL_TTL."""
+        from claude_island.platform_.providers import POLL_TTL, QuotaCacheState, Window
+        s = replace(QuotaCacheState.empty("anthropic"), consecutive_failures=5)
+        assert s.is_auto_refresh_paused is True
+        recovered = s.with_successful_fetch(
+            now=self._now(),
+            five_hour=Window(pct=10.0,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+            seven_day=Window(pct=5.0,
+                             resets_at=datetime(2030, 1, 7, tzinfo=timezone.utc)),
+        )
+        assert recovered.is_auto_refresh_paused is False
+        # Immediately after success → throttled (just attempted) …
+        assert recovered.is_fetch_due(now=self._now()) is False
+        # … but POLL_TTL+1 later the gate reopens, just like the happy path.
+        later = self._now() + timedelta(seconds=POLL_TTL + 1)
+        assert recovered.is_fetch_due(now=later) is True
+
+    def test_to_snapshot_carries_consecutive_failures(self):
+        """UI surfaces the failure count so the quota card can render
+        the "auto-paused, N consecutive failures" hint."""
+        from claude_island.platform_.providers import QuotaCacheState, Window
+        s = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=datetime(2026, 5, 5, 11, 0, 0, tzinfo=timezone.utc),
+            last_attempt_at=datetime(2026, 5, 5, 11, 59, 0, tzinfo=timezone.utc),
+            five_hour=Window(pct=42.0,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+            seven_day=Window(pct=15.0,
+                             resets_at=datetime(2030, 1, 7, tzinfo=timezone.utc)),
+            consecutive_failures=5,
+        )
+        snap = s.to_snapshot(now=self._now())
+        assert snap is not None
+        assert snap.consecutive_failures == 5
+        assert snap.is_auto_refresh_paused is True
+
+    def test_to_snapshot_paused_flag_false_below_threshold(self):
+        from claude_island.platform_.providers import QuotaCacheState, Window
+        s = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=datetime(2026, 5, 5, 11, 0, 0, tzinfo=timezone.utc),
+            last_attempt_at=datetime(2026, 5, 5, 11, 59, 0, tzinfo=timezone.utc),
+            five_hour=Window(pct=42.0,
+                             resets_at=datetime(2030, 1, 1, tzinfo=timezone.utc)),
+            seven_day=Window(pct=15.0,
+                             resets_at=datetime(2030, 1, 7, tzinfo=timezone.utc)),
+            consecutive_failures=3,
+        )
+        snap = s.to_snapshot(now=self._now())
+        assert snap is not None
+        assert snap.consecutive_failures == 3
+        assert snap.is_auto_refresh_paused is False
 
 
 class TestAnthropicNegativeCache:

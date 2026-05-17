@@ -4428,6 +4428,21 @@ class ExpandedWindow(QWidget):
         self._quota_unavailable.hide()
         layout.addWidget(self._quota_unavailable)
 
+        # "Auto-refresh paused" hint, hidden at rest. Shown when the
+        # provider's circuit-breaker has tripped (auto fetch stopped
+        # issuing HTTP after enough consecutive failures). Tells the
+        # user the bars they see are frozen and that ↻ is the recovery
+        # path. Distinct from ``_quota_unavailable`` — that one fires
+        # when we have NO data at all; this one fires when data exists
+        # but auto-refresh is on strike.
+        self._quota_paused_hint = mk_label("", elide=False)
+        self._quota_paused_hint.setStyleSheet(
+            "color: #f59e0b; font-size: 11px; padding: 4px 0 0 0;"
+        )
+        self._quota_paused_hint.setWordWrap(True)
+        self._quota_paused_hint.hide()
+        layout.addWidget(self._quota_paused_hint)
+
         return card
 
     def _refresh_quota_card(self) -> None:
@@ -4442,6 +4457,7 @@ class ExpandedWindow(QWidget):
         if snap is None:
             self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
             self._quota_inline.hide()
+            self._quota_paused_hint.hide()
             self._show_quota_unavailable_hint()
             return
 
@@ -4449,6 +4465,7 @@ class ExpandedWindow(QWidget):
         # gone (would otherwise persist across a recover-from-failure
         # transition and visually compete with the now-real bars).
         self._quota_unavailable.hide()
+        self._refresh_quota_paused_hint(snap)
 
         # Live dot: green when 5h window is still open
         active = snap.five_hour_resets_at > datetime.now(timezone.utc)
@@ -4480,6 +4497,28 @@ class ExpandedWindow(QWidget):
             f"<span style='color:{weekly_color}'>Weekly {weekly_pct}%{stale_marker} · {weekly_reset_short}</span>"
         )
         self._quota_inline.show()
+
+    def _refresh_quota_paused_hint(self, snap) -> None:
+        """Show / hide the "auto-refresh paused" hint based on the
+        snapshot's circuit-breaker state. Called from
+        ``_refresh_quota_card`` when ``snap`` is non-None — the no-data
+        branch hides the hint outright since the unavailable copy
+        already explains what to do.
+
+        Copy: surfaces the consecutive-failure count so the user knows
+        WHY auto stopped, and mentions the ↻ as the recovery path.
+        Distinct yellow tone (#f59e0b) so it reads as a warning rather
+        than the dimmer-grey "unavailable" message — bars below are
+        still real data, just frozen."""
+        if not snap.is_auto_refresh_paused:
+            self._quota_paused_hint.hide()
+            return
+        n = snap.consecutive_failures
+        self._quota_paused_hint.setText(
+            f"Auto-refresh paused after {n} consecutive failures. "
+            f"Click ↻ to retry."
+        )
+        self._quota_paused_hint.show()
 
     def _show_quota_unavailable_hint(self) -> None:
         """Surface a provider-specific tip explaining why the bars are

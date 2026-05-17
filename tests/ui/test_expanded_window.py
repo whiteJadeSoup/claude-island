@@ -563,6 +563,47 @@ def test_quota_card_stale_marks_warning(qtbot):
     assert "⚠" in p._quota_inline.text()
 
 
+def test_quota_card_paused_hint_hidden_on_happy_path(qtbot):
+    """Healthy snapshot (failures=0, not paused) → no paused hint."""
+    p = _panel_with_quota(qtbot, quota=_make_quota(five_pct=42.0))
+    p._render_cards()
+    assert p._quota_paused_hint.isHidden()
+
+
+def test_quota_card_paused_hint_shows_when_circuit_open(qtbot):
+    """``is_auto_refresh_paused=True`` → user-facing yellow hint that
+    auto-refresh has stopped and ↻ is the recovery path. Pins the
+    behaviour against future refactors that might silently drop the
+    snapshot fields."""
+    now = datetime.now(timezone.utc)
+    quota = _QuotaSnapshot(
+        five_hour_pct=42.0,
+        five_hour_resets_at=now + timedelta(hours=3),
+        seven_day_pct=17.0,
+        seven_day_resets_at=now + timedelta(days=4),
+        fetched_at=now - timedelta(hours=2),
+        is_stale=False,
+        consecutive_failures=5,
+        is_auto_refresh_paused=True,
+    )
+    p = _panel_with_quota(qtbot, quota=quota)
+    p._render_cards()
+    assert not p._quota_paused_hint.isHidden()
+    text = p._quota_paused_hint.text()
+    assert "5" in text                    # surfaces the failure count
+    assert "paused" in text.lower()        # signals the pause
+    assert "↻" in text                     # points at the recovery affordance
+
+
+def test_quota_card_paused_hint_hidden_when_snap_none(qtbot):
+    """No snapshot → unavailable hint takes over, paused hint stays
+    hidden (it has nothing meaningful to say without a count)."""
+    p = _panel_with_quota(qtbot, quota=None,
+                          totals=UsageTotals(period="today"))
+    p._render_cards()
+    assert p._quota_paused_hint.isHidden()
+
+
 def test_quota_card_no_quota_dot_gray(qtbot):
     """U4: no remote quota → live-dot greys out (no signal we can
     derive freshness from). Replaces the old "expired session" test

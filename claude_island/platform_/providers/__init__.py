@@ -179,20 +179,37 @@ class Provider(Protocol):
 
 HTTP_TIMEOUT = 3.0
 POLL_TTL = 300      # 5 min — base interval between fetch attempts
-POLL_TTL_MAX = 3600  # 60 min — backoff cap for consecutive failures
+POLL_TTL_MAX = 18000  # 5 h — backoff cap for consecutive failures
 STALE_MULT = 3       # 3 × TTL = stale flag
 
+# After this many consecutive failures, auto-refresh stops issuing
+# HTTP entirely — the doubling schedule alone would still ping a known-
+# broken endpoint every 5 h, which is wasteful and frequently produces
+# the same identical 401/network noise in stderr. The manual ⟳ button
+# always bypasses this circuit-breaker (see fetch()'s
+# ``bypass_cache=True`` path), so the user can probe a fix on demand;
+# a successful manual fetch resets the counter via
+# ``with_successful_fetch`` and resumes auto polling. Five attempts is
+# chosen because it covers the natural backoff schedule out to ~2.5 h
+# of cumulative wait — long enough to ride out transient outages,
+# short enough that a persistent failure surfaces clearly to the user.
+AUTO_REFRESH_FAILURE_THRESHOLD = 5
+
 # Exponential-backoff schedule on consecutive failures: window doubles
-# each failure, capped at POLL_TTL_MAX.
+# each failure, capped at POLL_TTL_MAX. Once
+# ``consecutive_failures >= AUTO_REFRESH_FAILURE_THRESHOLD`` auto-refresh
+# is paused entirely (see is_fetch_due) — the schedule below applies
+# only while the circuit-breaker remains closed.
 #   failures=0  →  POLL_TTL          (5 min — happy path)
 #   failures=1  →  POLL_TTL × 2      (10 min)
 #   failures=2  →  POLL_TTL × 4      (20 min)
 #   failures=3  →  POLL_TTL × 8      (40 min)
-#   failures≥4  →  POLL_TTL_MAX      (60 min — clamped)
-# Any success (auto OR manual ⟳) resets the counter, so a flaky network
-# blip doesn't permanently slow polling. Rationale for 60-min cap: 429
-# rate-limits typically clear in 1–15 min; 401 auth issues usually need
-# user intervention, so hourly is the right cadence to redetect a fix.
+#   failures=4  →  POLL_TTL × 16     (80 min — final auto attempt)
+#   failures≥5  →  auto-refresh stops (manual ⟳ still works)
+# Cumulative ~155 min before the circuit opens — long enough to ride
+# out transient 429s/network blips, short enough that a persistent
+# 401/network failure surfaces a clear "paused" indicator to the user
+# instead of silently retrying every 5 h forever.
 
 
 def read_env_token() -> str | None:
@@ -739,12 +756,31 @@ class QuotaCacheState:
         Window length is ``POLL_TTL × 2^consecutive_failures`` clamped
         at ``POLL_TTL_MAX`` — happy path is plain POLL_TTL; each failure
         doubles the wait so a persistently broken provider doesn't burn
-        a request every 5 min."""
+        a request every 5 min.
+
+        Circuit-breaker: once ``consecutive_failures`` reaches
+        ``AUTO_REFRESH_FAILURE_THRESHOLD`` we return False regardless of
+        elapsed time — the auto-refresh path uses this check to decide
+        whether to issue HTTP, so the auto-refresh stops entirely.
+        Manual ⟳ bypasses this check at the provider level
+        (``bypass_cache=True``), so the user can always probe; a manual
+        success resets the counter and resumes auto polling.
+        """
+        if self.is_auto_refresh_paused:
+            return False
         last = self.last_attempt_at or self.fetched_at
         if last is None:
             return True
         window = self._backoff_window_seconds()
         return (now - last).total_seconds() > window
+
+    @property
+    def is_auto_refresh_paused(self) -> bool:
+        """True when the circuit-breaker is open — too many consecutive
+        failures, auto-refresh has stopped issuing HTTP. UI uses this
+        (via the snapshot's ``consecutive_failures`` field) to render
+        the "auto-paused, N consecutive failures" hint."""
+        return self.consecutive_failures >= AUTO_REFRESH_FAILURE_THRESHOLD
 
     def _backoff_window_seconds(self) -> float:
         """Current backoff interval in seconds, clamped at POLL_TTL_MAX.
@@ -828,6 +864,8 @@ class QuotaCacheState:
             fetched_at=self.fetched_at,
             is_stale=self.is_stale(now=now),
             provider=self.provider,
+            consecutive_failures=self.consecutive_failures,
+            is_auto_refresh_paused=self.is_auto_refresh_paused,
         )
 
 

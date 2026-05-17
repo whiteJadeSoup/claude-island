@@ -235,6 +235,17 @@ class QuotaSnapshot:
     fetched_at: datetime
     is_stale: bool                  # True when fetched_at is older than 3*TTL
     provider: str = "anthropic"    # "anthropic" | "minimax"
+    # Number of consecutive failed fetches at the time this snapshot was
+    # produced. 0 on the happy path (last fetch succeeded). The UI uses
+    # this together with ``is_auto_refresh_paused`` to render a
+    # "auto-paused, N consecutive failures" hint on the quota card —
+    # manual ⟳ still works in that state and is the recovery affordance.
+    consecutive_failures: int = 0
+    # True when the producer's circuit-breaker has tripped — auto-refresh
+    # has stopped issuing HTTP for this provider. Manual ⟳ still works
+    # and resets ``consecutive_failures`` on success. The UI uses this
+    # bool directly so it doesn't need to know the producer's threshold.
+    is_auto_refresh_paused: bool = False
 
 
 @dataclass(frozen=True)
