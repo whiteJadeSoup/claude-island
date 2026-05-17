@@ -45,6 +45,7 @@ from claude_island.core.pending_decisions import (
 )
 from claude_island.ui.approval_card import ApprovalCard
 from claude_island.ui.fonts import MONO_FONT_STACK, UI_FONT_STACK
+from claude_island.ui.lab_palette import Color as _C, FontStack as _F
 from claude_island.ui.question_card import QuestionCard
 from claude_island.ui.session_color import session_accent
 
@@ -90,16 +91,25 @@ ResolveCallback = Callable[[str, Decision], None]
 FocusTerminalCallback = Callable[[str], None]
 
 
+# Risk → (background tint, text colour) for the small risk pill on each
+# peek sliver.  v3 keeps the three semantic colours (red/amber/green for
+# high/medium/low) because the user has learned what they mean, but
+# routes them through lab_palette so the pill matches the row strip's
+# tint family across surfaces.  Background tints stay rgba with low
+# alpha — a stronger fill would scream more than the v3 quiet aesthetic
+# wants on a tiny pill.
 _RISK_PILL_COLORS: dict[RiskLevel, tuple[str, str]] = {
-    # (background tint, text colour)
-    RiskLevel.HIGH:   ("rgba(239,68,68,0.18)",  "#f87171"),
-    RiskLevel.MEDIUM: ("rgba(245,158,11,0.15)", "#fbbf24"),
-    RiskLevel.LOW:    ("rgba(34,197,94,0.15)",  "#4ade80"),
+    RiskLevel.HIGH:   ("rgba(196,106,85,0.18)",  _C.red_warm),
+    RiskLevel.MEDIUM: ("rgba(212,164,96,0.18)",  _C.amber),
+    RiskLevel.LOW:    ("rgba(109,181,128,0.18)", _C.phosphor),
 }
 
 
 # ---------------------------------------------------------------------------
-# QSS
+# QSS — v3 lab-console tokens throughout.  No rounded corners on the
+# header counter / badge (rounded reads as v2 chrome); the badge becomes
+# an outlined square chip so it sits as a tally mark, not a notification
+# bubble.
 # ---------------------------------------------------------------------------
 
 _QSS = f"""
@@ -107,54 +117,60 @@ QWidget#stackedDecisionsPanel {{
     background: transparent;
 }}
 QLabel#stackedDecisionsHeader {{
-    color: #999;
-    font-family: {UI_FONT_STACK};
+    color: {_C.paper_dim};
+    font-family: {_F.mono_stack};
     font-size: 11px;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.18em;
 }}
 QLabel#stackedDecisionsBadge {{
-    background-color: #1d4ed8;
-    color: white;
-    border-radius: 10px;
-    padding: 1px 7px;
-    font-family: {UI_FONT_STACK};
+    background-color: transparent;
+    color: {_C.amber};
+    border: 1px solid {_C.amber_dim};
+    border-radius: 0;
+    padding: 1px 6px;
+    font-family: {_F.mono_stack};
     font-size: 10px;
-    font-weight: 700;
+    font-weight: 600;
+    letter-spacing: 0.04em;
 }}
 QLabel#stackedDecisionsCounter {{
-    color: #888;
-    font-family: {UI_FONT_STACK};
+    color: {_C.paper_faint};
+    font-family: {_F.mono_stack};
     font-size: 10px;
+    letter-spacing: 0.08em;
 }}
 QFrame#peekSliver {{
-    background-color: #1a1a1a;
-    border: 1px solid #232323;
+    background-color: {_C.surface};
+    border: 1px solid {_C.rule};
     border-bottom: none;
-    border-top-left-radius: 10px;
-    border-top-right-radius: 10px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
 }}
 QLabel#peekSessionTag {{
-    color: #ccc;
-    font-family: {MONO_FONT_STACK};
+    color: {_C.paper};
+    font-family: {_F.mono_stack};
     font-size: 10px;
 }}
 QLabel#peekToolName {{
-    color: #aaa;
-    font-family: {UI_FONT_STACK};
+    color: {_C.paper_dim};
+    font-family: {_F.mono_stack};
     font-size: 10px;
+    letter-spacing: 0.02em;
 }}
 QLabel#peekRiskPill {{
-    font-family: {UI_FONT_STACK};
+    font-family: {_F.mono_stack};
     font-size: 8px;
-    font-weight: 700;
+    font-weight: 600;
     padding: 0 5px;
-    border-radius: 7px;
+    border-radius: 0;
+    letter-spacing: 0.08em;
 }}
 QLabel#stackOverflowLabel {{
-    color: #777;
-    font-family: {UI_FONT_STACK};
+    color: {_C.paper_faint};
+    font-family: {_F.mono_stack};
     font-size: 10px;
+    letter-spacing: 0.04em;
 }}
 """
 

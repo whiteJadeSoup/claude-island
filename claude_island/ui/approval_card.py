@@ -93,10 +93,11 @@ _CHEVRON_EXPANDED = "▴"
 
 # Risk → accent colour for the top bar. Same vocabulary as the rest
 # of the panel (capsule, status dot).
+from claude_island.ui.lab_palette import Color as _C, FontStack as _F
 _TOP_BAR_COLOR_BY_RISK: dict[RiskLevel, str] = {
-    RiskLevel.HIGH:   "#ef4444",
-    RiskLevel.MEDIUM: "#f59e0b",
-    RiskLevel.LOW:    "#22c55e",
+    RiskLevel.HIGH:   _C.red_warm,
+    RiskLevel.MEDIUM: _C.amber,
+    RiskLevel.LOW:    _C.phosphor,
 }
 
 # Risk → tool-icon glyph displayed in the header. Mostly decorative —
@@ -123,73 +124,90 @@ ResolveCallback = Callable[[str, Decision], None]
 # QSS — pulled out so tests assert on widget structure, not strings.
 # ---------------------------------------------------------------------------
 
+# v3 approval card — outlined surfaces, square corners, mono throughout.
+# The "Allow" button is the only saturated element on the card (paper bg,
+# ink fg) so the primary action stays loudly readable; "Deny" is outline-
+# only with red_warm tint so the secondary action reads as deliberate
+# (the user is rejecting something).
 _CARD_QSS = f"""
 QFrame#approvalCard {{
-    background-color: #1f1f1f;
-    border-radius: 10px;
-    border: 1px solid #2a2a2a;
+    background-color: {_C.surface};
+    border-radius: 4px;
+    border: 1px solid {_C.rule};
 }}
 QFrame#approvalCardTopBar {{
-    border-top-left-radius: 10px;
-    border-top-right-radius: 10px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
 }}
-QLabel {{ color: #e8e8e8; }}
+QLabel {{ color: {_C.paper}; }}
 QLabel#approvalCardTitle {{
-    font-family: {UI_FONT_STACK};
+    font-family: {_F.mono_stack};
     font-size: 13px;
     font-weight: 600;
+    letter-spacing: 0.02em;
 }}
 QLabel#approvalCardSessionBadge {{
-    font-family: {MONO_FONT_STACK};
+    font-family: {_F.mono_stack};
     font-size: 10px;
-    color: #ddd;
-    background-color: rgba(255,255,255,0.06);
-    border-radius: 9px;
+    color: {_C.paper_dim};
+    background-color: transparent;
+    border: 1px solid {_C.rule};
+    border-radius: 0;
     padding: 2px 8px;
 }}
 QLabel#approvalCardChevron {{
-    color: #999;
+    color: {_C.paper_faint};
     font-size: 11px;
 }}
 QLabel#approvalCardPreview {{
-    font-family: {MONO_FONT_STACK};
+    font-family: {_F.mono_stack};
     font-size: 11px;
-    color: #cdd2d8;
-    background-color: #0e0e0e;
-    padding: 4px 8px;
-    border-radius: 4px;
-    border: 1px solid #1a1a1a;
+    color: {_C.paper};
+    background-color: {_C.ink};
+    padding: 6px 10px;
+    border-radius: 0;
+    border: 1px solid {_C.rule};
+    border-left: 2px solid {_C.rule_bright};
 }}
 QLabel#approvalCardWarning {{
-    font-family: {UI_FONT_STACK};
+    font-family: {_F.mono_stack};
     font-size: 10px;
-    color: #f59e0b;
+    color: {_C.amber};
     font-weight: 600;
+    letter-spacing: 0.02em;
 }}
 QPushButton#approvalAllow {{
-    background-color: #1d4ed8;
-    color: white;
-    border-radius: 6px;
+    background-color: {_C.paper};
+    color: {_C.ink};
+    border-radius: 0;
     padding: 7px {_BUTTON_PADDING_H_PX}px;
-    font-family: {UI_FONT_STACK};
+    font-family: {_F.mono_stack};
     font-size: 12px;
     font-weight: 600;
-    border: none;
+    letter-spacing: 0.08em;
+    border: 1px solid {_C.paper};
 }}
-QPushButton#approvalAllow:hover {{ background-color: #2563eb; }}
+QPushButton#approvalAllow:hover {{
+    background-color: {_C.amber};
+    border-color: {_C.amber};
+}}
 QPushButton#approvalDeny {{
     background-color: transparent;
-    color: #d4d4d4;
-    border-radius: 6px;
+    color: {_C.red_warm};
+    border-radius: 0;
     padding: 7px 12px;
-    font-family: {UI_FONT_STACK};
+    font-family: {_F.mono_stack};
     font-size: 12px;
-    border: 1px solid #404040;
+    letter-spacing: 0.08em;
+    border: 1px solid {_C.red_warm_dim};
 }}
-QPushButton#approvalDeny:hover {{ background-color: #2a2a2a; }}
+QPushButton#approvalDeny:hover {{
+    background-color: {_C.red_warm_dim};
+    color: {_C.paper};
+}}
 QCheckBox#approvalRemember {{
-    color: #cdd2d8;
-    font-family: {UI_FONT_STACK};
+    color: {_C.paper_dim};
+    font-family: {_F.mono_stack};
     font-size: 11px;
 }}
 """ + TOOLTIP_QSS
