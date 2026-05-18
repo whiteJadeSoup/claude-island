@@ -3539,8 +3539,18 @@ class ExpandedWindow(QWidget):
         root.addWidget(self._spend_card)
 
         # ── QUOTA card: provider tabs + 5h + weekly bars ────────────
+        # v4c: hide the large QUOTA card.  Its data lives in two places:
+        #   1. TODAY summary card carries the headline 5h percent + bar
+        #   2. New quota_footer (added below) carries "QUOTA · Anthropic
+        #      [+] · 5h N% · Weekly N% · ↻" as a single horizontal line
+        # Original quota_card stays in the tree (setVisible(False)) so
+        # provider tabs / refresh hooks / per-provider configs all keep
+        # compiling — the footer is a sibling view of the same data.
         self._quota_card = self._build_quota_card()
+        self._quota_card.setVisible(False)
         root.addWidget(self._quota_card)
+        self._quota_footer = self._build_quota_footer()
+        root.addWidget(self._quota_footer)
 
         self.setStyleSheet(_STYLE_PANEL)
 
@@ -3927,6 +3937,16 @@ class ExpandedWindow(QWidget):
         self._refresh_summary_card()
         self._refresh_spend_card()
         self._refresh_quota_card()
+        # v4c footer mirrors the same data the (hidden) quota card uses.
+        # Kept defensive — _build_quota_footer ran with no errors but
+        # individual snap fields might be missing on cold start.
+        if hasattr(self, "_quota_footer"):
+            try:
+                self._refresh_quota_footer()
+            except Exception as exc:
+                import sys as _sys
+                print(f"[claude-island] quota footer refresh failed: {exc}",
+                      file=_sys.stderr)
         self.adjustSize()
         self._position()
 
@@ -4561,6 +4581,211 @@ class ExpandedWindow(QWidget):
 
     def _hide_spend_row(self, row: QWidget) -> None:
         row.hide()
+
+    # ------------------------------------------------------------------
+    # v4c QUOTA footer — horizontal inline row replacing the big
+    # quota card at the bottom of the panel.  Mirrors prototype-v4c-
+    # github.html's footer band:
+    #
+    #   QUOTA  [Anthropic] [+]   5h 62% · 2h 14m  │  Weekly 41% · 4d 22h   ↻
+    #
+    # ``_refresh_quota_footer`` is called from the same refresh tick
+    # the big card uses, so both surfaces stay in lock-step.
+    # ------------------------------------------------------------------
+
+    def _build_quota_footer(self) -> QWidget:
+        """Build the inline quota footer.  Reads provider name + 5h /
+        weekly figures from snap.quota at refresh time; refresh button
+        forwards to the same on_refresh_clicked callback the v3 card
+        already uses."""
+        bar = QFrame()
+        bar.setObjectName("quota_footer")
+        bar.setStyleSheet(
+            f"QFrame#quota_footer {{"
+            f"  background: {_LabColor.surface};"
+            f"  border-top: 1px solid {_LabColor.rule};"
+            f"  border-radius: 0 0 6px 6px;"
+            f"}}"
+        )
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(14, 8, 10, 8)
+        lay.setSpacing(10)
+
+        # "QUOTA" caption (paper_dim uppercase).
+        cap = QLabel("QUOTA")
+        cap.setStyleSheet(
+            f"color: {_LabColor.paper_dim}; "
+            f"font-size: 10px; font-weight: 600; letter-spacing: 0.08em;"
+        )
+        lay.addWidget(cap)
+
+        # Provider chip — current selected provider.  Click TBD (v4c
+        # spec is "chip + [+] for switching", but provider switching
+        # already lives in the hidden quota_card's tab strip; the
+        # footer chip is read-only for now).  Updated by
+        # _refresh_quota_footer to reflect the active provider name.
+        self._quota_footer_chip = QPushButton("Anthropic")
+        self._quota_footer_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._quota_footer_chip.setStyleSheet(
+            f"QPushButton {{"
+            f"  background: {_LabColor.ink};"
+            f"  color: {_LabColor.accent};"
+            f"  border: 1px solid {_LabColor.accent};"
+            f"  border-radius: 100px;"
+            f"  padding: 2px 9px;"
+            f"  font-size: 11px;"
+            f"  font-weight: 500;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  background: {_LabColor.surface_hi};"
+            f"}}"
+        )
+        lay.addWidget(self._quota_footer_chip)
+
+        # "+" placeholder — future "add provider" affordance.  Sized to
+        # match chip height (dashed border = "potential / inactive").
+        self._quota_footer_add = QPushButton("+")
+        self._quota_footer_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._quota_footer_add.setFixedSize(20, 20)
+        self._quota_footer_add.setStyleSheet(
+            f"QPushButton {{"
+            f"  background: transparent;"
+            f"  color: {_LabColor.paper_faint};"
+            f"  border: 1px dashed {_LabColor.rule_bright};"
+            f"  border-radius: 100px;"
+            f"  font-size: 12px;"
+            f"  padding: 0;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  color: {_LabColor.paper};"
+            f"  border-color: {_LabColor.rule_active};"
+            f"}}"
+        )
+        self._quota_footer_add.setToolTip("Add another provider (coming soon)")
+        lay.addWidget(self._quota_footer_add)
+
+        # 5h figure ("5h 62% · 2h 14m") — mono, dim label + bright bold
+        # number, separator dot.  Single label keeps refresh cheap.
+        self._quota_footer_5h = QLabel("—")
+        self._quota_footer_5h.setStyleSheet(
+            f"color: {_LabColor.paper_dim}; font-size: 11px; "
+            f"font-family: {FontStack.mono_stack};"
+        )
+        self._quota_footer_5h.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(self._quota_footer_5h)
+
+        # vertical separator before Weekly
+        sep = QLabel("│")
+        sep.setStyleSheet(
+            f"color: {_LabColor.rule_bright}; font-size: 11px;"
+        )
+        lay.addWidget(sep)
+
+        # Weekly figure — same shape as 5h.  Snap doesn't carry a
+        # weekly progress today; we surface "Weekly —" until provider
+        # backends learn weekly reporting.
+        self._quota_footer_weekly = QLabel(
+            f"<span style='color: {_LabColor.paper_dim}'>Weekly</span> "
+            f"<span style='color: {_LabColor.paper_faint}'>—</span>"
+        )
+        self._quota_footer_weekly.setStyleSheet(
+            f"font-size: 11px; font-family: {FontStack.mono_stack};"
+        )
+        self._quota_footer_weekly.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(self._quota_footer_weekly)
+
+        lay.addStretch(1)
+
+        # Refresh button — forwards to the existing
+        # ``_on_refresh_clicked`` callback so both quota surfaces
+        # (hidden card + visible footer) share one network handler.
+        self._quota_footer_refresh = QPushButton("↻")
+        self._quota_footer_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._quota_footer_refresh.setFixedSize(24, 24)
+        self._quota_footer_refresh.setStyleSheet(
+            f"QPushButton {{"
+            f"  background: transparent;"
+            f"  color: {_LabColor.paper_dim};"
+            f"  border: 1px solid {_LabColor.rule};"
+            f"  border-radius: 100px;"
+            f"  font-size: 13px;"
+            f"  padding: 0;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  color: {_LabColor.paper};"
+            f"  background: {_LabColor.surface_hi};"
+            f"}}"
+        )
+        self._quota_footer_refresh.setToolTip("Refresh quota now")
+        self._quota_footer_refresh.clicked.connect(self._on_quota_footer_refresh)
+        lay.addWidget(self._quota_footer_refresh)
+
+        return bar
+
+    def _on_quota_footer_refresh(self) -> None:
+        """Forward footer refresh clicks to the existing handler."""
+        if self._on_refresh_clicked is not None:
+            try:
+                self._on_refresh_clicked()
+            except Exception as exc:
+                import sys as _sys
+                print(f"[claude-island] quota footer refresh failed: {exc}",
+                      file=_sys.stderr)
+
+    def _refresh_quota_footer(self) -> None:
+        """Repopulate the footer from the current quota snapshot.
+        Defensive — fall back to "—" labels when snapshot or
+        per-class fields are missing rather than crashing."""
+        # Provider chip — name comes from selected_provider_name (same
+        # source the v3 card uses).
+        provider = (self.selected_provider_name() or "anthropic").title()
+        self._quota_footer_chip.setText(provider)
+
+        snap = None
+        if self._get_quota_snapshot is not None:
+            try:
+                snap = self._get_quota_snapshot()
+            except Exception as exc:
+                import sys as _sys
+                print(f"[claude-island] quota footer fetch failed: {exc}",
+                      file=_sys.stderr)
+
+        if snap is None:
+            self._quota_footer_5h.setText(
+                f"<span style='color: {_LabColor.paper_dim}'>5h</span> "
+                f"<span style='color: {_LabColor.paper_faint}'>—</span>"
+            )
+            return
+
+        pct_5h = max(0.0, min(100.0, float(snap.five_hour_pct)))
+        bucket = int(round(pct_5h))
+        col = _quota_color(bucket, stale=snap.is_stale)
+        reset = _fmt_reset(snap.five_hour_resets_at)
+        self._quota_footer_5h.setText(
+            f"<span style='color: {_LabColor.paper_dim}'>5h</span> "
+            f"<span style='color: {col}; font-weight: 600'>{bucket}%</span>"
+            f"<span style='color: {_LabColor.rule_bright}'> · </span>"
+            f"<span style='color: {_LabColor.paper_dim}'>{reset}</span>"
+        )
+
+        # Weekly — UsageSnapshot may carry a seven_day_pct field; fall
+        # back to em-dash when absent.
+        wk_pct = getattr(snap, "seven_day_pct", None)
+        wk_reset = getattr(snap, "seven_day_resets_at", None)
+        if wk_pct is not None and wk_reset is not None:
+            wk_bucket = int(round(max(0.0, min(100.0, float(wk_pct)))))
+            wk_col = _quota_color(wk_bucket, stale=snap.is_stale)
+            self._quota_footer_weekly.setText(
+                f"<span style='color: {_LabColor.paper_dim}'>Weekly</span> "
+                f"<span style='color: {wk_col}; font-weight: 600'>{wk_bucket}%</span>"
+                f"<span style='color: {_LabColor.rule_bright}'> · </span>"
+                f"<span style='color: {_LabColor.paper_dim}'>{_fmt_reset(wk_reset)}</span>"
+            )
+        else:
+            self._quota_footer_weekly.setText(
+                f"<span style='color: {_LabColor.paper_dim}'>Weekly</span> "
+                f"<span style='color: {_LabColor.paper_faint}'>—</span>"
+            )
 
     # ------------------------------------------------------------------
     # USAGE: QUOTA card (provider-specific, 5h + weekly bars)

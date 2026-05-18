@@ -2689,6 +2689,70 @@ class TestSummaryCard:
         # labels appear as quiet text
         assert "tokens" in html and "cache" in html and "hit" in html
 
+    def test_quota_footer_renders_5h_percent_and_reset(self, qtbot):
+        """v4c QUOTA footer surfaces the 5h percent + reset countdown
+        from the same quota snapshot the (hidden) quota card uses."""
+        from claude_island.core.models import QuotaSnapshot, UsageTotals
+        from datetime import datetime, timedelta, timezone
+        capsule = QWidget()
+        capsule.show()
+        controller = IslandController()
+        snap = QuotaSnapshot(
+            five_hour_pct=62.0,
+            five_hour_resets_at=datetime.now(timezone.utc) + timedelta(hours=2, minutes=14),
+            seven_day_pct=41.0,
+            seven_day_resets_at=datetime.now(timezone.utc) + timedelta(days=4),
+            fetched_at=datetime.now(timezone.utc),
+            is_stale=False,
+            provider="anthropic",
+        )
+        p = ExpandedWindow(
+            capsule=capsule,
+            controller=controller,
+            get_usage_totals=lambda period: UsageTotals(period=period),
+            get_quota_snapshot=lambda: snap,
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_quota_footer()
+        html_5h = p._quota_footer_5h.text()
+        assert "5h" in html_5h
+        assert "62%" in html_5h
+        # Weekly figure renders alongside
+        html_wk = p._quota_footer_weekly.text()
+        assert "Weekly" in html_wk
+        assert "41%" in html_wk
+
+    def test_quota_footer_falls_back_when_snapshot_missing(self, qtbot):
+        from claude_island.core.models import UsageTotals
+        capsule = QWidget(); capsule.show()
+        p = ExpandedWindow(
+            capsule=capsule, controller=IslandController(),
+            get_usage_totals=lambda period: UsageTotals(period=period),
+            get_quota_snapshot=lambda: None,
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_quota_footer()
+        # Em-dash for the 5h figure when no snapshot
+        assert "—" in p._quota_footer_5h.text()
+
+    def test_quota_footer_refresh_button_forwards_to_handler(self, qtbot):
+        """Click on the footer ↻ button must invoke the same
+        on_refresh_clicked callback the (hidden) quota card uses."""
+        from claude_island.core.models import UsageTotals
+        capsule = QWidget(); capsule.show()
+        calls: list[None] = []
+        p = ExpandedWindow(
+            capsule=capsule, controller=IslandController(),
+            get_usage_totals=lambda period: UsageTotals(period=period),
+            on_refresh_clicked=lambda: calls.append(None),
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._quota_footer_refresh.click()
+        assert calls == [None], (
+            "footer refresh button must invoke on_refresh_clicked exactly once; "
+            f"got {len(calls)} calls"
+        )
+
     def test_summary_stats_blank_when_totals_fail(self, qtbot):
         """If get_usage_totals raises, the stats label should be empty
         rather than carry stale data — same defensive pattern as the
