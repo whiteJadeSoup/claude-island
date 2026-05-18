@@ -815,7 +815,11 @@ class _RowStatusGlyph(QWidget):
 # Two-line row: top = dot + name + cost, bottom = model chip + status.
 # 52 px holds the 13 px name plus the 11 px status row with breathing
 # room top/bottom — anything shorter clipped descenders on g/y/p.
-_ROW_HEIGHT = 52
+# v4c: rows grew from 52 → 68 px to fit a third line for the cwd path.
+# GitHub Actions list density — the cwd is too useful to elide off the
+# row entirely (it disambiguates two sessions named "master" living in
+# different repos) and too long to inline next to the name.
+_ROW_HEIGHT = 68
 _ROW_PAD_H = 12
 
 # Activity heuristic for the row status text. Same threshold as the
@@ -1125,7 +1129,14 @@ _STYLE_MODEL_CHIP_EMPTY = (
 )
 # Status line typography: same dimmer grey as _STYLE_AGE so the text
 # settles into the secondary tier; size matched to chip height.
-_STYLE_STATUS = "color: #9ca3af; font-size: 10px;"
+_STYLE_STATUS = f"color: {_LabColor.paper_dim}; font-size: 10px;"
+# v4c: cwd label sits between top (name + status + cost) and bottom
+# (model chip).  Monospace so paths read cleanly; paper_faint so they
+# settle into the secondary tier without distracting from the name.
+_STYLE_CWD = (
+    f"color: {_LabColor.paper_faint}; font-size: 10px; "
+    f"font-family: {FontStack.mono_stack};"
+)
 
 
 def _row_tooltip(view: "SessionView") -> str:
@@ -5034,22 +5045,23 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _make_row(self, view: SessionView, parent_card: QFrame | None = None) -> HoverRow:
-        """Build a click-target row with a two-line layout:
+        """Build a click-target row with a v4c three-line layout:
 
         ::
 
             ● name                                $cost
+              ~/path/to/cwd
               [Model] · running · 5m ago
 
-        The top line carries the activity dot, the (possibly renamed)
-        session name, and the cumulative cost. The bottom line carries
-        a colour-coded model chip plus the running/idle status word
-        and a relative-time ``5m ago`` suffix.
+        v4c GitHub-list density: cwd path on its own row (mono) so the
+        user can disambiguate two same-named sessions in different repos
+        without hovering for a tooltip.  Status text on the top line so
+        the phase reads next to the name (the way the prototype rendered
+        it).  Model chip + relative-time on the bottom row, same as
+        before — kept on its own line so chip + status stay one block.
 
-        Hover feedback is supplied by HoverRow's left-edge accent bar
-        (WA_Hover=True). All sub-labels carry WA_TransparentForMouseEvents
-        so clicks anywhere on the row reach the button. Right-click
-        still routes to the rich SessionDetailPopup.
+        Hover feedback is supplied by HoverRow's left-edge accent bar.
+        Right-click still routes to SessionDetailPopup.
         """
         btn = HoverRow(base_bg=_BG_SINGLE, parent_card=parent_card)
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -5107,6 +5119,18 @@ class ExpandedWindow(QWidget):
         top.addWidget(meta_label)
 
         outer.addLayout(top)
+
+        # ---- middle row: cwd path (mono) --------------------------------
+        # Indent matches the bottom row so cwd sits flush under the name,
+        # not under the status glyph. Eliding left so the *tail* of the
+        # path stays readable (basename matters more than ancestors).
+        cwd_label = _ElidingLabel()
+        cwd_label.setObjectName("cwd_label")
+        cwd_label.setStyleSheet(_STYLE_CWD)
+        cwd_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        cwd_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        cwd_label.setContentsMargins(20, 0, 0, 0)
+        outer.addWidget(cwd_label)
 
         # ---- bottom row: indent + model chip + status -------------------
         # Indent the bottom row so the model chip sits under the name,
@@ -5265,6 +5289,25 @@ class ExpandedWindow(QWidget):
         name_label = btn.findChild(QLabel, "name_label")
         if name_label is not None and name_label.text() != title:
             name_label.setText(title)
+
+        # v4c: cwd label on the middle row.  Tilde-prefixed if the path
+        # lives under the user's home so the row stays short for the
+        # common case.  Empty paths (degraded SessionView) show "—" to
+        # keep the row's three-line geometry stable across states.
+        cwd_label = btn.findChild(QLabel, "cwd_label")
+        if cwd_label is not None:
+            try:
+                import os as _os
+                p = str(view.project_path) if view.project_path else ""
+                home = str(_os.path.expanduser("~"))
+                if p and p.startswith(home):
+                    cwd_text = "~" + p[len(home):]
+                else:
+                    cwd_text = p or "—"
+            except Exception:
+                cwd_text = str(view.project_path) if view.project_path else "—"
+            if cwd_label.text() != cwd_text:
+                cwd_label.setText(cwd_text)
 
         meta_label = btn.findChild(QLabel, "meta_label")
         if meta_label is not None and meta_label.text() != meta_text:

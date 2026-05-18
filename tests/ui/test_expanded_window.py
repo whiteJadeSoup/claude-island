@@ -2253,14 +2253,14 @@ class TestRowStatusLine:
         assert btn.findChild(QLabel, "model_chip") is not None
         assert btn.findChild(QLabel, "status_label") is not None
 
-    def test_row_height_grew_to_fit_two_lines(self, panel):
-        """Row height jumped from 36 to 52 when the status row was
-        added. Locking the value down so a future code change can't
-        accidentally squash the bottom line and clip descenders."""
+    def test_row_height_grew_to_fit_three_lines(self, panel):
+        """v4c: row height grew from 52 → 68 to fit the new cwd line.
+        Pin the value so a future tweak doesn't silently clip the
+        cwd or the model chip below it."""
         from claude_island.ui.expanded_window import _ROW_HEIGHT
         panel._render_sessions([_session(1, "/a")])
-        assert _ROW_HEIGHT == 52
-        assert panel._rows[1].height() == 52
+        assert _ROW_HEIGHT == 68
+        assert panel._rows[1].height() == 68
 
     def test_chip_visually_empty_when_no_per_model_data(self, qtbot):
         """A freshly-discovered session has no UsageRecords yet ⇒

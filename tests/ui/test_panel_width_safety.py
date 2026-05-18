@@ -477,8 +477,23 @@ def test_session_row_status_label_absorbs_remaining_width(qtbot):
     # never chip. Verifying the *structure* (status is the stretch
     # slot) catches a regression even in offscreen tests where the
     # offscreen font metrics don't reproduce the deficit case.
-    bottom = btn.layout().itemAt(1)
-    bottom_layout = bottom.layout() if hasattr(bottom, "layout") else None
+    # v4c: row layout grew a middle row (cwd_label) so the bottom row
+    # is now at index 2, not 1.  Walk the outer layout and find the
+    # one carrying the status_label rather than hard-coding the index.
+    btn_layout = btn.layout()
+    bottom_layout = None
+    for i in range(btn_layout.count()):
+        item = btn_layout.itemAt(i)
+        inner = item.layout() if hasattr(item, "layout") else None
+        if inner is None:
+            continue
+        for j in range(inner.count()):
+            w = inner.itemAt(j).widget()
+            if w is status:
+                bottom_layout = inner
+                break
+        if bottom_layout is not None:
+            break
     assert bottom_layout is not None, "bottom row layout missing"
 
     last_item = bottom_layout.itemAt(bottom_layout.count() - 1)
