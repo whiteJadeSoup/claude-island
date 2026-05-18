@@ -3402,23 +3402,35 @@ class ExpandedWindow(QWidget):
         # The chip on the right surfaces dormant sessions (offline
         # sessions on disk with no live process) — click opens the
         # RecentsDrawer. Hidden when there are zero dormant sessions.
-        self._sessions_title = mk_label("CLAUDE SESSIONS", elide=False)
-        self._sessions_title.setStyleSheet(_STYLE_TITLE)
-        self._recents_chip = QPushButton("Recents · 0")
+        # v4c: sessions title reads "N sessions · M awaiting consent"
+        # instead of the all-caps "CLAUDE SESSIONS · N" — matches the
+        # prototype-v4c-github.html card-head layout the user picked.
+        # The label uses normal-case sans (not the v3 small-caps title
+        # style) so it reads as content, not chrome.
+        self._sessions_title = mk_label("0 sessions", elide=False)
+        self._sessions_title.setStyleSheet(
+            f"color: {_LabColor.paper}; font-size: 12.5px; font-weight: 600;"
+        )
+        # v4c Recents chip — rounded pill with a phosphor (green) dot
+        # signalling "dormant sessions exist".  Uses lab_palette so the
+        # tones stay in lock-step with everything else.
+        self._recents_chip = QPushButton("● Recents · 0")
         self._recents_chip.setCursor(Qt.CursorShape.PointingHandCursor)
         self._recents_chip.setStyleSheet(
-            "QPushButton {"
-            "  background: rgba(255,255,255,0.06);"
-            "  color: #cfcfcf;"
-            "  border: 1px solid rgba(255,255,255,0.1);"
-            "  border-radius: 4px;"
-            "  padding: 2px 6px;"
-            "  font-size: 10px;"
-            "}"
-            "QPushButton:hover {"
-            "  background: rgba(255,255,255,0.12);"
-            "  color: #ffffff;"
-            "}"
+            f"QPushButton {{"
+            f"  background: {_LabColor.ink};"
+            f"  color: {_LabColor.paper};"
+            f"  border: 1px solid {_LabColor.rule};"
+            f"  border-radius: 100px;"
+            f"  padding: 3px 9px;"
+            f"  font-size: 11px;"
+            f"  font-weight: 500;"
+            f"  text-align: left;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  background: {_LabColor.surface_hi};"
+            f"  border-color: {_LabColor.rule_bright};"
+            f"}}"
         )
         self._recents_chip.setFlat(True)
         self._recents_chip.setVisible(False)
@@ -3675,16 +3687,52 @@ class ExpandedWindow(QWidget):
         panel."""
         self._recents_drawer_window = drawer
 
-    def update_recents_count(self, n: int) -> None:
-        """Refresh the chip's "Recents · N" label. Hides when n == 0.
+    def _sessions_title_text(self, total_views: int) -> str:
+        """Compose the v4c session-list header text.
 
-        Plain text (no emoji) so the chip reads as a sibling label to
-        the all-caps "CLAUDE SESSIONS · 7" title on the left — not as a
-        cute icon button."""
+        Formats:
+          0 sessions
+          6 sessions
+          6 sessions · 1 awaiting consent
+          6 sessions · 3 awaiting consent
+
+        ``awaiting consent`` is the v4c label for any PendingDecisionView
+        currently in the registry — the panel already renders these via
+        ``StackedDecisionsPanel`` above; the title carries the count so
+        the user reads "yes there's work to do" before scrolling.
+        """
+        pending = 0
+        snap = getattr(self, "_latest_snap", None)
+        if snap is not None:
+            pending = len(getattr(snap, "pending_decisions", ()) or ())
+        base = f"{total_views} sessions" if total_views != 1 else "1 session"
+        if pending == 0:
+            return base
+        suffix = "1 awaiting consent" if pending == 1 else f"{pending} awaiting consent"
+        return f"{base} · {suffix}"
+
+    def update_recents_count(self, n: int) -> None:
+        """Refresh the chip's "● Recents · N" label.
+
+        v4c: chip stays visible at n == 0 too — its presence advertises
+        the ⌘J entry-point even when there are no dormant sessions yet,
+        and tucking it on a "● Recents · 0" label is less surprising
+        than a chip that pops in and out.  The dot tints by content:
+        phosphor when there's something to resume, paper_faint when not.
+        """
         if n <= 0:
-            self._recents_chip.setVisible(False)
-            return
-        self._recents_chip.setText(f"Recents · {n}")
+            # Faint dot when nothing dormant — chip stays so ⌘J is
+            # discoverable as a permanent affordance.
+            text = "● Recents · 0"
+            self._recents_chip.setStyleSheet(
+                self._recents_chip.styleSheet().replace(
+                    f"color: {_LabColor.paper};",
+                    f"color: {_LabColor.paper_dim};",
+                )
+            )
+        else:
+            text = f"● Recents · {n}"
+        self._recents_chip.setText(text)
         self._recents_chip.setVisible(True)
 
     def _on_recents_chip_clicked(self) -> None:
@@ -3771,15 +3819,12 @@ class ExpandedWindow(QWidget):
                         self._update_row(btn, view)
             # Title text + count rebuild remains safe (a setText() that
             # ends up identical is a no-op for Qt).
-            self._sessions_title.setText(f"CLAUDE SESSIONS · {total_views}")
+            self._sessions_title.setText(self._sessions_title_text(total_views))
             return
 
         self._last_struct_sig = new_struct_sig
         self._clear_session_layout()
-        if total_views:
-            self._sessions_title.setText(f"CLAUDE SESSIONS · {total_views}")
-        else:
-            self._sessions_title.setText("CLAUDE SESSIONS")
+        self._sessions_title.setText(self._sessions_title_text(total_views))
         # History chip count is updated separately via update_recents_count;
         # render() in __main__'s subscription wires the count from
         # snap.dormant_sessions, not from session_groups.
