@@ -2657,6 +2657,58 @@ class TestSummaryCard:
         # _fmt_money rounds 86.42 → "$86" (≥10 cuts cents)
         assert p._summary_amount.text() == "$86"
 
+    def test_summary_stats_strip_renders_tokens_cache_hit(self, qtbot):
+        """v4c: TODAY card carries a single inline stats row with
+        tokens / cache / hit-rate from UsageTotals('today').  Verify
+        each appears in the rendered rich label."""
+        from claude_island.core.models import UsageTotals
+        capsule = QWidget()
+        capsule.show()
+        controller = IslandController()
+        p = ExpandedWindow(
+            capsule=capsule,
+            controller=controller,
+            get_usage_totals=lambda period: UsageTotals(
+                period=period,
+                input_tokens=300,
+                output_tokens=210_000,
+                cache_creation_tokens=630_000,
+                cache_read_tokens=128_000_000,
+                input_cost=5.0, output_cost=1.0,  # so cost != 0 → stats render
+            ),
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        html = p._summary_stats.text()
+        # tokens: 300 + 210_000 ≈ 210K
+        assert "210K" in html
+        # cache: 630_000 + 128_000_000 ≈ 128.6M
+        assert "128.6M" in html or "128.7M" in html
+        # hit rate: 128_000_000 / (128_000_000 + 630_000) ≈ 99.5%
+        assert "99.5%" in html
+        # labels appear as quiet text
+        assert "tokens" in html and "cache" in html and "hit" in html
+
+    def test_summary_stats_blank_when_totals_fail(self, qtbot):
+        """If get_usage_totals raises, the stats label should be empty
+        rather than carry stale data — same defensive pattern as the
+        cost amount ("—") in the same situation."""
+        capsule = QWidget()
+        capsule.show()
+        controller = IslandController()
+
+        def _raise(_period):
+            raise RuntimeError("fake fetch failure")
+
+        p = ExpandedWindow(
+            capsule=capsule,
+            controller=controller,
+            get_usage_totals=_raise,
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        assert p._summary_stats.text() == ""
+
     def test_summary_hides_quota_bar_when_no_snapshot(self, qtbot):
         from claude_island.core.models import UsageTotals
         capsule = QWidget()

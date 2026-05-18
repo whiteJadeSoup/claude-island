@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from claude_island.ui.fonts import MONO_FONT_STACK, UI_FONT_STACK
-from claude_island.ui.lab_palette import Color as _LabColor
+from claude_island.ui.lab_palette import Color as _LabColor, FontStack
 from claude_island.ui.tooltip_style import TOOLTIP_QSS
 
 from PySide6.QtCore import (
@@ -3984,6 +3984,27 @@ class ExpandedWindow(QWidget):
         self._summary_caption.setStyleSheet(_STYLE_USAGE_PCT)
         layout.addWidget(self._summary_caption)
 
+        # ── v4c stats strip ─────────────────────────────────────────
+        # Single inline row at the bottom of the TODAY card carrying
+        # three quick KPIs: tokens / cache / hit-rate.  Mirrors the
+        # prototype-v4c-github.html stats strip — keeps secondary
+        # numbers visible without taking up a whole new card.
+        #
+        # Data source: usage_registry.get_totals("today") returns the
+        # same UsageTotals object _refresh_summary_card already reads
+        # for today's cost — no new fetch / no new fields.  Request
+        # count isn't shown because it doesn't exist on UsageTotals
+        # yet; adding it would be a new feature outside this UI slice.
+        self._summary_stats = _ElasticRichLabel("")
+        self._summary_stats.setStyleSheet(
+            f"color: {_LabColor.paper_faint}; font-size: 11px; "
+            f"font-family: {FontStack.mono_stack};"
+        )
+        self._summary_stats.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+        layout.addWidget(self._summary_stats)
+
         return card
 
     def _refresh_summary_card(self) -> None:
@@ -3991,18 +4012,29 @@ class ExpandedWindow(QWidget):
         snapshot. Same defensive pattern as the SPEND/QUOTA refreshers
         — getter exceptions are logged and the card degrades to a "—"
         amount or hides the bar rather than crashing the panel."""
-        # Today's spend
+        # Today's spend + stats strip — both pull from the SAME
+        # UsageTotals object, fetched once and stashed on the closure.
+        # The strip is rendered HERE (before the quota-snapshot check
+        # below) so stats stay visible even when quota fetch fails —
+        # the two data sources are independent (usage_registry vs.
+        # provider engine), so one failing shouldn't blank the other.
+        today_totals = None
         if self._get_usage_totals is not None:
             try:
-                t = self._get_usage_totals("today")
-                self._summary_amount.setText(_fmt_money(t.cost_usd))
+                today_totals = self._get_usage_totals("today")
+                self._summary_amount.setText(_fmt_money(today_totals.cost_usd))
             except Exception as exc:
                 import sys as _sys
                 print(f"[claude-island] summary today fetch failed: {exc}",
                       file=_sys.stderr)
                 self._summary_amount.setText("—")
+                today_totals = None
         else:
             self._summary_amount.setText("—")
+
+        # Stats strip (tokens / cache / hit) — derived from the same
+        # totals.  Empty when totals fetch failed or wasn't wired.
+        self._render_summary_stats(today_totals)
 
         # Quota snapshot for the 5h bar + reset countdown.
         snap = None
@@ -4057,6 +4089,51 @@ class ExpandedWindow(QWidget):
         # value, caption, and chunk colour all read from bucket_pct.
         self._summary_caption.setText(f"{bucket_pct}% of 5h limit{stale_marker}")
         self._summary_caption.show()
+
+    def _render_summary_stats(self, today: "UsageTotals | None") -> None:
+        """Paint the v4c stats strip ("210K tokens · 128.6M cache ·
+        99.5% hit") from a UsageTotals payload.  Empty string when
+        the payload is None — both "totals fetch failed" and "no
+        usage_registry wired" cases land here.
+
+        Pulled out as a small helper so the stats label can be
+        recomputed independently of the quota-snapshot fetch (those
+        two data sources are independent: usage_registry feeds stats,
+        provider engine feeds the bar)."""
+        if today is None:
+            self._summary_stats.setText("")
+            return
+        try:
+            total_tok = today.input_tokens + today.output_tokens
+            cache_tok = today.cache_creation_tokens + today.cache_read_tokens
+            # Cache hit rate: reads ÷ (reads + creations).  100% when
+            # there are no creations (everything was a hit); 0% when
+            # nothing was cached.  denom == 0 (cold-start day with
+            # zero cache traffic both directions) prints "—" rather
+            # than dividing.
+            denom = today.cache_read_tokens + today.cache_creation_tokens
+            hit_str = f"{today.cache_read_tokens / denom * 100:.1f}%" if denom > 0 else "—"
+
+            # HTML so a single QLabel.setText keeps stats coloured
+            # without us recreating QLabel children every refresh.
+            col_num   = _LabColor.paper
+            col_label = _LabColor.paper_faint
+            col_sep   = _LabColor.rule_bright
+            parts = [
+                f"<span style='color:{col_num}'><b>{_fmt_tokens(total_tok)}</b></span> "
+                f"<span style='color:{col_label}'>tokens</span>",
+                f"<span style='color:{col_num}'><b>{_fmt_tokens(cache_tok)}</b></span> "
+                f"<span style='color:{col_label}'>cache</span>",
+                f"<span style='color:{col_num}'><b>{hit_str}</b></span> "
+                f"<span style='color:{col_label}'>hit</span>",
+            ]
+            sep = f" <span style='color:{col_sep}'>·</span> "
+            self._summary_stats.setText(sep.join(parts))
+        except Exception as exc:
+            import sys as _sys
+            print(f"[claude-island] summary stats render failed: {exc}",
+                  file=_sys.stderr)
+            self._summary_stats.setText("")
 
     def _build_spend_card(self) -> QFrame:
         """Single SPEND card driven by a window dropdown (5h / Today /
