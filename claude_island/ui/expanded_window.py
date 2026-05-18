@@ -3526,7 +3526,16 @@ class ExpandedWindow(QWidget):
         # already does the job a 1 px line used to do, with less ink.
 
         # ── SPEND card: period selector + total + breakdown + I/O ──
+        # v4c: SPEND card is hidden by default — its headline data
+        # (today's cost / per-class tokens) is now in the TODAY summary
+        # card's hero number + the stats strip below it.  Keeping the
+        # widget tree in place (via setVisible(False)) preserves all
+        # downstream refresh hooks (_refresh_spend_card / spend_period
+        # selector / per-model rows) so callers / tests that reach
+        # through `self._spend_card.findChild(...)` keep compiling.
+        # A future slice can remove the build entirely after audit.
         self._spend_card = self._build_spend_card()
+        self._spend_card.setVisible(False)
         root.addWidget(self._spend_card)
 
         # ── QUOTA card: provider tabs + 5h + weekly bars ────────────
