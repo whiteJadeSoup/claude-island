@@ -294,8 +294,14 @@ _STYLE_PANEL = f"""
 # would render the "Add a quota provider" hint as white-on-white).
 # Wrapping the bare props under the ExpandedWindow selector forces a
 # strict parse so the QToolTip override actually applies.
-_STYLE_TITLE = "color: #888; font-size: 10px; letter-spacing: 1px;"
-_STYLE_SEP = "background: #2a2a2a;"
+# v4c: card-section titles ("TODAY" / "SPEND" / "QUOTA") use paper_dim
+# at 10 px with the same wide letter-spacing as before.  Routed through
+# lab_palette so a future palette tweak propagates here.
+_STYLE_TITLE = (
+    f"color: {_LabColor.paper_dim}; font-size: 10px; "
+    f"letter-spacing: 1px; font-weight: 600;"
+)
+_STYLE_SEP = f"background: {_LabColor.rule};"
 
 # --------------------------------------------------------------------------
 # Session row + card visual language
@@ -1073,15 +1079,20 @@ _STYLE_GROUP_ROW_SEP = (
 _GROUP_GAP = 8
 
 _STYLE_DOT = "color: {color}; font-size: 11px;"
-_STYLE_NAME = "color: #e8e8e8; font-size: 13px;"
-_STYLE_AGE = "color: #6b7280; font-size: 11px;"
-# Cost label styles — default dim grey for normal sessions, yellow +
-# bold for sessions whose cumulative spend crossed the alert
-# threshold. Putting the warning on the number itself (rather than
-# adding a separate icon / accent bar) is the YNAB / Mint pattern:
-# the value being expensive IS the warning, no second visual needed.
-_STYLE_COST_DEFAULT = "color: #c9c9c9; font-size: 11px;"
-_STYLE_COST_HIGH = "color: #facc15; font-size: 11px; font-weight: 600;"
+# v4c: row name is the primary identity, sans-serif, paper-bright.
+# Cwd / meta still use mono in their own labels (kept separate).
+_STYLE_NAME = (
+    f"color: {_LabColor.paper}; font-size: 13px; font-weight: 600;"
+)
+_STYLE_AGE = f"color: {_LabColor.paper_faint}; font-size: 11px;"
+# Cost label — three tiers mirror the v4c row colour ladder:
+# default (paper), high (orange), legacy (yellow for severe).
+# The "high" tier is what flips when cumulative spend crosses the alert
+# threshold; the value being expensive IS the warning, no separate icon.
+_STYLE_COST_DEFAULT = f"color: {_LabColor.paper}; font-size: 11px; font-weight: 500;"
+_STYLE_COST_HIGH = (
+    f"color: {_LabColor.red_warm}; font-size: 11px; font-weight: 600;"
+)
 # Small coloured pill label used in the row's status line. Background
 # is the model's hue at 18 % alpha so the chip reads as "tinted" against
 # the row bg without overpowering the name typography. Border shares
