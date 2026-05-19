@@ -147,6 +147,15 @@ end tell
 # pane lives in whatever window happens to be frontmost in iTerm2's
 # own z-order, which can leave the user staring at a different
 # window with the right pane hidden behind it.
+#
+# ``set miniaturized of w to false`` is required before ``select w``:
+# AppleScript's ``select`` brings a window forward in iTerm's z-order
+# but does NOT deminiaturize a window that's been minimized to the
+# Dock. Without this, clicking a session whose host window is in the
+# Dock activates iTerm but leaves the window stuck in the Dock —
+# user perceives "click did nothing". Idempotent: no-op when the
+# window is already visible. Mirrored in ``_FOCUS_SCRIPT_BY_ID_TEMPLATE``
+# and the fast-path handlers (``_iterm_fast_path._FOCUS_BY_*``).
 _FOCUS_SCRIPT_TEMPLATE = """\
 tell application "System Events"
     set frontmost of (first process whose unix id is {host_pid}) to true
@@ -156,6 +165,7 @@ tell application "iTerm"
         repeat with t in tabs of w
             repeat with s in sessions of t
                 if tty of s is "{tty}" then
+                    set miniaturized of w to false
                     select s
                     select t
                     select w
@@ -190,6 +200,7 @@ tell application "iTerm"
         repeat with t in tabs of w
             repeat with s in sessions of t
                 if (id of s as text) is "{session_id}" then
+                    set miniaturized of w to false
                     select s
                     select t
                     select w

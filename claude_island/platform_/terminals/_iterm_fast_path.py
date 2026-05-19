@@ -126,6 +126,7 @@ on focusByID(sessionID, hostPID)
             repeat with t in tabs of w
                 repeat with s in sessions of t
                     if (id of s as text) is sessionID then
+                        set miniaturized of w to false
                         select s
                         select t
                         select w
@@ -149,6 +150,7 @@ on focusByTTY(targetTTY, hostPID)
             repeat with t in tabs of w
                 repeat with s in sessions of t
                     if (tty of s) is targetTTY then
+                        set miniaturized of w to false
                         select s
                         select t
                         select w

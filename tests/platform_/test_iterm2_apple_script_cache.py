@@ -244,3 +244,28 @@ class TestDefensive:
         assert cache.note_failure("nonsense") is False
         assert cache._id_failures == 0
         assert cache._tty_failures == 0
+
+
+class TestFocusSourceDeminiaturizesWindow:
+    """Regression: clicking a session whose iTerm host window is
+    minimized to the Dock used to silently fail — ``select w`` raises
+    a window in iTerm's z-order but does not deminiaturize a window
+    in the Dock. The handler sources must set ``miniaturized of w to
+    false`` before ``select w``. Mirror of the same regression
+    coverage in :mod:`test_iterm2_adapter` for the subprocess
+    fallback path."""
+
+    def _assert_deminiaturize_before_select_w(self, source: str) -> None:
+        assert "set miniaturized of w to false" in source
+        i_demin = source.index("set miniaturized of w to false")
+        i_w = source.index("select w")
+        assert i_demin < i_w, (
+            "deminiaturize must precede select w; select alone won't "
+            "pull the window out of the Dock"
+        )
+
+    def test_by_id_source_deminiaturizes_before_select(self):
+        self._assert_deminiaturize_before_select_w(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_deminiaturizes_before_select(self):
+        self._assert_deminiaturize_before_select_w(fp._FOCUS_BY_TTY_SOURCE)

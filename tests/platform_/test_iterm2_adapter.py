@@ -20,6 +20,7 @@ from claude_island.core.snapshot import SessionView, _degraded_view
 from claude_island.platform_.terminals.iterm2 import (
     ITerm2Adapter,
     _ENUM_SCRIPT,
+    _FOCUS_SCRIPT_BY_ID_TEMPLATE,
     _FOCUS_SCRIPT_TEMPLATE,
     _escape_applescript_string,
     _parse_enum_output,
@@ -550,6 +551,34 @@ class TestFocus:
             i_t = script.index("select t")
             i_w = script.index("select w")
             assert i_s < i_t < i_w
+
+
+class TestFocusScriptDeminiaturizesWindow:
+    """Regression: clicking a session whose host iTerm window is
+    minimized to the Dock used to silently fail — ``select w`` raises
+    a window in iTerm's z-order but does not deminiaturize a window
+    that's in the Dock. The script must set ``miniaturized of w to
+    false`` before ``select w`` so the window comes out of the Dock.
+    Idempotent: no-op when the window is already visible."""
+
+    def _assert_deminiaturize_before_select_w(self, script: str) -> None:
+        assert "set miniaturized of w to false" in script
+        i_demin = script.index("set miniaturized of w to false")
+        i_w = script.index("select w")
+        assert i_demin < i_w, (
+            "deminiaturize must run before select w; select alone "
+            "won't pull the window out of the Dock"
+        )
+
+    def test_tty_template_deminiaturizes_before_select(self):
+        script = _FOCUS_SCRIPT_TEMPLATE.format(host_pid=42, tty="/dev/ttys004")
+        self._assert_deminiaturize_before_select_w(script)
+
+    def test_id_template_deminiaturizes_before_select(self):
+        script = _FOCUS_SCRIPT_BY_ID_TEMPLATE.format(
+            host_pid=42, session_id="ABC-123",
+        )
+        self._assert_deminiaturize_before_select_w(script)
 
 
 # ── Dual-iTerm host-pid resolution ──────────────────────────────────────
