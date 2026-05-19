@@ -817,8 +817,10 @@ class _RowStatusGlyph(QWidget):
 # room top/bottom — anything shorter clipped descenders on g/y/p.
 # v4c: rows are 2-line now (name+status+cwd inline / chip+meta below).
 # Prototype paints name + status + cwd in one band; cwd elides when
-# the row narrows.  56 px fits the two text lines + comfortable padding.
-_ROW_HEIGHT = 56
+# the row narrows.  48 px matches prototype-v4c-github.html's row
+# density — earlier 56 / 68 attempts were too tall and broke the
+# table-list feel.
+_ROW_HEIGHT = 48
 _ROW_PAD_H = 12
 
 # Activity heuristic for the row status text. Same threshold as the
@@ -1098,7 +1100,7 @@ _STYLE_DOT = "color: {color}; font-size: 11px;"
 # v4c: row name is the primary identity, sans-serif, paper-bright.
 # Cwd / meta still use mono in their own labels (kept separate).
 _STYLE_NAME = (
-    f"color: {_LabColor.paper}; font-size: 13px; font-weight: 600;"
+    f"color: {_LabColor.paper}; font-size: 13.5px; font-weight: 600;"
 )
 _STYLE_AGE = f"color: {_LabColor.paper_faint}; font-size: 11px;"
 # Cost label — three tiers mirror the v4c row colour ladder:
@@ -5597,7 +5599,8 @@ class ExpandedWindow(QWidget):
         btn.setProperty("_siblings", [])
 
         outer = QVBoxLayout(btn)
-        outer.setContentsMargins(_ROW_PAD_H, 6, _ROW_PAD_H, 6)
+        # v4c: tight 4 px vertical padding to match prototype density.
+        outer.setContentsMargins(_ROW_PAD_H, 4, _ROW_PAD_H, 4)
         outer.setSpacing(2)
 
         # ---- top row: dot + name + cost ---------------------------------
@@ -5658,18 +5661,17 @@ class ExpandedWindow(QWidget):
         status_inline = QLabel("")
         status_inline.setObjectName("status_inline")
         status_inline.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # v4c: status text size 12.5 (matches prototype-v4c row CSS).
         status_inline.setStyleSheet(
-            f"color: {_LabColor.paper_dim}; font-size: 11px;"
+            f"color: {_LabColor.paper_dim}; font-size: 12.5px;"
         )
         top.addWidget(status_inline)
 
-        # v4c: cwd path INLINE on the top row (was middle row in 3-line
-        # layout).  Eliding label so a long path tail-elides cleanly
-        # without pushing other widgets out.
+        # v4c: cwd path INLINE on the top row, mono 11.5 (prototype CSS).
         cwd_label_top = _ElidingLabel()
         cwd_label_top.setObjectName("cwd_label")
         cwd_label_top.setStyleSheet(
-            f"color: {_LabColor.paper_faint}; font-size: 11px; "
+            f"color: {_LabColor.paper_faint}; font-size: 11.5px; "
             f"font-family: {FontStack.mono_stack};"
         )
         cwd_label_top.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)

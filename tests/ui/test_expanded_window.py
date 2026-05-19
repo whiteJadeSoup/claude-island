@@ -2322,13 +2322,13 @@ class TestRowStatusLine:
             )
 
     def test_row_height_two_lines(self, panel):
-        """v4c (post-N): row collapses back to 2 lines (name+status+cwd
-        inline / chip+meta below).  Height pinned at 56 — pretotype
-        renders this density."""
+        """v4c: 2 lines (name+status+cwd inline / chip+meta below),
+        48 px to match prototype-v4c-github.html's row density —
+        earlier 56 / 68 attempts were too tall."""
         from claude_island.ui.expanded_window import _ROW_HEIGHT
         panel._render_sessions([_session(1, "/a")])
-        assert _ROW_HEIGHT == 56
-        assert panel._rows[1].height() == 56
+        assert _ROW_HEIGHT == 48
+        assert panel._rows[1].height() == 48
 
     def test_chip_visually_empty_when_no_per_model_data(self, qtbot):
         """A freshly-discovered session has no UsageRecords yet ⇒
