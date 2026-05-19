@@ -3403,6 +3403,31 @@ class ExpandedWindow(QWidget):
         self._quota_card = self._build_quota_card()
         root.addWidget(self._quota_card)
 
+        # Bottom toast surface — hidden at rest. Shown when a row
+        # click's dispatch returns False so the user gets feedback
+        # instead of a silent no-op. The panel only auto-hides when
+        # focus actually moves to another app (WindowDeactivate); a
+        # full focus failure leaves claude-island as the active app
+        # and the toast stays visible for its full 5s window.
+        self._focus_toast = mk_label("", elide=False)
+        self._focus_toast.setObjectName("focusToast")
+        self._focus_toast.setWordWrap(True)
+        self._focus_toast.setStyleSheet(
+            "QLabel#focusToast {"
+            "  color: #fde68a;"
+            "  background-color: rgba(245, 158, 11, 0.12);"
+            "  border: 1px solid rgba(245, 158, 11, 0.30);"
+            "  border-radius: 6px;"
+            "  padding: 6px 10px;"
+            "  font-size: 11px;"
+            "}"
+        )
+        self._focus_toast.hide()
+        self._focus_toast_timer = QTimer(self)
+        self._focus_toast_timer.setSingleShot(True)
+        self._focus_toast_timer.timeout.connect(self._focus_toast.hide)
+        root.addWidget(self._focus_toast)
+
         self.setStyleSheet(_STYLE_PANEL)
 
     # ------------------------------------------------------------------
@@ -5465,7 +5490,25 @@ class ExpandedWindow(QWidget):
         # clicked row's sentinel isn't in any UIA TabItem.Name, fall
         # back to a same-cwd sibling's sentinel to switch the WT tab).
         # Other adapters accept-and-ignore.
-        self._dispatch(view, Capability.FOCUS, siblings=siblings)
+        ok = self._dispatch(view, Capability.FOCUS, siblings=siblings)
+        if not ok:
+            # Dispatch failed entirely — no capability, all adapters
+            # returned False, or unexpected exception logged downstream.
+            # The panel will NOT auto-hide (no other app got focus) so
+            # the toast is reliably visible. Without this the user gets
+            # zero feedback on a silent failure — see review I-2.
+            self._show_focus_toast(
+                "Couldn't focus terminal — window may be closed, "
+                "on another Space, or iTerm isn't responding. See logs."
+            )
+
+    def _show_focus_toast(self, msg: str) -> None:
+        """Surface a brief 5 s status message at the bottom of the
+        panel. Used by :meth:`_on_row_clicked` to acknowledge failed
+        focus attempts. Idempotent: calling again resets the timer."""
+        self._focus_toast.setText(msg)
+        self._focus_toast.show()
+        self._focus_toast_timer.start(5000)
 
     def resizeEvent(self, event: object) -> None:  # type: ignore[override]
         """Recompute proportional bar fill widths after a layout resize.
