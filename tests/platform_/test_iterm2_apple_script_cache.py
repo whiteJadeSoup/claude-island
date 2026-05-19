@@ -256,9 +256,16 @@ class TestFocusSourceDeminiaturizesWindow:
     fallback path."""
 
     def _assert_deminiaturize_before_select_w(self, source: str) -> None:
-        assert "set miniaturized of w to false" in source
-        i_demin = source.index("set miniaturized of w to false")
-        i_w = source.index("select w")
+        # Strip AppleScript ``-- ...`` comments first so a comment
+        # mentioning "select w" doesn't fool the substring match.
+        # The actual ``select w`` statement must come after the
+        # deminiaturize mutator on its own line, otherwise the line
+        # selection won't pull a Dock window forward.
+        import re
+        bare = re.sub(r"--[^\n]*", "", source)
+        assert "set miniaturized of w to false" in bare
+        i_demin = bare.index("set miniaturized of w to false")
+        i_w = bare.index("select w")
         assert i_demin < i_w, (
             "deminiaturize must precede select w; select alone won't "
             "pull the window out of the Dock"
@@ -311,6 +318,41 @@ class TestFocusSourceTimeoutClause:
         assert fp._PANE_SELECT_APPLESCRIPT_TIMEOUT_S == 3
         for src in (fp._FOCUS_BY_ID_SOURCE, fp._FOCUS_BY_TTY_SOURCE):
             assert "with timeout of 3 seconds" in src
+
+
+class TestFocusSourceGuardsRedundantMutators:
+    """User-reported bug: clicking the apa-origin session caused
+    iTerm to "flash to front and back". The window was already at
+    iTerm index 1 and not minimized; the unconditional
+    ``set miniaturized of w to false`` + ``set index of w to 1``
+    calls fired iTerm-side animations even though nothing needed to
+    change. Other sessions (whose windows were in different states)
+    didn't flash because those mutators were actually doing real
+    work — the visible transition WAS the legitimate focus change.
+
+    Guarding both mutators behind an ``is ...`` check eliminates the
+    redundant work without losing functionality when it's needed
+    (minimized windows still get deminiaturized; windows behind
+    iTerm's idx 1 still get pulled forward)."""
+
+    def _assert_guarded_mutators(self, source: str) -> None:
+        # set miniaturized must be wrapped by ``if miniaturized of w is true then``
+        assert "if miniaturized of w is true then" in source
+        i_guard_min = source.index("if miniaturized of w is true then")
+        i_set_min = source.index("set miniaturized of w to false")
+        assert i_guard_min < i_set_min, "guard must precede the mutator"
+
+        # set index must be wrapped by ``if index of w is not 1 then``
+        assert "if index of w is not 1 then" in source
+        i_guard_idx = source.index("if index of w is not 1 then")
+        i_set_idx = source.index("set index of w to 1")
+        assert i_guard_idx < i_set_idx
+
+    def test_by_id_source_guards_mutators(self):
+        self._assert_guarded_mutators(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_guards_mutators(self):
+        self._assert_guarded_mutators(fp._FOCUS_BY_TTY_SOURCE)
 
 
 class TestFocusSourceRaceTolerance:

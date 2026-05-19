@@ -589,6 +589,28 @@ class TestFocusScriptDeminiaturizesWindow:
         self._assert_deminiaturize_before_select_w(script)
 
 
+class TestFocusScriptGuardsRedundantMutators:
+    """Subprocess templates carry the same guarded-mutator regression
+    as the fast-path sources — see TestFocusSourceGuardsRedundantMutators
+    in test_iterm2_apple_script_cache for the user-reported bug
+    (apa-origin "flash to front and back" caused by unconditional
+    ``set miniaturized``/``set index`` mutators)."""
+
+    def _assert_guarded_mutators(self, script: str) -> None:
+        assert "if miniaturized of w is true then" in script
+        assert "if index of w is not 1 then" in script
+
+    def test_tty_template_guards_mutators(self):
+        s = _FOCUS_SCRIPT_TEMPLATE.format(host_pid=42, tty="/dev/ttys004")
+        self._assert_guarded_mutators(s)
+
+    def test_id_template_guards_mutators(self):
+        s = _FOCUS_SCRIPT_BY_ID_TEMPLATE.format(
+            host_pid=42, session_id="ABC-123",
+        )
+        self._assert_guarded_mutators(s)
+
+
 class TestFocusScriptRaceTolerance:
     """Regression: subprocess focus AppleScripts now wrap the iTerm
     tell in retry-twice + try so a session/tab/window vanishing
@@ -620,9 +642,13 @@ class TestFocusScriptSetsWindowIndex:
     Space. Mirror of the same regression in the fast-path templates."""
 
     def _assert_index_after_select_w(self, script: str) -> None:
-        assert "set index of w to 1" in script
-        i_select = script.index("select w")
-        i_index = script.index("set index of w to 1")
+        # Strip ``-- ...`` AppleScript comments so comment text
+        # mentioning these constructs doesn't break substring matching.
+        import re
+        bare = re.sub(r"--[^\n]*", "", script)
+        assert "set index of w to 1" in bare
+        i_select = bare.index("select w")
+        i_index = bare.index("set index of w to 1")
         assert i_select < i_index
 
     def test_tty_template_sets_window_index(self):

@@ -174,11 +174,25 @@ repeat 2 times
                 repeat with t in tabs of w
                     repeat with s in sessions of t
                         if tty of s is "{tty}" then
-                            set miniaturized of w to false
+                            -- Guarded mutators: skip the no-op
+                            -- ``set miniaturized of w to false`` and
+                            -- ``set index of w to 1`` calls when the
+                            -- window is already in that state. Each
+                            -- unconditional call triggered visible
+                            -- iTerm side effects (a "flash" in
+                            -- multi-pane / already-front windows)
+                            -- without changing anything user-visible.
+                            -- See _iterm_fast_path._FOCUS_BY_*_SOURCE
+                            -- for the same pattern in the PyObjC path.
+                            if miniaturized of w is true then
+                                set miniaturized of w to false
+                            end if
                             select w
                             select t
                             select s
-                            set index of w to 1
+                            if index of w is not 1 then
+                                set index of w to 1
+                            end if
                             return "ok"
                         end if
                     end repeat
@@ -218,11 +232,25 @@ repeat 2 times
                 repeat with t in tabs of w
                     repeat with s in sessions of t
                         if (id of s as text) is "{session_id}" then
-                            set miniaturized of w to false
+                            -- Guarded mutators: skip the no-op
+                            -- ``set miniaturized of w to false`` and
+                            -- ``set index of w to 1`` calls when the
+                            -- window is already in that state. Each
+                            -- unconditional call triggered visible
+                            -- iTerm side effects (a "flash" in
+                            -- multi-pane / already-front windows)
+                            -- without changing anything user-visible.
+                            -- See _iterm_fast_path._FOCUS_BY_*_SOURCE
+                            -- for the same pattern in the PyObjC path.
+                            if miniaturized of w is true then
+                                set miniaturized of w to false
+                            end if
                             select w
                             select t
                             select s
-                            set index of w to 1
+                            if index of w is not 1 then
+                                set index of w to 1
+                            end if
                             return "ok"
                         end if
                     end repeat

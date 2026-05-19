@@ -154,7 +154,25 @@ on focusByID(sessionID, hostPID)
                         repeat with t in tabs of w
                             repeat with s in sessions of t
                                 if (id of s as text) is sessionID then
-                                    set miniaturized of w to false
+                                    -- All three mutators are guarded
+                                    -- by ``is not`` checks so they
+                                    -- only run when the target state
+                                    -- isn't already current. Without
+                                    -- these guards, the AppleScript
+                                    -- triggered visible iTerm-side
+                                    -- side effects (window-shuffle
+                                    -- "flash") for the common case
+                                    -- where the window was already
+                                    -- visible and at index 1 — only
+                                    -- the in-tab pane needed to
+                                    -- change. select w + select t +
+                                    -- select s themselves are still
+                                    -- needed; iTerm tracks "last
+                                    -- selected" per scope and we want
+                                    -- to update all three regardless.
+                                    if miniaturized of w is true then
+                                        set miniaturized of w to false
+                                    end if
                                     -- I-8: broadest-scope first
                                     -- (window → tab → session). iTerm's
                                     -- ``select`` mutates state on each
@@ -168,17 +186,16 @@ on focusByID(sessionID, hostPID)
                                     select w
                                     select t
                                     select s
-                                    -- I-5: setting index to 1 forces
-                                    -- iTerm's internal z-order AND in
-                                    -- many setups pulls the window onto
-                                    -- the current Space when it was on
-                                    -- a different Space. Not a full fix
-                                    -- — true cross-Space transport needs
-                                    -- private CGSPrivate APIs — but
-                                    -- resolves the common case where the
-                                    -- user's "switch to a Space with
-                                    -- open windows" pref is OFF.
-                                    set index of w to 1
+                                    -- I-5 cross-Space hint: only set
+                                    -- index when it would change
+                                    -- something. select w already
+                                    -- brings the window to iTerm idx
+                                    -- 1 in the common case; running
+                                    -- this unconditionally caused a
+                                    -- visible reorder side effect.
+                                    if index of w is not 1 then
+                                        set index of w to 1
+                                    end if
                                     return "ok"
                                 end if
                             end repeat
@@ -213,11 +230,20 @@ on focusByTTY(targetTTY, hostPID)
                         repeat with t in tabs of w
                             repeat with s in sessions of t
                                 if (tty of s) is targetTTY then
-                                    set miniaturized of w to false
+                                    -- Guarded mutators (see focusByID)
+                                    -- to suppress redundant operations
+                                    -- whose visible side effects read
+                                    -- as a "flash" when the window
+                                    -- was already in the target state.
+                                    if miniaturized of w is true then
+                                        set miniaturized of w to false
+                                    end if
                                     select w
                                     select t
                                     select s
-                                    set index of w to 1
+                                    if index of w is not 1 then
+                                        set index of w to 1
+                                    end if
                                     return "ok"
                                 end if
                             end repeat
