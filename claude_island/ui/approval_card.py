@@ -397,6 +397,23 @@ class ApprovalCard(QFrame):
         row.setContentsMargins(0, 2, 0, 0)
         row.setSpacing(_FOOTER_SPACING_PX)
 
+        # v4c: countdown lives on the footer's leftmost slot, mirrors
+        # prototype-v4c-github.html's "1m 4s · Deny · Allow once".
+        # Updated by a 1 Hz QTimer below; format from
+        # expires_at - now().
+        self._countdown_label = QLabel("")
+        self._countdown_label.setObjectName("approvalCountdown")
+        self._countdown_label.setStyleSheet(
+            f"color: {_C.red_warm}; font-size: 12px; font-weight: 600;"
+        )
+        row.addWidget(self._countdown_label)
+        self._update_countdown()
+        from PySide6.QtCore import QTimer as _QTimer
+        self._countdown_timer = _QTimer(self)
+        self._countdown_timer.setInterval(1000)
+        self._countdown_timer.timeout.connect(self._update_countdown)
+        self._countdown_timer.start()
+
         self._remember = QCheckBox(self._format_remember_label())
         self._remember.setObjectName("approvalRemember")
         self._remember.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -419,6 +436,25 @@ class ApprovalCard(QFrame):
         row.addWidget(allow_btn)
 
         return row
+
+    def _update_countdown(self) -> None:
+        """Refresh "1m 4s" countdown text from expires_at - now."""
+        from datetime import datetime, timezone
+        delta = self._view.expires_at - datetime.now(timezone.utc)
+        secs = int(delta.total_seconds())
+        if secs <= 0:
+            text = "expired"
+        elif secs < 60:
+            text = f"{secs}s"
+        elif secs < 3600:
+            m = secs // 60
+            s = secs % 60
+            text = f"{m}m {s}s" if s else f"{m}m"
+        else:
+            h = secs // 3600
+            m = (secs % 3600) // 60
+            text = f"{h}h {m}m" if m else f"{h}h"
+        self._countdown_label.setText(text)
 
     def _format_remember_label(self) -> str:
         tool = self._view.tool_name or "this tool"
