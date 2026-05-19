@@ -1181,4 +1181,25 @@ session_discovery.stop()
 file_watcher.stop()
 jsonl_parser.request_stop()
 
+# Drain the iTerm + WT fast-path worker pools so any in-flight
+# AppleEvent / UIA call has a chance to complete before the Python
+# interpreter starts tearing down — otherwise Qt logs scary
+# "QThread: Destroyed while thread is still running" lines at
+# stderr that look like bugs. 500ms each is generous; missing the
+# deadline silently drops the in-flight task rather than blocking
+# exit. No-op on platforms where the worker was never instantiated
+# (singletons stay None until first use; shutdown handles that).
+try:
+    from claude_island.platform_.terminals import _iterm_fast_path as _it_fp_exit
+    if _it_fp_exit._worker_singleton is not None:
+        _it_fp_exit._worker_singleton.shutdown(500)
+except Exception:
+    pass
+try:
+    from claude_island.platform_.terminals import _wt_fast_path as _wt_fp_exit
+    if _wt_fp_exit._worker_singleton is not None:
+        _wt_fp_exit._worker_singleton.shutdown(500)
+except Exception:
+    pass
+
 sys.exit(exit_code)
