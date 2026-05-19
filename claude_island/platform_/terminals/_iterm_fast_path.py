@@ -369,11 +369,26 @@ class FocusWorker:
         """Enqueue a task. Returns True if accepted, False if rejected
         due to backlog. On reject, caller has already done the
         main-thread NSRunningApplication.activate; the user sees the
-        host app in front but the pane stays at its previous position."""
+        host app in front but the pane stays at its previous position.
+
+        Read-decision-increment runs as a single critical section to
+        prevent the TOCTOU race where two concurrent submits both
+        observe ``backlog < REJECT`` and both increment, exceeding the
+        threshold the check was designed to enforce. Today all callers
+        are main-thread (Qt event loop serialises them) so the race is
+        theoretical — but nothing architectural enforces that, and a
+        future caller (e.g. a keyboard-shortcut handler on a worker
+        thread) would silently start sneaking past the limit. Cheap
+        insurance — one extra lock acquisition per submit (~µs)."""
+        task._worker = self
         with self._counter_lock:
             backlog = self._inflight
-
-        if backlog >= self.BACKLOG_REJECT:
+            if backlog >= self.BACKLOG_REJECT:
+                rejected = True
+            else:
+                rejected = False
+                self._inflight += 1
+        if rejected:
             now = time.monotonic()
             if now - self._last_reject_log_at > 60.0:
                 log.error(
@@ -384,10 +399,6 @@ class FocusWorker:
             return False
         if backlog >= self.BACKLOG_WARN:
             log.warning("FocusWorker backlog=%d", backlog)
-
-        task._worker = self
-        with self._counter_lock:
-            self._inflight += 1
         # If _pool.start raises (e.g. pool already shut down, Qt
         # internal corruption), the increment above would leak forever
         # because _on_task_done never fires for a task that never
