@@ -616,6 +616,19 @@ def try_fast_path(
         return False
 
     # Host raised — schedule pane select if any identifying signal.
+    # The submit() return value carries critical information:
+    #   * True  → task queued; pane will be selected asynchronously
+    #   * False → worker backlog full (iTerm Apple Event handler is
+    #             hung or overwhelmed); the task was silently dropped
+    #
+    # When False AND we had a pane signal, the user clicked expecting
+    # pane precision but only got app-level activation. Return False
+    # so ITerm2Adapter.focus falls through to _legacy_focus — the
+    # subprocess osascript path is slower (~250 ms) but bounded by a
+    # 3s timeout and not blocked by the same worker backlog, so it
+    # has an independent shot at landing the pane. Without this, the
+    # caller has no idea pane precision was dropped and the user is
+    # stuck on the wrong tab until they manually navigate.
     if session_id or tty:
         try:
             task = _PaneSelectTask(
@@ -623,11 +636,19 @@ def try_fast_path(
                 session_id=session_id,
                 tty=tty,
             )
-            get_worker().submit(task)
+            queued = get_worker().submit(task)
         except Exception as e:
-            # Failure to schedule the task doesn't undo the host raise.
-            # User still sees the right app in front; pane stays put.
+            # Failure to schedule the task doesn't undo the host raise,
+            # but we still want the legacy path to take a shot — it
+            # uses a fully separate subprocess osascript pipeline.
             log.warning("PaneSelectTask not scheduled: %s", e)
+            return False
+        if not queued:
+            log.info(
+                "iterm2 fast-path: pane select rejected (backlog full); "
+                "falling back to legacy osascript for pane precision",
+            )
+            return False
 
     return True
 
