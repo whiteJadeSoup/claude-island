@@ -74,9 +74,14 @@ def test_renders_question_header_question_text_and_options(app):
         if b.objectName() == "questionOption"
     ]
     assert len(option_btns) == 3
-    # Keycaps are visible decoration ([1] / [2] / [3])
-    assert "[1]" in option_btns[0].text()
-    assert "S" in option_btns[0].text()
+    # Option content lives in child QLabels (keycap + label + optional
+    # description) so the description can word-wrap — see
+    # _OptionButton docstring. The keycap text is the visible
+    # 1-based index; the label text is the option name.
+    first_keycap = option_btns[0].findChild(QLabel, "questionOptionKeycap")
+    first_label = option_btns[0].findChild(QLabel, "questionOptionLabel")
+    assert first_keycap.text() == "1"
+    assert first_label.text() == "S"
 
 
 def test_session_badge_shows_session_name(app):
@@ -301,6 +306,68 @@ def test_skip_resolves_with_skip_reason(app):
     _, dec = calls[0]
     assert dec.result is DecisionResult.ALLOW
     assert "skipped" in (dec.reason or "").lower()
+
+
+def test_option_description_wraps_when_too_long_for_one_line(app):
+    """Regression: option descriptions used to be packed into the
+    QPushButton's ``text`` field, which doesn't word-wrap — long
+    Chinese / multi-clause descriptions clipped on the right edge
+    of the panel. Now the description lives in its own QLabel with
+    ``setWordWrap(True)``; verify it actually wraps and that the
+    button grows vertically rather than clipping the text."""
+    from PySide6.QtWidgets import QLabel, QPushButton
+    from claude_island.ui.question_card import QuestionCard
+
+    long_desc = (
+        "/origin/v3 基路径下，与 /busiline/session/list 等同包同风格；"
+        "无包前缀冲突；可以与现有 controller 共用同一组拦截器与日志切面。"
+    )
+    card = QuestionCard(_view(
+        options=("加进现有 BusinessLineController（推荐）", "新建文件"),
+        descs=(long_desc, "按字面新建文件"),
+    ))
+    card.setFixedWidth(360)  # roughly the rendered panel width
+    app.addWidget(card)
+    card.adjustSize()
+
+    option_btns = [
+        b for b in card.findChildren(QPushButton)
+        if b.objectName() == "questionOption"
+    ]
+    long_desc_label = option_btns[0].findChild(QLabel, "questionOptionDesc")
+    assert long_desc_label is not None, (
+        "option with a description must render a description QLabel"
+    )
+    # Word-wrap must be enabled; without it the QLabel clips horizontally.
+    assert long_desc_label.wordWrap() is True
+    # Description text is preserved verbatim (no truncation).
+    assert long_desc_label.text() == long_desc
+    # And the button must be tall enough to fit the wrapped lines plus
+    # the label row — strictly more than the single-line floor.
+    btn = option_btns[0]
+    btn_w = btn.width() or 360
+    assert btn.heightForWidth(btn_w) > 36, (
+        "button height must grow with wrapped description; got "
+        f"{btn.heightForWidth(btn_w)} px at width {btn_w}"
+    )
+
+
+def test_option_without_description_omits_desc_label(app):
+    """Description QLabel should only exist when there's text to show
+    — keeps the empty-state button visually compact."""
+    from PySide6.QtWidgets import QLabel, QPushButton
+    from claude_island.ui.question_card import QuestionCard
+
+    card = QuestionCard(_view(
+        options=("Yes", "No"),
+        descs=(),  # no descriptions
+    ))
+    app.addWidget(card)
+    btn = next(
+        b for b in card.findChildren(QPushButton)
+        if b.objectName() == "questionOption"
+    )
+    assert btn.findChild(QLabel, "questionOptionDesc") is None
 
 
 def test_skip_also_focuses_terminal(app):
