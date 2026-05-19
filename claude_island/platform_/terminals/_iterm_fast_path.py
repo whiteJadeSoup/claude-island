@@ -607,7 +607,16 @@ class _PaneSelectTask(QRunnable):
         if result is None:
             cache.note_failure(handler_label)
             return None
-        return result.stringValue()
+        # I-9: defensive normalisation. ``stringValue()`` may return
+        # None if the descriptor isn't text (unexpected from our
+        # scripts but possible from a malformed iTerm response or a
+        # future iTerm version change), and our scripts return literal
+        # "ok"/"miss" strings but the caller compares with strict ``==``
+        # — any whitespace ("ok\n") would silently miss. The subprocess
+        # osascript path already strips; mirror that here so both paths
+        # have identical normalisation contract.
+        sv = result.stringValue()
+        return (sv or "").strip()
 
 
 def _build_subroutine_event(handler_name: str, arg: str, host_pid: int) -> Any:

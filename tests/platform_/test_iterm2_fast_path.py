@@ -210,6 +210,76 @@ class TestWorkerSubmit:
         assert fake_worker.submitted == []
 
 
+class TestTryHandlerStripsResult:
+    """I-9: ``result.stringValue()`` is the raw text descriptor; in
+    some iTerm versions an extra newline can sneak in (``"ok\\n"``)
+    which would make the strict ``==`` comparison in the caller
+    silently miss. Strip + None-safe so the contract matches the
+    subprocess osascript path."""
+
+    @staticmethod
+    def _stub_handler(stringvalue_result):
+        """Build a minimal handler stub that returns a descriptor
+        whose stringValue() returns the configured value."""
+        class _Desc:
+            def stringValue(self_inner):
+                return stringvalue_result
+        class _Handler:
+            def executeAppleEvent_error_(self_inner, event, err):
+                return (_Desc(), None)
+        return _Handler()
+
+    @staticmethod
+    def _stub_event_builder(monkeypatch):
+        """Replace _build_subroutine_event so the test doesn't need
+        real NSAppleEventDescriptor."""
+        monkeypatch.setattr(
+            fp, "_build_subroutine_event",
+            lambda *a, **kw: object(),  # any opaque value
+        )
+
+    def test_clean_ok_returned_verbatim(self, monkeypatch):
+        self._stub_event_builder(monkeypatch)
+        cache = fp.AppleScriptCache()
+        task = fp._PaneSelectTask(host_pid=1, session_id="x", tty=None)
+        ret = task._try_handler(
+            cache=cache,
+            handler=self._stub_handler("ok"),
+            handler_label="id",
+            subroutine="focusByID",
+            arg="x",
+        )
+        assert ret == "ok"
+
+    def test_trailing_newline_stripped_to_ok(self, monkeypatch):
+        """The actual bug: subtle whitespace difference between the
+        subprocess path's stripped output and the fast path's raw
+        output would make ``ret == 'ok'`` silently miss."""
+        self._stub_event_builder(monkeypatch)
+        cache = fp.AppleScriptCache()
+        task = fp._PaneSelectTask(host_pid=1, session_id="x", tty=None)
+        ret = task._try_handler(
+            cache=cache, handler=self._stub_handler("ok\n"),
+            handler_label="id", subroutine="focusByID", arg="x",
+        )
+        assert ret == "ok"
+
+    def test_none_stringvalue_returns_empty_string_not_none(self, monkeypatch):
+        """stringValue() returning None (unexpected from our scripts
+        but possible from a malformed iTerm response) should not
+        propagate as Python None — the caller compares with strict
+        equality and None != 'ok' is fine, but we want a consistent
+        string return type."""
+        self._stub_event_builder(monkeypatch)
+        cache = fp.AppleScriptCache()
+        task = fp._PaneSelectTask(host_pid=1, session_id="x", tty=None)
+        ret = task._try_handler(
+            cache=cache, handler=self._stub_handler(None),
+            handler_label="id", subroutine="focusByID", arg="x",
+        )
+        assert ret == ""
+
+
 class TestActivateLieDetection:
     """I-6: On macOS 14+ Sonoma, ``activateWithOptions_`` is deprecated
     and can return True without actually activating. Verify via
