@@ -1048,29 +1048,42 @@ _MODEL_COLOR_FALLBACK = DEFAULT_MODEL_COLOR
 _resolve_model_short_name = resolve_model_short_name
 _resolve_model_color = resolve_model_color
 
+# v4c: standalone session rows are flat table rows now, not standalone
+# cards.  No card-style background / radius; just a transparent surface
+# with a bottom hairline so the list reads as a continuous table.
+# Hover (handled by HoverRow.paintEvent) overlays a left-edge accent
+# without touching the background, so the table feel survives hover.
 _STYLE_SINGLE_ROW = f"""
     QPushButton {{
-        background: {_BG_SINGLE};
+        background: transparent;
         border: none;
-        border-radius: 8px;
+        border-bottom: 1px solid {_LabColor.rule};
+        border-radius: 0;
         text-align: left;
     }}
-    QPushButton:pressed {{ background: {_BG_PRESSED}; }}
+    QPushButton:hover {{ background: {_LabColor.surface_hi}; }}
+    QPushButton:pressed {{ background: {_LabColor.surface}; }}
 """
+# Group card (multiple sessions sharing a cwd) keeps its rounded
+# container, but the rows inside it now use a dashed inner divider —
+# the card frame is the chrome, the rows are list items.
 _STYLE_GROUP_CARD = f"""
     QFrame#group_card {{
         background: {_BG_GROUP};
-        border-radius: 8px;
+        border: 1px solid {_LabColor.rule};
+        border-radius: 6px;
     }}
 """
 _STYLE_GROUP_ROW = f"""
     QPushButton {{
-        background: {_BG_SINGLE};
+        background: transparent;
         border: none;
-        border-radius: 8px;
+        border-bottom: 1px dashed {_LabColor.rule};
+        border-radius: 0;
         text-align: left;
     }}
-    QPushButton:pressed {{ background: {_BG_PRESSED}; }}
+    QPushButton:hover {{ background: {_LabColor.surface_hi}; }}
+    QPushButton:pressed {{ background: {_LabColor.surface}; }}
 """
 # Separator between rows of the same group. With the group sitting on
 # #181818, a #2a2a2a hairline is just barely visible — enough to read
