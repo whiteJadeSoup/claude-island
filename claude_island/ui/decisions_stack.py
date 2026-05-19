@@ -274,7 +274,14 @@ def _build_card(
             on_resolve=on_resolve,
             on_focus_terminal=on_focus_terminal,
         )
-    return ApprovalCard(view, on_resolve=on_resolve)
+    return ApprovalCard(
+        view,
+        on_resolve=on_resolve,
+        # Same plumbing as QuestionCard — Allow/Deny focuses the
+        # terminal so the user can verify Claude proceeded (or type
+        # 1 / 2 manually if Claude is still waiting on its own prompt).
+        on_focus_terminal=on_focus_terminal,
+    )
 
 
 class StackedDecisionsPanel(QWidget):

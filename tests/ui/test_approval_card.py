@@ -210,3 +210,90 @@ def test_no_preview_falls_back_gracefully(app):
     app.addWidget(card)
     preview = card.findChild(QLabel, "approvalCardPreview")
     assert preview.text().strip() != ""  # something fallback-text shown
+
+
+# ── Hint + on_focus_terminal (mirror of QuestionCard) ────────────────
+
+
+def test_hint_label_rendered_and_explains_terminal_fallback(app):
+    """Regression: users reported clicking Allow in Island but the
+    terminal prompt still showed — Claude renders its own prompt
+    concurrently and the hook channel can race with it. The card now
+    carries a hint so the user knows the terminal is the source of
+    truth when our Allow/Deny doesn't dismiss the prompt in time."""
+    from PySide6.QtWidgets import QLabel
+    from claude_island.ui.approval_card import ApprovalCard
+
+    card = ApprovalCard(_view())
+    app.addWidget(card)
+    hint = card.findChild(QLabel, "approvalCardHint")
+    assert hint is not None, "ApprovalCard must surface the terminal-fallback hint"
+    assert "terminal" in hint.text().lower()
+
+
+def test_allow_click_focuses_terminal_then_emits_resolve(app):
+    """on_focus_terminal must fire BEFORE on_resolve so the terminal is
+    already on screen by the time the panel auto-hides on
+    WindowDeactivate. Same ordering as QuestionCard._emit_decision."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.approval_card import ApprovalCard
+
+    events: list[str] = []
+    card = ApprovalCard(
+        _view(),
+        on_resolve=lambda _i, _d: events.append("resolve"),
+        on_focus_terminal=lambda uuid: events.append(f"focus:{uuid}"),
+    )
+    app.addWidget(card)
+    {b.objectName(): b for b in card.findChildren(QPushButton)}["approvalAllow"].click()
+    assert events == ["focus:u1", "resolve"]
+
+
+def test_deny_click_also_focuses_terminal(app):
+    """Symmetry: Deny should focus the terminal too — if the user
+    denies in Island and Claude already had its prompt up, the user
+    will land on the terminal and can type 2 (Deny) to confirm."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.approval_card import ApprovalCard
+
+    focuses: list[str] = []
+    card = ApprovalCard(
+        _view(),
+        on_focus_terminal=lambda uuid: focuses.append(uuid),
+    )
+    app.addWidget(card)
+    {b.objectName(): b for b in card.findChildren(QPushButton)}["approvalDeny"].click()
+    assert focuses == ["u1"]
+
+
+def test_focus_terminal_optional_card_works_without_callback(app):
+    """Backwards compatibility: callers that don't pass
+    on_focus_terminal (e.g. existing tests) must still get a working
+    Allow/Deny — no AttributeError, no swallowed exception."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.approval_card import ApprovalCard
+
+    resolves: list = []
+    card = ApprovalCard(_view(), on_resolve=lambda i, d: resolves.append((i, d)))
+    app.addWidget(card)
+    {b.objectName(): b for b in card.findChildren(QPushButton)}["approvalAllow"].click()
+    assert len(resolves) == 1
+
+
+def test_decisions_stack_wires_focus_terminal_to_approval_card(app):
+    """The stack panel must pass on_focus_terminal through to BOTH
+    QuestionCard and ApprovalCard — previously only QuestionCard got
+    it, so Bash approvals never focused the terminal and the user
+    couldn't recover when Claude's prompt was still waiting."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.decisions_stack import _build_card
+
+    focuses: list[str] = []
+    card = _build_card(
+        _view(),
+        on_resolve=lambda i, d: None,
+        on_focus_terminal=lambda uuid: focuses.append(uuid),
+    )
+    app.addWidget(card)
+    {b.objectName(): b for b in card.findChildren(QPushButton)}["approvalAllow"].click()
+    assert focuses == ["u1"]
