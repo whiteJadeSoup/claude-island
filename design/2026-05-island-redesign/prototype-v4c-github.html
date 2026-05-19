@@ -1,0 +1,1201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>claude · island — v4c · GitHub list</title>
+<style>
+/* ──────────────────────────────────────────────────────────────────────
+   v4c · GitHub Actions / Issues list density.
+   - system sans for the chrome, mono for code / numbers / paths
+   - Default LIGHT (the engineering crowd reads light mode for 8 hours
+     at a stretch); dark mode is a switch, not the default
+   - Compact rows (36-44 px), icon-led status, lots of side-by-side info
+   - GitHub primer blue #0969da
+   ────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* light mode (default) — primer palette */
+  --canvas:       #ffffff;
+  --canvas-mute:  #f6f8fa;
+  --canvas-sub:   #eaeef2;
+  --canvas-emph:  #d0d7de;
+  --border:       #d0d7de;
+  --border-mute:  #d8dee4;
+  --fg:           #1f2328;
+  --fg-mute:      #59636e;
+  --fg-faint:     #818b98;
+  --link:         #0969da;
+  --success:      #1a7f37;
+  --attn:         #9a6700;
+  --severe:       #bc4c00;     /* orange — danger but warmer than red */
+  --danger:       #cf222e;
+  --done:         #8250df;     /* purple — merged / processed */
+
+  /* phase tints */
+  --thinking:     var(--done);
+  --tool-use:     var(--success);
+  --waiting:      var(--severe);
+  --compacting:   var(--link);
+  --idle:         var(--fg-faint);
+  --ended:        #6e7781;
+
+  /* row hover */
+  --row-hover:    #f3f4f6;
+  --row-waiting:  #fff8f0;
+  --row-waiting-border: #ffd8a8;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+[data-theme="dark"] {
+  --canvas:       #0d1117;
+  --canvas-mute:  #010409;
+  --canvas-sub:   #151b23;
+  --canvas-emph:  #21262d;
+  --border:       #30363d;
+  --border-mute:  #21262d;
+  --fg:           #f0f6fc;
+  --fg-mute:      #9198a1;
+  --fg-faint:     #6e7681;
+  --link:         #4493f8;
+  --success:      #3fb950;
+  --attn:         #d29922;
+  --severe:       #db6d28;
+  --danger:       #f85149;
+  --done:         #a371f7;
+  --row-hover:    #161b22;
+  --row-waiting:  #1f1106;
+  --row-waiting-border: rgba(219,109,40,0.4);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--canvas-mute);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+.desk {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  height: 100vh;
+}
+
+/* ── left rail ────────────────────────────────────────────────────── */
+.rail {
+  padding: 16px 16px;
+  border-right: 1px solid var(--border);
+  background: var(--canvas);
+  overflow-y: auto;
+}
+.brand {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 6px 14px;
+  border-bottom: 1px solid var(--border-mute);
+}
+.brand .mark {
+  width: 22px; height: 22px;
+  background: var(--fg);
+  color: var(--canvas);
+  border-radius: 4px;
+  display: grid; place-items: center;
+  font-size: 11px; font-weight: 700;
+}
+.brand .name { font-weight: 600; font-size: 14px; }
+.brand .ver {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+.section h2 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  margin: 14px 6px 6px;
+}
+.btn-group { display: flex; flex-direction: column; gap: 0; }
+.btn {
+  appearance: none;
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.btn:hover { background: var(--canvas-sub); }
+.btn[aria-pressed="true"] {
+  background: var(--canvas-sub);
+  font-weight: 600;
+}
+.btn .ico {
+  width: 16px; height: 16px;
+  display: grid; place-items: center;
+  font-size: 10px;
+  color: var(--fg-mute);
+}
+.btn[aria-pressed="true"] .ico { color: var(--link); }
+.btn .count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 100px;
+  background: var(--canvas-sub);
+  color: var(--fg-mute);
+}
+.btn[data-pending="1"] .count,
+.btn[data-pending="3"] .count {
+  background: var(--severe);
+  color: white;
+  font-weight: 600;
+}
+
+.theme-row {
+  display: flex;
+  margin-top: 6px;
+  padding: 2px;
+  background: var(--canvas-sub);
+  border-radius: 6px;
+}
+.theme-row .btn {
+  flex: 1;
+  text-align: center;
+  justify-content: center;
+  padding: 4px 0;
+  font-size: 12px;
+  border-radius: 4px;
+}
+.theme-row .btn[aria-pressed="true"] {
+  background: var(--canvas);
+  box-shadow: 0 1px 0 rgba(0,0,0,0.04);
+}
+
+.note {
+  margin-top: 16px;
+  padding: 10px 12px;
+  background: var(--canvas-sub);
+  border: 1px solid var(--border-mute);
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--fg-mute);
+  line-height: 1.5;
+}
+.note b { color: var(--fg); font-weight: 600; }
+
+/* ── stage ─────────────────────────────────────────────────────────── */
+.stage {
+  padding: 24px 24px 0;
+  overflow-y: auto;
+}
+.island {
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+/* ── capsule — narrow info bar ─────────────────────────────────────── */
+.capsule {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+  border-bottom: none;
+  cursor: pointer;
+  user-select: none;
+}
+.capsule .mark {
+  width: 20px; height: 20px;
+  background: var(--fg);
+  color: var(--canvas);
+  border-radius: 4px;
+  display: grid; place-items: center;
+  font-size: 10px; font-weight: 700;
+}
+.capsule .title { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.capsule .name { font-weight: 600; font-size: 13.5px; }
+.capsule .sub {
+  color: var(--fg-mute);
+  font-size: 12.5px;
+}
+.capsule .badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px;
+  background: var(--severe);
+  color: white;
+  border-radius: 100px;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.island[data-pending="0"] .capsule .badge { display: none; }
+.capsule .shortcut {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-mute);
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+/* ── card ──────────────────────────────────────────────────────────── */
+.card {
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  margin-top: -1px;
+}
+
+/* ── TODAY block — top-of-card hero
+   Mirrors the production UI's "TODAY $69 / 11% of 5h limit" panel.
+   This is what the user looks at every minute; deserves the biggest
+   number on the card. */
+.today-block {
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+}
+.today-block .row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0;
+  border: none;
+}
+.today-block .row:hover { background: transparent; }
+.today-block .lbl {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-mute);
+}
+.today-block .v {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+}
+.today-block .ctx {
+  font-size: 12px;
+  color: var(--fg-mute);
+  margin-top: 4px;
+}
+.today-block .ctx b { color: var(--fg); font-weight: 600; }
+/* progress bar — overlay the percent label inline at the right of the
+   bar's row, keeping bar + percent on a single 16-px-tall line instead
+   of two separate rows. */
+.today-block .bar-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.today-block .bar {
+  height: 4px;
+  background: var(--canvas-emph);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.today-block .bar .fill {
+  height: 100%;
+  background: var(--success);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+.today-block[data-tier="warn"] .bar .fill { background: var(--attn); }
+.today-block[data-tier="hot"]  .bar .fill { background: var(--severe); }
+.today-block .pct {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--success);
+  white-space: nowrap;
+}
+.today-block[data-tier="warn"] .pct { color: var(--attn); }
+.today-block[data-tier="hot"]  .pct { color: var(--severe); }
+.today-block .pct .of {
+  color: var(--fg-faint);
+  font-weight: 400;
+  font-size: 11.5px;
+  margin-left: 2px;
+}
+
+/* mini stats — single inline row at the bottom of the TODAY block.
+   Numbers carry weight, labels stay light.  Breakdowns (in/out,
+   create/hit) move to hover tooltips so the resting state is one
+   short line — Apple Watch complication feel rather than dashboard
+   widget feel. */
+.stats-strip {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-mute);
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+.stat-inline {
+  font-family: var(--font-mono);
+  cursor: help;
+}
+.stat-inline b {
+  color: var(--fg);
+  font-weight: 600;
+  margin-right: 3px;
+}
+.stat-inline + .stat-inline::before {
+  content: "·";
+  margin: 0 8px;
+  color: var(--border-hi);
+  font-weight: 400;
+}
+
+/* header bar — sessions count + filters + recents entry */
+.card-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  background: var(--canvas-sub);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+/* card-head — sessions count + recents entry + time.
+   Filter chips removed in v4c: they fragmented the header without
+   adding much (sessions list is short enough to scan; the phase tint
+   on each row's status text is already the filter). */
+.card-head {
+  grid-template-columns: 1fr auto;
+}
+.card-head .lead {
+  display: flex; align-items: center; gap: 10px;
+}
+.card-head .lead .count {
+  font-weight: 600;
+}
+.card-head .lead .verb { color: var(--fg-mute); }
+.card-head .right-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* Recents entry — chip styled like a filter, slight emphasis with a
+   blue dot indicating "you have N dormant sessions worth resuming". */
+.card-head .recents-chip {
+  appearance: none;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 9px 3px 8px;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  color: var(--fg);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+.card-head .recents-chip:hover {
+  background: var(--row-hover);
+  border-color: var(--canvas-emph);
+}
+.card-head .recents-chip .dot {
+  width: 6px; height: 6px;
+  background: var(--link);
+  border-radius: 50%;
+}
+.card-head .recents-chip .count {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--fg-mute);
+  font-size: 11.5px;
+}
+.card-head time {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+.card-head .filters {
+  display: flex; align-items: center; gap: 4px;
+}
+.card-head .filters .chip {
+  font-size: 12px;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.card-head .filters .chip[aria-pressed="true"] {
+  background: var(--canvas);
+  border-color: var(--canvas-emph);
+}
+.card-head time {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+
+/* ── decision banner ──────────────────────────────────────────────── */
+.decision {
+  display: none;
+  padding: 12px 14px;
+  background: var(--row-waiting);
+  border-bottom: 1px solid var(--row-waiting-border);
+}
+.island[data-pending="1"] .decision,
+.island[data-pending="3"] .decision { display: block; }
+.decision .head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.decision .head .ico {
+  width: 16px; height: 16px;
+  display: grid; place-items: center;
+  background: var(--severe);
+  color: white;
+  border-radius: 50%;
+  font-size: 11px; font-weight: 700;
+}
+.decision .head b { font-weight: 600; }
+.decision .head .queue {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-mute);
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  padding: 1px 7px;
+  border-radius: 100px;
+}
+.decision .head .queue b { color: var(--severe); font-weight: 600; }
+.decision .what {
+  font-size: 13.5px;
+  margin-bottom: 6px;
+  margin-left: 24px;
+}
+.decision .preview {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  margin-left: 24px;
+  padding: 6px 10px;
+  background: var(--canvas);
+  border: 1px solid var(--border-mute);
+  border-radius: 4px;
+  margin-bottom: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.decision .preview b { color: var(--severe); font-weight: 600; }
+.decision .actions {
+  display: flex; gap: 6px; align-items: center;
+  margin-left: 24px;
+}
+.decision .actions .clock {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--severe);
+  font-weight: 600;
+  margin-right: 6px;
+}
+.decision .actions button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--canvas);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.decision .actions button:hover {
+  background: var(--canvas-sub);
+}
+.decision .actions button.allow {
+  background: var(--success);
+  color: white;
+  border-color: var(--success);
+}
+.decision .actions button.allow:hover { filter: brightness(0.92); }
+.decision .actions button .key {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(0,0,0,0.08);
+}
+.decision .actions button.allow .key { background: rgba(255,255,255,0.18); }
+
+.decision .queue-list {
+  margin-top: 10px;
+  margin-left: 24px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--row-waiting-border);
+  font-size: 12.5px;
+}
+.island[data-pending="1"] .decision .queue-list { display: none; }
+.decision .queue-list .lbl {
+  font-size: 11.5px;
+  color: var(--fg-mute);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.decision .queue-list .mini {
+  display: grid; grid-template-columns: 1fr auto;
+  gap: 8px;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.decision .queue-list .mini:hover { color: var(--link); }
+.decision .queue-list .mini .nm { color: var(--fg); }
+.decision .queue-list .mini .nm span { color: var(--fg-mute); }
+.decision .queue-list .mini .w { font-family: var(--font-mono); color: var(--severe); font-weight: 600; }
+
+/* ── session list — table-row dense ───────────────────────────────── */
+.sessions {
+  list-style: none;
+}
+.row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-mute);
+  font-size: 13px;
+  cursor: pointer;
+  position: relative;
+}
+.row:last-child { border-bottom: none; }
+.row:hover { background: var(--row-hover); }
+
+/* status icon — 14 px square (Octicon-scale) */
+.row .ico {
+  width: 14px; height: 14px;
+  display: grid; place-items: center;
+  font-size: 12px;
+  line-height: 1;
+}
+.row[data-phase="thinking"]   .ico { color: var(--thinking); }
+.row[data-phase="tool_use"]   .ico { color: var(--tool-use); }
+.row[data-phase="waiting_approval"] .ico { color: var(--waiting); }
+.row[data-phase="compacting"] .ico { color: var(--compacting); }
+.row[data-phase="idle"]       .ico { color: var(--idle); }
+.row[data-phase="ended"]      .ico { color: var(--ended); }
+
+/* breathing on active phases */
+.row[data-phase="thinking"]   .ico,
+.row[data-phase="tool_use"]   .ico,
+.row[data-phase="compacting"] .ico { animation: ico-breathe 1.6s ease-in-out infinite; }
+.row[data-phase="waiting_approval"] .ico { animation: ico-breathe 1.0s ease-in-out infinite; }
+@keyframes ico-breathe {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+.row .body {
+  min-width: 0;
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.row .body .name {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 280px;
+}
+.row .body .name:hover { color: var(--link); text-decoration: underline; }
+.row .body .status-text {
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+.row[data-phase="thinking"]   .body .status-text { color: var(--thinking); }
+.row[data-phase="tool_use"]   .body .status-text { color: var(--tool-use); }
+.row[data-phase="waiting_approval"] .body .status-text { color: var(--waiting); font-weight: 600; }
+.row[data-phase="compacting"] .body .status-text { color: var(--compacting); }
+.row .body .meta {
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+.row .body .cwd {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg-mute);
+}
+.row .body .chip {
+  font-size: 11px;
+  padding: 1px 7px;
+  background: var(--canvas-sub);
+  border: 1px solid var(--border-mute);
+  border-radius: 100px;
+  color: var(--fg-mute);
+}
+
+.row .rate {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+  min-width: 64px;
+}
+
+/* live-running wave — 4 narrow bars, phase-tinted.  GitHub-density,
+   so smaller than v4a / v4b (12 high, 18 wide).  Sits immediately
+   before the rate column for a "live signal next to live number" pair. */
+.row .wave {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 11px;
+  width: 18px;
+}
+.row .wave i {
+  flex: 1;
+  background: var(--idle);
+  border-radius: 1px;
+  animation: wave 1200ms linear infinite;
+  transform-origin: bottom;
+}
+.row .wave i:nth-child(1) { animation-delay: 0ms;   }
+.row .wave i:nth-child(2) { animation-delay: 300ms; }
+.row .wave i:nth-child(3) { animation-delay: 600ms; }
+.row .wave i:nth-child(4) { animation-delay: 900ms; }
+.row[data-phase="thinking"]   .wave i { background: var(--thinking); }
+.row[data-phase="tool_use"]   .wave i { background: var(--tool-use); }
+.row[data-phase="compacting"] .wave i { background: var(--compacting); }
+.row[data-phase="idle"]   .wave,
+.row[data-phase="ended"]  .wave,
+.row[data-phase="waiting_approval"] .wave { display: none; }
+@keyframes wave {
+  0%, 100% { height: 22%; }
+  50%      { height: 100%; }
+}
+.row .cost {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  text-align: right;
+  min-width: 60px;
+}
+/* cost colour ladder — three tiers mirroring the production UI's
+   "$57 yellow / $251 red" progression so a glance at the right column
+   tells you which sessions are eating budget. */
+.row[data-tier="mid"]  .cost { color: var(--attn); }       /* yellow */
+.row[data-tier="high"] .cost { color: var(--severe); }     /* orange */
+.row[data-tier="huge"] .cost { color: var(--danger); }     /* red */
+.row[data-flag="high"] .cost { color: var(--severe); }     /* legacy alias */
+
+/* WAITING ROW — orange tint background */
+.row[data-phase="waiting_approval"] {
+  background: var(--row-waiting);
+  border-left: 3px solid var(--severe);
+  padding-left: 11px;
+}
+.row[data-phase="waiting_approval"] .resolve {
+  position: absolute;
+  top: 50%; right: 14px;
+  transform: translateY(-50%) translateX(4px);
+  opacity: 0;
+  pointer-events: none;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 11px;
+  border-radius: 6px;
+  background: var(--severe);
+  color: white;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.18s;
+}
+.row[data-phase="waiting_approval"]:hover .resolve {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) translateX(0);
+}
+.row[data-phase="waiting_approval"]:hover .cost,
+.row[data-phase="waiting_approval"]:hover .rate { opacity: 0.18; transition: opacity 0.12s; }
+
+/* ── QUOTA footer — inline provider chips + 5h/7d figures + refresh.
+   Mirrors the production UI's bottom band: provider chip + "+" + inline
+   "5h N% · Xh Xm | Weekly N% · Xh Xm" reading.  No big dial widgets —
+   the TODAY block already carries the headline 5h gauge. */
+.quota-foot {
+  border-top: 1px solid var(--border);
+  background: var(--canvas-sub);
+  border-radius: 0 0 6px 6px;
+  padding: 12px 16px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+}
+.quota-foot .lbl {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-mute);
+}
+.quota-foot .providers {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.provider-chip {
+  appearance: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 3px 9px;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  color: var(--fg);
+  cursor: pointer;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+.provider-chip:hover {
+  background: var(--row-hover);
+  border-color: var(--canvas-emph);
+}
+.provider-chip[aria-pressed="true"] {
+  background: var(--canvas);
+  border-color: var(--link);
+  color: var(--link);
+}
+.provider-add {
+  width: 22px; height: 22px;
+  background: transparent;
+  border: 1px dashed var(--border-mute);
+  border-radius: 100px;
+  color: var(--fg-faint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.provider-add:hover {
+  border-color: var(--canvas-emph);
+  color: var(--fg);
+}
+.quota-foot .figures {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+.quota-foot .figures .span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.quota-foot .figures .span b {
+  color: var(--success);
+  font-weight: 600;
+  font-size: 13px;
+}
+.quota-foot .figures .span[data-tier="warn"] b { color: var(--attn); }
+.quota-foot .figures .span[data-tier="hot"]  b { color: var(--severe); }
+.quota-foot .figures .sep { color: var(--border-hi); padding: 0 4px; }
+.quota-foot .refresh {
+  appearance: none;
+  display: inline-flex; align-items: center;
+  padding: 0;
+  width: 28px; height: 28px;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--fg-mute);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.quota-foot .refresh:hover {
+  background: var(--row-hover);
+  color: var(--fg);
+}
+.quota-foot .refresh.spinning {
+  color: var(--link);
+}
+.quota-foot .refresh.spinning .ico {
+  animation: spin 0.9s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.dial .h {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.dial .h .l {
+  color: var(--fg-mute);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
+.dial .h .v { font-weight: 600; font-family: var(--font-mono); }
+.dial[data-flag="hot"] .h .v { color: var(--severe); }
+.dial[data-flag="ok"]  .h .v { color: var(--link); }
+.dial .bar {
+  height: 6px;
+  background: var(--canvas-emph);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.dial .bar .fill {
+  height: 100%;
+  border-radius: 3px;
+}
+.dial[data-flag="hot"] .bar .fill { background: var(--severe); }
+.dial[data-flag="ok"]  .bar .fill { background: var(--link); }
+.dial .m {
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  margin-top: 4px;
+}
+
+@media (max-width: 880px) {
+  .desk { grid-template-columns: 1fr; }
+  .rail { border-right: none; border-bottom: 1px solid var(--border); }
+  .stage { padding: 16px 12px 0; }
+}
+</style>
+</head>
+<body data-theme="light">
+<div class="desk">
+
+  <aside class="rail">
+    <div class="brand">
+      <span class="mark">CI</span>
+      <span class="name">claude · island</span>
+      <span class="ver">v4c</span>
+    </div>
+
+    <div class="section">
+      <h2>State</h2>
+      <div class="btn-group" data-group="state">
+        <button class="btn" data-state="idle" data-pending="0">
+          <span class="ico">○</span> No sessions <span class="count">0</span>
+        </button>
+        <button class="btn" data-state="active" data-pending="0">
+          <span class="ico">●</span> Active <span class="count">6</span>
+        </button>
+        <button class="btn" data-state="approval-1" data-pending="1" aria-pressed="true">
+          <span class="ico">!</span> Awaiting <span class="count">1</span>
+        </button>
+        <button class="btn" data-state="approval-3" data-pending="3">
+          <span class="ico">!</span> Awaiting <span class="count">3</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Theme</h2>
+      <div class="theme-row" data-group="theme">
+        <button class="btn" data-theme="light" aria-pressed="true">Light</button>
+        <button class="btn" data-theme="dark">Dark</button>
+      </div>
+    </div>
+
+    <div class="note">
+      <b>v4c · GitHub list density.</b><br>
+      Light-mode default, system sans, mono only for code / numbers /
+      paths. Status as a small Octicon-scale glyph in the gutter, label
+      inline. Reads like an Actions run list — built for hours of
+      sustained skim.
+    </div>
+  </aside>
+
+  <section class="stage">
+    <div class="island" data-pending="1">
+
+      <div class="capsule">
+        <span class="mark">CI</span>
+        <div class="title">
+          <span class="name" id="cap-name">vibe-ipad</span>
+          <span class="sub" id="cap-sub">· awaiting consent · 6 active</span>
+        </div>
+        <span class="badge"><span id="cap-pn">1</span> awaiting</span>
+        <span class="shortcut">⌘J</span>
+      </div>
+
+      <div class="card">
+
+        <!-- TODAY block — top-of-card hero number, mirrors the
+             production UI's $69 / 11% of 5h limit panel.  Now carries
+             the per-window stats strip (Requests / Tokens / Cache)
+             so all "what's my budget burn look like" data lives in
+             one block at the top. -->
+        <div class="today-block" id="today-block" data-tier="ok">
+          <div class="row">
+            <div>
+              <div class="lbl">Today</div>
+              <div class="ctx"><b id="today-provider">Anthropic</b> · resets in <b id="today-reset">2h 14m</b></div>
+            </div>
+            <div class="v" id="today-cost">$14.84</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar"><div class="fill" id="today-fill" style="width: 62%"></div></div>
+            <span class="pct"><span id="today-pct">62%</span><span class="of"> of 5h</span></span>
+          </div>
+
+          <!-- Inline mini stats — one line, dot-separated.  Hover any
+               stat to see its breakdown (in/out for tokens, create/hit
+               for cache) without taking permanent vertical real estate. -->
+          <div class="stats-strip">
+            <span class="stat-inline" title="HTTP requests today">
+              <b id="stat-reqs">257</b>reqs
+            </span>
+            <span class="stat-inline" title="Tokens · in 0.3K · out 209.8K">
+              <b id="stat-tokens">210K</b>tokens
+            </span>
+            <span class="stat-inline" title="Cache · creation 630.3K · hit 128.3M">
+              <b id="stat-cache">128.9M</b>cache
+            </span>
+            <span class="stat-inline" title="Cache hit rate">
+              <b id="stat-hit">99.5%</b>hit
+            </span>
+          </div>
+        </div>
+
+        <div class="card-head">
+          <div class="lead">
+            <span class="count"><span id="head-num">6</span> sessions</span>
+            <span class="verb" id="head-verb">· 1 awaiting consent</span>
+          </div>
+          <div class="right-tools">
+            <button class="recents-chip" id="btn-recents" title="Recents · ⌘J">
+              <span class="dot"></span>Recents
+              <span class="count">6</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="decision">
+          <div class="head">
+            <span class="ico">!</span>
+            <span><b>vibe-ipad</b> wants permission for <b>Bash</b></span>
+            <span class="queue"><b id="dec-idx">1</b> of <span id="dec-total">3</span></span>
+          </div>
+          <div class="what">Wipe <code>node_modules</code> then reinstall from frozen lockfile</div>
+          <code class="preview">rm -rf node_modules &amp;&amp; <b>pnpm install --frozen-lockfile</b></code>
+          <div class="actions">
+            <span class="clock">1m 4s</span>
+            <button>Deny <span class="key">D</span></button>
+            <button class="allow">Allow once <span class="key">A</span></button>
+          </div>
+          <div class="queue-list">
+            <div class="lbl">Queued · 2 more</div>
+            <div class="mini">
+              <span class="nm">claude-island · master <span>Write .github/workflows/ci.yml</span></span>
+              <span class="w">4s</span>
+            </div>
+            <div class="mini">
+              <span class="nm">design-review · feat/perf <span>Bash git push</span></span>
+              <span class="w">1m 4s</span>
+            </div>
+          </div>
+        </div>
+
+        <ul class="sessions">
+
+          <li class="row" data-phase="thinking" data-flag="normal">
+            <span class="ico">◐</span>
+            <div class="body">
+              <span class="name">build-mini-cc</span>
+              <span class="status-text">thinking · turn 3</span>
+              <span class="cwd">~/coding-projects/build-mini-cc</span>
+              <span class="chip">opus-4.7</span>
+            </div>
+            <span class="rate">
+              <span class="wave"><i></i><i></i><i></i><i></i></span>
+              1.4k tk/min
+            </span>
+            <span class="cost">$3.42</span>
+          </li>
+
+          <li class="row" data-phase="tool_use" data-tier="huge">
+            <span class="ico">▶</span>
+            <div class="body">
+              <span class="name">claude-island · master</span>
+              <span class="status-text">tool_use · Bash · 1.2s</span>
+              <span class="cwd">~/coding-projects/claude-island</span>
+              <span class="chip">opus-4.7</span>
+            </div>
+            <span class="rate">
+              <span class="wave"><i></i><i></i><i></i><i></i></span>
+              2.1k tk/min
+            </span>
+            <span class="cost">$11.07</span>
+          </li>
+
+          <li class="row" data-phase="waiting_approval" data-flag="normal">
+            <span class="ico">!</span>
+            <div class="body">
+              <span class="name">vibe-ipad</span>
+              <span class="status-text">awaiting consent · 1m 4s elapsed</span>
+              <span class="cwd">~/coding-projects/open-vibe-island/ipad</span>
+              <span class="chip">sonnet-4.6</span>
+            </div>
+            <span class="rate">—</span>
+            <span class="cost">$0.84</span>
+            <button class="resolve">Resolve →</button>
+          </li>
+
+          <li class="row" data-phase="compacting" data-flag="normal">
+            <span class="ico">⇕</span>
+            <div class="body">
+              <span class="name">design-review · feat/perf</span>
+              <span class="status-text">compacting · 142 KB · 8s</span>
+              <span class="cwd">~/coding-projects/cc-review</span>
+              <span class="chip">haiku-4.5</span>
+            </div>
+            <span class="rate">
+              <span class="wave"><i></i><i></i><i></i><i></i></span>
+              8s
+            </span>
+            <span class="cost">$0.12</span>
+          </li>
+
+          <li class="row" data-phase="idle" data-flag="normal">
+            <span class="ico">○</span>
+            <div class="body">
+              <span class="name">notes · drafting reply</span>
+              <span class="status-text">idle · 1h 4m</span>
+              <span class="cwd">~/Documents/notes</span>
+              <span class="chip">opus-4.7</span>
+            </div>
+            <span class="rate"></span>
+            <span class="cost">$0.31</span>
+          </li>
+
+          <li class="row" data-phase="ended" data-tier="mid">
+            <span class="ico">✓</span>
+            <div class="body">
+              <span class="name">prototype-review · v2</span>
+              <span class="status-text">ended · 4s ago · 247 turns</span>
+              <span class="cwd">~/coding-projects/claude-island/design</span>
+              <span class="chip">opus-4.7</span>
+            </div>
+            <span class="rate"></span>
+            <span class="cost">$5.18</span>
+          </li>
+
+        </ul>
+
+        <!-- QUOTA footer — provider chips + inline 5h / 7d figures +
+             refresh icon.  Mirrors the production UI's bottom band.
+             "5h" and "Weekly" are kept terse on purpose; the headline
+             5h gauge lives in the TODAY block above. -->
+        <div class="quota-foot">
+          <div class="lbl">Quota</div>
+          <div class="providers">
+            <button class="provider-chip" aria-pressed="true">Anthropic</button>
+            <button class="provider-add" title="Add provider">+</button>
+            <span class="figures" style="margin-left: 8px;">
+              <span class="span" data-tier="hot"><b>5h 62%</b> · 2h 14m</span>
+              <span class="sep">│</span>
+              <span class="span" data-tier="ok"><b>Weekly 41%</b> · 4d 22h</span>
+            </span>
+          </div>
+          <button class="refresh" id="btn-refresh" title="Force refresh quota">
+            <span class="ico">↻</span>
+          </button>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const island = $('.island');
+function apply(state, pending) {
+  island.dataset.state = state;
+  island.dataset.pending = pending;
+  $('#cap-pn').textContent = pending;
+  $('#cap-sub').textContent = state === 'idle' ? '· no live sessions' :
+    pending === '0' ? '· 6 active · 38% used' : `· ${pending} awaiting · 6 active`;
+  $('#head-num').textContent = state === 'idle' ? '0' : '6';
+  $('#head-verb').textContent = pending === '0' ? '· all clear' : `· ${pending} awaiting consent`;
+  $('#dec-total').textContent = pending;
+}
+document.querySelectorAll('[data-group="state"] .btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('[data-group="state"] .btn').forEach(x =>
+      x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+    apply(b.dataset.state, b.dataset.pending);
+  });
+});
+document.querySelectorAll('[data-group="theme"] .btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('[data-group="theme"] .btn').forEach(x =>
+      x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+    document.body.dataset.theme = b.dataset.theme;
+  });
+});
+
+// Refresh quota — spinning ↻ on the small footer icon.  Real wiring
+// (in PySide6) calls quota_engine.force_refresh(provider) and re-renders
+// the TODAY block + quota footer figures on completion.
+const btnR = document.getElementById('btn-refresh');
+btnR.addEventListener('click', () => {
+  if (btnR.classList.contains('spinning')) return;
+  btnR.classList.add('spinning');
+  setTimeout(() => btnR.classList.remove('spinning'), 900);
+});
+
+// Recents chip in the card header — same toggle as capsule's ⌘J badge
+// (no drawer wired up in this prototype, just shows the click target).
+const btnRec = document.getElementById('btn-recents');
+btnRec.addEventListener('click', () => {
+  // hook in real RecentsDrawer.toggle() here
+});
+</script>
+</body>
+</html>

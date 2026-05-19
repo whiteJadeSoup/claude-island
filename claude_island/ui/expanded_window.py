@@ -4120,14 +4120,21 @@ class ExpandedWindow(QWidget):
         self._summary_quota_bar.setStyleSheet(
             _STYLE_SUMMARY_PROGRESS.replace("__CHUNK__", "#4a4a4a")
         )
-        layout.addWidget(self._summary_quota_bar)
 
-        # Bar caption ("78% of 5h limit"). Hidden when quota
-        # snapshot is unavailable (matches the bar's hide).
-        # "X% of 5h limit" — bounded short, elide=False is safe.
+        # v4c: bar + percent caption on the SAME row — "▓▓▓░░░  62% of 5h"
+        # mirrors prototype-v4c-github.html's bar-row group, keeping the
+        # signal compact (one visual line carrying fill + label).
+        bar_row = QHBoxLayout()
+        bar_row.setContentsMargins(0, 0, 0, 0)
+        bar_row.setSpacing(10)
+        bar_row.addWidget(self._summary_quota_bar, 1)
         self._summary_caption = mk_label("", elide=False)
         self._summary_caption.setStyleSheet(_STYLE_USAGE_PCT)
-        layout.addWidget(self._summary_caption)
+        self._summary_caption.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        bar_row.addWidget(self._summary_caption)
+        layout.addLayout(bar_row)
 
         # ── v4c stats strip ─────────────────────────────────────────
         # Single inline row at the bottom of the TODAY card carrying
@@ -4193,12 +4200,23 @@ class ExpandedWindow(QWidget):
 
         provider_label = (self.selected_provider_name() or "anthropic").title()
         if snap is None:
-            # Subtitle still shows the provider name — gives the user
-            # something to read and signals "we know which provider
-            # we're trying to fetch" even when the fetch failed.
+            # v4c: quota fetch failed (most often: OAuth expired, no
+            # network, rate-limit on the quota endpoint itself).  Keep
+            # the bar + caption slots visible to preserve the layout —
+            # a missing row makes the card look "broken".  Render an
+            # empty bar in paper_faint + the same "quota unavailable"
+            # subtitle.
             self._summary_subtitle.setText(f"{provider_label} · quota unavailable")
-            self._summary_quota_bar.hide()
-            self._summary_caption.hide()
+            self._summary_quota_bar.setValue(0)
+            self._summary_quota_bar.setStyleSheet(
+                _STYLE_SUMMARY_PROGRESS.replace("__CHUNK__", _LabColor.rule_bright)
+            )
+            self._summary_quota_bar.show()
+            self._summary_caption.setStyleSheet(
+                f"color: {_LabColor.paper_faint}; font-size: 11px;"
+            )
+            self._summary_caption.setText("quota unavailable · sign in or hit ↻")
+            self._summary_caption.show()
             return
 
         reset = _fmt_reset(snap.five_hour_resets_at)
@@ -4232,7 +4250,14 @@ class ExpandedWindow(QWidget):
         # Show the same rounded bucket the colour was picked from so
         # the user never sees "84 % → red" or "85 % → yellow" — bar
         # value, caption, and chunk colour all read from bucket_pct.
-        self._summary_caption.setText(f"{bucket_pct}% of 5h limit{stale_marker}")
+        # v4c: caption sits on the SAME row as the bar, right-aligned.
+        # Shorter copy ("62% of 5h" not "62% of 5h limit") to fit
+        # without crowding the bar fill.
+        self._summary_caption.setText(
+            f"<b>{bucket_pct}%</b> "
+            f"<span style='color: {_LabColor.paper_faint};'>of 5h</span>"
+            f"{stale_marker}"
+        )
         self._summary_caption.show()
 
     def _render_summary_stats(self, today: "UsageTotals | None") -> None:
@@ -4264,7 +4289,13 @@ class ExpandedWindow(QWidget):
             col_num   = _LabColor.paper
             col_label = _LabColor.paper_faint
             col_sep   = _LabColor.rule_bright
+            # v4c: 4-stat strip — reqs first (number of API calls)
+            # then tokens / cache / hit.  Mirrors prototype layout:
+            # "257 reqs · 210K tokens · 128.9M cache · 99.5% hit"
+            reqs = getattr(today, "request_count", 0)
             parts = [
+                f"<span style='color:{col_num}'><b>{_fmt_tokens(reqs)}</b></span> "
+                f"<span style='color:{col_label}'>reqs</span>",
                 f"<span style='color:{col_num}'><b>{_fmt_tokens(total_tok)}</b></span> "
                 f"<span style='color:{col_label}'>tokens</span>",
                 f"<span style='color:{col_num}'><b>{_fmt_tokens(cache_tok)}</b></span> "

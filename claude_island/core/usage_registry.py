@@ -267,11 +267,17 @@ class UsageRegistry:
         """Sum tokens + recompute cost for the given rolling period.
         Backward-compatible with the SQLite version's API: same
         ``period`` strings, same ``UsageTotals`` shape.
+
+        v4c (2026-05): also reports ``request_count`` — the number of
+        UsageRecord rows in the window.  One row = one assistant
+        message = one Claude API request, so this is the count the
+        TODAY card surfaces as "N reqs".
         """
         since = _period_cutoff(period)
-        per_model = _aggregate_by_model(self._records_since(since))
+        records = self._records_since(since)
+        per_model = _aggregate_by_model(records)
 
-        totals = UsageTotals(period=period)
+        totals = UsageTotals(period=period, request_count=len(records))
         for m in per_model:
             totals.input_tokens          += m.input_tokens
             totals.output_tokens         += m.output_tokens

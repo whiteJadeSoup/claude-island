@@ -196,6 +196,12 @@ class UsageTotals:
     output_cost: float = 0.0
     cache_creation_cost: float = 0.0
     cache_read_cost: float = 0.0
+    # v4c (2026-05): request count for the period.  One UsageRecord =
+    # one Claude API request (one assistant message), so this is the
+    # length of the records list that ``UsageRegistry.get_totals``
+    # aggregated.  Surfaced in the TODAY card stats strip as
+    # "N reqs" — a key headline number alongside tokens / cache.
+    request_count: int = 0
 
     @property
     def cost_usd(self) -> float:

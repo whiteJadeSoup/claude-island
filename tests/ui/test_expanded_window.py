@@ -2841,7 +2841,13 @@ class TestSummaryCard:
         p._refresh_summary_card()
         assert p._summary_stats.text() == ""
 
-    def test_summary_hides_quota_bar_when_no_snapshot(self, qtbot):
+    def test_summary_keeps_layout_when_no_snapshot(self, qtbot):
+        """v4c: when the quota fetch fails the bar + caption stay
+        VISIBLE (empty / dim) so the card's vertical rhythm doesn't
+        collapse — a missing row would make the TODAY card look
+        broken.  v3 hid them; the v4c rule is "preserve layout, drop
+        intensity".  Subtitle + caption surface the unavailability
+        in copy."""
         from claude_island.core.models import UsageTotals
         capsule = QWidget()
         capsule.show()
@@ -2854,11 +2860,17 @@ class TestSummaryCard:
         )
         qtbot.addWidget(p); qtbot.addWidget(capsule)
         p._refresh_summary_card()
-        assert p._summary_quota_bar.isHidden()
-        assert p._summary_caption.isHidden()
-        # Subtitle still names the provider so the user can tell which
-        # provider's quota we tried (and failed) to fetch.
+        # The widgets stay visible — only their content / colour signal
+        # the unavailability.
+        assert not p._summary_quota_bar.isHidden()
+        assert not p._summary_caption.isHidden()
+        # Bar value reads zero (no fill drawn).
+        assert p._summary_quota_bar.value() == 0
+        # Subtitle still names the provider so the user can tell
+        # which provider's quota we tried (and failed) to fetch.
         assert "unavailable" in p._summary_subtitle.text().lower()
+        # Caption explains *why* and points to the recovery affordance.
+        assert "unavailable" in p._summary_caption.text().lower()
 
     def test_summary_shows_quota_bar_when_snapshot_present(self, qtbot):
         from claude_island.core.models import UsageTotals
@@ -2878,7 +2890,9 @@ class TestSummaryCard:
         assert not p._summary_quota_bar.isHidden()
         assert p._summary_quota_bar.value() == 78
         assert "78%" in p._summary_caption.text()
-        assert "5h limit" in p._summary_caption.text()
+        # v4c: caption was "78% of 5h limit" → "78% of 5h"
+        # (shorter copy so percent + label fit on the same row as the bar).
+        assert "5h" in p._summary_caption.text()
         assert "resets in" in p._summary_subtitle.text()
 
 

@@ -1,0 +1,992 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>claude · island — v4a · linear / vercel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400..600&display=swap">
+<style>
+/* ──────────────────────────────────────────────────────────────────────
+   v4a · Linear / Vercel modern product UI.
+   - Geist Sans for everything but numbers / code / paths
+   - Pure black surface + zinc neutral scale + blue primary
+   - 6-8 px radius, hover-lift rows, dot+label status pills
+   ────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* surfaces */
+  --bg:           #0a0a0a;
+  --surface:      #141414;
+  --surface-hi:   #1c1c1c;
+  --surface-hover:#1a1a1a;
+
+  /* borders */
+  --border:       #262626;
+  --border-hi:    #3a3a3a;
+
+  /* text — zinc scale */
+  --fg:           #fafafa;
+  --fg-dim:       #a1a1aa;
+  --fg-faint:     #71717a;
+  --fg-ghost:     #52525b;
+
+  /* accents */
+  --blue:         #3b82f6;          /* primary action */
+  --blue-dim:     #1e3a8a;
+
+  /* phase tints (Tailwind 400-500 family) */
+  --thinking:     #a78bfa;          /* purple-400 — "deliberating" */
+  --tool-use:     #34d399;          /* emerald-400 — "executing" */
+  --waiting:      #fb923c;          /* orange-400 — "needs you, not panic" */
+  --compacting:   #60a5fa;          /* blue-400 — "housekeeping" */
+  --idle:         #71717a;          /* zinc-500 */
+  --ended:        #52525b;          /* zinc-600 */
+
+  /* phase soft fills (for waiting row's accent strip background) */
+  --waiting-soft: rgba(251, 146, 60, 0.10);
+
+  --font-sans:    'Geist', -apple-system, system-ui, sans-serif;
+  --font-mono:    'Geist Mono', ui-monospace, 'SF Mono', monospace;
+}
+
+[data-theme="light"] {
+  --bg:           #ffffff;
+  --surface:      #f9fafb;
+  --surface-hi:   #f3f4f6;
+  --surface-hover:#f3f4f6;
+  --border:       #e5e7eb;
+  --border-hi:    #d1d5db;
+  --fg:           #18181b;
+  --fg-dim:       #52525b;
+  --fg-faint:     #71717a;
+  --fg-ghost:     #a1a1aa;
+  --blue-dim:     #93c5fd;
+  --waiting-soft: rgba(251, 146, 60, 0.12);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+.desk {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  height: 100vh;
+}
+
+/* ── left rail ────────────────────────────────────────────────────── */
+.rail {
+  padding: 24px 20px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  overflow-y: auto;
+}
+.rail h2 {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin: 18px 0 8px;
+}
+.rail h2:first-of-type { margin-top: 0; }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 18px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.brand .mark {
+  width: 26px; height: 26px;
+  background: var(--fg);
+  color: var(--bg);
+  border-radius: 6px;
+  display: grid; place-items: center;
+  font-size: 12px; font-weight: 600;
+  letter-spacing: 0;
+}
+.brand .name { font-size: 13px; font-weight: 500; letter-spacing: -0.005em; }
+.brand .ver {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-faint);
+}
+
+.btn-group { display: flex; flex-direction: column; gap: 2px; }
+.btn {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+}
+.btn:hover { background: var(--surface-hover); color: var(--fg); }
+.btn[aria-pressed="true"] {
+  background: var(--surface-hi);
+  color: var(--fg);
+}
+.btn .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--fg-ghost);
+}
+.btn[aria-pressed="true"] .dot { background: var(--blue); }
+.btn .num {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--waiting);
+}
+
+.theme-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+}
+.theme-row .btn {
+  flex: 1;
+  border-radius: 4px;
+  justify-content: center;
+  padding: 6px 0;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.note {
+  margin-top: 24px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--surface-hi);
+  font-size: 12px;
+  color: var(--fg-dim);
+  line-height: 1.5;
+  border: 1px solid var(--border);
+}
+.note b { color: var(--blue); font-weight: 500; }
+
+/* ── stage ─────────────────────────────────────────────────────────── */
+.stage {
+  padding: 32px 32px 0;
+  overflow-y: auto;
+}
+.island {
+  max-width: 620px;
+  margin: 0 auto;
+  animation: drop 0.45s cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes drop {
+  from { transform: translateY(-8px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+/* ── capsule ──────────────────────────────────────────────────────── */
+.capsule {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  height: 44px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px 10px 0 0;
+  cursor: pointer;
+  user-select: none;
+  border-bottom-color: transparent;
+}
+.capsule .mark {
+  width: 24px; height: 24px;
+  background: var(--fg);
+  color: var(--bg);
+  border-radius: 5px;
+  display: grid; place-items: center;
+  font-size: 11px; font-weight: 600;
+}
+.capsule .title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0; }
+.capsule .now {
+  font-size: 13px; font-weight: 500;
+  color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  letter-spacing: -0.005em;
+}
+.capsule .sub {
+  font-family: var(--font-mono);
+  font-size: 11px; color: var(--fg-faint);
+  letter-spacing: 0;
+}
+.capsule .pending-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 8px;
+  background: var(--waiting-soft);
+  color: var(--waiting);
+  border-radius: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.capsule .pending-chip .num { font-family: var(--font-mono); font-weight: 600; }
+.island[data-pending="0"] .capsule .pending-chip { display: none; }
+
+.capsule .shortcut {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-faint);
+}
+
+/* ── card ──────────────────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  overflow: hidden;
+}
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.card-head .lead {
+  display: flex; align-items: baseline; gap: 12px;
+}
+.card-head .lead .count {
+  font-size: 18px; font-weight: 500;
+  letter-spacing: -0.01em;
+}
+.card-head .lead .verb {
+  font-size: 13px; color: var(--fg-dim);
+}
+.card-head time {
+  font-family: var(--font-mono);
+  font-size: 11.5px; color: var(--fg-faint);
+}
+
+/* ── decision banner — appears above session list when pending ───── */
+.decision {
+  display: none;
+  margin: 14px 18px 0;
+  padding: 14px 14px 14px 16px;
+  border-radius: 8px;
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--waiting);
+}
+.island[data-pending="1"] .decision,
+.island[data-pending="3"] .decision { display: block; }
+.decision .head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 4px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+.decision .head .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--waiting);
+  box-shadow: 0 0 0 3px rgba(251,146,60,0.15);
+}
+.decision .head b {
+  font-weight: 500;
+  color: var(--fg);
+}
+.decision .head .queue {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.decision .head .queue b { color: var(--waiting); font-weight: 600; }
+.decision .body {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: end;
+}
+.decision .what {
+  font-size: 14px;
+  margin-bottom: 6px;
+  letter-spacing: -0.005em;
+}
+.decision .preview {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.decision .preview b { color: var(--waiting); font-weight: 500; }
+.decision .actions {
+  display: flex; gap: 6px; align-items: center;
+}
+.decision .actions .clock {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--waiting);
+  margin-right: 6px;
+  font-weight: 500;
+}
+.decision .actions button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 7px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-weight: 500;
+  transition: background 0.12s, border-color 0.12s;
+}
+.decision .actions button:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-hi);
+}
+.decision .actions button.allow {
+  background: var(--blue);
+  color: white;
+  border-color: var(--blue);
+}
+.decision .actions button.allow:hover { background: #2563eb; }
+.decision .actions button .key {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.12);
+  color: inherit;
+  opacity: 0.8;
+}
+.decision .actions button.allow .key { background: rgba(0,0,0,0.2); }
+
+.decision .queued-list {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.island[data-pending="1"] .decision .queued-list { display: none; }
+.decision .queued-list .label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  margin-bottom: 2px;
+}
+.decision .queued-list .mini {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  gap: 10px;
+  padding: 4px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  align-items: center;
+}
+.decision .queued-list .mini:hover { background: var(--surface-hover); }
+.decision .queued-list .mini .mini-n {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.decision .queued-list .mini .mini-name { color: var(--fg); }
+.decision .queued-list .mini .mini-meta {
+  font-family: var(--font-mono);
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
+/* ── session list ─────────────────────────────────────────────────── */
+.sessions {
+  list-style: none;
+  padding: 6px 0;
+}
+.row {
+  display: grid;
+  grid-template-columns: 30px 1fr auto;
+  gap: 14px;
+  align-items: center;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.12s;
+  cursor: pointer;
+  position: relative;
+}
+.row:last-child { border-bottom: none; }
+.row:hover { background: var(--surface-hover); }
+.row .idx {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-faint);
+  text-align: right;
+}
+.row .info { min-width: 0; }
+.row .info .name {
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+.row .info .cwd {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.row .info .meta {
+  display: flex; gap: 10px; align-items: center;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  flex-wrap: wrap;
+}
+.row .info .meta .sep { color: var(--border-hi); }
+
+/* status pill — dot + label inline */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.status .pip {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+}
+.row[data-phase="thinking"]   .status { color: var(--thinking); }
+.row[data-phase="thinking"]   .status .pip {
+  background: var(--thinking);
+  box-shadow: 0 0 0 3px rgba(167,139,250,0.18);
+  animation: pip-pulse 1.8s ease-in-out infinite;
+}
+.row[data-phase="tool_use"]   .status { color: var(--tool-use); }
+.row[data-phase="tool_use"]   .status .pip {
+  background: var(--tool-use);
+  box-shadow: 0 0 0 3px rgba(52,211,153,0.18);
+  animation: pip-pulse 1.4s ease-in-out infinite;
+}
+.row[data-phase="waiting_approval"] .status { color: var(--waiting); }
+.row[data-phase="waiting_approval"] .status .pip {
+  background: var(--waiting);
+  box-shadow: 0 0 0 3px rgba(251,146,60,0.20);
+  animation: pip-pulse 1.1s ease-in-out infinite;
+}
+.row[data-phase="compacting"] .status { color: var(--compacting); }
+.row[data-phase="compacting"] .status .pip {
+  background: var(--compacting);
+  box-shadow: 0 0 0 3px rgba(96,165,250,0.18);
+  animation: pip-pulse 2.4s ease-in-out infinite;
+}
+.row[data-phase="idle"]   .status { color: var(--idle); }
+.row[data-phase="idle"]   .status .pip { background: var(--idle); }
+.row[data-phase="ended"]  .status { color: var(--ended); }
+.row[data-phase="ended"]  .status .pip { background: var(--ended); }
+@keyframes pip-pulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.15); }
+}
+
+.row .info .meta .extra {
+  color: var(--fg-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.row .info .meta .model {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+/* right cluster: tk/min spark + cost */
+.row .right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.row .spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 18px;
+  width: 28px;
+}
+.row .spark i {
+  flex: 1;
+  background: var(--idle);
+  border-radius: 1px;
+  animation: bar 1200ms linear infinite;
+  transform-origin: bottom;
+}
+.row[data-phase="thinking"]   .spark i { background: var(--thinking); }
+.row[data-phase="tool_use"]   .spark i { background: var(--tool-use); }
+.row[data-phase="compacting"] .spark i { background: var(--compacting); }
+.row[data-phase="idle"]       .spark i,
+.row[data-phase="ended"]      .spark i,
+.row[data-phase="waiting_approval"] .spark i {
+  animation: none;
+  height: 8% !important;
+  opacity: 0.4;
+}
+.row .spark i:nth-child(1) { animation-delay: 0ms;   }
+.row .spark i:nth-child(2) { animation-delay: 240ms; }
+.row .spark i:nth-child(3) { animation-delay: 480ms; }
+.row .spark i:nth-child(4) { animation-delay: 720ms; }
+.row .spark i:nth-child(5) { animation-delay: 960ms; }
+@keyframes bar {
+  0%, 100% { height: 20%; }
+  50%      { height: 100%; }
+}
+.row .cost {
+  text-align: right;
+}
+.row .cost .num {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+}
+.row[data-flag="high"] .cost .num { color: var(--waiting); }
+.row .cost .lbl {
+  font-size: 10px;
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 1px;
+}
+
+/* WAITING ROW special — orange left border + resolve button reveal */
+.row[data-phase="waiting_approval"] {
+  background: var(--waiting-soft);
+  border-left: 3px solid var(--waiting);
+  padding-left: 15px;
+}
+.row[data-phase="waiting_approval"] .resolve {
+  position: absolute;
+  top: 50%; right: 16px;
+  transform: translateY(-50%) translateX(6px);
+  opacity: 0;
+  pointer-events: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: var(--waiting);
+  color: #1a0e00;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.2s;
+}
+.row[data-phase="waiting_approval"]:hover .resolve {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) translateX(0);
+}
+.row[data-phase="waiting_approval"]:hover .right {
+  opacity: 0.2;
+  transition: opacity 0.15s;
+}
+.row[data-phase="waiting_approval"] .countdown {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--waiting);
+}
+
+/* footer dials */
+.dials {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  padding: 16px 18px 18px;
+  border-top: 1px solid var(--border);
+}
+.dial {
+  display: flex; align-items: center; gap: 14px;
+}
+.dial .ring {
+  position: relative;
+  width: 56px; height: 56px;
+}
+.dial .ring svg { display: block; }
+.dial .ring .pct {
+  position: absolute;
+  inset: 0;
+  display: grid; place-items: center;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.dial .label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  margin-bottom: 3px;
+}
+.dial .figure {
+  font-size: 13px;
+  color: var(--fg);
+}
+.dial .figure b { font-weight: 500; }
+.dial .meta {
+  font-size: 11px;
+  color: var(--fg-faint);
+  margin-top: 1px;
+}
+
+@media (max-width: 880px) {
+  .desk { grid-template-columns: 1fr; }
+  .rail { border-right: none; border-bottom: 1px solid var(--border); }
+  .stage { padding: 24px 16px 0; }
+}
+</style>
+</head>
+<body data-theme="dark">
+<div class="desk">
+
+  <!-- LEFT RAIL -->
+  <aside class="rail">
+    <div class="brand">
+      <span class="mark">CI</span>
+      <span class="name">claude · island</span>
+      <span class="ver">v4a</span>
+    </div>
+
+    <h2>state</h2>
+    <div class="btn-group" data-group="state">
+      <button class="btn" data-state="idle" data-pending="0">
+        <span class="dot"></span> no sessions
+      </button>
+      <button class="btn" data-state="active" data-pending="0">
+        <span class="dot"></span> 6 live
+      </button>
+      <button class="btn" data-state="approval-1" data-pending="1" aria-pressed="true">
+        <span class="dot"></span> 1 awaiting <span class="num">01</span>
+      </button>
+      <button class="btn" data-state="approval-3" data-pending="3">
+        <span class="dot"></span> 3 awaiting <span class="num">03</span>
+      </button>
+    </div>
+
+    <h2>theme</h2>
+    <div class="theme-row" data-group="theme">
+      <button class="btn" data-theme="dark" aria-pressed="true">Dark</button>
+      <button class="btn" data-theme="light">Light</button>
+    </div>
+
+    <div class="note">
+      <b>v4a · Linear / Vercel.</b><br>
+      Geist sans for words, Geist mono for numbers / paths / code.
+      Status uses a small <em>dot + label</em> inline — Tailwind-tinted by phase
+      (thinking purple, tool_use emerald, waiting orange).
+    </div>
+  </aside>
+
+  <!-- STAGE -->
+  <section class="stage">
+    <div class="island" data-pending="1">
+
+      <!-- CAPSULE -->
+      <div class="capsule" id="capsule">
+        <span class="mark">CI</span>
+        <div class="title">
+          <div class="now" id="capsule-now">vibe-ipad <span style="color: var(--fg-faint); font-weight: 400;">· awaiting consent</span></div>
+          <div class="sub" id="capsule-sub">6 sessions · 38% used · 5h</div>
+        </div>
+        <span class="pending-chip">
+          <span class="num" id="capsule-pending">1</span> awaiting
+        </span>
+        <span class="shortcut">⌘J</span>
+      </div>
+
+      <!-- CARD -->
+      <div class="card">
+        <div class="card-head">
+          <div class="lead">
+            <span class="count" id="head-count">6 sessions</span>
+            <span class="verb" id="head-verb">/ 1 awaiting consent</span>
+          </div>
+          <time>21:47:32</time>
+        </div>
+
+        <!-- DECISION banner (pending only) -->
+        <div class="decision" id="decision">
+          <div class="head">
+            <span class="dot"></span>
+            <span><b>vibe-ipad</b> wants permission · PreToolUse / Bash</span>
+            <span class="queue"><b id="dec-idx">1</b> of <span id="dec-total">3</span></span>
+          </div>
+          <div class="body">
+            <div>
+              <div class="what" id="dec-what">Run a command that wipes <code>node_modules</code> before reinstalling</div>
+              <code class="preview" id="dec-preview">rm -rf node_modules &amp;&amp; <b>pnpm install --frozen-lockfile</b></code>
+            </div>
+            <div class="actions">
+              <span class="clock" id="dec-clock">1m 4s</span>
+              <button id="btn-deny">Deny <span class="key">D</span></button>
+              <button class="allow" id="btn-allow">Allow once <span class="key">A</span></button>
+            </div>
+          </div>
+          <div class="queued-list" id="dec-stack">
+            <div class="label">Queued · 2 more</div>
+            <div class="mini">
+              <span class="mini-n">02</span>
+              <span class="mini-name">claude-island · master · Write .github/workflows/ci.yml</span>
+              <span class="mini-meta">4s</span>
+            </div>
+            <div class="mini">
+              <span class="mini-n">03</span>
+              <span class="mini-name">design-review · feat/perf · Bash git push</span>
+              <span class="mini-meta">1m 4s</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- SESSION LIST -->
+        <ul class="sessions">
+
+          <li class="row" data-phase="thinking" data-flag="normal">
+            <span class="idx">01</span>
+            <div class="info">
+              <div class="name">build-mini-cc</div>
+              <div class="cwd">~/coding-projects/build-mini-cc</div>
+              <div class="meta">
+                <span class="status"><span class="pip"></span>thinking</span>
+                <span class="sep">·</span>
+                <span>turn 3</span>
+                <span class="sep">·</span>
+                <span class="extra">1.4k tk/min</span>
+                <span class="sep">·</span>
+                <span class="model">opus-4.7</span>
+              </div>
+            </div>
+            <div class="right">
+              <div class="spark"><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="cost"><div class="num">$3.42</div><div class="lbl">spend</div></div>
+            </div>
+          </li>
+
+          <li class="row" data-phase="tool_use" data-flag="high">
+            <span class="idx">02</span>
+            <div class="info">
+              <div class="name">claude-island · master</div>
+              <div class="cwd">~/coding-projects/claude-island</div>
+              <div class="meta">
+                <span class="status"><span class="pip"></span>tool_use</span>
+                <span class="sep">·</span>
+                <span>Bash · 1.2s</span>
+                <span class="sep">·</span>
+                <span class="extra">2.1k tk/min</span>
+                <span class="sep">·</span>
+                <span class="model">opus-4.7</span>
+              </div>
+            </div>
+            <div class="right">
+              <div class="spark"><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="cost"><div class="num">$11.07</div><div class="lbl">spend</div></div>
+            </div>
+          </li>
+
+          <li class="row" data-phase="waiting_approval" data-flag="normal">
+            <span class="idx">03</span>
+            <div class="info">
+              <div class="name">vibe-ipad</div>
+              <div class="cwd">~/coding-projects/open-vibe-island/ipad</div>
+              <div class="meta">
+                <span class="status"><span class="pip"></span>awaiting consent</span>
+                <span class="sep">·</span>
+                <span class="countdown">1m 4s elapsed</span>
+                <span class="sep">·</span>
+                <span class="model">sonnet-4.6</span>
+              </div>
+            </div>
+            <div class="right">
+              <div class="cost"><div class="num">$0.84</div><div class="lbl">spend</div></div>
+            </div>
+            <button class="resolve">Resolve →</button>
+          </li>
+
+          <li class="row" data-phase="compacting" data-flag="normal">
+            <span class="idx">04</span>
+            <div class="info">
+              <div class="name">design-review · feat/perf</div>
+              <div class="cwd">~/coding-projects/cc-review</div>
+              <div class="meta">
+                <span class="status"><span class="pip"></span>compacting</span>
+                <span class="sep">·</span>
+                <span>142 KB · 8s</span>
+                <span class="sep">·</span>
+                <span class="model">haiku-4.5</span>
+              </div>
+            </div>
+            <div class="right">
+              <div class="spark"><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="cost"><div class="num">$0.12</div><div class="lbl">spend</div></div>
+            </div>
+          </li>
+
+          <li class="row" data-phase="idle" data-flag="normal">
+            <span class="idx">05</span>
+            <div class="info">
+              <div class="name">notes · drafting reply</div>
+              <div class="cwd">~/Documents/notes</div>
+              <div class="meta">
+                <span class="status"><span class="pip"></span>idle</span>
+                <span class="sep">·</span>
+                <span>1h 4m</span>
+                <span class="sep">·</span>
+                <span class="model">opus-4.7</span>
+              </div>
+            </div>
+            <div class="right">
+              <div class="spark"><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="cost"><div class="num">$0.31</div><div class="lbl">spend</div></div>
+            </div>
+          </li>
+
+          <li class="row" data-phase="ended" data-flag="normal">
+            <span class="idx">06</span>
+            <div class="info">
+              <div class="name">prototype-review · v2</div>
+              <div class="cwd">~/coding-projects/claude-island/design</div>
+              <div class="meta">
+                <span class="status"><span class="pip"></span>ended</span>
+                <span class="sep">·</span>
+                <span>4s ago · 247 turns</span>
+                <span class="sep">·</span>
+                <span class="model">opus-4.7</span>
+              </div>
+            </div>
+            <div class="right">
+              <div class="spark"><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="cost"><div class="num">$5.18</div><div class="lbl">spend</div></div>
+            </div>
+          </li>
+
+        </ul>
+
+        <!-- DIALS -->
+        <div class="dials">
+          <div class="dial">
+            <div class="ring">
+              <svg viewBox="0 0 56 56" width="56" height="56">
+                <circle cx="28" cy="28" r="22" fill="none"
+                  stroke="var(--border)" stroke-width="4"/>
+                <circle cx="28" cy="28" r="22" fill="none"
+                  stroke="var(--waiting)" stroke-width="4"
+                  stroke-dasharray="138" stroke-dashoffset="52"
+                  stroke-linecap="round"
+                  transform="rotate(-90 28 28)"/>
+              </svg>
+              <span class="pct">62%</span>
+            </div>
+            <div>
+              <div class="label">5-Hour Window</div>
+              <div class="figure"><b>62%</b> used</div>
+              <div class="meta">resets in 2h 14m</div>
+            </div>
+          </div>
+          <div class="dial">
+            <div class="ring">
+              <svg viewBox="0 0 56 56" width="56" height="56">
+                <circle cx="28" cy="28" r="22" fill="none"
+                  stroke="var(--border)" stroke-width="4"/>
+                <circle cx="28" cy="28" r="22" fill="none"
+                  stroke="var(--blue)" stroke-width="4"
+                  stroke-dasharray="138" stroke-dashoffset="81"
+                  stroke-linecap="round"
+                  transform="rotate(-90 28 28)"/>
+              </svg>
+              <span class="pct">41%</span>
+            </div>
+            <div>
+              <div class="label">7-Day Window</div>
+              <div class="figure"><b>$48.20</b> / $120.00</div>
+              <div class="meta">resets Thu 18:00</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const island = $('.island');
+
+function apply(state, pending) {
+  island.dataset.state = state;
+  island.dataset.pending = pending;
+  $('#capsule-pending').textContent = pending;
+  $('#capsule-sub').textContent = state === 'idle'
+    ? '0 sessions · idle'
+    : pending === '0' ? '6 sessions · 38% used · 5h'
+                      : `6 sessions · ${pending} awaiting`;
+  $('#head-count').textContent = state === 'idle' ? '0 sessions' : '6 sessions';
+  $('#head-verb').textContent = pending === '0' ? '/ all clear' : `/ ${pending} awaiting consent`;
+  $('#dec-total').textContent = pending;
+}
+document.querySelectorAll('[data-group="state"] .btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('[data-group="state"] .btn').forEach(x =>
+      x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+    apply(b.dataset.state, b.dataset.pending);
+  });
+});
+document.querySelectorAll('[data-group="theme"] .btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('[data-group="theme"] .btn').forEach(x =>
+      x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+    document.body.dataset.theme = b.dataset.theme;
+  });
+});
+</script>
+</body>
+</html>
