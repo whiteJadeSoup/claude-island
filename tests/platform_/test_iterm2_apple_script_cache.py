@@ -311,3 +311,28 @@ class TestFocusSourceTimeoutClause:
         assert fp._PANE_SELECT_APPLESCRIPT_TIMEOUT_S == 3
         for src in (fp._FOCUS_BY_ID_SOURCE, fp._FOCUS_BY_TTY_SOURCE):
             assert "with timeout of 3 seconds" in src
+
+
+class TestFocusSourceSetsWindowIndex:
+    """I-5: ``set index of w to 1`` after ``select w`` forces iTerm's
+    z-order AND in many setups pulls the window onto the current
+    macOS Space (Mission Control). Not a full fix for cross-Space —
+    true transport requires private CGSPrivate APIs — but resolves
+    the common case where the user's preference "switch to a Space
+    with open windows" is OFF.
+
+    Must come AFTER select w (which sets the window selection inside
+    iTerm) so the index assignment doesn't get reordered behind the
+    selection change."""
+
+    def _assert_index_after_select_w(self, source: str) -> None:
+        assert "set index of w to 1" in source
+        i_select = source.index("select w")
+        i_index = source.index("set index of w to 1")
+        assert i_select < i_index
+
+    def test_by_id_source_sets_index(self):
+        self._assert_index_after_select_w(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_sets_index(self):
+        self._assert_index_after_select_w(fp._FOCUS_BY_TTY_SOURCE)

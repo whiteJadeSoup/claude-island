@@ -169,6 +169,7 @@ tell application "iTerm"
                     select s
                     select t
                     select w
+                    set index of w to 1
                     return "ok"
                 end if
             end repeat
@@ -204,6 +205,7 @@ tell application "iTerm"
                     select s
                     select t
                     select w
+                    set index of w to 1
                     return "ok"
                 end if
             end repeat

@@ -144,6 +144,18 @@ on focusByID(sessionID, hostPID)
                             select s
                             select t
                             select w
+                            -- I-5: setting index to 1 forces iTerm's
+                            -- internal z-order AND in many setups
+                            -- pulls the window onto the current Space
+                            -- when it was previously on a different
+                            -- Space (Mission Control). Not a full fix
+                            -- — true cross-Space transport requires
+                            -- private CGSPrivate APIs we don't ship —
+                            -- but resolves the common case where the
+                            -- user's preference "switch to a Space
+                            -- with open windows" is OFF and an iTerm
+                            -- window lived on another Space.
+                            set index of w to 1
                             return "ok"
                         end if
                     end repeat
@@ -170,6 +182,18 @@ on focusByTTY(targetTTY, hostPID)
                             select s
                             select t
                             select w
+                            -- I-5: setting index to 1 forces iTerm's
+                            -- internal z-order AND in many setups
+                            -- pulls the window onto the current Space
+                            -- when it was previously on a different
+                            -- Space (Mission Control). Not a full fix
+                            -- — true cross-Space transport requires
+                            -- private CGSPrivate APIs we don't ship —
+                            -- but resolves the common case where the
+                            -- user's preference "switch to a Space
+                            -- with open windows" is OFF and an iTerm
+                            -- window lived on another Space.
+                            set index of w to 1
                             return "ok"
                         end if
                     end repeat

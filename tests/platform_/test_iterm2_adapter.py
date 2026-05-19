@@ -581,6 +581,28 @@ class TestFocusScriptDeminiaturizesWindow:
         self._assert_deminiaturize_before_select_w(script)
 
 
+class TestFocusScriptSetsWindowIndex:
+    """I-5: cross-Space hint — ``set index of w to 1`` after
+    ``select w`` sometimes pulls the window onto the current macOS
+    Space. Mirror of the same regression in the fast-path templates."""
+
+    def _assert_index_after_select_w(self, script: str) -> None:
+        assert "set index of w to 1" in script
+        i_select = script.index("select w")
+        i_index = script.index("set index of w to 1")
+        assert i_select < i_index
+
+    def test_tty_template_sets_window_index(self):
+        script = _FOCUS_SCRIPT_TEMPLATE.format(host_pid=42, tty="/dev/ttys004")
+        self._assert_index_after_select_w(script)
+
+    def test_id_template_sets_window_index(self):
+        script = _FOCUS_SCRIPT_BY_ID_TEMPLATE.format(
+            host_pid=42, session_id="ABC-123",
+        )
+        self._assert_index_after_select_w(script)
+
+
 # ── Dual-iTerm host-pid resolution ──────────────────────────────────────
 
 
