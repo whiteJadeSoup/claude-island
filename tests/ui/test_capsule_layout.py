@@ -250,3 +250,103 @@ class TestDotRim:
         from claude_island.ui.capsule_window import _DOT_RIM_URGENT
         from claude_island.ui.lab_palette import Color
         assert _DOT_RIM_URGENT.name() == Color.red_warm
+
+
+class TestCapsuleAwaitingLabel:
+    """v4c: when at least one decision is awaiting consent, the capsule
+    headline names the affected session ("vibe-ipad · awaiting consent")
+    instead of falling back to the generic "N sessions" count or the
+    multi-running carousel.  Verifies the compose function the capsule
+    paints from."""
+
+    def _make(self, qtbot):
+        from claude_island.ui.controller import IslandController
+        from claude_island.ui.capsule_window import CapsuleWindow
+        cap = CapsuleWindow(IslandController())
+        qtbot.addWidget(cap)
+        return cap
+
+    def test_no_pending_falls_back_to_count(self, qtbot):
+        from claude_island.ui.capsule_window import CapsuleData
+        cap = self._make(qtbot)
+        cap._data = CapsuleData(
+            flat_count=3, running_names=(), cost_str="$28",
+            quota_pct=14,
+        )
+        # width_px=0 skips the elide step, returns raw compose
+        assert cap._compose_name_for_label(width_px=0) == "3 sessions"
+
+    def test_single_pending_names_session(self, qtbot):
+        from claude_island.ui.capsule_window import CapsuleData
+        cap = self._make(qtbot)
+        cap._data = CapsuleData(
+            flat_count=6, running_names=("a",), cost_str="$14.84",
+            quota_pct=62, awaiting_count=1, active_name="vibe-ipad",
+        )
+        text = cap._compose_name_for_label(width_px=0)
+        assert "vibe-ipad" in text
+        assert "awaiting consent" in text
+        assert "6 active" in text
+
+    def test_multi_pending_surfaces_count(self, qtbot):
+        from claude_island.ui.capsule_window import CapsuleData
+        cap = self._make(qtbot)
+        cap._data = CapsuleData(
+            flat_count=6, running_names=("a",), cost_str="$14.84",
+            quota_pct=62, awaiting_count=3, active_name="vibe-ipad",
+        )
+        text = cap._compose_name_for_label(width_px=0)
+        assert "3 awaiting consent" in text
+
+
+class TestCapsuleComputeAwaitingFields:
+    """``CapsuleData`` carries awaiting_count + active_name so the
+    capsule headline can name the session that needs consent.  Verify
+    ``compute(snap)`` populates them from snap.pending_decisions."""
+
+    def test_awaiting_count_zero_when_no_pending(self, qtbot):
+        from claude_island.core.snapshot import WorldSnapshot
+        from claude_island.ui.controller import IslandController
+        from claude_island.ui.capsule_window import CapsuleWindow
+        from datetime import datetime, timezone
+        cap = CapsuleWindow(IslandController())
+        qtbot.addWidget(cap)
+        snap = WorldSnapshot(
+            today_cost_usd=0.0, quota=None,
+            available_providers=(), selected_provider=None,
+            fetched_at=datetime.now(timezone.utc),
+            session_groups=(), dormant_sessions=(),
+            launching_sessions=(), pending_decisions=(),
+        )
+        data = cap.compute(snap)
+        assert data.awaiting_count == 0
+        assert data.active_name == ""
+
+    def test_awaiting_count_reflects_pending_decisions(self, qtbot):
+        from claude_island.core.snapshot import WorldSnapshot
+        from claude_island.core.pending_decisions import (
+            DecisionKind, PendingDecisionView, RiskLevel,
+        )
+        from claude_island.ui.controller import IslandController
+        from claude_island.ui.capsule_window import CapsuleWindow
+        from datetime import datetime, timedelta, timezone
+        cap = CapsuleWindow(IslandController())
+        qtbot.addWidget(cap)
+        pv = PendingDecisionView(
+            id="d1", kind=DecisionKind.PRE_TOOL_USE, session_uuid="u1",
+            session_name="vibe-ipad", cwd_basename="ipad",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            risk_level=RiskLevel.LOW,
+            tool_name="Bash", tool_input_preview="echo hi",
+        )
+        snap = WorldSnapshot(
+            today_cost_usd=0.0, quota=None,
+            available_providers=(), selected_provider=None,
+            fetched_at=datetime.now(timezone.utc),
+            session_groups=(), dormant_sessions=(),
+            launching_sessions=(),
+            pending_decisions=(pv,),
+        )
+        data = cap.compute(snap)
+        assert data.awaiting_count == 1
+        assert data.active_name == "vibe-ipad"

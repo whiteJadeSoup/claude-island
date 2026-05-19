@@ -240,6 +240,8 @@ class CapsuleData(NamedTuple):
     running_names: tuple[str, ...]       # names of running sessions (carousel feed)
     cost_str: str                        # "" if cost <= 0, else _fmt_money(cost)
     quota_pct: int | None                # None if no quota, else 0..100 truncated
+    awaiting_count: int = 0              # v4c: pending decisions count
+    active_name: str = ""                # v4c: most-prominent live session name
 
 # Right-click menu — v3 surface tints + mono font.  No rounded corners
 # on items (v3 reserves rounded for the wax-stamp / red shock visuals
@@ -280,6 +282,7 @@ class CapsuleWindow(QWidget):
         # doesn't AttributeError.
         self._data: CapsuleData = CapsuleData(
             flat_count=0, running_names=(), cost_str="", quota_pct=None,
+            awaiting_count=0, active_name="",
         )
         # Multi-running carousel: when ≥2 sessions are running, cycle
         # the pill text through their names every _ROTATE_INTERVAL_MS
@@ -635,11 +638,34 @@ class CapsuleWindow(QWidget):
         quota_pct = (
             int(snap.quota.five_hour_pct) if snap.quota is not None else None
         )
+        # v4c: awaiting consent count + most-prominent active name.
+        # awaiting_count drives the badge ("[1 awaiting]") on the
+        # capsule's right cluster.  active_name is the first name in
+        # priority order: waiting > running > any.  Carried so the
+        # capsule headline reads "vibe-ipad · awaiting consent" instead
+        # of the generic "3 sessions".
+        awaiting = len(snap.pending_decisions or ())
+        # Active name resolution:
+        #   1. Any session whose phase says "waiting_approval"
+        #   2. First running session name
+        #   3. First flat name (idle / ended snapshots)
+        active = ""
+        if snap.pending_decisions:
+            # Use the session name carried by the first pending decision
+            # so the capsule names the same session the user will see
+            # in the awaiting-consent row.
+            active = snap.pending_decisions[0].session_name
+        if not active and running_names:
+            active = running_names[0]
+        if not active and flat:
+            active = flat[0].name
         return CapsuleData(
             flat_count=len(flat),
             running_names=running_names,
             cost_str=cost_str,
             quota_pct=quota_pct,
+            awaiting_count=awaiting,
+            active_name=active,
         )
 
     def render(self, data: CapsuleData) -> None:
@@ -767,7 +793,26 @@ class CapsuleWindow(QWidget):
         string unchanged when it already fits, so short names pay
         no overhead and tests asserting full names in 1-running
         scenarios keep passing."""
-        if self._rotation_names:
+        # v4c: when a decision is awaiting consent, the capsule headline
+        # names that session so the user sees "vibe-ipad · awaiting
+        # consent · 6 active" rather than the generic "6 sessions" /
+        # carousel rotation.  Falls back to the v3 behaviour when no
+        # decisions are pending.
+        if self._data.awaiting_count > 0 and self._data.active_name:
+            n = self._data.awaiting_count
+            suffix = "awaiting consent"
+            count_str = "" if self._data.flat_count == 0 else (
+                f" · {self._data.flat_count} active"
+            )
+            full = f"{self._data.active_name} · {suffix}{count_str}"
+            if n > 1:
+                # Surface the multi-pending case in the headline so the
+                # user reads "3 awaiting" without having to expand.
+                full = (
+                    f"{self._data.active_name} · {n} awaiting consent"
+                    f"{count_str}"
+                )
+        elif self._rotation_names:
             idx = self._rotation_index % len(self._rotation_names)
             full = self._rotation_names[idx]
         else:
