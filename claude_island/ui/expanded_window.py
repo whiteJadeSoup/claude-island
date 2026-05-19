@@ -201,7 +201,12 @@ class _HoverRevealRow(QFrame):
         return super().leaveEvent(event)
 
 
-_PANEL_W = 400
+# v4c: panel widens from 400 to 580 to fit the prototype's column
+# layout — 6-char session names + 30-char cwd paths + status text +
+# rate + cost all on one row.  400 px was clipping at the cwd column,
+# turning every row into "review… ~/coding-proj…" which defeats the
+# whole point of the inline-cwd 2-line layout.
+_PANEL_W = 580
 # Visible gap (in px) between the capsule's bottom and the panel's top.
 # 6 px ≈ 12 physical px on Retina — small but clearly perceived.
 # The historical "6 px gap collapses to 0 visible px" bug was *not*
@@ -816,12 +821,12 @@ class _RowStatusGlyph(QWidget):
 # 52 px holds the 13 px name plus the 11 px status row with breathing
 # room top/bottom — anything shorter clipped descenders on g/y/p.
 # v4c: rows are 2-line now (name+status+cwd inline / chip+meta below).
-# Prototype paints name + status + cwd in one band; cwd elides when
-# the row narrows.  48 px matches prototype-v4c-github.html's row
-# density — earlier 56 / 68 attempts were too tall and broke the
-# table-list feel.
-_ROW_HEIGHT = 48
-_ROW_PAD_H = 12
+# Padding 8px vertical / 14px horizontal mirrors prototype's
+# .row { padding: 8px 14px } exactly.  Height 56 = 8 + ~13.5 (name)
+# + ~12 (chip line) + 8 — leaves the bottom chip row a comfortable
+# 12 px slot without clipping descenders.
+_ROW_HEIGHT = 56
+_ROW_PAD_H = 14
 
 # Activity heuristic for the row status text. Same threshold as the
 # capsule's breathing animation so "running" / "idle" reads consistently
@@ -1115,15 +1120,20 @@ _STYLE_COST_HIGH = (
 # is the model's hue at 18 % alpha so the chip reads as "tinted" against
 # the row bg without overpowering the name typography. Border shares
 # the same hue at higher alpha for legibility.
+# v4c: model chip — rounded pill (.row .body .chip in prototype CSS).
+# Subtle canvas-sub background + border-mute outline, paper_dim text.
+# Tint kept per-model via the {color} placeholder so colour-coded chips
+# still differentiate Opus / Sonnet / Haiku at a glance, but the pill
+# shape and 11 px / padding 1×7 spec mirror prototype precisely.
 _STYLE_MODEL_CHIP = (
     "QLabel {{"
     " color: {color};"
-    " background: rgba(255, 255, 255, 0);"
-    " border: 1px solid {color};"
-    " border-radius: 6px;"
-    " padding: 0px 6px;"
-    " font-size: 10px;"
-    " font-weight: 600;"
+    f" background: {_LabColor.surface};"
+    f" border: 1px solid {_LabColor.rule};"
+    " border-radius: 8px;"
+    " padding: 1px 7px;"
+    " font-size: 11px;"
+    " font-weight: 500;"
     "}}"
 )
 # Empty / unset chip: transparent border + transparent text so an empty
@@ -5599,8 +5609,8 @@ class ExpandedWindow(QWidget):
         btn.setProperty("_siblings", [])
 
         outer = QVBoxLayout(btn)
-        # v4c: tight 4 px vertical padding to match prototype density.
-        outer.setContentsMargins(_ROW_PAD_H, 4, _ROW_PAD_H, 4)
+        # v4c: 8/14 padding mirrors prototype's .row { padding: 8px 14px }.
+        outer.setContentsMargins(_ROW_PAD_H, 8, _ROW_PAD_H, 8)
         outer.setSpacing(2)
 
         # ---- top row: dot + name + cost ---------------------------------

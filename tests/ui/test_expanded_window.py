@@ -1474,7 +1474,13 @@ def test_detail_popup_cjk_long_prompt_shows_toggle(qtbot):
     from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/x")
     # User's real prompt from screenshot — 53 chars but ~439px wide.
-    long_cjk = "我已经merge了 checkout到master pull最新代码，然后把改动同步到~/.claude下"
+    # v4c: panel widened 400 → 580 so popup-inner-width grew too; the
+    # original 53-char prompt now fits.  Doubled to 100+ chars to stay
+    # over the budget under any reasonable width tweak.
+    long_cjk = (
+        "我已经merge了 checkout到master pull最新代码，然后把改动同步到~/.claude下"
+        "并且重新启动服务确认所有的功能都正常工作，包括最新的钩子和决策栈逻辑"
+    )
     details = _make_full_details(s, last_prompt=long_cjk)
     popup = SessionDetailPopup(details, _session_view(s))
     qtbot.addWidget(popup)
@@ -2323,12 +2329,12 @@ class TestRowStatusLine:
 
     def test_row_height_two_lines(self, panel):
         """v4c: 2 lines (name+status+cwd inline / chip+meta below),
-        48 px to match prototype-v4c-github.html's row density —
-        earlier 56 / 68 attempts were too tall."""
+        56 px = 8 + ~13.5 + ~12 + 8 padding/baselines.  Pinned so
+        future tweaks don't silently clip the chip or cwd line."""
         from claude_island.ui.expanded_window import _ROW_HEIGHT
         panel._render_sessions([_session(1, "/a")])
-        assert _ROW_HEIGHT == 48
-        assert panel._rows[1].height() == 48
+        assert _ROW_HEIGHT == 56
+        assert panel._rows[1].height() == 56
 
     def test_chip_visually_empty_when_no_per_model_data(self, qtbot):
         """A freshly-discovered session has no UsageRecords yet ⇒
