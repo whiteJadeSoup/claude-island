@@ -309,19 +309,25 @@ class ApprovalCard(QFrame):
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
 
+        # v4c: header reads "{session} wants permission for {tool}"
+        # — same as prototype-v4c-github.html.  Risk icon stays in the
+        # leftmost slot but the title is now a richer phrase.
         icon = QLabel(_TOOL_ICON_BY_RISK[self._view.risk_level])
         icon.setFixedWidth(18)
         header.addWidget(icon)
 
-        title = QLabel(self._view.tool_name or "(unknown tool)")
+        sess = self._view.session_name or "session"
+        tool = self._view.tool_name or "(unknown tool)"
+        title = QLabel()
         title.setObjectName("approvalCardTitle")
+        title.setTextFormat(Qt.TextFormat.RichText)
+        title.setText(
+            f"<span style='font-weight:600'>{sess}</span> "
+            f"<span style='color:{_C.paper_dim}'>wants permission for</span> "
+            f"<span style='font-weight:600'>{tool}</span>"
+        )
         title.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-        # stretch=1 so a long tool name eats remaining space and pushes
-        # the session badge to the right edge.
         header.addWidget(title, 1)
-
-        badge = self._build_session_badge()
-        header.addWidget(badge)
 
         self._chevron = QLabel(_CHEVRON_COLLAPSED)
         self._chevron.setObjectName("approvalCardChevron")

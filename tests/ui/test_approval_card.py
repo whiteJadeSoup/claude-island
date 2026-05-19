@@ -139,25 +139,31 @@ def test_low_risk_hides_warning_label(app):
 # ── Title / preview surfaces correct fields ───────────────────────────
 
 
-def test_title_shows_tool_name(app):
+def test_title_shows_tool_name_and_session(app):
+    """v4c: title is the full phrase "{session} wants permission for
+    {tool}" (matches prototype-v4c-github.html's decision banner
+    header) instead of just the bare tool name + a separate badge."""
     from PySide6.QtWidgets import QLabel
     from claude_island.ui.approval_card import ApprovalCard
     card = ApprovalCard(_view(tool="Edit"))
     app.addWidget(card)
     title = card.findChild(QLabel, "approvalCardTitle")
-    assert title.text() == "Edit"
+    text = title.text()
+    assert "Edit" in text
+    assert "my-session" in text
+    assert "wants permission" in text
 
 
-def test_session_name_shown_in_badge(app):
-    """v2: session lives in its own badge widget (with the accent
-    dot), no longer concatenated into the title."""
+def test_session_badge_removed_in_v4c(app):
+    """v4c collapsed the session badge widget into the title text.
+    The separate approvalCardSessionBadge label no longer exists in
+    the widget tree."""
     from PySide6.QtWidgets import QLabel
     from claude_island.ui.approval_card import ApprovalCard
     card = ApprovalCard(_view(tool="Edit"))
     app.addWidget(card)
     badge = card.findChild(QLabel, "approvalCardSessionBadge")
-    assert badge is not None
-    assert "my-session" in badge.text()
+    assert badge is None
 
 
 def test_preview_starts_folded_and_toggles_on_request(app):
