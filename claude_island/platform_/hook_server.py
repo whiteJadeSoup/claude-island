@@ -613,22 +613,41 @@ class HookServer:
         return b"{}"
 
     def _handle_stop(self, payload: dict) -> None:
-        """Push a NotifyEvent for Stop / StopFailure. Non-blocking;
-        caller writes "{}" immediately so Claude Code never waits on
-        the notification path."""
-        if self._notify is None:
-            return
+        """Push a NotifyEvent for Stop / StopFailure and evict any
+        orphan pending decisions for this session.
+
+        Eviction reason: when the user Esc-interrupts a tool whose
+        PermissionRequest is still blocked in ``_handle_permission_request``
+        (waiting on the UI), Claude Code kills the hook.py subprocess
+        but does NOT send a follow-up PostToolUseFailure /
+        PermissionDenied that ``_maybe_mark_resolved_by_post`` could
+        match on. The only signal we still get is this Stop / StopFailure
+        marking the turn end — at which point any remaining pending
+        entry for this session is an orphan we must clear so the UI
+        card doesn't sit stale for the full 598 s wait timeout.
+
+        Both writes are best-effort: the registry is the second concern,
+        so a notify-queue None must not block eviction and vice versa.
+        Non-blocking either way; caller writes "{}" immediately so
+        Claude Code never waits on this path.
+        """
         uuid = _safe_str(payload.get("session_id"))
         if not uuid:
             return
         cwd = _safe_path(payload.get("cwd"))
         is_failure = payload.get("hook_event_name") == "StopFailure"
-        self._notify.push(make_turn_complete(
-            session_uuid=uuid,
-            session_name=self._resolve_session_name(uuid, cwd),
-            cwd_basename=cwd.name or "session",
-            is_failure=is_failure,
-        ))
+        if self._notify is not None:
+            self._notify.push(make_turn_complete(
+                session_uuid=uuid,
+                session_name=self._resolve_session_name(uuid, cwd),
+                cwd_basename=cwd.name or "session",
+                is_failure=is_failure,
+            ))
+        if self._pending is not None:
+            try:
+                self._pending.evict_session_pending(uuid)
+            except Exception:
+                log.exception("evict_session_pending raised; ignored")
 
     def _handle_session_end(self, payload: dict) -> None:
         """Evict the SessionPermissionCache entries for the ending session.

@@ -404,6 +404,45 @@ class PendingDecisionRegistry:
         )
         return True
 
+    def evict_session_pending(self, session_uuid: str) -> int:
+        """Drop every pending entry belonging to ``session_uuid``.
+
+        Used by HookServer when Claude Code reports the turn ended
+        (Stop / StopFailure) — at that point any still-pending
+        PermissionRequest is an orphan (the user Esc-interrupted the
+        tool, so Claude killed the blocking hook.py subprocess but never
+        sent a PostToolUseFailure or PermissionDenied that
+        ``mark_externally_resolved_by_tool`` could match on).
+
+        Like ``mark_externally_resolved_by_tool``, this attaches no
+        Decision — the waiting server thread sees ``entry.decision is
+        None`` and HookServer encodes that as ``"defer"`` (a no-op on
+        the wire by the time it gets back to Claude, since the tool was
+        already cancelled). The value here is letting the UI card
+        disappear immediately instead of waiting out the 598 s timeout.
+
+        Returns count dropped. No-op when ``session_uuid`` is empty so
+        a malformed Stop payload can't accidentally evict everything.
+        """
+        if not session_uuid:
+            return 0
+        with self._lock:
+            to_drop = [
+                did for did, e in self._entries.items()
+                if not e.event.is_set() and e.request.session_uuid == session_uuid
+            ]
+            for did in to_drop:
+                entry = self._entries.pop(did)
+                entry.event.set()
+        # decision stays None on each — wait() returns None → defer
+        if to_drop:
+            self._on_change()
+            log.info(
+                "evicted %d pending decision(s) for session %s on turn end",
+                len(to_drop), session_uuid,
+            )
+        return len(to_drop)
+
     # ── UI-thread API (called from AppBackend.resolve_decision) ─────────
 
     def resolve(self, decision_id: str, decision: Decision) -> bool:

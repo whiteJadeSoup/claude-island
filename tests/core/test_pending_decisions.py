@@ -705,6 +705,111 @@ class TestMarkExternallyResolved:
         assert ok is True
 
 
+# ── evict_session_pending — turn-end orphan cleanup ──────────────────
+
+
+class TestEvictSessionPending:
+    """The Esc-interrupt path: Claude Code kills hook.py for a blocked
+    PermissionRequest but only signals turn end via Stop / StopFailure
+    (no PostToolUse / PermissionDenied). Stop handler must evict the
+    orphan, or the UI card sits stale for ~598 s."""
+
+    def test_evicts_all_pending_for_session(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        a = _req(session_uuid="u1", tool_use_id="tu_a", tool_name="Bash")
+        b = _req(session_uuid="u1", tool_use_id="tu_b", tool_name="Edit")
+        c = _req(session_uuid="u2", tool_use_id="tu_c", tool_name="Bash")
+        registry.register(a)
+        registry.register(b)
+        registry.register(c)
+
+        dropped = registry.evict_session_pending("u1")
+
+        assert dropped == 2
+        # u2 entry untouched
+        assert tuple(v.id for v in registry.snapshot()) == (c.id,)
+
+    def test_wait_returns_None_after_evict(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        """The whole point: a thread parked in wait() must wake up
+        immediately, not after the full timeout. Same shape as the
+        externally-resolved test — mirrors what HookServer's server
+        thread sees on the turn-end path."""
+        req = _req(timeout_s=5.0, session_uuid="u1", tool_use_id="tu_x")
+        registry.register(req)
+
+        def _evictor():
+            time.sleep(0.05)
+            registry.evict_session_pending("u1")
+
+        t = threading.Thread(target=_evictor)
+        t.start()
+        result = registry.wait(req.id, timeout_s=5.0)
+        t.join(timeout=1.0)
+        # decision stays None — encoded as defer by HookServer
+        assert result is None
+
+    def test_fires_on_change_exactly_once_per_call(
+        self,
+        registry: PendingDecisionRegistry,
+        changes: list[int],
+    ):
+        a = _req(session_uuid="u1", tool_use_id="tu_a")
+        b = _req(session_uuid="u1", tool_use_id="tu_b")
+        registry.register(a)
+        registry.register(b)
+        baseline = len(changes)
+        registry.evict_session_pending("u1")
+        # one callback regardless of how many entries dropped — the UI
+        # only needs to refresh once per turn-end event
+        assert len(changes) == baseline + 1
+
+    def test_no_op_when_no_match(
+        self,
+        registry: PendingDecisionRegistry,
+        changes: list[int],
+    ):
+        # Different session — must not touch anything.
+        a = _req(session_uuid="u1", tool_use_id="tu_a")
+        registry.register(a)
+        baseline = len(changes)
+        dropped = registry.evict_session_pending("u-other")
+        assert dropped == 0
+        # No spurious on_change for a no-op call.
+        assert len(changes) == baseline
+        assert registry.snapshot() != ()
+
+    def test_empty_session_uuid_is_no_op(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        """Defensive: a malformed Stop payload with session_id="" must
+        not evict the whole registry."""
+        a = _req(session_uuid="u1", tool_use_id="tu_a")
+        registry.register(a)
+        dropped = registry.evict_session_pending("")
+        assert dropped == 0
+        assert len(registry.snapshot()) == 1
+
+    def test_already_resolved_entries_left_alone(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        """If the UI resolved it but wait() hasn't popped yet (a small
+        race window), evict_session_pending must not double-process."""
+        req = _req(session_uuid="u1", tool_use_id="tu_a")
+        registry.register(req)
+        registry.resolve(req.id, Decision(result=DecisionResult.ALLOW))
+        # entry.event is set but still in _entries — that's the race
+        dropped = registry.evict_session_pending("u1")
+        # already-resolved entries skipped (the wait() side will pop it)
+        assert dropped == 0
+
+
 # ── PROMPT-flavoured projection ──────────────────────────────────────
 
 

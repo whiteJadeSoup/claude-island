@@ -816,6 +816,149 @@ class TestStop:
         events = notify_queue.snapshot()
         assert events[0].kind is NotifyKind.TURN_FAILED
 
+    def test_stop_evicts_orphan_permission_request(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        """User Esc-interrupt path: a PermissionRequest is blocked waiting
+        for the UI, then Claude kills hook.py and emits Stop (no PostToolUse
+        / PermissionDenied because the tool never executed). The Stop
+        handler must evict the orphan so the UI card disappears and the
+        blocked POST thread unwinds with defer instead of waiting out 598s."""
+        srv, port = server
+        responses: dict = {}
+
+        def _send():
+            try:
+                status, body = _post(port, {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "u-esc",
+                    "tool_name": "AskUserQuestion",
+                    "tool_input": {
+                        "questions": [{
+                            "question": "pick one",
+                            "header": "Hdr",
+                            "options": [
+                                {"label": "A", "description": "first"},
+                                {"label": "B", "description": "second"},
+                            ],
+                        }],
+                    },
+                    "tool_use_id": "tu_esc_1",
+                    "cwd": "/tmp/proj",
+                }, timeout=15.0)
+                responses["status"] = status
+                responses["body"] = body
+            except Exception as e:
+                responses["error"] = repr(e)
+
+        perm_thread = threading.Thread(target=_send, daemon=True)
+        perm_thread.start()
+
+        # Wait for the entry to land.
+        for _ in range(60):
+            if registry.snapshot():
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("PermissionRequest never registered pending")
+
+        # Fire Stop — the user just Esc'd. No PostToolUse / PermissionDenied.
+        status, body = _post(port, {
+            "hook_event_name": "Stop",
+            "session_id": "u-esc",
+            "cwd": "/tmp/proj",
+        })
+        assert status == 200
+        assert body == {}
+
+        # Blocked thread unwinds quickly (not in 598 s).
+        perm_thread.join(timeout=3.0)
+        assert not perm_thread.is_alive(), "PermissionRequest still blocking after Stop"
+        assert responses["body"]["hookSpecificOutput"]["permissionDecision"] == "defer"
+        # Card gone from the snapshot.
+        assert registry.snapshot() == ()
+
+    def test_stopfailure_also_evicts_orphan(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        srv, port = server
+        responses: dict = {}
+
+        def _send():
+            try:
+                _, body = _post(port, {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "u-fail",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "echo hi"},
+                    "tool_use_id": "tu_fail",
+                    "cwd": "/tmp/proj",
+                }, timeout=15.0)
+                responses["body"] = body
+            except Exception as e:
+                responses["error"] = repr(e)
+
+        t = threading.Thread(target=_send, daemon=True)
+        t.start()
+        for _ in range(60):
+            if registry.snapshot():
+                break
+            time.sleep(0.05)
+
+        _post(port, {
+            "hook_event_name": "StopFailure",
+            "session_id": "u-fail",
+            "cwd": "/tmp/proj",
+        })
+        t.join(timeout=3.0)
+        assert not t.is_alive()
+        assert registry.snapshot() == ()
+
+    def test_stop_for_different_session_does_not_evict(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        """Cross-session safety: Stop on session A must not touch
+        session B's pending entries."""
+        srv, port = server
+        responses: dict = {}
+
+        def _send():
+            try:
+                _, body = _post(port, {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "u-keep",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "echo hi"},
+                    "tool_use_id": "tu_keep",
+                    "cwd": "/tmp/proj",
+                }, timeout=15.0)
+                responses["body"] = body
+            except Exception as e:
+                responses["error"] = repr(e)
+
+        t = threading.Thread(target=_send, daemon=True)
+        t.start()
+        for _ in range(60):
+            if registry.snapshot():
+                break
+            time.sleep(0.05)
+
+        # Stop for an unrelated session.
+        _post(port, {
+            "hook_event_name": "Stop",
+            "session_id": "u-other",
+            "cwd": "/tmp/proj",
+        })
+        time.sleep(0.1)
+        # Still blocked — entry preserved.
+        assert t.is_alive()
+        assert len(registry.snapshot()) == 1
+
+        # Clean up so the test doesn't leave a hung thread behind.
+        snap = registry.snapshot()
+        registry.resolve(snap[0].id, Decision(result=DecisionResult.ALLOW))
+        t.join(timeout=3.0)
+
 
 # ── SessionEnd → cache eviction (T3.7) ───────────────────────────────
 
