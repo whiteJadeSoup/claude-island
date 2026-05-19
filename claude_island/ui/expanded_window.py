@@ -5429,15 +5429,16 @@ class ExpandedWindow(QWidget):
         btn._phase_icon = phase_icon
         top.addWidget(phase_icon)
 
-        # Status glyph slot — kept for the wave animation (now lives on
-        # the RIGHT side of the row, next to the rate / cost — see
-        # below).  Sized 0×0 to preserve existing _status_glyph hooks
-        # on the row object without inflating the left slot.  Old
-        # callers reaching btn._status_glyph still work.
+        # Status glyph — the 5-bar wave that signals "this session is
+        # actively producing tokens".  v4c moves it from the leftmost
+        # slot (where v3 put it) to a position adjacent to the cost
+        # number on the top row — same right-side spot where the
+        # prototype paints it next to "1.4k tk/min".  Stays mounted on
+        # the row object as ``btn._status_glyph`` so existing
+        # set_phase / capabilities dispatch hooks keep working.
         status_glyph = _RowStatusGlyph(btn)
         status_glyph.setFixedHeight(_ROW_HEIGHT - 12)
         status_glyph.set_idle_visible(False)
-        status_glyph.setVisible(False)  # v4c: wave moved out of left slot
         btn._status_glyph = status_glyph
 
         # _ElidingLabel: project names / AI titles are user-supplied
@@ -5471,6 +5472,13 @@ class ExpandedWindow(QWidget):
             f"color: {_LabColor.paper_dim}; font-size: 11px;"
         )
         top.addWidget(status_inline)
+
+        # v4c: wave glyph immediately before the cost number — that's
+        # where prototype-v4c-github.html paints "live signal next to
+        # live number".  Glyph is the same instance bound above as
+        # btn._status_glyph (so set_phase / set_running still flip it);
+        # we just attach it to a different layout slot here than v3 did.
+        top.addWidget(status_glyph)
 
         # Right-side meta slot. Shows cumulative session cost ("$XX.XX").
         # elide=False: cost strings are bounded short, eliding right-
