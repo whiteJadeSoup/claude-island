@@ -589,6 +589,31 @@ class TestFocusScriptDeminiaturizesWindow:
         self._assert_deminiaturize_before_select_w(script)
 
 
+class TestFocusScriptRaceTolerance:
+    """Regression: subprocess focus AppleScripts now wrap the iTerm
+    tell in retry-twice + try so a session/tab/window vanishing
+    mid-iteration (errAEIllegalIndex -1719) is absorbed rather than
+    surfacing as a focus failure."""
+
+    def _assert_retry_wraps_iterm_tell(self, script: str) -> None:
+        assert "repeat 2 times" in script
+        assert "on error" in script
+        i_repeat = script.index("repeat 2 times")
+        i_iterm = script.index('tell application "iTerm"')
+        i_on_error = script.index("on error")
+        assert i_repeat < i_iterm < i_on_error
+
+    def test_tty_template_wraps_in_retry(self):
+        script = _FOCUS_SCRIPT_TEMPLATE.format(host_pid=42, tty="/dev/ttys004")
+        self._assert_retry_wraps_iterm_tell(script)
+
+    def test_id_template_wraps_in_retry(self):
+        script = _FOCUS_SCRIPT_BY_ID_TEMPLATE.format(
+            host_pid=42, session_id="ABC-123",
+        )
+        self._assert_retry_wraps_iterm_tell(script)
+
+
 class TestFocusScriptSetsWindowIndex:
     """I-5: cross-Space hint — ``set index of w to 1`` after
     ``select w`` sometimes pulls the window onto the current macOS

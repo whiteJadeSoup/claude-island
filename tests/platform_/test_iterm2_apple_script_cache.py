@@ -313,6 +313,46 @@ class TestFocusSourceTimeoutClause:
             assert "with timeout of 3 seconds" in src
 
 
+class TestFocusSourceRaceTolerance:
+    """Regression: iTerm's ``repeat with x in collection`` could
+    raise ``errAEIllegalIndex (-1719)`` when sessions/tabs/windows
+    closed mid-iteration. Caller's _try_handler would call
+    ``cache.note_failure`` on the error; after 3 such failures the
+    cached compiled handler was invalidated and recompiled — wasted
+    work because the script was fine, only iTerm's runtime state
+    was racy.
+
+    The new scripts wrap the iTerm tell in ``try`` + ``repeat 2 times``
+    so transient races are absorbed (one retry catches the typical
+    case) and persistent failures return "miss" rather than raising,
+    so the cache failure counter isn't tripped spuriously."""
+
+    def _assert_retry_wraps_iterm_tell(self, source: str) -> None:
+        # Retry loop must come BEFORE the iTerm tell block and the
+        # on-error clause must come AFTER, wrapping the entire scan.
+        assert "repeat 2 times" in source
+        assert "on error" in source
+        i_repeat = source.index("repeat 2 times")
+        i_iterm = source.index('tell application "iTerm"')
+        i_on_error = source.index("on error")
+        i_end_repeat = source.rindex("end repeat")
+        assert i_repeat < i_iterm, (
+            "retry must wrap the iTerm tell; got repeat at {} iterm at {}".format(
+                i_repeat, i_iterm,
+            )
+        )
+        assert i_iterm < i_on_error < i_end_repeat, (
+            "on error must catch the iTerm scan and live inside the "
+            "retry loop"
+        )
+
+    def test_by_id_source_wraps_in_retry_try(self):
+        self._assert_retry_wraps_iterm_tell(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_wraps_in_retry_try(self):
+        self._assert_retry_wraps_iterm_tell(fp._FOCUS_BY_TTY_SOURCE)
+
+
 class TestFocusSourceSelectOrder:
     """I-8: broadest-scope first ordering (window → tab → session).
     iTerm's ``select`` mutates state on each call; if we did window

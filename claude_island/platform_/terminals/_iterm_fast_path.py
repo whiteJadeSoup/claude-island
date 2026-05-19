@@ -138,43 +138,59 @@ on focusByID(sessionID, hostPID)
         tell application "System Events"
             set frontmost of (first process whose unix id is (hostPID as integer)) to true
         end tell
-        tell application "iTerm"
-            repeat with w in windows
-                repeat with t in tabs of w
-                    repeat with s in sessions of t
-                        if (id of s as text) is sessionID then
-                            set miniaturized of w to false
-                            -- I-8: broadest-scope first ordering
-                            -- (window → tab → session). iTerm's
-                            -- ``select`` mutates state on each call;
-                            -- doing window last would mean an extra
-                            -- z-order change after we've already
-                            -- selected the right session and tab.
-                            -- Most-precise selection ends last so it
-                            -- wins regardless of what ``select w``
-                            -- might do to the in-tab selection.
-                            select w
-                            select t
-                            select s
-                            -- I-5: setting index to 1 forces iTerm's
-                            -- internal z-order AND in many setups
-                            -- pulls the window onto the current Space
-                            -- when it was previously on a different
-                            -- Space (Mission Control). Not a full fix
-                            -- — true cross-Space transport requires
-                            -- private CGSPrivate APIs we don't ship —
-                            -- but resolves the common case where the
-                            -- user's preference "switch to a Space
-                            -- with open windows" is OFF and an iTerm
-                            -- window lived on another Space.
-                            set index of w to 1
-                            return "ok"
-                        end if
+        -- Outer retry-twice + try guards against errAEIllegalIndex
+        -- (-1719) when iTerm's window/tab/session collection changes
+        -- mid-iteration (a pane closes, a user resizes a split). The
+        -- error fires on dereference of a now-stale reference inside
+        -- ``repeat with x in collection``. Most races resolve within
+        -- microseconds, so one retry catches the typical case. If
+        -- both attempts race, we return "miss" — the caller treats
+        -- this as a normal not-found (no cache failure increment),
+        -- which avoids the spurious invalidate-and-recompile cycle.
+        repeat 2 times
+            try
+                tell application "iTerm"
+                    repeat with w in windows
+                        repeat with t in tabs of w
+                            repeat with s in sessions of t
+                                if (id of s as text) is sessionID then
+                                    set miniaturized of w to false
+                                    -- I-8: broadest-scope first
+                                    -- (window → tab → session). iTerm's
+                                    -- ``select`` mutates state on each
+                                    -- call; doing window last would mean
+                                    -- an extra z-order change after we'd
+                                    -- already selected the right session
+                                    -- and tab. Most-precise selection
+                                    -- ends last so it wins regardless of
+                                    -- what ``select w`` did to the
+                                    -- in-tab selection.
+                                    select w
+                                    select t
+                                    select s
+                                    -- I-5: setting index to 1 forces
+                                    -- iTerm's internal z-order AND in
+                                    -- many setups pulls the window onto
+                                    -- the current Space when it was on
+                                    -- a different Space. Not a full fix
+                                    -- — true cross-Space transport needs
+                                    -- private CGSPrivate APIs — but
+                                    -- resolves the common case where the
+                                    -- user's "switch to a Space with
+                                    -- open windows" pref is OFF.
+                                    set index of w to 1
+                                    return "ok"
+                                end if
+                            end repeat
+                        end repeat
                     end repeat
-                end repeat
-            end repeat
-            return "miss"
-        end tell
+                    return "miss"
+                end tell
+            on error errMsg number errNum
+                -- transient race; retry once before giving up
+            end try
+        end repeat
+        return "miss"
     end timeout
 end focusByID
 """.format(timeout=_PANE_SELECT_APPLESCRIPT_TIMEOUT_S)
@@ -185,43 +201,35 @@ on focusByTTY(targetTTY, hostPID)
         tell application "System Events"
             set frontmost of (first process whose unix id is (hostPID as integer)) to true
         end tell
-        tell application "iTerm"
-            repeat with w in windows
-                repeat with t in tabs of w
-                    repeat with s in sessions of t
-                        if (tty of s) is targetTTY then
-                            set miniaturized of w to false
-                            -- I-8: broadest-scope first ordering
-                            -- (window → tab → session). iTerm's
-                            -- ``select`` mutates state on each call;
-                            -- doing window last would mean an extra
-                            -- z-order change after we've already
-                            -- selected the right session and tab.
-                            -- Most-precise selection ends last so it
-                            -- wins regardless of what ``select w``
-                            -- might do to the in-tab selection.
-                            select w
-                            select t
-                            select s
-                            -- I-5: setting index to 1 forces iTerm's
-                            -- internal z-order AND in many setups
-                            -- pulls the window onto the current Space
-                            -- when it was previously on a different
-                            -- Space (Mission Control). Not a full fix
-                            -- — true cross-Space transport requires
-                            -- private CGSPrivate APIs we don't ship —
-                            -- but resolves the common case where the
-                            -- user's preference "switch to a Space
-                            -- with open windows" is OFF and an iTerm
-                            -- window lived on another Space.
-                            set index of w to 1
-                            return "ok"
-                        end if
+        -- See focusByID for the retry-twice + try rationale: iTerm's
+        -- collection can change mid-iteration and raise -1719; retry
+        -- catches the typical race, and on persistent failure we
+        -- return "miss" so the cache failure counter isn't tripped
+        -- spuriously.
+        repeat 2 times
+            try
+                tell application "iTerm"
+                    repeat with w in windows
+                        repeat with t in tabs of w
+                            repeat with s in sessions of t
+                                if (tty of s) is targetTTY then
+                                    set miniaturized of w to false
+                                    select w
+                                    select t
+                                    select s
+                                    set index of w to 1
+                                    return "ok"
+                                end if
+                            end repeat
+                        end repeat
                     end repeat
-                end repeat
-            end repeat
-            return "miss"
-        end tell
+                    return "miss"
+                end tell
+            on error errMsg number errNum
+                -- transient race; retry once before giving up
+            end try
+        end repeat
+        return "miss"
     end timeout
 end focusByTTY
 """.format(timeout=_PANE_SELECT_APPLESCRIPT_TIMEOUT_S)

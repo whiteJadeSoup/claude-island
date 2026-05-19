@@ -160,23 +160,37 @@ _FOCUS_SCRIPT_TEMPLATE = """\
 tell application "System Events"
     set frontmost of (first process whose unix id is {host_pid}) to true
 end tell
-tell application "iTerm"
-    repeat with w in windows
-        repeat with t in tabs of w
-            repeat with s in sessions of t
-                if tty of s is "{tty}" then
-                    set miniaturized of w to false
-                    select w
-                    select t
-                    select s
-                    set index of w to 1
-                    return "ok"
-                end if
+-- Retry-twice + try guards against iTerm's
+-- ``errAEIllegalIndex`` (-1719) when a session/tab/window vanishes
+-- mid-iteration of ``repeat with x in collection``. Most races
+-- resolve within microseconds, so one retry catches the typical
+-- case. Persistent failure returns "miss" — the subprocess caller
+-- treats this as not-found and falls through to focus_host_app
+-- instead of mis-attributing the race as a focus failure.
+repeat 2 times
+    try
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if tty of s is "{tty}" then
+                            set miniaturized of w to false
+                            select w
+                            select t
+                            select s
+                            set index of w to 1
+                            return "ok"
+                        end if
+                    end repeat
+                end repeat
             end repeat
-        end repeat
-    end repeat
-    return "miss"
-end tell
+            return "miss"
+        end tell
+    on error errMsg number errNum
+        -- transient iTerm state race; retry once before giving up
+    end try
+end repeat
+return "miss"
 """
 
 # Same shape as _FOCUS_SCRIPT_TEMPLATE but matches by stable session id
@@ -196,23 +210,31 @@ _FOCUS_SCRIPT_BY_ID_TEMPLATE = """\
 tell application "System Events"
     set frontmost of (first process whose unix id is {host_pid}) to true
 end tell
-tell application "iTerm"
-    repeat with w in windows
-        repeat with t in tabs of w
-            repeat with s in sessions of t
-                if (id of s as text) is "{session_id}" then
-                    set miniaturized of w to false
-                    select w
-                    select t
-                    select s
-                    set index of w to 1
-                    return "ok"
-                end if
+-- See _FOCUS_SCRIPT_TEMPLATE for retry-twice rationale.
+repeat 2 times
+    try
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if (id of s as text) is "{session_id}" then
+                            set miniaturized of w to false
+                            select w
+                            select t
+                            select s
+                            set index of w to 1
+                            return "ok"
+                        end if
+                    end repeat
+                end repeat
             end repeat
-        end repeat
-    end repeat
-    return "miss"
-end tell
+            return "miss"
+        end tell
+    on error errMsg number errNum
+        -- transient iTerm state race; retry once before giving up
+    end try
+end repeat
+return "miss"
 """
 
 
