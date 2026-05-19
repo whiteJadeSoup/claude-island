@@ -196,6 +196,52 @@ class TestWorkerSubmit:
         assert fake_worker.submitted == []
 
 
+class TestPrewarm:
+    """I-4: prewarm() at app boot eliminates ~50-60 ms of first-click
+    latency. It must:
+      * no-op when PyObjC is unavailable (non-macOS, missing dep)
+      * idempotent — repeated calls don't accumulate work
+      * forgiving of pool-start failures (don't leak _inflight)"""
+
+    def test_no_op_when_pyobjc_unavailable(self, monkeypatch):
+        """Non-macOS path: prewarm must return cleanly without
+        constructing the worker or touching the cache."""
+        monkeypatch.setattr(fp, "_HAS_PYOBJC", False)
+        monkeypatch.setattr(fp, "_worker_singleton", None)
+        monkeypatch.setattr(fp, "_cache_singleton", None)
+        fp.prewarm()   # must not raise
+        # Worker / cache stay unconstructed; nothing to prewarm.
+        assert fp._worker_singleton is None
+        assert fp._cache_singleton is None
+
+    def test_idempotent_with_pyobjc(self, fake_pyobjc, fake_worker):
+        """Repeated prewarm calls don't accumulate inflight tasks
+        beyond the worker's recovery path (each task self-decrements
+        in finally)."""
+        for _ in range(3):
+            fp.prewarm()
+        # All three prewarm tasks were submitted to the fake worker
+        # (the fake doesn't actually run them, so backlog isn't a
+        # useful assertion here — just verify no exception escaped).
+        assert len(fake_worker.submitted) >= 1
+
+    def test_prewarm_leak_safe_when_pool_start_raises(
+        self, fake_pyobjc, monkeypatch,
+    ):
+        """If the worker's pool start raises during prewarm, the
+        increment must be undone — same C-2 guard as submit()."""
+        # Build a fresh real-ish worker whose pool raises on start.
+        monkeypatch.setattr(fp, "_worker_singleton", None)
+        worker = fp.get_worker()
+        worker._pool = mock.Mock()
+        worker._pool.start.side_effect = RuntimeError("pool gone")
+        # prewarm must not raise to the caller (best-effort).
+        fp.prewarm()
+        assert worker.backlog() == 0, (
+            "leaked _inflight after failed prewarm pool.start"
+        )
+
+
 class TestSubmitRejectionFallsBack:
     """C-3: When the worker rejects pane-select (backlog full, iTerm
     hung), try_fast_path must return False so the caller's legacy

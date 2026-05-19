@@ -1070,6 +1070,20 @@ except Exception as _e:
         "wt fast-path prewarm skipped: %s", _e,
     )
 
+# Pre-warm the iTerm2 focus fast path: PyObjC cold import (~30 ms),
+# QThreadPool construction (~5-15 ms), and the two NSAppleScript
+# handler compiles (~5-10 ms each). All paid at boot so the first
+# click lands within Goal G1 (~1 ms main-thread return). No-op on
+# non-macOS / when PyObjC is unavailable.
+try:
+    from claude_island.platform_.terminals import _iterm_fast_path as _it_fp
+    _it_fp.prewarm()
+except Exception as _e:
+    import logging as _logging
+    _logging.getLogger(__name__).debug(
+        "iterm fast-path prewarm skipped: %s", _e,
+    )
+
 
 def _bootstrap_session_discovery() -> None:
     """Background-thread bootstrap for the session pipeline.

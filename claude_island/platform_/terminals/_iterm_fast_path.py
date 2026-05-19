@@ -682,6 +682,73 @@ def try_fast_path(
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Prewarm — sibling of _wt_fast_path.prewarm()
+# ─────────────────────────────────────────────────────────────────────
+
+
+def prewarm() -> None:
+    """Pre-import PyObjC, construct the worker pool, and compile the
+    cached NSAppleScript handlers at app startup.
+
+    First-click latency was the most user-visible perf surface:
+      * ``_ensure_pyobjc`` cold imports AppKit + Foundation (~30 ms)
+      * ``get_worker()`` constructs QThreadPool (~5-15 ms)
+      * ``AppleScriptCache.get_*_handler`` compiles each handler the
+        first time it's invoked (~5-10 ms apiece)
+
+    All ~50-60 ms of that would otherwise land on the user's first
+    click — the moment they're judging whether Island works. Running
+    it ahead of time at boot moves that latency off the click path.
+    No-op on non-macOS (``_ensure_pyobjc`` returns False) and on
+    repeated calls (cache singletons are idempotent).
+
+    Safe from any thread; we use the worker pool for the AppleScript
+    compile so NSAppleScript stays single-threaded — same contract as
+    real pane-select tasks."""
+    if not _ensure_pyobjc():
+        return
+    # Touch the worker singleton so its QThreadPool is constructed
+    # ahead of the first real click.
+    worker = get_worker()
+    # Submit a no-op task that just warms the AppleScript handlers on
+    # the worker thread (NSAppleScript is not thread-safe, so compile
+    # must happen on the same single thread that later runs execute).
+    # Reuse submit() so the lock + leak guard live in one place — the
+    # PaneSelectTask type hint is just a docstring; submit() runs any
+    # QRunnable with the worker conventions. Submit failure here is
+    # already handled by submit's C-2 guard.
+    task = _PrewarmTask()
+    try:
+        worker.submit(task)
+    except Exception as e:
+        log.warning("iTerm fast-path prewarm: submit failed: %s", e)
+
+
+class _PrewarmTask(QRunnable):
+    """Tiny task that compiles the AppleScript handlers on the worker
+    thread so they're ready before the first real click. Sibling of
+    ``_wt_fast_path._PrewarmTask``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._worker: FocusWorker | None = None
+
+    def run(self) -> None:
+        try:
+            cache = get_cache()
+            # Trigger lazy compile on both handlers — each costs ~5-10 ms,
+            # both negligible on a warm worker thread.
+            cache.get_id_handler()
+            cache.get_tty_handler()
+            log.debug("iTerm fast-path prewarm: handlers compiled")
+        except Exception as e:
+            log.warning("iTerm fast-path prewarm failed: %s", e)
+        finally:
+            if self._worker is not None:
+                self._worker._on_task_done()
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Testing hooks
 # ─────────────────────────────────────────────────────────────────────
 
