@@ -366,25 +366,17 @@ class StackedDecisionsPanel(QWidget):
         self._overflow_label = None
 
     def _build_header(self, total: int) -> QWidget:
+        # v4c: hide the all-caps "PENDING DECISIONS [N]" header that v3
+        # rendered above the active card.  Prototype-v4c-github.html
+        # puts the decision card directly under the sessions list with
+        # no parent caption — the orange left border + "X of Y" pill
+        # inside the card already signal "this is a decision queue".
+        # The widget is kept (so tests that reach for _header_widget
+        # still compile) but its content is empty and the layout
+        # collapses to zero height.
         host = QWidget()
-        layout = QHBoxLayout(host)
-        layout.setContentsMargins(0, 0, 0, 8)
-        layout.setSpacing(6)
-
-        label = QLabel(_HEADER_LABEL)
-        label.setObjectName("stackedDecisionsHeader")
-        layout.addWidget(label)
-
-        badge = QLabel(str(total))
-        badge.setObjectName("stackedDecisionsBadge")
-        layout.addWidget(badge)
-
-        layout.addStretch(1)
-
-        counter = QLabel(_COUNTER_TEMPLATE.format(queued=max(0, total - 1)))
-        counter.setObjectName("stackedDecisionsCounter")
-        layout.addWidget(counter)
-
+        host.setVisible(False)
+        host.setFixedHeight(0)
         self._header_widget = host
         return host
 

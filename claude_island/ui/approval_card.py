@@ -131,9 +131,10 @@ ResolveCallback = Callable[[str, Decision], None]
 # (the user is rejecting something).
 _CARD_QSS = f"""
 QFrame#approvalCard {{
-    background-color: {_C.surface};
+    background-color: rgba(219, 109, 40, 0.08);
     border-radius: 4px;
-    border: 1px solid {_C.rule};
+    border: 1px solid rgba(219, 109, 40, 0.30);
+    border-left: 3px solid {_C.red_warm};
 }}
 QFrame#approvalCardTopBar {{
     border-top-left-radius: 4px;
@@ -177,33 +178,31 @@ QLabel#approvalCardWarning {{
     letter-spacing: 0.02em;
 }}
 QPushButton#approvalAllow {{
-    background-color: {_C.paper};
-    color: {_C.ink};
-    border-radius: 0;
+    background-color: {_C.phosphor};
+    color: #062911;
+    border-radius: 6px;
     padding: 7px {_BUTTON_PADDING_H_PX}px;
-    font-family: {_F.mono_stack};
     font-size: 12px;
     font-weight: 600;
-    letter-spacing: 0.08em;
-    border: 1px solid {_C.paper};
+    letter-spacing: 0.02em;
+    border: 1px solid {_C.phosphor};
 }}
 QPushButton#approvalAllow:hover {{
-    background-color: {_C.amber};
-    border-color: {_C.amber};
+    background-color: #4ec766;
+    border-color: #4ec766;
 }}
 QPushButton#approvalDeny {{
-    background-color: transparent;
-    color: {_C.red_warm};
-    border-radius: 0;
+    background-color: {_C.ink};
+    color: {_C.paper};
+    border-radius: 6px;
     padding: 7px 12px;
-    font-family: {_F.mono_stack};
     font-size: 12px;
-    letter-spacing: 0.08em;
-    border: 1px solid {_C.red_warm_dim};
+    letter-spacing: 0.02em;
+    border: 1px solid {_C.rule_bright};
 }}
 QPushButton#approvalDeny:hover {{
-    background-color: {_C.red_warm_dim};
-    color: {_C.paper};
+    background-color: {_C.surface_hi};
+    border-color: {_C.rule_active};
 }}
 QCheckBox#approvalRemember {{
     color: {_C.paper_dim};

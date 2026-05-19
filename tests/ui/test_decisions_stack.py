@@ -147,29 +147,26 @@ def test_mixed_kinds_active_is_first_kind(app):
 # ── header ─────────────────────────────────────────────────────────────
 
 
-def test_header_shows_total_count_badge(app):
-    from PySide6.QtWidgets import QLabel
+def test_header_collapsed_in_v4c(app):
+    """v4c removed the all-caps "PENDING DECISIONS [N] · M queued"
+    header that v3 rendered above the active card.  The widget is
+    kept around (as a 0-height invisible placeholder) so callers /
+    tests that find _header_widget keep compiling, but it no longer
+    paints anything."""
     from claude_island.ui.decisions_stack import StackedDecisionsPanel
 
     panel = StackedDecisionsPanel(on_resolve=lambda *a: None)
     app.addWidget(panel)
     panel.render(tuple(_approval_view(i) for i in range(1, 4)))
-    badge = panel.findChild(QLabel, "stackedDecisionsBadge")
-    assert badge is not None
-    assert badge.text() == "3"
-
-
-def test_header_counter_excludes_active(app):
-    """'decide one at a time · N queued' counts views behind the head."""
+    header = panel._header_widget
+    assert header is not None
+    assert header.height() == 0
+    # The old stackedDecisionsBadge / stackedDecisionsCounter children
+    # are gone in v4c — they were the badge text/counter inside the
+    # collapsed header.
     from PySide6.QtWidgets import QLabel
-    from claude_island.ui.decisions_stack import StackedDecisionsPanel
-
-    panel = StackedDecisionsPanel(on_resolve=lambda *a: None)
-    app.addWidget(panel)
-    panel.render(tuple(_approval_view(i) for i in range(1, 5)))
-    counter = panel.findChild(QLabel, "stackedDecisionsCounter")
-    assert counter is not None
-    assert "3 queued" in counter.text()
+    assert panel.findChild(QLabel, "stackedDecisionsBadge") is None
+    assert panel.findChild(QLabel, "stackedDecisionsCounter") is None
 
 
 # ── resolve plumbing ───────────────────────────────────────────────────
