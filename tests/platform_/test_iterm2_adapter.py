@@ -695,6 +695,109 @@ class TestITermHostPidResolution:
             fha.assert_called_once_with(10)
 
 
+class TestStaleTerminalPidValidation:
+    """C-1: Hook-captured ``jump_target.terminal_pid`` is frozen at
+    SessionStart. By click time iTerm may have restarted (pid dead)
+    or, worse, macOS may have recycled the pid to a different UI app
+    (Slack, Mail). Trusting the stale pid silently steals focus.
+
+    ``_resolve_host_pid`` now validates the cached pid via
+    ``_pid_is_iterm`` (psutil name check) before trusting it; otherwise
+    falls back to the runtime ancestor walk on the live claude pid.
+    """
+
+    @staticmethod
+    def _view_with_terminal_pid(
+        claude_pid: int, terminal_pid: int,
+    ):
+        from dataclasses import replace as _replace
+        from claude_island.core.hook_events import JumpTarget
+        v = _view(pid=claude_pid)
+        return _replace(
+            v,
+            jump_target=JumpTarget(
+                terminal_app="iTerm.app",
+                term_program="iTerm.app",
+                iterm_session_id="",
+                terminal_pid=terminal_pid,
+            ),
+        )
+
+    def test_resolve_host_pid_trusts_terminal_pid_when_still_iterm(self):
+        """Common case: hook captured pid, iTerm is still that pid →
+        return the cached pid directly without runtime walk."""
+        adapter = adapter_for_test()
+        v = self._view_with_terminal_pid(claude_pid=10, terminal_pid=999)
+        # _pid_is_iterm returns True (process still alive and named iTerm).
+        with mock.patch(
+            "claude_island.platform_.terminals.iterm2._pid_is_iterm",
+            return_value=True,
+        ) as is_iterm:
+            assert adapter._resolve_host_pid(v, v.jump_target) == 999
+            is_iterm.assert_called_once_with(999)
+
+    def test_resolve_host_pid_falls_back_when_terminal_pid_recycled(self):
+        """If the cached pid is no longer iTerm (process died and
+        macOS recycled the pid to Slack), fall back to the runtime
+        walk on the live claude pid instead of trusting the stale pid.
+
+        Critical: without this, NSRunningApplication.activate(stale_pid)
+        would foreground Slack when the user clicked an iTerm session.
+        """
+        adapter = adapter_for_test()
+        v = self._view_with_terminal_pid(claude_pid=10, terminal_pid=999)
+        with (
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._pid_is_iterm",
+                return_value=False,   # stale: pid is now non-iTerm
+            ) as is_iterm,
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._iterm_host_pid",
+                return_value=12345,
+            ) as walk,
+        ):
+            assert adapter._resolve_host_pid(v, v.jump_target) == 12345
+            is_iterm.assert_called_once_with(999)
+            walk.assert_called_once_with(10)   # walk on live claude pid
+
+    def test_pid_is_iterm_true_for_iterm_process(self):
+        """Direct unit: live process whose name matches the iTerm
+        ancestor set returns True."""
+        from claude_island.platform_.terminals.iterm2 import _pid_is_iterm
+        fake = mock.Mock()
+        fake.name.return_value = "iTerm2"
+        with mock.patch("psutil.Process", return_value=fake):
+            assert _pid_is_iterm(999) is True
+
+    def test_pid_is_iterm_false_for_recycled_pid_now_non_iterm(self):
+        """Recycled pid: process exists but its name is something
+        else (Slack, Mail). Must NOT be trusted."""
+        from claude_island.platform_.terminals.iterm2 import _pid_is_iterm
+        fake = mock.Mock()
+        fake.name.return_value = "Slack"
+        with mock.patch("psutil.Process", return_value=fake):
+            assert _pid_is_iterm(999) is False
+
+    def test_pid_is_iterm_false_when_process_dead(self):
+        """psutil.NoSuchProcess → False (no Python exception escapes)."""
+        import psutil
+        from claude_island.platform_.terminals.iterm2 import _pid_is_iterm
+        with mock.patch(
+            "psutil.Process",
+            side_effect=psutil.NoSuchProcess(pid=999),
+        ):
+            assert _pid_is_iterm(999) is False
+
+    def test_pid_is_iterm_false_for_zero_and_negative(self):
+        """Defensive: pid <= 0 short-circuits to False without
+        touching psutil."""
+        from claude_island.platform_.terminals.iterm2 import _pid_is_iterm
+        with mock.patch("psutil.Process") as p:
+            assert _pid_is_iterm(0) is False
+            assert _pid_is_iterm(-1) is False
+            p.assert_not_called()
+
+
 def adapter_for_test() -> ITerm2Adapter:
     """Adapter instance for the dual-iTerm regression tests.
     Bypasses the @adapter registry so the tests run on any OS."""

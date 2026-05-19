@@ -414,9 +414,26 @@ class ITerm2Adapter(_CapabilityProvider):
 
         Prefers hook-captured ``jump_target.terminal_pid``; falls back
         to the runtime ancestor walk. Returns None when neither yields
-        a valid pid (placeholder session, no iTerm ancestor)."""
+        a valid pid (placeholder session, no iTerm ancestor).
+
+        The hook-captured pid is **liveness-checked** before being
+        trusted: macOS recycles pids, and the captured pid is frozen
+        at SessionStart time. If iTerm restarted (or the user just
+        kept the row alive across reboots), the captured pid may now
+        belong to a *different* UI app — activating it would silently
+        focus Slack / Mail / etc. instead of iTerm. We require the
+        process to still exist AND its name to match the iTerm
+        ancestor set; otherwise we fall through to the runtime walk
+        which always derives the host from the live claude pid."""
         if jt is not None and getattr(jt, "terminal_pid", 0) > 0:
-            return int(jt.terminal_pid)  # type: ignore[attr-defined]
+            pid = int(jt.terminal_pid)  # type: ignore[attr-defined]
+            if _pid_is_iterm(pid):
+                return pid
+            log.info(
+                "iterm2: jt.terminal_pid=%d no longer iTerm "
+                "(recycled or app restart); falling back to runtime walk",
+                pid,
+            )
         if view.session.pid > 0:
             return _iterm_host_pid(view.session.pid)
         return None
@@ -633,6 +650,35 @@ def _focus_by_tty(tty: str, *, host_pid: int) -> bool:
     if result.returncode != 0:
         return False
     return result.stdout.decode("utf-8", errors="replace").strip() == "ok"
+
+
+def _pid_is_iterm(pid: int) -> bool:
+    """True iff ``pid`` is alive AND its process name matches the iTerm
+    ancestor set.
+
+    Used by :meth:`ITerm2Adapter._resolve_host_pid` to validate
+    hook-captured ``terminal_pid`` before trusting it. Without this,
+    a recycled pid that now belongs to a non-iTerm UI app (Slack, etc.)
+    silently steals focus when the user clicks the row.
+
+    psutil-only — no AppleScript, so cheap (~0.1 ms) and safe to call
+    from the Qt main thread at click time. False on any psutil failure
+    (process gone, access denied, psutil missing): the caller falls
+    through to the runtime ancestor walk, which always derives from
+    the live claude pid."""
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+    except ImportError:
+        # No psutil → caller should fall through to runtime walk
+        # (which also bails without psutil). Match that behaviour by
+        # refusing to trust the cached pid here.
+        return False
+    try:
+        return psutil.Process(pid).name().lower() in _ITERM2_ANCESTOR_NAMES
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
 
 
 def _iterm_host_pid(claude_pid: int) -> int | None:
