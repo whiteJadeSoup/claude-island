@@ -212,3 +212,46 @@ class TestPaneSelectTaskIntegration:
                 fresh_worker._pool.waitForDone(2000)
         assert any("_PaneSelectTask raised" in r.message for r in caplog.records)
         assert fresh_worker.backlog() == 0
+
+
+class TestSubmitInflightLeak:
+    """C-2: ``_pool.start(task)`` can raise (pool shut down, Qt internal
+    corruption). The increment happens BEFORE start, so without the
+    decrement-on-exception guard the counter leaks forever — driving
+    backlog up to BACKLOG_REJECT and silently breaking pane-select
+    until app restart."""
+
+    def test_inflight_decrements_when_pool_start_raises(self, fresh_worker):
+        """If _pool.start raises, backlog must NOT leak. The exception
+        re-raises so the caller knows submit didn't actually queue."""
+        fake_pool = mock.Mock()
+        fake_pool.start.side_effect = RuntimeError("pool gone")
+        fresh_worker._pool = fake_pool
+        task = fp._PaneSelectTask(host_pid=1, session_id="x", tty=None)
+
+        assert fresh_worker.backlog() == 0
+        with pytest.raises(RuntimeError, match="pool gone"):
+            fresh_worker.submit(task)
+        # Counter conserved — leak fixed.
+        assert fresh_worker.backlog() == 0
+
+    def test_repeated_start_failures_dont_block_future_submits(
+        self, fresh_worker,
+    ):
+        """Without the fix, 10 failed submits would saturate the counter
+        at BACKLOG_REJECT and every subsequent submit would silently
+        return False — even after the pool recovered. Verify the
+        counter stays at 0 across many failures so submission can
+        recover the moment the pool starts working again."""
+        fake_pool = mock.Mock()
+        fake_pool.start.side_effect = RuntimeError("flake")
+        fresh_worker._pool = fake_pool
+
+        for _ in range(fp.FocusWorker.BACKLOG_REJECT + 5):
+            task = fp._PaneSelectTask(host_pid=1, session_id="x", tty=None)
+            with pytest.raises(RuntimeError):
+                fresh_worker.submit(task)
+
+        assert fresh_worker.backlog() == 0, (
+            "leak: counter should still be 0 after every failed start"
+        )

@@ -371,7 +371,19 @@ class FocusWorker:
         task._worker = self
         with self._counter_lock:
             self._inflight += 1
-        self._pool.start(task)
+        # If _pool.start raises (e.g. pool already shut down, Qt
+        # internal corruption), the increment above would leak forever
+        # because _on_task_done never fires for a task that never
+        # started. Decrement + re-raise so the counter is conserved.
+        # Without this guard, repeated failures drive _inflight up to
+        # BACKLOG_REJECT and every subsequent click silently drops
+        # pane select — only restart fixes it.
+        try:
+            self._pool.start(task)
+        except Exception:
+            with self._counter_lock:
+                self._inflight = max(0, self._inflight - 1)
+            raise
         return True
 
     def _on_task_done(self) -> None:
