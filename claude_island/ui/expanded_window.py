@@ -3448,6 +3448,12 @@ class ExpandedWindow(QWidget):
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(8)
 
+        # ── v4c top header bar — mirrors the prototype's nameplate at
+        # the very top of the expanded card:
+        #   [CI] vibe-ipad · awaiting consent · 6 active   [N awaiting] [⌘J]
+        self._top_header = self._build_top_header_bar()
+        root.addWidget(self._top_header)
+
         # ── Focus summary (Tier 1: at-a-glance headline) ────────────
         # Big "today" dollar value paired with a single 5h quota bar —
         # the two numbers a user most often opens the panel to check.
@@ -3697,6 +3703,9 @@ class ExpandedWindow(QWidget):
         the dedicated top panel sidesteps the clip entirely.
         """
         self._latest_snap = snap
+        # v4c top header bar reads pending_decisions + session_groups
+        # to compose the "vibe-ipad · awaiting consent · 6 active" line.
+        self._refresh_top_header(snap)
         self._pending_panel.render(snap.pending_decisions)
         self._render_session_groups(snap.session_groups)
         self._render_cards()
@@ -4036,6 +4045,155 @@ class ExpandedWindow(QWidget):
     # ------------------------------------------------------------------
     # Focus summary (Tier 1 headline)
     # ------------------------------------------------------------------
+
+    def _build_top_header_bar(self) -> QFrame:
+        """v4c expanded card's top nameplate row.
+
+        Layout (mirrors prototype-v4c-github.html):
+
+           ┌────────────────────────────────────────────────────────┐
+           │ [CI] vibe-ipad · awaiting consent · 6 active           │
+           │                                  [3 awaiting] [⌘J]    │
+           └────────────────────────────────────────────────────────┘
+
+        Left cluster:
+          - CI mono logo chip (16×16, ink bg + paper fg)
+          - active session name (paper, bold)
+          - status text (paper_dim) — phase descriptor or "N active"
+
+        Right cluster:
+          - awaiting pill (orange) — only renders when >0
+          - ⌘J chip (rule outline, links to recents drawer)
+        """
+        bar = QFrame()
+        bar.setObjectName("top_header_bar")
+        bar.setStyleSheet(
+            f"QFrame#top_header_bar {{"
+            f"  background: transparent;"
+            f"  border-bottom: 1px solid {_LabColor.rule};"
+            f"}}"
+        )
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(0, 0, 0, 8)
+        lay.setSpacing(10)
+
+        # CI monogram chip.
+        logo = QLabel("CI")
+        logo.setFixedSize(22, 22)
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo.setStyleSheet(
+            f"QLabel {{"
+            f"  background: {_LabColor.ink};"
+            f"  color: {_LabColor.paper};"
+            f"  border: 1px solid {_LabColor.rule};"
+            f"  border-radius: 4px;"
+            f"  font-size: 10px; font-weight: 700;"
+            f"  letter-spacing: 0.06em;"
+            f"}}"
+        )
+        lay.addWidget(logo)
+
+        # Active session name + status text — both in one rich label.
+        self._top_title = _ElasticRichLabel("")
+        self._top_title.setStyleSheet(
+            f"font-size: 13px; color: {_LabColor.paper}; "
+            f"font-weight: 600;"
+        )
+        self._top_title.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
+        )
+        lay.addWidget(self._top_title, 1)
+
+        # Awaiting pill (orange).  Hidden when count == 0.
+        self._top_awaiting_pill = QLabel("")
+        self._top_awaiting_pill.setStyleSheet(
+            f"QLabel {{"
+            f"  background: {_LabColor.red_warm};"
+            f"  color: #1a0e00;"
+            f"  border-radius: 100px;"
+            f"  padding: 3px 10px;"
+            f"  font-size: 11px;"
+            f"  font-weight: 600;"
+            f"}}"
+        )
+        self._top_awaiting_pill.setVisible(False)
+        lay.addWidget(self._top_awaiting_pill)
+
+        # ⌘J chip — opens the recents drawer (same handler the
+        # _recents_chip uses farther down the panel).
+        self._top_jjk_chip = QPushButton("⌘J")
+        self._top_jjk_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._top_jjk_chip.setFixedHeight(24)
+        self._top_jjk_chip.setStyleSheet(
+            f"QPushButton {{"
+            f"  background: transparent;"
+            f"  color: {_LabColor.paper_dim};"
+            f"  border: 1px solid {_LabColor.rule};"
+            f"  border-radius: 4px;"
+            f"  padding: 0 8px;"
+            f"  font-size: 11px;"
+            f"  font-family: {FontStack.mono_stack};"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  color: {_LabColor.paper};"
+            f"  border-color: {_LabColor.rule_bright};"
+            f"}}"
+        )
+        self._top_jjk_chip.clicked.connect(self._on_recents_chip_clicked)
+        lay.addWidget(self._top_jjk_chip)
+
+        return bar
+
+    def _refresh_top_header(self, snap: "WorldSnapshot | None") -> None:
+        """Repopulate the top header bar from the current snapshot.
+
+        Active name resolution priority:
+          1. First pending decision's session_name (loudest signal)
+          2. First running session's name
+          3. First session in the list (idle case)
+          4. Empty (cold start)
+        """
+        flat: list = []
+        if snap is not None:
+            flat = [v for g in snap.session_groups for v in g.views]
+        pending = list(snap.pending_decisions or ()) if snap is not None else []
+        running = [v for v in flat if getattr(v, "is_running", False)]
+        running_count = len(running)
+
+        if pending:
+            active_name = pending[0].session_name
+            n = len(pending)
+            status_word = "awaiting consent" if n == 1 else f"{n} awaiting consent"
+        elif running:
+            active_name = running[0].name
+            status_word = "live"
+        elif flat:
+            active_name = flat[0].name
+            status_word = "idle"
+        else:
+            active_name = ""
+            status_word = "no live sessions"
+
+        active_suffix = f" · {running_count} active" if running_count else ""
+        if active_name:
+            self._top_title.setText(
+                f"<span style='color: {_LabColor.paper}; font-weight: 600;'>"
+                f"{active_name}</span>"
+                f"<span style='color: {_LabColor.paper_dim};'>"
+                f" · {status_word}{active_suffix}</span>"
+            )
+        else:
+            self._top_title.setText(
+                f"<span style='color: {_LabColor.paper_dim};'>"
+                f"{status_word}</span>"
+            )
+
+        n_awaiting = len(pending)
+        if n_awaiting > 0:
+            self._top_awaiting_pill.setText(f"{n_awaiting} awaiting")
+            self._top_awaiting_pill.setVisible(True)
+        else:
+            self._top_awaiting_pill.setVisible(False)
 
     def _build_summary_card(self) -> QFrame:
         """Top focus summary — the panel's "what's the headline?" tier.
