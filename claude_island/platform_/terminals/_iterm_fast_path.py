@@ -47,6 +47,7 @@ _NSRunningApplication: Any = None
 _NSApplicationActivateIgnoringOtherApps: int | None = None
 _NSAppleScript: Any = None
 _NSAppleEventDescriptor: Any = None
+_NSWorkspace: Any = None
 
 
 def _ensure_pyobjc() -> bool:
@@ -57,7 +58,7 @@ def _ensure_pyobjc() -> bool:
     False and logs once — caller falls back to the subprocess path.
     """
     global _HAS_PYOBJC, _NSRunningApplication, _NSApplicationActivateIgnoringOtherApps
-    global _NSAppleScript, _NSAppleEventDescriptor
+    global _NSAppleScript, _NSAppleEventDescriptor, _NSWorkspace
 
     if _HAS_PYOBJC is not None:
         return _HAS_PYOBJC
@@ -66,6 +67,7 @@ def _ensure_pyobjc() -> bool:
         from AppKit import (  # type: ignore[import-not-found]
             NSRunningApplication,
             NSApplicationActivateIgnoringOtherApps,
+            NSWorkspace,
         )
         from Foundation import (  # type: ignore[import-not-found]
             NSAppleEventDescriptor,
@@ -80,6 +82,7 @@ def _ensure_pyobjc() -> bool:
     _NSApplicationActivateIgnoringOtherApps = NSApplicationActivateIgnoringOtherApps
     _NSAppleScript = NSAppleScript
     _NSAppleEventDescriptor = NSAppleEventDescriptor
+    _NSWorkspace = NSWorkspace
     _HAS_PYOBJC = True
     return True
 
@@ -620,6 +623,55 @@ def _build_subroutine_event(handler_name: str, arg: str, host_pid: int) -> Any:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Activation verification — see I-6
+# ─────────────────────────────────────────────────────────────────────
+
+
+# Total wall-clock budget for verify_frontmost. Three polls of 10 ms
+# each balances "activate is async on Sonoma+; give it room to complete"
+# against "Goal G1 wants main-thread return ~1 ms on success" (the
+# success path returns on the first poll, so this only adds latency on
+# failure paths that were going to take ~250 ms anyway).
+_VERIFY_POLL_INTERVAL_S = 0.01
+_VERIFY_POLL_COUNT = 3
+
+
+def _verify_app_now_frontmost(app: Any, host_pid: int) -> bool:
+    """True iff the running app actually became active within the
+    poll budget.
+
+    macOS 14+ Sonoma deprecation: ``activateWithOptions_`` is a
+    request, not a synchronous transition. The OS may silently refuse
+    the request (caller not active, stale activation rights) and still
+    return True. The visible foreground app stays the same.
+
+    Use the NSRunningApplication's own ``isActive`` property —
+    cheaper than NSWorkspace.frontmostApplication (no workspace
+    lookup; just reads the cached property on the wrapper we already
+    have). False here is the signal for the caller to fall through to
+    the legacy subprocess osascript path, which uses System Events
+    ``set frontmost`` — different API, runs with Accessibility
+    privilege, not subject to the same demotion rules.
+
+    ``host_pid`` is accepted for diagnostic-logging callers and unused
+    in the check itself (the app object IS the host).
+    """
+    del host_pid  # parameter retained for future-proof logging
+    if app is None:
+        return False
+    for _ in range(_VERIFY_POLL_COUNT):
+        try:
+            if app.isActive():
+                return True
+        except Exception:
+            # Defensive: if isActive raises (PyObjC bridge oddity),
+            # fall through to legacy rather than treat as success.
+            return False
+        time.sleep(_VERIFY_POLL_INTERVAL_S)
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Main entry point
 # ─────────────────────────────────────────────────────────────────────
 
@@ -665,6 +717,28 @@ def try_fast_path(
         log.warning("NSRunningApplication.activate raised: %s", e)
         return False
     if not ok:
+        return False
+
+    # I-6: On macOS 14+ Sonoma, ``activateWithOptions_`` is deprecated
+    # and can return True without actually activating — when the caller
+    # isn't currently the active app (or has stale activation rights),
+    # the OS silently demotes the request. Without verification we'd
+    # report success and skip the legacy fallback, leaving the user on
+    # the previous app.
+    #
+    # Verify via NSWorkspace.frontmostApplication. Brief poll because
+    # activation is asynchronous — Apple's docs describe it as a
+    # request, and on a quiet machine it transitions within one
+    # event-loop tick. 3 × 10 ms covers the typical transition without
+    # blowing past Goal G1 on the success path (most calls return
+    # True on the first poll, so cost ≈ one syscall).
+    if not _verify_app_now_frontmost(app, host_pid):
+        log.info(
+            "iterm2 fast-path: activate(host=%d) reported True but "
+            "app.isActive remained False; falling back to legacy "
+            "subprocess osascript path",
+            host_pid,
+        )
         return False
 
     # Host raised — schedule pane select if any identifying signal.

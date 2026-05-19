@@ -19,14 +19,21 @@ from claude_island.platform_.terminals import _iterm_fast_path as fp
 
 
 class _FakeNSRunningApp:
-    """Mimics NSRunningApplication for fast-path activation tests."""
+    """Mimics NSRunningApplication for fast-path activation tests.
+
+    ``is_active_result`` simulates the I-6 post-condition: even when
+    activate returns True, the OS may not actually have transitioned
+    the app on macOS 14+ Sonoma. False here means "activate lied" and
+    triggers the legacy fallback."""
 
     def __init__(self, *, activate_result: bool = True,
-                 raise_on_activate: bool = False) -> None:
+                 raise_on_activate: bool = False,
+                 is_active_result: bool = True) -> None:
         self.activate_result = activate_result
         self.raise_on_activate = raise_on_activate
         self.activate_call_count = 0
         self.activate_options_seen: int | None = None
+        self.is_active_result = is_active_result
 
     def activateWithOptions_(self, options):
         self.activate_call_count += 1
@@ -34,6 +41,9 @@ class _FakeNSRunningApp:
         if self.raise_on_activate:
             raise RuntimeError("fake objc error")
         return self.activate_result
+
+    def isActive(self) -> bool:
+        return self.is_active_result
 
 
 class _FakeNSRunningApplicationClass:
@@ -65,8 +75,12 @@ class _FakeWorker:
 
 @pytest.fixture
 def fake_pyobjc(monkeypatch):
-    """Mark PyObjC available and install fake NSRunningApplication."""
-    fake_app = _FakeNSRunningApp(activate_result=True)
+    """Mark PyObjC available and install fake NSRunningApplication.
+    The fake app reports isActive()=True by default so the I-6
+    post-activate verifier sees success; tests that simulate the
+    deprecated-activate-lie pass ``is_active_result=False`` on a
+    custom _FakeNSRunningApp instance."""
+    fake_app = _FakeNSRunningApp(activate_result=True, is_active_result=True)
     fake_class = _FakeNSRunningApplicationClass({99999: fake_app, 88888: None})
     monkeypatch.setattr(fp, "_HAS_PYOBJC", True)
     monkeypatch.setattr(fp, "_NSRunningApplication", fake_class)
@@ -194,6 +208,60 @@ class TestWorkerSubmit:
         ok = fp.try_fast_path(host_pid=99999, session_id="", tty="")
         assert ok is True
         assert fake_worker.submitted == []
+
+
+class TestActivateLieDetection:
+    """I-6: On macOS 14+ Sonoma, ``activateWithOptions_`` is deprecated
+    and can return True without actually activating. Verify via
+    ``app.isActive()`` (a property on the NSRunningApplication wrapper
+    we already have) that the transition happened. On mismatch,
+    return False so the caller's legacy subprocess osascript path
+    (which uses System Events `set frontmost`) takes over — that path
+    is not subject to the same demotion rules."""
+
+    def test_returns_false_when_app_did_not_become_active(
+        self, fake_pyobjc, fake_worker, monkeypatch,
+    ):
+        """activate returned True but app.isActive remained False.
+        The 'lie' case: return False so legacy fallback fires."""
+        # Override the fake app to lie: activate succeeds but the OS
+        # never actually transitioned (isActive stays False).
+        lying_app = _FakeNSRunningApp(
+            activate_result=True, is_active_result=False,
+        )
+        monkeypatch.setattr(
+            fp, "_NSRunningApplication",
+            _FakeNSRunningApplicationClass({99999: lying_app}),
+        )
+        # Shorten poll budget so the test doesn't sleep for 30ms.
+        monkeypatch.setattr(fp, "_VERIFY_POLL_INTERVAL_S", 0.001)
+        ok = fp.try_fast_path(host_pid=99999, session_id="X", tty=None)
+        assert ok is False
+
+    def test_returns_true_when_app_is_active_after_activate(
+        self, fake_pyobjc, fake_worker,
+    ):
+        """Normal success path: activate returned True and isActive
+        immediately reflects True on the first poll → fast return."""
+        ok = fp.try_fast_path(host_pid=99999, session_id="X", tty=None)
+        assert ok is True
+
+    def test_is_active_raising_treated_as_failure(
+        self, fake_pyobjc, fake_worker, monkeypatch,
+    ):
+        """Defensive: if isActive raises (PyObjC bridge oddity), fall
+        through to legacy rather than treat as success."""
+        class _BrokenApp(_FakeNSRunningApp):
+            def isActive(self):
+                raise RuntimeError("objc bridge hiccup")
+        broken = _BrokenApp(activate_result=True)
+        monkeypatch.setattr(
+            fp, "_NSRunningApplication",
+            _FakeNSRunningApplicationClass({99999: broken}),
+        )
+        monkeypatch.setattr(fp, "_VERIFY_POLL_INTERVAL_S", 0.001)
+        ok = fp.try_fast_path(host_pid=99999, session_id="X", tty=None)
+        assert ok is False
 
 
 class TestPrewarm:
