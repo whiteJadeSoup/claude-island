@@ -1130,7 +1130,7 @@ _STYLE_MODEL_CHIP = (
     " color: {color};"
     f" background: {_LabColor.surface};"
     f" border: 1px solid {_LabColor.rule};"
-    " border-radius: 8px;"
+    " border-radius: 100px;"
     " padding: 1px 7px;"
     " font-size: 11px;"
     " font-weight: 500;"
@@ -4115,14 +4115,22 @@ class ExpandedWindow(QWidget):
         )
         lay.addWidget(self._top_title, 1)
 
-        # Awaiting pill (orange).  Hidden when count == 0.
+        # Awaiting pill (orange).  Hidden when count == 0.  Fixed
+        # height + Maximum size policy keep the label sized to its
+        # content; without these Qt's default Preferred sizing
+        # stretched the QSS background into a giant square block.
         self._top_awaiting_pill = QLabel("")
+        self._top_awaiting_pill.setFixedHeight(22)
+        self._top_awaiting_pill.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed,
+        )
+        self._top_awaiting_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._top_awaiting_pill.setStyleSheet(
             f"QLabel {{"
             f"  background: {_LabColor.red_warm};"
             f"  color: #1a0e00;"
-            f"  border-radius: 100px;"
-            f"  padding: 3px 10px;"
+            f"  border-radius: 11px;"
+            f"  padding: 0 10px;"
             f"  font-size: 11px;"
             f"  font-weight: 600;"
             f"}}"
@@ -5618,13 +5626,12 @@ class ExpandedWindow(QWidget):
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(8)
 
-        # v4c: phase icon — 16 px QLabel that paints a single character
-        # glyph (◐ ▶ ! ⇕ ○ ✓) coloured by SessionPhase.  Sits in the
-        # row's leftmost slot.  ``_update_row`` rebinds the text +
-        # colour every refresh from view.phase.
+        # v4c: phase icon — 14 px wide (matches prototype's .row
+        # grid-template-columns: 14px ...).  Paints a single character
+        # glyph (◐ ▶ ! ⇕ ○ ✓) coloured by SessionPhase via _update_row.
         phase_icon = QLabel("")
         phase_icon.setObjectName("phase_icon")
-        phase_icon.setFixedWidth(16)
+        phase_icon.setFixedWidth(14)
         phase_icon.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
         phase_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         btn._phase_icon = phase_icon
@@ -5653,13 +5660,18 @@ class ExpandedWindow(QWidget):
         #   2. Visual elision (`…`) at paint time so an overflowing
         #      name reads cleanly instead of getting hard-clipped
         #      mid-character at the row boundary.
-        name_label = _ElidingLabel()
+        # v4c: name uses a plain QLabel (not ElidingLabel) so short
+        # session names render at their natural width without the
+        # eliding label's overzealous minimumSizeHint=0 collapsing
+        # them.  Maximum size policy + 280 px cap matches prototype's
+        # .body .name { max-width: 280px } — cwd elides first
+        # because it's the stretch slot next to name.
+        name_label = QLabel()
         name_label.setObjectName("name_label")
         name_label.setStyleSheet(_STYLE_NAME)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        # v4c: name takes only its preferred width on the top row so the
-        # cwd label (added next, with stretch=1) absorbs the surplus.
-        name_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        name_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        name_label.setMaximumWidth(280)
         top.addWidget(name_label)
 
         # v4c: status text inline next to the name on the top row
