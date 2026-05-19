@@ -144,9 +144,18 @@ on focusByID(sessionID, hostPID)
                     repeat with s in sessions of t
                         if (id of s as text) is sessionID then
                             set miniaturized of w to false
-                            select s
-                            select t
+                            -- I-8: broadest-scope first ordering
+                            -- (window → tab → session). iTerm's
+                            -- ``select`` mutates state on each call;
+                            -- doing window last would mean an extra
+                            -- z-order change after we've already
+                            -- selected the right session and tab.
+                            -- Most-precise selection ends last so it
+                            -- wins regardless of what ``select w``
+                            -- might do to the in-tab selection.
                             select w
+                            select t
+                            select s
                             -- I-5: setting index to 1 forces iTerm's
                             -- internal z-order AND in many setups
                             -- pulls the window onto the current Space
@@ -182,9 +191,18 @@ on focusByTTY(targetTTY, hostPID)
                     repeat with s in sessions of t
                         if (tty of s) is targetTTY then
                             set miniaturized of w to false
-                            select s
-                            select t
+                            -- I-8: broadest-scope first ordering
+                            -- (window → tab → session). iTerm's
+                            -- ``select`` mutates state on each call;
+                            -- doing window last would mean an extra
+                            -- z-order change after we've already
+                            -- selected the right session and tab.
+                            -- Most-precise selection ends last so it
+                            -- wins regardless of what ``select w``
+                            -- might do to the in-tab selection.
                             select w
+                            select t
+                            select s
                             -- I-5: setting index to 1 forces iTerm's
                             -- internal z-order AND in many setups
                             -- pulls the window onto the current Space

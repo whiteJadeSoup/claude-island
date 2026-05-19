@@ -547,10 +547,18 @@ class TestFocus:
             assert "select s" in script
             assert "select t" in script
             assert "select w" in script
+            # I-8: broadest-scope first (w → t → s). select mutates
+            # state on each call; doing window last would force an
+            # extra z-order change after we've already pinned tab +
+            # session. Most-precise selection ends last so it wins
+            # regardless of what select w did to in-tab selection.
             i_s = script.index("select s")
             i_t = script.index("select t")
             i_w = script.index("select w")
-            assert i_s < i_t < i_w
+            assert i_w < i_t < i_s, (
+                "selects must run window → tab → session "
+                "(broadest scope first); got s={} t={} w={}".format(i_s, i_t, i_w)
+            )
 
 
 class TestFocusScriptDeminiaturizesWindow:

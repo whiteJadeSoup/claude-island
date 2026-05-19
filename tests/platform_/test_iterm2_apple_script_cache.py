@@ -313,6 +313,29 @@ class TestFocusSourceTimeoutClause:
             assert "with timeout of 3 seconds" in src
 
 
+class TestFocusSourceSelectOrder:
+    """I-8: broadest-scope first ordering (window → tab → session).
+    iTerm's ``select`` mutates state on each call; if we did window
+    last, an extra z-order change would happen after we'd already
+    pinned tab + session. Putting the most-precise selection last
+    means it wins regardless of what select w did to the in-tab
+    selection."""
+
+    def _assert_w_before_t_before_s(self, source: str) -> None:
+        i_w = source.index("select w")
+        i_t = source.index("select t")
+        i_s = source.index("select s")
+        assert i_w < i_t < i_s, (
+            f"want w<t<s, got w={i_w} t={i_t} s={i_s}"
+        )
+
+    def test_by_id_source_orders_w_t_s(self):
+        self._assert_w_before_t_before_s(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_orders_w_t_s(self):
+        self._assert_w_before_t_before_s(fp._FOCUS_BY_TTY_SOURCE)
+
+
 class TestFocusSourceSetsWindowIndex:
     """I-5: ``set index of w to 1`` after ``select w`` forces iTerm's
     z-order AND in many setups pulls the window onto the current

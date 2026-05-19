@@ -166,9 +166,9 @@ tell application "iTerm"
             repeat with s in sessions of t
                 if tty of s is "{tty}" then
                     set miniaturized of w to false
-                    select s
-                    select t
                     select w
+                    select t
+                    select s
                     set index of w to 1
                     return "ok"
                 end if
@@ -202,9 +202,9 @@ tell application "iTerm"
             repeat with s in sessions of t
                 if (id of s as text) is "{session_id}" then
                     set miniaturized of w to false
-                    select s
-                    select t
                     select w
+                    select t
+                    select s
                     set index of w to 1
                     return "ok"
                 end if
