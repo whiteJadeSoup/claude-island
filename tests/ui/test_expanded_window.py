@@ -2321,14 +2321,14 @@ class TestRowStatusLine:
                 f"{inline.text()!r}"
             )
 
-    def test_row_height_grew_to_fit_three_lines(self, panel):
-        """v4c: row height grew from 52 → 68 to fit the new cwd line.
-        Pin the value so a future tweak doesn't silently clip the
-        cwd or the model chip below it."""
+    def test_row_height_two_lines(self, panel):
+        """v4c (post-N): row collapses back to 2 lines (name+status+cwd
+        inline / chip+meta below).  Height pinned at 56 — pretotype
+        renders this density."""
         from claude_island.ui.expanded_window import _ROW_HEIGHT
         panel._render_sessions([_session(1, "/a")])
-        assert _ROW_HEIGHT == 68
-        assert panel._rows[1].height() == 68
+        assert _ROW_HEIGHT == 56
+        assert panel._rows[1].height() == 56
 
     def test_chip_visually_empty_when_no_per_model_data(self, qtbot):
         """A freshly-discovered session has no UsageRecords yet ⇒

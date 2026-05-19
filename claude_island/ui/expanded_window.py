@@ -815,11 +815,10 @@ class _RowStatusGlyph(QWidget):
 # Two-line row: top = dot + name + cost, bottom = model chip + status.
 # 52 px holds the 13 px name plus the 11 px status row with breathing
 # room top/bottom — anything shorter clipped descenders on g/y/p.
-# v4c: rows grew from 52 → 68 px to fit a third line for the cwd path.
-# GitHub Actions list density — the cwd is too useful to elide off the
-# row entirely (it disambiguates two sessions named "master" living in
-# different repos) and too long to inline next to the name.
-_ROW_HEIGHT = 68
+# v4c: rows are 2-line now (name+status+cwd inline / chip+meta below).
+# Prototype paints name + status + cwd in one band; cwd elides when
+# the row narrows.  56 px fits the two text lines + comfortable padding.
+_ROW_HEIGHT = 56
 _ROW_PAD_H = 12
 
 # Activity heuristic for the row status text. Same threshold as the
@@ -5645,8 +5644,10 @@ class ExpandedWindow(QWidget):
         name_label.setObjectName("name_label")
         name_label.setStyleSheet(_STYLE_NAME)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        top.addWidget(name_label, 1)
+        # v4c: name takes only its preferred width on the top row so the
+        # cwd label (added next, with stretch=1) absorbs the surplus.
+        name_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        top.addWidget(name_label)
 
         # v4c: status text inline next to the name on the top row
         # ("thinking · turn 3", "tool_use · Bash · 1.2s", etc.).
@@ -5661,6 +5662,19 @@ class ExpandedWindow(QWidget):
             f"color: {_LabColor.paper_dim}; font-size: 11px;"
         )
         top.addWidget(status_inline)
+
+        # v4c: cwd path INLINE on the top row (was middle row in 3-line
+        # layout).  Eliding label so a long path tail-elides cleanly
+        # without pushing other widgets out.
+        cwd_label_top = _ElidingLabel()
+        cwd_label_top.setObjectName("cwd_label")
+        cwd_label_top.setStyleSheet(
+            f"color: {_LabColor.paper_faint}; font-size: 11px; "
+            f"font-family: {FontStack.mono_stack};"
+        )
+        cwd_label_top.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        cwd_label_top.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        top.addWidget(cwd_label_top, 1)
 
         # v4c: wave glyph immediately before the cost number — that's
         # where prototype-v4c-github.html paints "live signal next to
@@ -5680,18 +5694,6 @@ class ExpandedWindow(QWidget):
         top.addWidget(meta_label)
 
         outer.addLayout(top)
-
-        # ---- middle row: cwd path (mono) --------------------------------
-        # Indent matches the bottom row so cwd sits flush under the name,
-        # not under the status glyph. Eliding left so the *tail* of the
-        # path stays readable (basename matters more than ancestors).
-        cwd_label = _ElidingLabel()
-        cwd_label.setObjectName("cwd_label")
-        cwd_label.setStyleSheet(_STYLE_CWD)
-        cwd_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        cwd_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        cwd_label.setContentsMargins(20, 0, 0, 0)
-        outer.addWidget(cwd_label)
 
         # ---- bottom row: indent + model chip + status -------------------
         # Indent the bottom row so the model chip sits under the name,
