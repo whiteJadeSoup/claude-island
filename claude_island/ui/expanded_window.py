@@ -1561,6 +1561,53 @@ def _fmt_ago(dt: datetime) -> str:
     return f"{s // 86400}d"
 
 
+def _phase_icon_char(phase) -> str:
+    """v4c: single-character glyph painted in the row's leftmost slot.
+
+    Mirrors prototype-v4c-github.html's .row[data-phase=...] .ico
+    selectors.  Returns Unicode characters that all major macOS /
+    Windows / Linux fonts render — no SVG or icon font dependency.
+    """
+    from claude_island.core.session_phase import SessionPhase as _SP
+    return {
+        _SP.IDLE:             "○",
+        _SP.THINKING:         "◐",
+        _SP.TOOL_USE:         "▶",
+        _SP.WAITING_APPROVAL: "!",
+        _SP.COMPACTING:       "⇕",
+        _SP.ENDED:            "✓",
+    }.get(phase, "·")
+
+
+def _phase_inline_text(view) -> str:
+    """v4c: phase-tinted status text that sits inline next to the
+    session name on the top row.
+
+    Format follows prototype-v4c-github.html's .row .status-text:
+      THINKING         → "· thinking · turn N"     (turn count if known)
+      TOOL_USE         → "· tool_use · ToolName"   (current tool)
+      WAITING_APPROVAL → "· awaiting consent · Xs elapsed"
+      COMPACTING       → "· compacting"
+      IDLE             → ""   (the bottom-row "active Xm ago" already
+                                 carries this; no need to duplicate)
+      ENDED            → "· ended"
+    """
+    from claude_island.core.session_phase import SessionPhase as _SP
+    phase = getattr(view, "phase", _SP.IDLE)
+    if phase == _SP.THINKING:
+        return "· thinking"
+    if phase == _SP.TOOL_USE:
+        tool = getattr(view, "current_tool", None)
+        return f"· tool_use · {tool}" if tool else "· tool_use"
+    if phase == _SP.WAITING_APPROVAL:
+        return "· awaiting consent"
+    if phase == _SP.COMPACTING:
+        return "· compacting"
+    if phase == _SP.ENDED:
+        return "· ended"
+    return ""
+
+
 def _activity_color(dt: datetime) -> str:
     """Traffic-light dot color encoding how recent ``dt`` is.
     Thresholds are chosen so a daily user sees mostly green (active),
@@ -5370,17 +5417,28 @@ class ExpandedWindow(QWidget):
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(8)
 
-        # Status glyph slot — equalizer bars when running, nothing when
-        # idle. The widget itself stays 12 px wide so the row layout
-        # stays geometrically stable across state transitions; idle
-        # rows just have an empty leftmost slot so RUNNING rows
-        # visually stand out as the only rows with anything painted
-        # there ("scheme 2" of the row-design proposal).
+        # v4c: phase icon — 16 px QLabel that paints a single character
+        # glyph (◐ ▶ ! ⇕ ○ ✓) coloured by SessionPhase.  Sits in the
+        # row's leftmost slot.  ``_update_row`` rebinds the text +
+        # colour every refresh from view.phase.
+        phase_icon = QLabel("")
+        phase_icon.setObjectName("phase_icon")
+        phase_icon.setFixedWidth(16)
+        phase_icon.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+        phase_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        btn._phase_icon = phase_icon
+        top.addWidget(phase_icon)
+
+        # Status glyph slot — kept for the wave animation (now lives on
+        # the RIGHT side of the row, next to the rate / cost — see
+        # below).  Sized 0×0 to preserve existing _status_glyph hooks
+        # on the row object without inflating the left slot.  Old
+        # callers reaching btn._status_glyph still work.
         status_glyph = _RowStatusGlyph(btn)
-        status_glyph.setFixedHeight(_ROW_HEIGHT - 12)  # respect outer padding
+        status_glyph.setFixedHeight(_ROW_HEIGHT - 12)
         status_glyph.set_idle_visible(False)
+        status_glyph.setVisible(False)  # v4c: wave moved out of left slot
         btn._status_glyph = status_glyph
-        top.addWidget(status_glyph)
 
         # _ElidingLabel: project names / AI titles are user-supplied
         # text. Two reasons we need the eliding variant here:
@@ -5399,6 +5457,20 @@ class ExpandedWindow(QWidget):
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         top.addWidget(name_label, 1)
+
+        # v4c: status text inline next to the name on the top row
+        # ("thinking · turn 3", "tool_use · Bash · 1.2s", etc.).
+        # Phase-tinted; populated by _update_row from view.phase.
+        # The bottom row's status_label is kept for backwards compat
+        # (older meta strings like "active 3m ago") — they live
+        # alongside each other as two complementary signals.
+        status_inline = QLabel("")
+        status_inline.setObjectName("status_inline")
+        status_inline.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        status_inline.setStyleSheet(
+            f"color: {_LabColor.paper_dim}; font-size: 11px;"
+        )
+        top.addWidget(status_inline)
 
         # Right-side meta slot. Shows cumulative session cost ("$XX.XX").
         # elide=False: cost strings are bounded short, eliding right-
@@ -5581,6 +5653,25 @@ class ExpandedWindow(QWidget):
         name_label = btn.findChild(QLabel, "name_label")
         if name_label is not None and name_label.text() != title:
             name_label.setText(title)
+
+        # v4c: phase icon + inline status text, driven by view.phase.
+        phase_icon = btn.findChild(QLabel, "phase_icon")
+        if phase_icon is not None:
+            char = _phase_icon_char(view.phase)
+            tint = _LabColor.for_phase(view.phase)
+            phase_icon.setText(char)
+            phase_icon.setStyleSheet(
+                f"color: {tint}; font-size: 12px; font-weight: 600;"
+            )
+
+        status_inline = btn.findChild(QLabel, "status_inline")
+        if status_inline is not None:
+            inline_text = _phase_inline_text(view)
+            tint = _LabColor.for_phase(view.phase)
+            status_inline.setText(inline_text)
+            status_inline.setStyleSheet(
+                f"color: {tint}; font-size: 11px;"
+            )
 
         # v4c: cwd label on the middle row.  Tilde-prefixed if the path
         # lives under the user's home so the row stays short for the

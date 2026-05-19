@@ -2253,6 +2253,74 @@ class TestRowStatusLine:
         assert btn.findChild(QLabel, "model_chip") is not None
         assert btn.findChild(QLabel, "status_label") is not None
 
+    def test_phase_icon_painted_per_session_phase(self, panel):
+        """v4c: row's leftmost slot is a single character glyph
+        coloured by SessionPhase.  Verify every phase produces a
+        distinct icon + matching tint."""
+        from claude_island.core.snapshot import SessionGroup, _degraded_view
+        from claude_island.core.session_phase import SessionPhase
+        from claude_island.ui.lab_palette import Color
+        from PySide6.QtWidgets import QLabel
+        from dataclasses import replace
+        cases = [
+            (SessionPhase.IDLE,             "○", Color.rule_active),
+            (SessionPhase.THINKING,         "◐", Color.amber),
+            (SessionPhase.TOOL_USE,         "▶", Color.phosphor),
+            (SessionPhase.WAITING_APPROVAL, "!", Color.red_warm),
+            (SessionPhase.COMPACTING,       "⇕", Color.amber_dim),
+            (SessionPhase.ENDED,            "✓", Color.paper_deep),
+        ]
+        groups = []
+        for i, (ph, _ch, _co) in enumerate(cases, 1):
+            s = _session(i, f"/a{i}")
+            view = replace(_degraded_view(s), phase=ph)
+            groups.append(SessionGroup(
+                group_id=f"g{i}", title_hint=None,
+                adapter_id="test", views=(view,),
+            ))
+        panel._render_session_groups(tuple(groups))
+        for i, (ph, char, tint) in enumerate(cases, 1):
+            row = panel._rows[i]
+            icon = row.findChild(QLabel, "phase_icon")
+            assert icon is not None, f"phase_icon missing for {ph}"
+            assert icon.text() == char, (
+                f"{ph}: expected icon {char!r}, got {icon.text()!r}"
+            )
+            assert tint.lower() in icon.styleSheet().lower(), (
+                f"{ph}: expected tint {tint} in stylesheet {icon.styleSheet()!r}"
+            )
+
+    def test_status_inline_text_carries_phase_label(self, panel):
+        """v4c: status text inline next to the name follows view.phase."""
+        from claude_island.core.snapshot import SessionGroup, _degraded_view
+        from claude_island.core.session_phase import SessionPhase
+        from PySide6.QtWidgets import QLabel
+        from dataclasses import replace
+        cases = {
+            SessionPhase.THINKING:         "thinking",
+            SessionPhase.TOOL_USE:         "tool_use",
+            SessionPhase.WAITING_APPROVAL: "awaiting consent",
+            SessionPhase.COMPACTING:       "compacting",
+            SessionPhase.ENDED:            "ended",
+        }
+        groups = []
+        for i, ph in enumerate(cases, 1):
+            s = _session(i, f"/a{i}")
+            view = replace(_degraded_view(s), phase=ph)
+            groups.append(SessionGroup(
+                group_id=f"g{i}", title_hint=None,
+                adapter_id="test", views=(view,),
+            ))
+        panel._render_session_groups(tuple(groups))
+        for i, (ph, want_substr) in enumerate(cases.items(), 1):
+            row = panel._rows[i]
+            inline = row.findChild(QLabel, "status_inline")
+            assert inline is not None
+            assert want_substr in inline.text(), (
+                f"{ph}: expected '{want_substr}' in inline text "
+                f"{inline.text()!r}"
+            )
+
     def test_row_height_grew_to_fit_three_lines(self, panel):
         """v4c: row height grew from 52 → 68 to fit the new cwd line.
         Pin the value so a future tweak doesn't silently clip the
