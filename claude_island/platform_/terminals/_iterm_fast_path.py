@@ -116,53 +116,70 @@ _kAnyTransactionID = 0
 # — no escaping needed, and compile happens at most once per handler
 # per process.
 
+# ``with timeout of N seconds`` wraps the Apple Event dispatch so iTerm
+# can't peg the worker thread indefinitely. Default AppleEvent timeout
+# is 60 s — too long for an interactive click. 3 s matches the
+# subprocess osascript path's ``timeout=3.0`` so the two paths fail in
+# the same envelope; on overrun AppleScript raises errno -1712
+# ("AppleEvent timed out") which our error handler catches and the
+# AppleScriptCache failure counter treats as a normal failure (3
+# strikes invalidates the compiled handler so the next click rebuilds
+# fresh state). Without this, a single hung iTerm plugin saturated the
+# single-thread worker pool, and after 10 backed-up clicks every
+# subsequent pane-select silently dropped until app restart.
+_PANE_SELECT_APPLESCRIPT_TIMEOUT_S = 3
+
 _FOCUS_BY_ID_SOURCE = """
 on focusByID(sessionID, hostPID)
-    tell application "System Events"
-        set frontmost of (first process whose unix id is (hostPID as integer)) to true
-    end tell
-    tell application "iTerm"
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    if (id of s as text) is sessionID then
-                        set miniaturized of w to false
-                        select s
-                        select t
-                        select w
-                        return "ok"
-                    end if
+    with timeout of {timeout} seconds
+        tell application "System Events"
+            set frontmost of (first process whose unix id is (hostPID as integer)) to true
+        end tell
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if (id of s as text) is sessionID then
+                            set miniaturized of w to false
+                            select s
+                            select t
+                            select w
+                            return "ok"
+                        end if
+                    end repeat
                 end repeat
             end repeat
-        end repeat
-        return "miss"
-    end tell
+            return "miss"
+        end tell
+    end timeout
 end focusByID
-"""
+""".format(timeout=_PANE_SELECT_APPLESCRIPT_TIMEOUT_S)
 
 _FOCUS_BY_TTY_SOURCE = """
 on focusByTTY(targetTTY, hostPID)
-    tell application "System Events"
-        set frontmost of (first process whose unix id is (hostPID as integer)) to true
-    end tell
-    tell application "iTerm"
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    if (tty of s) is targetTTY then
-                        set miniaturized of w to false
-                        select s
-                        select t
-                        select w
-                        return "ok"
-                    end if
+    with timeout of {timeout} seconds
+        tell application "System Events"
+            set frontmost of (first process whose unix id is (hostPID as integer)) to true
+        end tell
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if (tty of s) is targetTTY then
+                            set miniaturized of w to false
+                            select s
+                            select t
+                            select w
+                            return "ok"
+                        end if
+                    end repeat
                 end repeat
             end repeat
-        end repeat
-        return "miss"
-    end tell
+            return "miss"
+        end tell
+    end timeout
 end focusByTTY
-"""
+""".format(timeout=_PANE_SELECT_APPLESCRIPT_TIMEOUT_S)
 
 
 # ─────────────────────────────────────────────────────────────────────

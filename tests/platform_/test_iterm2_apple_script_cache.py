@@ -269,3 +269,45 @@ class TestFocusSourceDeminiaturizesWindow:
 
     def test_by_tty_source_deminiaturizes_before_select(self):
         self._assert_deminiaturize_before_select_w(fp._FOCUS_BY_TTY_SOURCE)
+
+
+class TestFocusSourceTimeoutClause:
+    """I-1: AppleScript ``with timeout of N seconds`` wraps the inner
+    tell blocks so a hung iTerm Apple Event handler can't peg the
+    single-thread worker pool indefinitely (default AE timeout is 60s,
+    way too long for an interactive click). On overrun AppleScript
+    raises errno -1712 which our error handler treats as a normal
+    failure; the AppleScriptCache counter eventually invalidates the
+    compiled handler so the next click rebuilds fresh state."""
+
+    def _assert_timeout_wraps_inner_tells(self, source: str) -> None:
+        assert "with timeout of" in source, (
+            "source must wrap the body in `with timeout` to bound "
+            "execution time"
+        )
+        # Timeout must enclose BOTH the System Events frontmost call
+        # AND the iTerm tell block — those are the two operations that
+        # can hang on a stuck app.
+        i_timeout = source.index("with timeout of")
+        i_se = source.index('tell application "System Events"')
+        i_iterm = source.index('tell application "iTerm"')
+        i_end_timeout = source.index("end timeout")
+        assert i_timeout < i_se, "timeout must enclose System Events tell"
+        assert i_timeout < i_iterm, "timeout must enclose iTerm tell"
+        assert i_se < i_end_timeout
+        assert i_iterm < i_end_timeout
+
+    def test_by_id_source_wraps_in_timeout(self):
+        self._assert_timeout_wraps_inner_tells(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_wraps_in_timeout(self):
+        self._assert_timeout_wraps_inner_tells(fp._FOCUS_BY_TTY_SOURCE)
+
+    def test_timeout_seconds_matches_subprocess_path(self):
+        """The fast-path AppleScript timeout should match the subprocess
+        osascript path's timeout (currently 3s). Two paths failing in
+        the same envelope keeps user-visible latency consistent and
+        prevents one from masking the other's hang."""
+        assert fp._PANE_SELECT_APPLESCRIPT_TIMEOUT_S == 3
+        for src in (fp._FOCUS_BY_ID_SOURCE, fp._FOCUS_BY_TTY_SOURCE):
+            assert "with timeout of 3 seconds" in src
