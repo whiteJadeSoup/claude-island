@@ -1081,3 +1081,57 @@ class TestITerm2Launch:
         ):
             with pytest.raises(LauncherSpawnError, match="osascript missing"):
                 adapter.launch(cwd=Path("/x"), command=("claude",))
+
+
+class TestWriteTextToITermSession:
+    """write_text_to_iterm_session injects text into a target iTerm
+    pane via AppleScript's ``write text`` — the workaround for
+    Claude's terminal-prompt-not-dismissed-by-hook-allow bug on
+    sensitive operations. Tested via mocked subprocess; the real
+    AppleScript is exercised in the legacy-focus tests."""
+
+    def test_returns_true_on_ok(self):
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        with mock.patch("subprocess.run", return_value=_mock_run(stdout="ok\n")) as run:
+            assert write_text_to_iterm_session("/dev/ttys007", "1") is True
+        # Script must contain the tty target and the text payload.
+        called_script = run.call_args[0][0][2]
+        assert "/dev/ttys007" in called_script
+        # Text appears inside ``write text "..."`` — check substring match.
+        assert 'write text "1"' in called_script
+
+    def test_returns_false_on_miss(self):
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        with mock.patch("subprocess.run", return_value=_mock_run(stdout="miss\n")):
+            assert write_text_to_iterm_session("/dev/ttys-bogus", "1") is False
+
+    def test_returns_false_on_subprocess_failure(self):
+        """OSError / TimeoutExpired must not crash the caller — the
+        Allow flow already fired its hook response by the time this
+        runs, so a failed inject just degrades to "user types in
+        terminal" rather than surfacing as an error."""
+        import subprocess as _sp
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        with mock.patch("subprocess.run", side_effect=_sp.TimeoutExpired("osascript", 3)):
+            assert write_text_to_iterm_session("/dev/ttys007", "1") is False
+
+    def test_empty_tty_short_circuits_without_subprocess(self):
+        """Empty tty (placeholder sessions, lookup failure) skips the
+        subprocess entirely — no point asking iTerm about a non-tty."""
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        with mock.patch("subprocess.run") as run:
+            assert write_text_to_iterm_session("", "1") is False
+            run.assert_not_called()
+
+    def test_text_with_quote_or_backslash_is_escaped(self):
+        """User-provided text could contain AppleScript metacharacters.
+        We use _escape_applescript_string (already used by focus
+        scripts) so injecting ``"`` or ``\\`` doesn't break the
+        script. The Allow callback always passes "1", but defending
+        the helper makes it safe for other callers."""
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        with mock.patch("subprocess.run", return_value=_mock_run(stdout="miss\n")) as run:
+            write_text_to_iterm_session("/dev/ttys007", 'a"b\\c')
+        script = run.call_args[0][0][2]
+        # Escaped: " → \", \ → \\
+        assert r'a\"b\\c' in script

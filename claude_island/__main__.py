@@ -566,6 +566,54 @@ def _resolve_pending_decision(decision_id: str, decision: object) -> bool:
     return pending_registry.resolve(decision_id, decision)  # type: ignore[arg-type]
 
 
+def _inject_default_terminal_answer(session_uuid: str) -> None:
+    """Type ``1\\n`` into the iTerm pane for ``session_uuid`` after the
+    user clicks Allow on an ApprovalCard.
+
+    Workaround for Claude Code's terminal prompt persistence on
+    sensitive operations (out-of-cwd Read, multi-option Bash): the
+    hook's ``allow`` response doesn't fully clear those prompts —
+    Claude waits on stdin until a digit is typed. We type "1" for
+    the user via iTerm's ``write text`` AppleScript so they don't
+    have to switch to the terminal.
+
+    Lookup chain: session_uuid → SessionRegistry → Session.pid →
+    psutil tty → iterm2.write_text_to_iterm_session. Each step is
+    defensive: missing session / dead pid / non-iTerm tty all
+    degrade silently to "no inject". The hook ``allow`` already
+    fired by the time this runs, so worst case is the pre-fix
+    behaviour: user types the digit themselves.
+    """
+    if not session_uuid:
+        return
+    target = None
+    for s in session_registry.sessions:
+        if s.session_uuid == session_uuid:
+            target = s
+            break
+    if target is None or target.pid <= 0:
+        return
+    try:
+        import psutil
+        tty = psutil.Process(target.pid).terminal()
+    except Exception:
+        return
+    if not tty:
+        return
+    try:
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        write_text_to_iterm_session(tty, "1")
+    except Exception:
+        # Best-effort — degrade to "user types in terminal" rather
+        # than surface an error for an action that's already done
+        # (the hook ``allow`` fired before we got here).
+        import logging
+        logging.getLogger(__name__).exception(
+            "write_text_to_iterm_session failed for uuid=%s tty=%s",
+            session_uuid, tty,
+        )
+
+
 expanded = ExpandedWindow(
     capsule=capsule,
     controller=controller,
@@ -593,6 +641,10 @@ expanded = ExpandedWindow(
     resolve_decision=_resolve_pending_decision,
     get_review_mode=permission_cache.is_review,
     set_review_mode=permission_cache.set_review,
+    # ApprovalCard Allow → inject "1\n" into the session's iTerm pane
+    # so Claude's terminal-side prompt for sensitive operations is
+    # dismissed even when the hook ``allow`` isn't sufficient.
+    on_terminal_answer_default=_inject_default_terminal_answer,
 )
 
 # ---------------------------------------------------------------------------

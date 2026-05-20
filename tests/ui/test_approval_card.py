@@ -280,6 +280,85 @@ def test_focus_terminal_optional_card_works_without_callback(app):
     assert len(resolves) == 1
 
 
+def test_allow_invokes_terminal_answer_default(app):
+    """Regression: Claude's terminal prompt for sensitive operations
+    (out-of-cwd Read, multi-option Bash) persists even after the hook
+    ``allow`` because Claude requires explicit terminal confirmation
+    for that class of operation. ApprovalCard.Allow now invokes the
+    ``on_terminal_answer_default`` callback so the wiring layer can
+    inject ``1\\n`` into the session's iTerm pane and dismiss the
+    prompt without the user switching apps."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.approval_card import ApprovalCard
+
+    typed: list[str] = []
+    card = ApprovalCard(
+        _view(),
+        on_terminal_answer_default=lambda uuid: typed.append(uuid),
+    )
+    app.addWidget(card)
+    {b.objectName(): b for b in card.findChildren(QPushButton)}["approvalAllow"].click()
+    assert typed == ["u1"], (
+        "Allow must invoke on_terminal_answer_default with the session uuid"
+    )
+
+
+def test_deny_does_not_inject_terminal_answer(app):
+    """Symmetry: Deny intentionally skips injection. We don't know
+    which digit means "deny" for an arbitrary prompt shape, and the
+    hook ``deny`` already aborts the tool call so the terminal prompt
+    becomes obsolete anyway. Mis-typed digit on a stale prompt would
+    be worse than leaving the prompt for the user to dismiss."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.approval_card import ApprovalCard
+
+    typed: list[str] = []
+    card = ApprovalCard(
+        _view(),
+        on_terminal_answer_default=lambda uuid: typed.append(uuid),
+    )
+    app.addWidget(card)
+    {b.objectName(): b for b in card.findChildren(QPushButton)}["approvalDeny"].click()
+    assert typed == []
+
+
+def test_terminal_answer_default_optional_card_works_without_callback(app):
+    """Backwards compatibility: callers that don't pass the new
+    callback must still get a working Allow path (no AttributeError,
+    no swallowed exception). Mirrors the existing on_focus_terminal
+    backcompat test."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.approval_card import ApprovalCard
+
+    resolves: list = []
+    card = ApprovalCard(_view(), on_resolve=lambda i, d: resolves.append((i, d)))
+    app.addWidget(card)
+    {b.objectName(): b for b in card.findChildren(QPushButton)}["approvalAllow"].click()
+    assert len(resolves) == 1
+
+
+def test_terminal_answer_default_callback_exception_does_not_block_resolve(app):
+    """If the inject callback raises (e.g. iTerm AppleScript timeout),
+    the user's Allow MUST still resolve the hook — losing the inject
+    is acceptable degradation but losing the allow would be far worse
+    (Claude would wait out the full 598s hook timeout). The exception
+    is logged but swallowed."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.approval_card import ApprovalCard
+
+    def boom(_uuid):
+        raise RuntimeError("simulated AppleScript failure")
+    resolves: list = []
+    card = ApprovalCard(
+        _view(),
+        on_resolve=lambda i, d: resolves.append(d),
+        on_terminal_answer_default=boom,
+    )
+    app.addWidget(card)
+    {b.objectName(): b for b in card.findChildren(QPushButton)}["approvalAllow"].click()
+    assert len(resolves) == 1, "resolve must still fire when inject raises"
+
+
 def test_decisions_stack_wires_focus_terminal_to_approval_card(app):
     """The stack panel must pass on_focus_terminal through to BOTH
     QuestionCard and ApprovalCard — previously only QuestionCard got
@@ -297,3 +376,24 @@ def test_decisions_stack_wires_focus_terminal_to_approval_card(app):
     app.addWidget(card)
     {b.objectName(): b for b in card.findChildren(QPushButton)}["approvalAllow"].click()
     assert focuses == ["u1"]
+
+
+def test_decisions_stack_wires_terminal_answer_default_to_approval_card(app):
+    """The stack panel must pass on_terminal_answer_default through
+    to ApprovalCard (QuestionCard doesn't need it — its options are
+    relayed via updatedInput in the hook response, not by typing
+    digits into the terminal). Without this wiring the inject feature
+    is dead in production even though ApprovalCard supports it."""
+    from PySide6.QtWidgets import QPushButton
+    from claude_island.ui.decisions_stack import _build_card
+
+    typed: list[str] = []
+    card = _build_card(
+        _view(),
+        on_resolve=lambda i, d: None,
+        on_focus_terminal=None,
+        on_terminal_answer_default=lambda uuid: typed.append(uuid),
+    )
+    app.addWidget(card)
+    {b.objectName(): b for b in card.findChildren(QPushButton)}["approvalAllow"].click()
+    assert typed == ["u1"]

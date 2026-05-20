@@ -648,6 +648,95 @@ def _parse_enum_output(text: str) -> dict[str, tuple[int, int]]:
     return out
 
 
+# AppleScript template for writing literal text into an iTerm session.
+# Used by ApprovalCard's Allow flow to dismiss Claude Code's terminal-
+# side permission prompt for sensitive operations (out-of-cwd Read,
+# multi-option Bash, etc.).
+#
+# Background — what this works around:
+# Claude Code's hook protocol lets us return ``permissionDecision:
+# "allow"`` from PermissionRequest. For ordinary tools this dismisses
+# Claude's terminal prompt and the tool proceeds silently. BUT for
+# sensitive operations (e.g. ``Read`` outside the project cwd, which
+# uses Claude's 3-option "Yes / Yes for session / No" UI), Claude
+# renders the terminal prompt regardless and waits on stdin even
+# after the hook returns "allow" — verified empirically on user's
+# 2.1.142 build. The hook approves "in principle" but Claude requires
+# explicit terminal confirmation for sensitive ops.
+#
+# The workaround: type the answer for the user. iTerm AppleScript
+# ``write text`` injects characters into the pseudo-terminal as if
+# the user typed them. We send "1" + newline (iTerm's ``write text``
+# appends newline by default) which selects the default "Yes" option
+# in Claude's prompt. If Claude already moved past the prompt by the
+# time we inject (e.g. the hook DID dismiss it for non-sensitive ops),
+# "1" lands harmlessly in a shell or fresh prompt — the worst case is
+# "command not found: 1" stderr, which is annoying but safe.
+#
+# We use the SAME iteration pattern as the focus scripts (find by
+# tty), wrapped in the same try/retry envelope so iTerm collection
+# races (errno -1719) don't crash the injection.
+_WRITE_TEXT_SCRIPT_TEMPLATE = """\
+repeat 2 times
+    try
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if tty of s is "{tty}" then
+                            tell s to write text "{text}"
+                            return "ok"
+                        end if
+                    end repeat
+                end repeat
+            end repeat
+            return "miss"
+        end tell
+    on error errMsg number errNum
+        -- transient iTerm state race; retry once before giving up
+    end try
+end repeat
+return "miss"
+"""
+
+
+def write_text_to_iterm_session(tty: str, text: str) -> bool:
+    """Type ``text`` into the iTerm session identified by ``tty``,
+    as if the user typed it at the keyboard. iTerm appends a newline
+    automatically — pass just ``"1"`` to send ``1\\n``.
+
+    Used by ApprovalCard.Allow to dismiss Claude's terminal-side
+    permission prompt for sensitive operations whose hook ``allow``
+    response isn't sufficient to clear the prompt. See
+    ``_WRITE_TEXT_SCRIPT_TEMPLATE`` for the full rationale.
+
+    Returns True iff osascript completed AND the script found the
+    matching session AND wrote successfully. False on any failure
+    (subprocess error, timeout, session not found, AppleScript race
+    that retried and still missed).
+
+    Safe to call from any thread (uses subprocess osascript, not the
+    main-thread NSAppleScript fast path). Cost ~250 ms cold, ~50 ms
+    warm — same envelope as the legacy focus path.
+    """
+    if not tty:
+        return False
+    script = _WRITE_TEXT_SCRIPT_TEMPLATE.format(
+        tty=_escape_applescript_string(tty),
+        text=_escape_applescript_string(text),
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, timeout=_OSASCRIPT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    return result.stdout.decode("utf-8", errors="replace").strip() == "ok"
+
+
 def _focus_by_session_id(session_id: str, *, host_pid: int) -> bool:
     """Run the focus AppleScript matching by iTerm session id. Returns
     True iff osascript completed AND the script reported "ok".

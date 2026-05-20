@@ -138,6 +138,13 @@ _HINT_TEXT = (
 # Callback signature: (decision_id, decision)
 ResolveCallback = Callable[[str, Decision], None]
 FocusTerminalCallback = Callable[[str], None]
+# Inject the default-accept answer (digit "1" + newline) into the
+# target session's terminal pane. Used by Allow to dismiss Claude's
+# terminal-side permission prompt that the hook ``allow`` response
+# alone doesn't clear for sensitive operations (out-of-cwd Read,
+# multi-option Bash, etc.). Implementation in platform_.terminals.iterm2
+# (``write_text_to_iterm_session``).
+TerminalAnswerCallback = Callable[[str], None]
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +251,7 @@ class ApprovalCard(QFrame):
         *,
         on_resolve: ResolveCallback | None = None,
         on_focus_terminal: FocusTerminalCallback | None = None,
+        on_terminal_answer_default: TerminalAnswerCallback | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -255,6 +263,15 @@ class ApprovalCard(QFrame):
         # if needed, answer in the terminal directly. Mirror of
         # ui/question_card.py:QuestionCard.
         self._on_focus_terminal = on_focus_terminal
+        # Inject "1\n" into the target session's terminal pane on Allow
+        # so Claude's terminal-side prompt for sensitive operations
+        # (out-of-cwd Read, multi-option Bash) gets dismissed even
+        # when the hook ``allow`` alone isn't sufficient. None ⇒
+        # feature disabled (no injection). Only Allow injects — Deny
+        # leaves the prompt alone (we don't know which digit means
+        # "deny" for an unknown prompt shape, and the hook ``deny``
+        # already aborts the tool call).
+        self._on_terminal_answer_default = on_terminal_answer_default
         self._expanded = False
         self._build_ui()
 
@@ -449,6 +466,25 @@ class ApprovalCard(QFrame):
     # ── handlers ────────────────────────────────────────────────────────
 
     def _on_allow(self) -> None:
+        # Inject the default-accept digit into the target session's
+        # terminal pane BEFORE emitting the resolve. Two reasons for
+        # the ordering:
+        #   1. The injection's iTerm AppleScript runs on a worker
+        #      thread (subprocess osascript ~50 ms); kicking it off
+        #      early gives it the most head-room to dismiss the
+        #      terminal prompt before Claude moves on.
+        #   2. If injection fails or the callback is None, the resolve
+        #      still happens — degrade gracefully to the pre-fix
+        #      behaviour (user must answer in terminal manually).
+        # Only on Allow — Deny intentionally skips injection because
+        # we don't know which digit means "deny" for an arbitrary
+        # prompt shape, and the hook ``deny`` already aborts the tool
+        # call so the terminal prompt becomes obsolete anyway.
+        try:
+            if self._on_terminal_answer_default is not None:
+                self._on_terminal_answer_default(self._view.session_uuid)
+        except Exception:
+            log.exception("ApprovalCard.on_terminal_answer_default raised")
         self._emit(Decision(
             result=DecisionResult.ALLOW,
             remember=self._remember.isChecked(),

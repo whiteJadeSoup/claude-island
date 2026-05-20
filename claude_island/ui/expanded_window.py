@@ -2943,6 +2943,16 @@ class ExpandedWindow(QWidget):
         # popup hides the row entirely (matches v0 behavior + tests).
         get_review_mode: "Callable[[str], bool] | None" = None,
         set_review_mode: "Callable[[str, bool], None] | None" = None,
+        # Approval-card Allow → terminal answer injection. When set,
+        # clicking Allow on an ApprovalCard ALSO sends "1\n" to the
+        # session's iTerm pane via the wiring layer. Without this,
+        # Claude's terminal prompt for sensitive operations
+        # (out-of-cwd Read, multi-option Bash) persists even after the
+        # hook ``allow`` because Claude requires explicit terminal
+        # confirmation for that class of operation. The callback runs
+        # synchronously on the Qt main thread; the underlying
+        # AppleScript dispatches to a subprocess with its own timeout.
+        on_terminal_answer_default: "Callable[[str], None] | None" = None,
     ) -> None:
         super().__init__()
         self._capsule = capsule
@@ -3005,6 +3015,7 @@ class ExpandedWindow(QWidget):
         self._resolve_decision = resolve_decision
         self._get_review_mode = get_review_mode
         self._set_review_mode = set_review_mode
+        self._on_terminal_answer_default_external = on_terminal_answer_default
         self._provider_btns: dict[str, QPushButton] = {}
         # Hold a reference to the active add-provider dialog so Qt's
         # GC doesn't tear it down before the user can interact with it.
@@ -3317,6 +3328,7 @@ class ExpandedWindow(QWidget):
         self._pending_panel = StackedDecisionsPanel(
             on_resolve=self._on_decision_resolved,
             on_focus_terminal=self._on_focus_terminal_for_decision,
+            on_terminal_answer_default=self._on_terminal_answer_default_for_decision,
         )
         root.addWidget(self._pending_panel)
         # Legacy alias — some older test scaffolding peeked at
@@ -3564,6 +3576,34 @@ class ExpandedWindow(QWidget):
         until wired.
         """
         del session_uuid   # intentional no-op for now; seam preserved
+
+    def _on_terminal_answer_default_for_decision(self, session_uuid: str) -> None:
+        """ApprovalCard Allow hook — inject ``1\\n`` into the session's
+        iTerm pane so Claude's terminal-side permission prompt is
+        dismissed too.
+
+        Delegates to the external callback (wired in __main__.py)
+        which knows how to resolve a session_uuid to a tty + run the
+        AppleScript. None ⇒ feature disabled (this widget renders
+        cards but the inject is a no-op — matches v0 behaviour + tests
+        that don't construct the wiring layer).
+
+        Wrapped defensively because the callback's implementation in
+        __main__ touches platform_ code (psutil + osascript); any
+        platform-side exception MUST NOT escape into Qt's signal
+        delivery and surface as a "click did nothing" failure that
+        also poisons subsequent clicks. We log and swallow."""
+        cb = self._on_terminal_answer_default_external
+        if cb is None:
+            return
+        try:
+            cb(session_uuid)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "terminal_answer_default(%s) callback raised",
+                session_uuid,
+            )
 
     # ── History chip integration ────────────────────────────────────────
 
