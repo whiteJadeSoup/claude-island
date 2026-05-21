@@ -179,6 +179,17 @@ class SessionView:
     # to "ended", mirroring prototype-v4c-github.html's status strings.
     # Default 0 keeps legacy degraded views compiling.
     turn_count: int = 0
+    # ── Phase elapsed timestamps (v4c Phase 3) ──────────────────────
+    # Seconds elapsed inside the current phase, populated only when
+    # the row is in the matching phase.  Snapshot worker computes
+    # ``now - live.tool_started_at`` once per build and freezes the
+    # float here so the UI doesn't have to re-read the clock per
+    # render.  Both fields are None when:
+    #   - phase ≠ matching phase (TOOL_USE / COMPACTING)
+    #   - state machine never saw the corresponding hook event
+    # which gracefully degrades the row to no inline elapsed display.
+    tool_elapsed_s: float | None = None
+    compact_elapsed_s: float | None = None
 
     def __post_init__(self) -> None:
         # Self-consistency invariant — guards against the UI and the
@@ -651,6 +662,36 @@ def compose_session_view(
         # in WT, last seen at ...").
         jump_target = live.jump_target if live is not None else None
 
+    # v4c Phase 3: project phase-elapsed timestamps onto the view so
+    # the UI renders "tool_use · Bash · 1.2s" / "compacting · 8s"
+    # without re-reading the clock on every paint.  Only populate when
+    # the row is in the matching phase + the timestamp exists — falls
+    # back to None ⇒ UI omits the elapsed portion.
+    now_utc = datetime.now(timezone.utc)
+    tool_elapsed_s: float | None = None
+    compact_elapsed_s: float | None = None
+    if live is not None:
+        if (
+            phase == SessionPhase.TOOL_USE
+            and getattr(live, "tool_started_at", None) is not None
+        ):
+            try:
+                tool_elapsed_s = (now_utc - live.tool_started_at).total_seconds()
+                if tool_elapsed_s < 0:   # clock skew — clamp
+                    tool_elapsed_s = 0.0
+            except Exception:
+                tool_elapsed_s = None
+        if (
+            phase == SessionPhase.COMPACTING
+            and getattr(live, "compact_started_at", None) is not None
+        ):
+            try:
+                compact_elapsed_s = (now_utc - live.compact_started_at).total_seconds()
+                if compact_elapsed_s < 0:
+                    compact_elapsed_s = 0.0
+            except Exception:
+                compact_elapsed_s = None
+
     return SessionView(
         pid=session.pid,
         name=name,
@@ -670,6 +711,8 @@ def compose_session_view(
         jump_target=jump_target,
         has_live_state=live is not None,
         turn_count=int(turns or 0),
+        tool_elapsed_s=tool_elapsed_s,
+        compact_elapsed_s=compact_elapsed_s,
     )
 
 

@@ -274,6 +274,17 @@ class SessionLiveState:
     last_prompt: str | None = None
     last_assistant_message: str | None = None
     pending_permission_tool: str | None = None
+    # v4c Phase 3a: timestamp of the most recent PreToolUse → set when
+    # phase enters TOOL_USE, cleared when leaving.  Used to render
+    # "tool_use · Bash · 1.2s" — the snapshot worker computes elapsed
+    # = now() - tool_started_at on each rebuild.  None outside TOOL_USE.
+    tool_started_at: datetime | None = None
+    # v4c Phase 3c: timestamp of the most recent PreCompact → set when
+    # phase enters COMPACTING, cleared when leaving.  Used to render
+    # "compacting · 8s".  PreCompact hook does not provide context
+    # bytes (verified 2026-05-21 against Claude Code's hook docs), so
+    # there is no companion bytes field — only elapsed.
+    compact_started_at: datetime | None = None
     # Terminal-identifying metadata captured at SessionStart hook time.
     # None when the hook didn't ship one (older hook.py, capture failure,
     # or session arrived to state machine via non-SessionStart events).

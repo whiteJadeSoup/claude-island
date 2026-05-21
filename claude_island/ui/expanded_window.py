@@ -1783,7 +1783,15 @@ def _phase_inline_text(view) -> str:
         return "· thinking"
     if phase == _SP.TOOL_USE:
         tool = getattr(view, "current_tool", None)
-        return f"· tool_use · {tool}" if tool else "· tool_use"
+        elapsed_s = getattr(view, "tool_elapsed_s", None)
+        elapsed_part = (
+            f" · {_fmt_short_elapsed(int(elapsed_s))}"
+            if elapsed_s is not None and elapsed_s >= 0
+            else ""
+        )
+        if tool:
+            return f"· tool_use · {tool}{elapsed_part}"
+        return f"· tool_use{elapsed_part}"
     if phase == _SP.WAITING_APPROVAL:
         # Render elapsed seconds since the row entered waiting state.
         # No dedicated "phase_entered_at" field on SessionView yet —
@@ -1798,6 +1806,9 @@ def _phase_inline_text(view) -> str:
                 pass
         return "· awaiting consent"
     if phase == _SP.COMPACTING:
+        elapsed_s = getattr(view, "compact_elapsed_s", None)
+        if elapsed_s is not None and elapsed_s >= 0:
+            return f"· compacting · {_fmt_short_elapsed(int(elapsed_s))}"
         return "· compacting"
     if phase == _SP.ENDED:
         last = getattr(view, "last_activity", None)
