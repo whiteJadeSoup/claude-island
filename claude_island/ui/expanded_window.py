@@ -461,8 +461,15 @@ class FlowLayout(QLayout):
         line_h = 0
         for it in self._items:
             wid = it.widget()
-            if wid is not None and not wid.isVisible():
-                continue   # match CSS: invisible children take no slot
+            # IMPORTANT: use isHidden() not isVisible().  Qt newly-created
+            # QWidgets have isVisible() == False until the ancestor row
+            # is actually shown — FlowLayout's first layout pass happens
+            # BEFORE that, so isVisible() would skip every child and
+            # produce an empty body.  isHidden() returns True only when
+            # explicit hide()/setVisible(False) was called, which is the
+            # contract we want to match.
+            if wid is not None and wid.isHidden():
+                continue
             sz = it.sizeHint()
             next_x = x + sz.width() + self._h_spacing
             if next_x - self._h_spacing > eff.right() and line_h > 0:
