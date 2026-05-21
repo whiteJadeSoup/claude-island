@@ -147,25 +147,64 @@ end tell
 # pane lives in whatever window happens to be frontmost in iTerm2's
 # own z-order, which can leave the user staring at a different
 # window with the right pane hidden behind it.
+#
+# ``set miniaturized of w to false`` is required before ``select w``:
+# AppleScript's ``select`` brings a window forward in iTerm's z-order
+# but does NOT deminiaturize a window that's been minimized to the
+# Dock. Without this, clicking a session whose host window is in the
+# Dock activates iTerm but leaves the window stuck in the Dock —
+# user perceives "click did nothing". Idempotent: no-op when the
+# window is already visible. Mirrored in ``_FOCUS_SCRIPT_BY_ID_TEMPLATE``
+# and the fast-path handlers (``_iterm_fast_path._FOCUS_BY_*``).
 _FOCUS_SCRIPT_TEMPLATE = """\
 tell application "System Events"
     set frontmost of (first process whose unix id is {host_pid}) to true
 end tell
-tell application "iTerm"
-    repeat with w in windows
-        repeat with t in tabs of w
-            repeat with s in sessions of t
-                if tty of s is "{tty}" then
-                    select s
-                    select t
-                    select w
-                    return "ok"
-                end if
+-- Retry-twice + try guards against iTerm's
+-- ``errAEIllegalIndex`` (-1719) when a session/tab/window vanishes
+-- mid-iteration of ``repeat with x in collection``. Most races
+-- resolve within microseconds, so one retry catches the typical
+-- case. Persistent failure returns "miss" — the subprocess caller
+-- treats this as not-found and falls through to focus_host_app
+-- instead of mis-attributing the race as a focus failure.
+repeat 2 times
+    try
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if tty of s is "{tty}" then
+                            -- Guarded mutators: skip the no-op
+                            -- ``set miniaturized of w to false`` and
+                            -- ``set index of w to 1`` calls when the
+                            -- window is already in that state. Each
+                            -- unconditional call triggered visible
+                            -- iTerm side effects (a "flash" in
+                            -- multi-pane / already-front windows)
+                            -- without changing anything user-visible.
+                            -- See _iterm_fast_path._FOCUS_BY_*_SOURCE
+                            -- for the same pattern in the PyObjC path.
+                            if miniaturized of w is true then
+                                set miniaturized of w to false
+                            end if
+                            select w
+                            select t
+                            select s
+                            if index of w is not 1 then
+                                set index of w to 1
+                            end if
+                            return "ok"
+                        end if
+                    end repeat
+                end repeat
             end repeat
-        end repeat
-    end repeat
-    return "miss"
-end tell
+            return "miss"
+        end tell
+    on error errMsg number errNum
+        -- transient iTerm state race; retry once before giving up
+    end try
+end repeat
+return "miss"
 """
 
 # Same shape as _FOCUS_SCRIPT_TEMPLATE but matches by stable session id
@@ -185,21 +224,45 @@ _FOCUS_SCRIPT_BY_ID_TEMPLATE = """\
 tell application "System Events"
     set frontmost of (first process whose unix id is {host_pid}) to true
 end tell
-tell application "iTerm"
-    repeat with w in windows
-        repeat with t in tabs of w
-            repeat with s in sessions of t
-                if (id of s as text) is "{session_id}" then
-                    select s
-                    select t
-                    select w
-                    return "ok"
-                end if
+-- See _FOCUS_SCRIPT_TEMPLATE for retry-twice rationale.
+repeat 2 times
+    try
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if (id of s as text) is "{session_id}" then
+                            -- Guarded mutators: skip the no-op
+                            -- ``set miniaturized of w to false`` and
+                            -- ``set index of w to 1`` calls when the
+                            -- window is already in that state. Each
+                            -- unconditional call triggered visible
+                            -- iTerm side effects (a "flash" in
+                            -- multi-pane / already-front windows)
+                            -- without changing anything user-visible.
+                            -- See _iterm_fast_path._FOCUS_BY_*_SOURCE
+                            -- for the same pattern in the PyObjC path.
+                            if miniaturized of w is true then
+                                set miniaturized of w to false
+                            end if
+                            select w
+                            select t
+                            select s
+                            if index of w is not 1 then
+                                set index of w to 1
+                            end if
+                            return "ok"
+                        end if
+                    end repeat
+                end repeat
             end repeat
-        end repeat
-    end repeat
-    return "miss"
-end tell
+            return "miss"
+        end tell
+    on error errMsg number errNum
+        -- transient iTerm state race; retry once before giving up
+    end try
+end repeat
+return "miss"
 """
 
 
@@ -403,9 +466,26 @@ class ITerm2Adapter(_CapabilityProvider):
 
         Prefers hook-captured ``jump_target.terminal_pid``; falls back
         to the runtime ancestor walk. Returns None when neither yields
-        a valid pid (placeholder session, no iTerm ancestor)."""
+        a valid pid (placeholder session, no iTerm ancestor).
+
+        The hook-captured pid is **liveness-checked** before being
+        trusted: macOS recycles pids, and the captured pid is frozen
+        at SessionStart time. If iTerm restarted (or the user just
+        kept the row alive across reboots), the captured pid may now
+        belong to a *different* UI app — activating it would silently
+        focus Slack / Mail / etc. instead of iTerm. We require the
+        process to still exist AND its name to match the iTerm
+        ancestor set; otherwise we fall through to the runtime walk
+        which always derives the host from the live claude pid."""
         if jt is not None and getattr(jt, "terminal_pid", 0) > 0:
-            return int(jt.terminal_pid)  # type: ignore[attr-defined]
+            pid = int(jt.terminal_pid)  # type: ignore[attr-defined]
+            if _pid_is_iterm(pid):
+                return pid
+            log.info(
+                "iterm2: jt.terminal_pid=%d no longer iTerm "
+                "(recycled or app restart); falling back to runtime walk",
+                pid,
+            )
         if view.session.pid > 0:
             return _iterm_host_pid(view.session.pid)
         return None
@@ -568,6 +648,95 @@ def _parse_enum_output(text: str) -> dict[str, tuple[int, int]]:
     return out
 
 
+# AppleScript template for writing literal text into an iTerm session.
+# Used by ApprovalCard's Allow flow to dismiss Claude Code's terminal-
+# side permission prompt for sensitive operations (out-of-cwd Read,
+# multi-option Bash, etc.).
+#
+# Background — what this works around:
+# Claude Code's hook protocol lets us return ``permissionDecision:
+# "allow"`` from PermissionRequest. For ordinary tools this dismisses
+# Claude's terminal prompt and the tool proceeds silently. BUT for
+# sensitive operations (e.g. ``Read`` outside the project cwd, which
+# uses Claude's 3-option "Yes / Yes for session / No" UI), Claude
+# renders the terminal prompt regardless and waits on stdin even
+# after the hook returns "allow" — verified empirically on user's
+# 2.1.142 build. The hook approves "in principle" but Claude requires
+# explicit terminal confirmation for sensitive ops.
+#
+# The workaround: type the answer for the user. iTerm AppleScript
+# ``write text`` injects characters into the pseudo-terminal as if
+# the user typed them. We send "1" + newline (iTerm's ``write text``
+# appends newline by default) which selects the default "Yes" option
+# in Claude's prompt. If Claude already moved past the prompt by the
+# time we inject (e.g. the hook DID dismiss it for non-sensitive ops),
+# "1" lands harmlessly in a shell or fresh prompt — the worst case is
+# "command not found: 1" stderr, which is annoying but safe.
+#
+# We use the SAME iteration pattern as the focus scripts (find by
+# tty), wrapped in the same try/retry envelope so iTerm collection
+# races (errno -1719) don't crash the injection.
+_WRITE_TEXT_SCRIPT_TEMPLATE = """\
+repeat 2 times
+    try
+        tell application "iTerm"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if tty of s is "{tty}" then
+                            tell s to write text "{text}"
+                            return "ok"
+                        end if
+                    end repeat
+                end repeat
+            end repeat
+            return "miss"
+        end tell
+    on error errMsg number errNum
+        -- transient iTerm state race; retry once before giving up
+    end try
+end repeat
+return "miss"
+"""
+
+
+def write_text_to_iterm_session(tty: str, text: str) -> bool:
+    """Type ``text`` into the iTerm session identified by ``tty``,
+    as if the user typed it at the keyboard. iTerm appends a newline
+    automatically — pass just ``"1"`` to send ``1\\n``.
+
+    Used by ApprovalCard.Allow to dismiss Claude's terminal-side
+    permission prompt for sensitive operations whose hook ``allow``
+    response isn't sufficient to clear the prompt. See
+    ``_WRITE_TEXT_SCRIPT_TEMPLATE`` for the full rationale.
+
+    Returns True iff osascript completed AND the script found the
+    matching session AND wrote successfully. False on any failure
+    (subprocess error, timeout, session not found, AppleScript race
+    that retried and still missed).
+
+    Safe to call from any thread (uses subprocess osascript, not the
+    main-thread NSAppleScript fast path). Cost ~250 ms cold, ~50 ms
+    warm — same envelope as the legacy focus path.
+    """
+    if not tty:
+        return False
+    script = _WRITE_TEXT_SCRIPT_TEMPLATE.format(
+        tty=_escape_applescript_string(tty),
+        text=_escape_applescript_string(text),
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, timeout=_OSASCRIPT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    return result.stdout.decode("utf-8", errors="replace").strip() == "ok"
+
+
 def _focus_by_session_id(session_id: str, *, host_pid: int) -> bool:
     """Run the focus AppleScript matching by iTerm session id. Returns
     True iff osascript completed AND the script reported "ok".
@@ -622,6 +791,35 @@ def _focus_by_tty(tty: str, *, host_pid: int) -> bool:
     if result.returncode != 0:
         return False
     return result.stdout.decode("utf-8", errors="replace").strip() == "ok"
+
+
+def _pid_is_iterm(pid: int) -> bool:
+    """True iff ``pid`` is alive AND its process name matches the iTerm
+    ancestor set.
+
+    Used by :meth:`ITerm2Adapter._resolve_host_pid` to validate
+    hook-captured ``terminal_pid`` before trusting it. Without this,
+    a recycled pid that now belongs to a non-iTerm UI app (Slack, etc.)
+    silently steals focus when the user clicks the row.
+
+    psutil-only — no AppleScript, so cheap (~0.1 ms) and safe to call
+    from the Qt main thread at click time. False on any psutil failure
+    (process gone, access denied, psutil missing): the caller falls
+    through to the runtime ancestor walk, which always derives from
+    the live claude pid."""
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+    except ImportError:
+        # No psutil → caller should fall through to runtime walk
+        # (which also bails without psutil). Match that behaviour by
+        # refusing to trust the cached pid here.
+        return False
+    try:
+        return psutil.Process(pid).name().lower() in _ITERM2_ANCESTOR_NAMES
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
 
 
 def _iterm_host_pid(claude_pid: int) -> int | None:

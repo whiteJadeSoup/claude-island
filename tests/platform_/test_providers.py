@@ -1412,6 +1412,44 @@ class TestAnthropicNegativeCache:
             p.fetch(cache_dir=tmp_path, bypass_cache=True)         # manual: HTTP
             assert mock_http.call_count == 3
 
+    def test_bypass_cache_http_failure_logs_to_stderr(self, tmp_path, capsys):
+        """Manual ⟳ HTTP failure must emit a stderr line. Without this,
+        the click is invisible: the UI redraws the same 'unavailable'
+        copy and the terminal stays silent, so the user reports
+        "刷新没反应". The UI hint at ``expanded_window.py:4603`` promises
+        errors print to the terminal — this is what makes that true on
+        the bypass_cache path.
+        """
+        from claude_island.platform_.providers import anthropic as anth
+        creds = self._seed_token(tmp_path)
+        with patch.object(anth, "_CREDENTIALS_PATH", creds), \
+             patch.object(anth, "_fetch_http",
+                          return_value=(None, "HTTP 429 Too Many Requests")):
+            result = anth.AnthropicProvider().fetch(
+                cache_dir=tmp_path, bypass_cache=True,
+            )
+        assert result is None
+        err = capsys.readouterr().err
+        assert "manual ⟳ failed" in err
+        assert "HTTP 429" in err
+
+    def test_bypass_cache_missing_token_logs_to_stderr(self, tmp_path, capsys):
+        """Manual ⟳ with no OAuth credentials must also leave a trail.
+        The missing-token branch is the other silent-return path.
+        """
+        from claude_island.platform_.providers import anthropic as anth
+        empty = tmp_path / "nope.json"  # doesn't exist, no keychain fallback in test
+        with patch.object(anth, "_CREDENTIALS_PATH", empty), \
+             patch("claude_island.platform_.providers."
+                   "_read_keychain_credentials", return_value=None):
+            result = anth.AnthropicProvider().fetch(
+                cache_dir=tmp_path, bypass_cache=True,
+            )
+        assert result is None
+        err = capsys.readouterr().err
+        assert "manual ⟳ failed" in err
+        assert "OAuth credentials not found" in err
+
     def test_failed_fetch_preserves_prior_business_data(self, tmp_path):
         """Cache had a successful payload from earlier; current fetch
         fails → cache must still expose the old five_hour/seven_day

@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtCore import QSize
 
 from claude_island.core.pending_decisions import (
     Decision,
@@ -74,6 +75,11 @@ _OPTION_LIST_MAX_HEIGHT_PX = 200
 _OPTION_BUTTON_HEIGHT_PX = 30  # tighter than v3 (was 36) to read as banner row
 
 _BUTTON_ROW_HEIGHT_PX = 30
+
+# Top-bar tint reused inside option keycap chips (orange amber, picked
+# up from master's option chip styling).  Keeps the keycap palette
+# coherent with the rest of the question-card banner aesthetic.
+_QUESTION_TOP_BAR_COLOR = "#f59e0b"
 
 # Small filled orange disc with a "?" glyph — mirrors the prototype's
 # `.decision .head .ico` (16x16 circle, white char inside).
@@ -183,48 +189,65 @@ QLabel#questionCardHint {{
     border: none;
     padding: 0;
 }}
-
+/* Option container — clickable QPushButton with no text of its own.
+   Inner labels carry the visible content so we get word-wrap on the
+   description (QPushButton.text does not wrap). All inner labels run
+   with WA_TransparentForMouseEvents so clicks reach the button. */
 QPushButton#questionOption {{
-    background-color: {_C.ink};
-    /* Native button text hidden — the child labels render the visible
-       content so they can word-wrap (QPushButton.text() doesn't). */
-    color: transparent;
-    border: 1px solid {_C.rule};
-    border-radius: 6px;
-    padding: 0;
+    background-color: #0e0e0e;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 0;          /* container has its own inner layout margins */
     text-align: left;
 }}
 QPushButton#questionOption:hover {{
-    background-color: {_C.surface_hi};
-    border-color: {_C.rule_active};
+    background-color: #161616;
+    border-color: #3a3a3a;
+}}
+/* Inner labels inherit colour from the button via dynamic property
+   `picked`, but Qt won't cascade :hover into child QLabel selectors
+   reliably, so we colour them explicitly per-state. */
+QPushButton#questionOption QLabel#questionOptionKeycap {{
+    font-family: {MONO_FONT_STACK};
+    font-size: 11px;
+    font-weight: 600;
+    color: {_QUESTION_TOP_BAR_COLOR};
+    background-color: rgba(245, 158, 11, 0.10);
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    border-radius: 5px;
+    padding: 2px 7px;
+    min-width: 12px;
+}}
+QPushButton#questionOption QLabel#questionOptionLabel {{
+    font-family: {UI_FONT_STACK};
+    font-size: 13px;
+    font-weight: 600;
+    color: #ffffff;
+}}
+QPushButton#questionOption QLabel#questionOptionDesc {{
+    font-family: {UI_FONT_STACK};
+    font-size: 11.5px;
+    color: #a5a5a5;
+    line-height: 1.45;
 }}
 QPushButton#questionOption[picked="true"] {{
-    background-color: {_C.accent};
-    border-color: {_C.accent};
+    background-color: #1d4ed8;
+    border-color: #1d4ed8;
 }}
-QLabel#questionOptionKeycap {{
-    color: {_C.paper_dim};
-    font-family: {_F.mono_stack};
-    font-size: 11px;
-    font-weight: 500;
+QPushButton#questionOption[picked="true"]:hover {{
+    background-color: #2563eb;
 }}
-QLabel#questionOptionTitle {{
-    color: {_C.paper};
-    font-family: {_F.sans_stack};
-    font-size: 12.5px;
-    font-weight: 500;
-}}
-QLabel#questionOptionDesc {{
-    color: {_C.paper_dim};
-    font-family: {_F.sans_stack};
-    font-size: 11.5px;
-}}
-QPushButton#questionOption[picked="true"] QLabel#questionOptionTitle,
-QPushButton#questionOption[picked="true"] QLabel#questionOptionDesc,
 QPushButton#questionOption[picked="true"] QLabel#questionOptionKeycap {{
-    color: white;
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 0.18);
+    border-color: rgba(255, 255, 255, 0.30);
 }}
-
+QPushButton#questionOption[picked="true"] QLabel#questionOptionLabel {{
+    color: #ffffff;
+}}
+QPushButton#questionOption[picked="true"] QLabel#questionOptionDesc {{
+    color: rgba(255, 255, 255, 0.82);
+}}
 QPushButton#questionSkip {{
     background-color: transparent;
     color: {_C.paper_dim};
@@ -256,89 +279,54 @@ QPushButton#questionSubmit:disabled {{
 
 
 # ---------------------------------------------------------------------------
-# Option button — keeps QPushButton as the outer widget so existing
-# tests (``findChildren(QPushButton, "questionOption")``) keep working,
-# but internally uses a QHBoxLayout with proper word-wrapping QLabels.
-# QPushButton's native text rendering doesn't wrap; we hide it via
-# ``color: transparent`` in QSS and let the child labels paint the
-# visible content.  ``.text()`` still returns the structured
-# "[N]  title\n      description" string so tests asserting on
-# ``btn.text()`` keep working without changes.
+# _OptionButton — QPushButton subclass that defers sizing to its layout.
 # ---------------------------------------------------------------------------
 
 
 class _OptionButton(QPushButton):
-    """Clickable option row with wrap-friendly title + description.
+    """A QPushButton that takes its size from its inner QLayout instead
+    of from its (empty) ``text`` property.
 
-    Layout:
-        [N]  Title text (bold, wraps)
-             Description text (dim, wraps)
+    The default ``QPushButton.sizeHint()`` is computed from the text
+    metric of ``self.text()``. We don't set text on the button — the
+    visible content lives in child QLabels held by a QHBoxLayout — so
+    the default sizeHint would collapse to the no-text minimum (~24 px
+    tall) and the wrapped description label would render outside the
+    button's drawn frame. Forwarding sizeHint to the layout makes the
+    button grow vertically as the wrapped description grows.
+
+    ``minimumSizeHint`` is forwarded the same way so layout managers
+    don't squash the button below the wrapped content height.
+
+    ``heightForWidth`` is enabled so parent layouts that allocate
+    narrower-than-preferred widths (the decisions stack at very small
+    panel widths) still get the correct wrapped height.
     """
 
-    def __init__(
-        self,
-        *,
-        index: int,
-        keycap: str,
-        title: str,
-        description: str,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        # Native text — kept so QPushButton.text() returns content the
-        # existing tests assert on.  Visually hidden via QSS
-        # (color: transparent); the labels below paint the real text.
-        plain = f"[{keycap}]  {title}"
-        if description:
-            plain += f"\n      {description}"
-        self.setText(plain)
-        self.setObjectName("questionOption")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Preferred,
-        )
-        self.setProperty("picked", False)
-        self._index = index
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        lay = self.layout()
+        if lay is None:
+            return super().sizeHint()
+        h = lay.sizeHint().height()
+        w = lay.sizeHint().width()
+        # Honour the floor so a description-less option still feels
+        # like a real button, not a single-line text strip.
+        return QSize(w, max(h, _OPTION_BUTTON_HEIGHT_PX))
 
-        inner = QHBoxLayout(self)
-        inner.setContentsMargins(12, 8, 12, 8)
-        inner.setSpacing(10)
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        lay = self.layout()
+        if lay is None:
+            return super().minimumSizeHint()
+        return QSize(lay.minimumSize().width(), lay.minimumSize().height())
 
-        keycap_lbl = QLabel(f"[{keycap}]")
-        keycap_lbl.setObjectName("questionOptionKeycap")
-        keycap_lbl.setFixedWidth(28)
-        keycap_lbl.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
-        )
-        keycap_lbl.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-        )
-        inner.addWidget(keycap_lbl, 0, Qt.AlignmentFlag.AlignTop)
+    def hasHeightForWidth(self) -> bool:  # type: ignore[override]
+        return True
 
-        content = QVBoxLayout()
-        content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(2)
-
-        title_lbl = QLabel(title)
-        title_lbl.setObjectName("questionOptionTitle")
-        title_lbl.setWordWrap(True)
-        title_lbl.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-        )
-        content.addWidget(title_lbl)
-
-        if description:
-            desc_lbl = QLabel(description)
-            desc_lbl.setObjectName("questionOptionDesc")
-            desc_lbl.setWordWrap(True)
-            desc_lbl.setAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            )
-            content.addWidget(desc_lbl)
-
-        inner.addLayout(content, 1)
+    def heightForWidth(self, w: int) -> int:  # type: ignore[override]
+        lay = self.layout()
+        if lay is None or not lay.hasHeightForWidth():
+            return super().heightForWidth(w)
+        return max(lay.heightForWidth(w), _OPTION_BUTTON_HEIGHT_PX)
 
 
 # ---------------------------------------------------------------------------
@@ -515,21 +503,82 @@ class QuestionCard(QFrame):
                 if idx < len(_OPTION_KEYCAPS)
                 else "·"
             )
-            description = ""
-            if descs and idx < len(descs) and descs[idx]:
-                description = descs[idx]
-            btn = _OptionButton(
-                index=idx,
-                keycap=keycap,
-                title=label,
-                description=description,
-            )
-            btn.clicked.connect(
-                lambda _checked=False, i=idx: self._on_option(i)
-            )
+            desc = descs[idx] if descs and idx < len(descs) else ""
+            btn = self._make_option_button(idx, keycap, label, desc)
             widgets.append(btn)
             self._option_buttons.append(btn)
         return widgets
+
+    def _make_option_button(
+        self, idx: int, keycap: str, label: str, desc: str,
+    ) -> QPushButton:
+        """Build one option as a clickable QPushButton with an inner
+        layout. The button itself carries no text (QPushButton.text does
+        not word-wrap, which is why long descriptions used to clip);
+        instead, child QLabels carry the visible content and the
+        description label sets ``setWordWrap(True)`` so it grows
+        vertically to fit. All inner labels are
+        ``WA_TransparentForMouseEvents`` so clicks reach the button.
+
+        Layout::
+
+            ┌──────────────────────────────────────────────┐
+            │ ┌──┐  Label (semibold, white)                │
+            │ │1·│  Description wraps across as many       │
+            │ └──┘  lines as needed, never clips           │
+            └──────────────────────────────────────────────┘
+
+        The keycap is top-aligned against the label so multi-line
+        descriptions don't visually drag the number off the title row.
+        """
+        btn = _OptionButton()
+        btn.setObjectName("questionOption")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setProperty("picked", False)
+        btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        outer = QHBoxLayout(btn)
+        # Inner padding mirrors the previous text padding (7px 10px)
+        # so visual rhythm vs. the question text above stays unchanged.
+        outer.setContentsMargins(10, 8, 12, 9)
+        outer.setSpacing(10)
+        outer.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        keycap_lbl = QLabel(keycap)
+        keycap_lbl.setObjectName("questionOptionKeycap")
+        keycap_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        keycap_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        keycap_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        outer.addWidget(keycap_lbl, 0, Qt.AlignmentFlag.AlignTop)
+
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(3)
+
+        label_lbl = QLabel(label)
+        label_lbl.setObjectName("questionOptionLabel")
+        label_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # Wrap the label too — short labels stay on one line; rare long
+        # labels (some agents emit option names ≥ 60 chars) wrap rather
+        # than push the keycap off-screen.
+        label_lbl.setWordWrap(True)
+        label_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        text_col.addWidget(label_lbl)
+
+        if desc:
+            desc_lbl = QLabel(desc)
+            desc_lbl.setObjectName("questionOptionDesc")
+            desc_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
+            )
+            text_col.addWidget(desc_lbl)
+
+        outer.addLayout(text_col, 1)
+        btn.clicked.connect(lambda _checked=False, i=idx: self._on_option(i))
+        return btn
 
     def _build_footer_row(self) -> QHBoxLayout:
         row = QHBoxLayout()

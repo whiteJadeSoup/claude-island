@@ -207,11 +207,12 @@ class _HoverRevealRow(QFrame):
 # rate + cost all on one row.  400 px was clipping at the cwd column,
 # turning every row into "review… ~/coding-proj…" which defeats the
 # whole point of the inline-cwd 2-line layout.
-# v4c: 680 px matches prototype-v4c-github.html's `.island { max-width:
-# 680px }` — the panel size the prototype's CSS was actually designed
-# around.  Wider panels (820 px tried) read as too sparse; narrower
-# (580 px tried) crowd the idle row content.
-_PANEL_W = 680
+# v4c: 620 px — slightly narrower than the prototype's 680 max-width
+# so the empty space between the row's left cluster (name+cwd) and
+# the right cluster (wave + tk/min + cost) doesn't visually float
+# (user feedback 2026-05-22 "中间宽度太大了 稍微窄点点").  At 620 px
+# the right cluster sits ~60 px tighter against the body content.
+_PANEL_W = 620
 # Visible gap (in px) between the capsule's bottom and the panel's top.
 # 6 px ≈ 12 physical px on Retina — small but clearly perceived.
 # The historical "6 px gap collapses to 0 visible px" bug was *not*
@@ -3360,6 +3361,16 @@ class ExpandedWindow(QWidget):
         # popup hides the row entirely (matches v0 behavior + tests).
         get_review_mode: "Callable[[str], bool] | None" = None,
         set_review_mode: "Callable[[str, bool], None] | None" = None,
+        # Approval-card Allow → terminal answer injection. When set,
+        # clicking Allow on an ApprovalCard ALSO sends "1\n" to the
+        # session's iTerm pane via the wiring layer. Without this,
+        # Claude's terminal prompt for sensitive operations
+        # (out-of-cwd Read, multi-option Bash) persists even after the
+        # hook ``allow`` because Claude requires explicit terminal
+        # confirmation for that class of operation. The callback runs
+        # synchronously on the Qt main thread; the underlying
+        # AppleScript dispatches to a subprocess with its own timeout.
+        on_terminal_answer_default: "Callable[[str], None] | None" = None,
     ) -> None:
         super().__init__()
         self._capsule = capsule
@@ -3422,6 +3433,7 @@ class ExpandedWindow(QWidget):
         self._resolve_decision = resolve_decision
         self._get_review_mode = get_review_mode
         self._set_review_mode = set_review_mode
+        self._on_terminal_answer_default_external = on_terminal_answer_default
         self._provider_btns: dict[str, QPushButton] = {}
         # Hold a reference to the active add-provider dialog so Qt's
         # GC doesn't tear it down before the user can interact with it.
@@ -3752,6 +3764,7 @@ class ExpandedWindow(QWidget):
         self._pending_panel = StackedDecisionsPanel(
             on_resolve=self._on_decision_resolved,
             on_focus_terminal=self._on_focus_terminal_for_decision,
+            on_terminal_answer_default=self._on_terminal_answer_default_for_decision,
         )
         root.addWidget(self._pending_panel)
         # Legacy alias — some older test scaffolding peeked at
@@ -3856,6 +3869,31 @@ class ExpandedWindow(QWidget):
         root.addWidget(self._quota_card)
         self._quota_footer = self._build_quota_footer()
         root.addWidget(self._quota_footer)
+
+        # Bottom toast surface — hidden at rest. Shown when a row
+        # click's dispatch returns False so the user gets feedback
+        # instead of a silent no-op. The panel only auto-hides when
+        # focus actually moves to another app (WindowDeactivate); a
+        # full focus failure leaves claude-island as the active app
+        # and the toast stays visible for its full 5s window.
+        self._focus_toast = mk_label("", elide=False)
+        self._focus_toast.setObjectName("focusToast")
+        self._focus_toast.setWordWrap(True)
+        self._focus_toast.setStyleSheet(
+            "QLabel#focusToast {"
+            "  color: #fde68a;"
+            "  background-color: rgba(245, 158, 11, 0.12);"
+            "  border: 1px solid rgba(245, 158, 11, 0.30);"
+            "  border-radius: 6px;"
+            "  padding: 6px 10px;"
+            "  font-size: 11px;"
+            "}"
+        )
+        self._focus_toast.hide()
+        self._focus_toast_timer = QTimer(self)
+        self._focus_toast_timer.setSingleShot(True)
+        self._focus_toast_timer.timeout.connect(self._focus_toast.hide)
+        root.addWidget(self._focus_toast)
 
         self.setStyleSheet(_STYLE_PANEL)
 
@@ -3996,6 +4034,34 @@ class ExpandedWindow(QWidget):
         until wired.
         """
         del session_uuid   # intentional no-op for now; seam preserved
+
+    def _on_terminal_answer_default_for_decision(self, session_uuid: str) -> None:
+        """ApprovalCard Allow hook — inject ``1\\n`` into the session's
+        iTerm pane so Claude's terminal-side permission prompt is
+        dismissed too.
+
+        Delegates to the external callback (wired in __main__.py)
+        which knows how to resolve a session_uuid to a tty + run the
+        AppleScript. None ⇒ feature disabled (this widget renders
+        cards but the inject is a no-op — matches v0 behaviour + tests
+        that don't construct the wiring layer).
+
+        Wrapped defensively because the callback's implementation in
+        __main__ touches platform_ code (psutil + osascript); any
+        platform-side exception MUST NOT escape into Qt's signal
+        delivery and surface as a "click did nothing" failure that
+        also poisons subsequent clicks. We log and swallow."""
+        cb = self._on_terminal_answer_default_external
+        if cb is None:
+            return
+        try:
+            cb(session_uuid)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "terminal_answer_default(%s) callback raised",
+                session_uuid,
+            )
 
     # ── History chip integration ────────────────────────────────────────
 
@@ -6668,7 +6734,25 @@ class ExpandedWindow(QWidget):
         # clicked row's sentinel isn't in any UIA TabItem.Name, fall
         # back to a same-cwd sibling's sentinel to switch the WT tab).
         # Other adapters accept-and-ignore.
-        self._dispatch(view, Capability.FOCUS, siblings=siblings)
+        ok = self._dispatch(view, Capability.FOCUS, siblings=siblings)
+        if not ok:
+            # Dispatch failed entirely — no capability, all adapters
+            # returned False, or unexpected exception logged downstream.
+            # The panel will NOT auto-hide (no other app got focus) so
+            # the toast is reliably visible. Without this the user gets
+            # zero feedback on a silent failure — see review I-2.
+            self._show_focus_toast(
+                "Couldn't focus terminal — window may be closed, "
+                "on another Space, or iTerm isn't responding. See logs."
+            )
+
+    def _show_focus_toast(self, msg: str) -> None:
+        """Surface a brief 5 s status message at the bottom of the
+        panel. Used by :meth:`_on_row_clicked` to acknowledge failed
+        focus attempts. Idempotent: calling again resets the timer."""
+        self._focus_toast.setText(msg)
+        self._focus_toast.show()
+        self._focus_toast_timer.start(5000)
 
     def resizeEvent(self, event: object) -> None:  # type: ignore[override]
         """Recompute proportional bar fill widths after a layout resize.

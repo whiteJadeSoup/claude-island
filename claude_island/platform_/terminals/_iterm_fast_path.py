@@ -47,6 +47,7 @@ _NSRunningApplication: Any = None
 _NSApplicationActivateIgnoringOtherApps: int | None = None
 _NSAppleScript: Any = None
 _NSAppleEventDescriptor: Any = None
+_NSWorkspace: Any = None
 
 
 def _ensure_pyobjc() -> bool:
@@ -57,7 +58,7 @@ def _ensure_pyobjc() -> bool:
     False and logs once — caller falls back to the subprocess path.
     """
     global _HAS_PYOBJC, _NSRunningApplication, _NSApplicationActivateIgnoringOtherApps
-    global _NSAppleScript, _NSAppleEventDescriptor
+    global _NSAppleScript, _NSAppleEventDescriptor, _NSWorkspace
 
     if _HAS_PYOBJC is not None:
         return _HAS_PYOBJC
@@ -66,6 +67,7 @@ def _ensure_pyobjc() -> bool:
         from AppKit import (  # type: ignore[import-not-found]
             NSRunningApplication,
             NSApplicationActivateIgnoringOtherApps,
+            NSWorkspace,
         )
         from Foundation import (  # type: ignore[import-not-found]
             NSAppleEventDescriptor,
@@ -80,6 +82,7 @@ def _ensure_pyobjc() -> bool:
     _NSApplicationActivateIgnoringOtherApps = NSApplicationActivateIgnoringOtherApps
     _NSAppleScript = NSAppleScript
     _NSAppleEventDescriptor = NSAppleEventDescriptor
+    _NSWorkspace = NSWorkspace
     _HAS_PYOBJC = True
     return True
 
@@ -116,51 +119,146 @@ _kAnyTransactionID = 0
 # — no escaping needed, and compile happens at most once per handler
 # per process.
 
+# ``with timeout of N seconds`` wraps the Apple Event dispatch so iTerm
+# can't peg the worker thread indefinitely. Default AppleEvent timeout
+# is 60 s — too long for an interactive click. 3 s matches the
+# subprocess osascript path's ``timeout=3.0`` so the two paths fail in
+# the same envelope; on overrun AppleScript raises errno -1712
+# ("AppleEvent timed out") which our error handler catches and the
+# AppleScriptCache failure counter treats as a normal failure (3
+# strikes invalidates the compiled handler so the next click rebuilds
+# fresh state). Without this, a single hung iTerm plugin saturated the
+# single-thread worker pool, and after 10 backed-up clicks every
+# subsequent pane-select silently dropped until app restart.
+_PANE_SELECT_APPLESCRIPT_TIMEOUT_S = 3
+
 _FOCUS_BY_ID_SOURCE = """
 on focusByID(sessionID, hostPID)
-    tell application "System Events"
-        set frontmost of (first process whose unix id is (hostPID as integer)) to true
-    end tell
-    tell application "iTerm"
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    if (id of s as text) is sessionID then
-                        select s
-                        select t
-                        select w
-                        return "ok"
-                    end if
-                end repeat
-            end repeat
+    with timeout of {timeout} seconds
+        tell application "System Events"
+            set frontmost of (first process whose unix id is (hostPID as integer)) to true
+        end tell
+        -- Outer retry-twice + try guards against errAEIllegalIndex
+        -- (-1719) when iTerm's window/tab/session collection changes
+        -- mid-iteration (a pane closes, a user resizes a split). The
+        -- error fires on dereference of a now-stale reference inside
+        -- ``repeat with x in collection``. Most races resolve within
+        -- microseconds, so one retry catches the typical case. If
+        -- both attempts race, we return "miss" — the caller treats
+        -- this as a normal not-found (no cache failure increment),
+        -- which avoids the spurious invalidate-and-recompile cycle.
+        repeat 2 times
+            try
+                tell application "iTerm"
+                    repeat with w in windows
+                        repeat with t in tabs of w
+                            repeat with s in sessions of t
+                                if (id of s as text) is sessionID then
+                                    -- All three mutators are guarded
+                                    -- by ``is not`` checks so they
+                                    -- only run when the target state
+                                    -- isn't already current. Without
+                                    -- these guards, the AppleScript
+                                    -- triggered visible iTerm-side
+                                    -- side effects (window-shuffle
+                                    -- "flash") for the common case
+                                    -- where the window was already
+                                    -- visible and at index 1 — only
+                                    -- the in-tab pane needed to
+                                    -- change. select w + select t +
+                                    -- select s themselves are still
+                                    -- needed; iTerm tracks "last
+                                    -- selected" per scope and we want
+                                    -- to update all three regardless.
+                                    if miniaturized of w is true then
+                                        set miniaturized of w to false
+                                    end if
+                                    -- I-8: broadest-scope first
+                                    -- (window → tab → session). iTerm's
+                                    -- ``select`` mutates state on each
+                                    -- call; doing window last would mean
+                                    -- an extra z-order change after we'd
+                                    -- already selected the right session
+                                    -- and tab. Most-precise selection
+                                    -- ends last so it wins regardless of
+                                    -- what ``select w`` did to the
+                                    -- in-tab selection.
+                                    select w
+                                    select t
+                                    select s
+                                    -- I-5 cross-Space hint: only set
+                                    -- index when it would change
+                                    -- something. select w already
+                                    -- brings the window to iTerm idx
+                                    -- 1 in the common case; running
+                                    -- this unconditionally caused a
+                                    -- visible reorder side effect.
+                                    if index of w is not 1 then
+                                        set index of w to 1
+                                    end if
+                                    return "ok"
+                                end if
+                            end repeat
+                        end repeat
+                    end repeat
+                    return "miss"
+                end tell
+            on error errMsg number errNum
+                -- transient race; retry once before giving up
+            end try
         end repeat
         return "miss"
-    end tell
+    end timeout
 end focusByID
-"""
+""".format(timeout=_PANE_SELECT_APPLESCRIPT_TIMEOUT_S)
 
 _FOCUS_BY_TTY_SOURCE = """
 on focusByTTY(targetTTY, hostPID)
-    tell application "System Events"
-        set frontmost of (first process whose unix id is (hostPID as integer)) to true
-    end tell
-    tell application "iTerm"
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    if (tty of s) is targetTTY then
-                        select s
-                        select t
-                        select w
-                        return "ok"
-                    end if
-                end repeat
-            end repeat
+    with timeout of {timeout} seconds
+        tell application "System Events"
+            set frontmost of (first process whose unix id is (hostPID as integer)) to true
+        end tell
+        -- See focusByID for the retry-twice + try rationale: iTerm's
+        -- collection can change mid-iteration and raise -1719; retry
+        -- catches the typical race, and on persistent failure we
+        -- return "miss" so the cache failure counter isn't tripped
+        -- spuriously.
+        repeat 2 times
+            try
+                tell application "iTerm"
+                    repeat with w in windows
+                        repeat with t in tabs of w
+                            repeat with s in sessions of t
+                                if (tty of s) is targetTTY then
+                                    -- Guarded mutators (see focusByID)
+                                    -- to suppress redundant operations
+                                    -- whose visible side effects read
+                                    -- as a "flash" when the window
+                                    -- was already in the target state.
+                                    if miniaturized of w is true then
+                                        set miniaturized of w to false
+                                    end if
+                                    select w
+                                    select t
+                                    select s
+                                    if index of w is not 1 then
+                                        set index of w to 1
+                                    end if
+                                    return "ok"
+                                end if
+                            end repeat
+                        end repeat
+                    end repeat
+                    return "miss"
+                end tell
+            on error errMsg number errNum
+                -- transient race; retry once before giving up
+            end try
         end repeat
         return "miss"
-    end tell
+    end timeout
 end focusByTTY
-"""
+""".format(timeout=_PANE_SELECT_APPLESCRIPT_TIMEOUT_S)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -350,11 +448,26 @@ class FocusWorker:
         """Enqueue a task. Returns True if accepted, False if rejected
         due to backlog. On reject, caller has already done the
         main-thread NSRunningApplication.activate; the user sees the
-        host app in front but the pane stays at its previous position."""
+        host app in front but the pane stays at its previous position.
+
+        Read-decision-increment runs as a single critical section to
+        prevent the TOCTOU race where two concurrent submits both
+        observe ``backlog < REJECT`` and both increment, exceeding the
+        threshold the check was designed to enforce. Today all callers
+        are main-thread (Qt event loop serialises them) so the race is
+        theoretical — but nothing architectural enforces that, and a
+        future caller (e.g. a keyboard-shortcut handler on a worker
+        thread) would silently start sneaking past the limit. Cheap
+        insurance — one extra lock acquisition per submit (~µs)."""
+        task._worker = self
         with self._counter_lock:
             backlog = self._inflight
-
-        if backlog >= self.BACKLOG_REJECT:
+            if backlog >= self.BACKLOG_REJECT:
+                rejected = True
+            else:
+                rejected = False
+                self._inflight += 1
+        if rejected:
             now = time.monotonic()
             if now - self._last_reject_log_at > 60.0:
                 log.error(
@@ -365,11 +478,19 @@ class FocusWorker:
             return False
         if backlog >= self.BACKLOG_WARN:
             log.warning("FocusWorker backlog=%d", backlog)
-
-        task._worker = self
-        with self._counter_lock:
-            self._inflight += 1
-        self._pool.start(task)
+        # If _pool.start raises (e.g. pool already shut down, Qt
+        # internal corruption), the increment above would leak forever
+        # because _on_task_done never fires for a task that never
+        # started. Decrement + re-raise so the counter is conserved.
+        # Without this guard, repeated failures drive _inflight up to
+        # BACKLOG_REJECT and every subsequent click silently drops
+        # pane select — only restart fixes it.
+        try:
+            self._pool.start(task)
+        except Exception:
+            with self._counter_lock:
+                self._inflight = max(0, self._inflight - 1)
+            raise
         return True
 
     def _on_task_done(self) -> None:
@@ -520,7 +641,16 @@ class _PaneSelectTask(QRunnable):
         if result is None:
             cache.note_failure(handler_label)
             return None
-        return result.stringValue()
+        # I-9: defensive normalisation. ``stringValue()`` may return
+        # None if the descriptor isn't text (unexpected from our
+        # scripts but possible from a malformed iTerm response or a
+        # future iTerm version change), and our scripts return literal
+        # "ok"/"miss" strings but the caller compares with strict ``==``
+        # — any whitespace ("ok\n") would silently miss. The subprocess
+        # osascript path already strips; mirror that here so both paths
+        # have identical normalisation contract.
+        sv = result.stringValue()
+        return (sv or "").strip()
 
 
 def _build_subroutine_event(handler_name: str, arg: str, host_pid: int) -> Any:
@@ -551,6 +681,55 @@ def _build_subroutine_event(handler_name: str, arg: str, host_pid: int) -> Any:
     )
     event.setParamDescriptor_forKeyword_(arg_list, _keyDirectObject)
     return event
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Activation verification — see I-6
+# ─────────────────────────────────────────────────────────────────────
+
+
+# Total wall-clock budget for verify_frontmost. Three polls of 10 ms
+# each balances "activate is async on Sonoma+; give it room to complete"
+# against "Goal G1 wants main-thread return ~1 ms on success" (the
+# success path returns on the first poll, so this only adds latency on
+# failure paths that were going to take ~250 ms anyway).
+_VERIFY_POLL_INTERVAL_S = 0.01
+_VERIFY_POLL_COUNT = 3
+
+
+def _verify_app_now_frontmost(app: Any, host_pid: int) -> bool:
+    """True iff the running app actually became active within the
+    poll budget.
+
+    macOS 14+ Sonoma deprecation: ``activateWithOptions_`` is a
+    request, not a synchronous transition. The OS may silently refuse
+    the request (caller not active, stale activation rights) and still
+    return True. The visible foreground app stays the same.
+
+    Use the NSRunningApplication's own ``isActive`` property —
+    cheaper than NSWorkspace.frontmostApplication (no workspace
+    lookup; just reads the cached property on the wrapper we already
+    have). False here is the signal for the caller to fall through to
+    the legacy subprocess osascript path, which uses System Events
+    ``set frontmost`` — different API, runs with Accessibility
+    privilege, not subject to the same demotion rules.
+
+    ``host_pid`` is accepted for diagnostic-logging callers and unused
+    in the check itself (the app object IS the host).
+    """
+    del host_pid  # parameter retained for future-proof logging
+    if app is None:
+        return False
+    for _ in range(_VERIFY_POLL_COUNT):
+        try:
+            if app.isActive():
+                return True
+        except Exception:
+            # Defensive: if isActive raises (PyObjC bridge oddity),
+            # fall through to legacy rather than treat as success.
+            return False
+        time.sleep(_VERIFY_POLL_INTERVAL_S)
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -601,7 +780,42 @@ def try_fast_path(
     if not ok:
         return False
 
+    # I-6: On macOS 14+ Sonoma, ``activateWithOptions_`` is deprecated
+    # and can return True without actually activating — when the caller
+    # isn't currently the active app (or has stale activation rights),
+    # the OS silently demotes the request. Without verification we'd
+    # report success and skip the legacy fallback, leaving the user on
+    # the previous app.
+    #
+    # Verify via NSWorkspace.frontmostApplication. Brief poll because
+    # activation is asynchronous — Apple's docs describe it as a
+    # request, and on a quiet machine it transitions within one
+    # event-loop tick. 3 × 10 ms covers the typical transition without
+    # blowing past Goal G1 on the success path (most calls return
+    # True on the first poll, so cost ≈ one syscall).
+    if not _verify_app_now_frontmost(app, host_pid):
+        log.info(
+            "iterm2 fast-path: activate(host=%d) reported True but "
+            "app.isActive remained False; falling back to legacy "
+            "subprocess osascript path",
+            host_pid,
+        )
+        return False
+
     # Host raised — schedule pane select if any identifying signal.
+    # The submit() return value carries critical information:
+    #   * True  → task queued; pane will be selected asynchronously
+    #   * False → worker backlog full (iTerm Apple Event handler is
+    #             hung or overwhelmed); the task was silently dropped
+    #
+    # When False AND we had a pane signal, the user clicked expecting
+    # pane precision but only got app-level activation. Return False
+    # so ITerm2Adapter.focus falls through to _legacy_focus — the
+    # subprocess osascript path is slower (~250 ms) but bounded by a
+    # 3s timeout and not blocked by the same worker backlog, so it
+    # has an independent shot at landing the pane. Without this, the
+    # caller has no idea pane precision was dropped and the user is
+    # stuck on the wrong tab until they manually navigate.
     if session_id or tty:
         try:
             task = _PaneSelectTask(
@@ -609,13 +823,88 @@ def try_fast_path(
                 session_id=session_id,
                 tty=tty,
             )
-            get_worker().submit(task)
+            queued = get_worker().submit(task)
         except Exception as e:
-            # Failure to schedule the task doesn't undo the host raise.
-            # User still sees the right app in front; pane stays put.
+            # Failure to schedule the task doesn't undo the host raise,
+            # but we still want the legacy path to take a shot — it
+            # uses a fully separate subprocess osascript pipeline.
             log.warning("PaneSelectTask not scheduled: %s", e)
+            return False
+        if not queued:
+            log.info(
+                "iterm2 fast-path: pane select rejected (backlog full); "
+                "falling back to legacy osascript for pane precision",
+            )
+            return False
 
     return True
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Prewarm — sibling of _wt_fast_path.prewarm()
+# ─────────────────────────────────────────────────────────────────────
+
+
+def prewarm() -> None:
+    """Pre-import PyObjC, construct the worker pool, and compile the
+    cached NSAppleScript handlers at app startup.
+
+    First-click latency was the most user-visible perf surface:
+      * ``_ensure_pyobjc`` cold imports AppKit + Foundation (~30 ms)
+      * ``get_worker()`` constructs QThreadPool (~5-15 ms)
+      * ``AppleScriptCache.get_*_handler`` compiles each handler the
+        first time it's invoked (~5-10 ms apiece)
+
+    All ~50-60 ms of that would otherwise land on the user's first
+    click — the moment they're judging whether Island works. Running
+    it ahead of time at boot moves that latency off the click path.
+    No-op on non-macOS (``_ensure_pyobjc`` returns False) and on
+    repeated calls (cache singletons are idempotent).
+
+    Safe from any thread; we use the worker pool for the AppleScript
+    compile so NSAppleScript stays single-threaded — same contract as
+    real pane-select tasks."""
+    if not _ensure_pyobjc():
+        return
+    # Touch the worker singleton so its QThreadPool is constructed
+    # ahead of the first real click.
+    worker = get_worker()
+    # Submit a no-op task that just warms the AppleScript handlers on
+    # the worker thread (NSAppleScript is not thread-safe, so compile
+    # must happen on the same single thread that later runs execute).
+    # Reuse submit() so the lock + leak guard live in one place — the
+    # PaneSelectTask type hint is just a docstring; submit() runs any
+    # QRunnable with the worker conventions. Submit failure here is
+    # already handled by submit's C-2 guard.
+    task = _PrewarmTask()
+    try:
+        worker.submit(task)
+    except Exception as e:
+        log.warning("iTerm fast-path prewarm: submit failed: %s", e)
+
+
+class _PrewarmTask(QRunnable):
+    """Tiny task that compiles the AppleScript handlers on the worker
+    thread so they're ready before the first real click. Sibling of
+    ``_wt_fast_path._PrewarmTask``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._worker: FocusWorker | None = None
+
+    def run(self) -> None:
+        try:
+            cache = get_cache()
+            # Trigger lazy compile on both handlers — each costs ~5-10 ms,
+            # both negligible on a warm worker thread.
+            cache.get_id_handler()
+            cache.get_tty_handler()
+            log.debug("iTerm fast-path prewarm: handlers compiled")
+        except Exception as e:
+            log.warning("iTerm fast-path prewarm failed: %s", e)
+        finally:
+            if self._worker is not None:
+                self._worker._on_task_done()
 
 
 # ─────────────────────────────────────────────────────────────────────

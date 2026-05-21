@@ -20,6 +20,7 @@ from claude_island.core.snapshot import SessionView, _degraded_view
 from claude_island.platform_.terminals.iterm2 import (
     ITerm2Adapter,
     _ENUM_SCRIPT,
+    _FOCUS_SCRIPT_BY_ID_TEMPLATE,
     _FOCUS_SCRIPT_TEMPLATE,
     _escape_applescript_string,
     _parse_enum_output,
@@ -546,10 +547,119 @@ class TestFocus:
             assert "select s" in script
             assert "select t" in script
             assert "select w" in script
+            # I-8: broadest-scope first (w → t → s). select mutates
+            # state on each call; doing window last would force an
+            # extra z-order change after we've already pinned tab +
+            # session. Most-precise selection ends last so it wins
+            # regardless of what select w did to in-tab selection.
             i_s = script.index("select s")
             i_t = script.index("select t")
             i_w = script.index("select w")
-            assert i_s < i_t < i_w
+            assert i_w < i_t < i_s, (
+                "selects must run window → tab → session "
+                "(broadest scope first); got s={} t={} w={}".format(i_s, i_t, i_w)
+            )
+
+
+class TestFocusScriptDeminiaturizesWindow:
+    """Regression: clicking a session whose host iTerm window is
+    minimized to the Dock used to silently fail — ``select w`` raises
+    a window in iTerm's z-order but does not deminiaturize a window
+    that's in the Dock. The script must set ``miniaturized of w to
+    false`` before ``select w`` so the window comes out of the Dock.
+    Idempotent: no-op when the window is already visible."""
+
+    def _assert_deminiaturize_before_select_w(self, script: str) -> None:
+        assert "set miniaturized of w to false" in script
+        i_demin = script.index("set miniaturized of w to false")
+        i_w = script.index("select w")
+        assert i_demin < i_w, (
+            "deminiaturize must run before select w; select alone "
+            "won't pull the window out of the Dock"
+        )
+
+    def test_tty_template_deminiaturizes_before_select(self):
+        script = _FOCUS_SCRIPT_TEMPLATE.format(host_pid=42, tty="/dev/ttys004")
+        self._assert_deminiaturize_before_select_w(script)
+
+    def test_id_template_deminiaturizes_before_select(self):
+        script = _FOCUS_SCRIPT_BY_ID_TEMPLATE.format(
+            host_pid=42, session_id="ABC-123",
+        )
+        self._assert_deminiaturize_before_select_w(script)
+
+
+class TestFocusScriptGuardsRedundantMutators:
+    """Subprocess templates carry the same guarded-mutator regression
+    as the fast-path sources — see TestFocusSourceGuardsRedundantMutators
+    in test_iterm2_apple_script_cache for the user-reported bug
+    (apa-origin "flash to front and back" caused by unconditional
+    ``set miniaturized``/``set index`` mutators)."""
+
+    def _assert_guarded_mutators(self, script: str) -> None:
+        assert "if miniaturized of w is true then" in script
+        assert "if index of w is not 1 then" in script
+
+    def test_tty_template_guards_mutators(self):
+        s = _FOCUS_SCRIPT_TEMPLATE.format(host_pid=42, tty="/dev/ttys004")
+        self._assert_guarded_mutators(s)
+
+    def test_id_template_guards_mutators(self):
+        s = _FOCUS_SCRIPT_BY_ID_TEMPLATE.format(
+            host_pid=42, session_id="ABC-123",
+        )
+        self._assert_guarded_mutators(s)
+
+
+class TestFocusScriptRaceTolerance:
+    """Regression: subprocess focus AppleScripts now wrap the iTerm
+    tell in retry-twice + try so a session/tab/window vanishing
+    mid-iteration (errAEIllegalIndex -1719) is absorbed rather than
+    surfacing as a focus failure."""
+
+    def _assert_retry_wraps_iterm_tell(self, script: str) -> None:
+        assert "repeat 2 times" in script
+        assert "on error" in script
+        i_repeat = script.index("repeat 2 times")
+        i_iterm = script.index('tell application "iTerm"')
+        i_on_error = script.index("on error")
+        assert i_repeat < i_iterm < i_on_error
+
+    def test_tty_template_wraps_in_retry(self):
+        script = _FOCUS_SCRIPT_TEMPLATE.format(host_pid=42, tty="/dev/ttys004")
+        self._assert_retry_wraps_iterm_tell(script)
+
+    def test_id_template_wraps_in_retry(self):
+        script = _FOCUS_SCRIPT_BY_ID_TEMPLATE.format(
+            host_pid=42, session_id="ABC-123",
+        )
+        self._assert_retry_wraps_iterm_tell(script)
+
+
+class TestFocusScriptSetsWindowIndex:
+    """I-5: cross-Space hint — ``set index of w to 1`` after
+    ``select w`` sometimes pulls the window onto the current macOS
+    Space. Mirror of the same regression in the fast-path templates."""
+
+    def _assert_index_after_select_w(self, script: str) -> None:
+        # Strip ``-- ...`` AppleScript comments so comment text
+        # mentioning these constructs doesn't break substring matching.
+        import re
+        bare = re.sub(r"--[^\n]*", "", script)
+        assert "set index of w to 1" in bare
+        i_select = bare.index("select w")
+        i_index = bare.index("set index of w to 1")
+        assert i_select < i_index
+
+    def test_tty_template_sets_window_index(self):
+        script = _FOCUS_SCRIPT_TEMPLATE.format(host_pid=42, tty="/dev/ttys004")
+        self._assert_index_after_select_w(script)
+
+    def test_id_template_sets_window_index(self):
+        script = _FOCUS_SCRIPT_BY_ID_TEMPLATE.format(
+            host_pid=42, session_id="ABC-123",
+        )
+        self._assert_index_after_select_w(script)
 
 
 # ── Dual-iTerm host-pid resolution ──────────────────────────────────────
@@ -664,6 +774,109 @@ class TestITermHostPidResolution:
             # No tty-precision AppleScript emitted (host pid unknown).
             run.assert_not_called()
             fha.assert_called_once_with(10)
+
+
+class TestStaleTerminalPidValidation:
+    """C-1: Hook-captured ``jump_target.terminal_pid`` is frozen at
+    SessionStart. By click time iTerm may have restarted (pid dead)
+    or, worse, macOS may have recycled the pid to a different UI app
+    (Slack, Mail). Trusting the stale pid silently steals focus.
+
+    ``_resolve_host_pid`` now validates the cached pid via
+    ``_pid_is_iterm`` (psutil name check) before trusting it; otherwise
+    falls back to the runtime ancestor walk on the live claude pid.
+    """
+
+    @staticmethod
+    def _view_with_terminal_pid(
+        claude_pid: int, terminal_pid: int,
+    ):
+        from dataclasses import replace as _replace
+        from claude_island.core.hook_events import JumpTarget
+        v = _view(pid=claude_pid)
+        return _replace(
+            v,
+            jump_target=JumpTarget(
+                terminal_app="iTerm.app",
+                term_program="iTerm.app",
+                iterm_session_id="",
+                terminal_pid=terminal_pid,
+            ),
+        )
+
+    def test_resolve_host_pid_trusts_terminal_pid_when_still_iterm(self):
+        """Common case: hook captured pid, iTerm is still that pid →
+        return the cached pid directly without runtime walk."""
+        adapter = adapter_for_test()
+        v = self._view_with_terminal_pid(claude_pid=10, terminal_pid=999)
+        # _pid_is_iterm returns True (process still alive and named iTerm).
+        with mock.patch(
+            "claude_island.platform_.terminals.iterm2._pid_is_iterm",
+            return_value=True,
+        ) as is_iterm:
+            assert adapter._resolve_host_pid(v, v.jump_target) == 999
+            is_iterm.assert_called_once_with(999)
+
+    def test_resolve_host_pid_falls_back_when_terminal_pid_recycled(self):
+        """If the cached pid is no longer iTerm (process died and
+        macOS recycled the pid to Slack), fall back to the runtime
+        walk on the live claude pid instead of trusting the stale pid.
+
+        Critical: without this, NSRunningApplication.activate(stale_pid)
+        would foreground Slack when the user clicked an iTerm session.
+        """
+        adapter = adapter_for_test()
+        v = self._view_with_terminal_pid(claude_pid=10, terminal_pid=999)
+        with (
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._pid_is_iterm",
+                return_value=False,   # stale: pid is now non-iTerm
+            ) as is_iterm,
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._iterm_host_pid",
+                return_value=12345,
+            ) as walk,
+        ):
+            assert adapter._resolve_host_pid(v, v.jump_target) == 12345
+            is_iterm.assert_called_once_with(999)
+            walk.assert_called_once_with(10)   # walk on live claude pid
+
+    def test_pid_is_iterm_true_for_iterm_process(self):
+        """Direct unit: live process whose name matches the iTerm
+        ancestor set returns True."""
+        from claude_island.platform_.terminals.iterm2 import _pid_is_iterm
+        fake = mock.Mock()
+        fake.name.return_value = "iTerm2"
+        with mock.patch("psutil.Process", return_value=fake):
+            assert _pid_is_iterm(999) is True
+
+    def test_pid_is_iterm_false_for_recycled_pid_now_non_iterm(self):
+        """Recycled pid: process exists but its name is something
+        else (Slack, Mail). Must NOT be trusted."""
+        from claude_island.platform_.terminals.iterm2 import _pid_is_iterm
+        fake = mock.Mock()
+        fake.name.return_value = "Slack"
+        with mock.patch("psutil.Process", return_value=fake):
+            assert _pid_is_iterm(999) is False
+
+    def test_pid_is_iterm_false_when_process_dead(self):
+        """psutil.NoSuchProcess → False (no Python exception escapes)."""
+        import psutil
+        from claude_island.platform_.terminals.iterm2 import _pid_is_iterm
+        with mock.patch(
+            "psutil.Process",
+            side_effect=psutil.NoSuchProcess(pid=999),
+        ):
+            assert _pid_is_iterm(999) is False
+
+    def test_pid_is_iterm_false_for_zero_and_negative(self):
+        """Defensive: pid <= 0 short-circuits to False without
+        touching psutil."""
+        from claude_island.platform_.terminals.iterm2 import _pid_is_iterm
+        with mock.patch("psutil.Process") as p:
+            assert _pid_is_iterm(0) is False
+            assert _pid_is_iterm(-1) is False
+            p.assert_not_called()
 
 
 def adapter_for_test() -> ITerm2Adapter:
@@ -868,3 +1081,57 @@ class TestITerm2Launch:
         ):
             with pytest.raises(LauncherSpawnError, match="osascript missing"):
                 adapter.launch(cwd=Path("/x"), command=("claude",))
+
+
+class TestWriteTextToITermSession:
+    """write_text_to_iterm_session injects text into a target iTerm
+    pane via AppleScript's ``write text`` — the workaround for
+    Claude's terminal-prompt-not-dismissed-by-hook-allow bug on
+    sensitive operations. Tested via mocked subprocess; the real
+    AppleScript is exercised in the legacy-focus tests."""
+
+    def test_returns_true_on_ok(self):
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        with mock.patch("subprocess.run", return_value=_mock_run(stdout="ok\n")) as run:
+            assert write_text_to_iterm_session("/dev/ttys007", "1") is True
+        # Script must contain the tty target and the text payload.
+        called_script = run.call_args[0][0][2]
+        assert "/dev/ttys007" in called_script
+        # Text appears inside ``write text "..."`` — check substring match.
+        assert 'write text "1"' in called_script
+
+    def test_returns_false_on_miss(self):
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        with mock.patch("subprocess.run", return_value=_mock_run(stdout="miss\n")):
+            assert write_text_to_iterm_session("/dev/ttys-bogus", "1") is False
+
+    def test_returns_false_on_subprocess_failure(self):
+        """OSError / TimeoutExpired must not crash the caller — the
+        Allow flow already fired its hook response by the time this
+        runs, so a failed inject just degrades to "user types in
+        terminal" rather than surfacing as an error."""
+        import subprocess as _sp
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        with mock.patch("subprocess.run", side_effect=_sp.TimeoutExpired("osascript", 3)):
+            assert write_text_to_iterm_session("/dev/ttys007", "1") is False
+
+    def test_empty_tty_short_circuits_without_subprocess(self):
+        """Empty tty (placeholder sessions, lookup failure) skips the
+        subprocess entirely — no point asking iTerm about a non-tty."""
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        with mock.patch("subprocess.run") as run:
+            assert write_text_to_iterm_session("", "1") is False
+            run.assert_not_called()
+
+    def test_text_with_quote_or_backslash_is_escaped(self):
+        """User-provided text could contain AppleScript metacharacters.
+        We use _escape_applescript_string (already used by focus
+        scripts) so injecting ``"`` or ``\\`` doesn't break the
+        script. The Allow callback always passes "1", but defending
+        the helper makes it safe for other callers."""
+        from claude_island.platform_.terminals.iterm2 import write_text_to_iterm_session
+        with mock.patch("subprocess.run", return_value=_mock_run(stdout="miss\n")) as run:
+            write_text_to_iterm_session("/dev/ttys007", 'a"b\\c')
+        script = run.call_args[0][0][2]
+        # Escaped: " → \", \ → \\
+        assert r'a\"b\\c' in script

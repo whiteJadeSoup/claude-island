@@ -244,3 +244,200 @@ class TestDefensive:
         assert cache.note_failure("nonsense") is False
         assert cache._id_failures == 0
         assert cache._tty_failures == 0
+
+
+class TestFocusSourceDeminiaturizesWindow:
+    """Regression: clicking a session whose iTerm host window is
+    minimized to the Dock used to silently fail — ``select w`` raises
+    a window in iTerm's z-order but does not deminiaturize a window
+    in the Dock. The handler sources must set ``miniaturized of w to
+    false`` before ``select w``. Mirror of the same regression
+    coverage in :mod:`test_iterm2_adapter` for the subprocess
+    fallback path."""
+
+    def _assert_deminiaturize_before_select_w(self, source: str) -> None:
+        # Strip AppleScript ``-- ...`` comments first so a comment
+        # mentioning "select w" doesn't fool the substring match.
+        # The actual ``select w`` statement must come after the
+        # deminiaturize mutator on its own line, otherwise the line
+        # selection won't pull a Dock window forward.
+        import re
+        bare = re.sub(r"--[^\n]*", "", source)
+        assert "set miniaturized of w to false" in bare
+        i_demin = bare.index("set miniaturized of w to false")
+        i_w = bare.index("select w")
+        assert i_demin < i_w, (
+            "deminiaturize must precede select w; select alone won't "
+            "pull the window out of the Dock"
+        )
+
+    def test_by_id_source_deminiaturizes_before_select(self):
+        self._assert_deminiaturize_before_select_w(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_deminiaturizes_before_select(self):
+        self._assert_deminiaturize_before_select_w(fp._FOCUS_BY_TTY_SOURCE)
+
+
+class TestFocusSourceTimeoutClause:
+    """I-1: AppleScript ``with timeout of N seconds`` wraps the inner
+    tell blocks so a hung iTerm Apple Event handler can't peg the
+    single-thread worker pool indefinitely (default AE timeout is 60s,
+    way too long for an interactive click). On overrun AppleScript
+    raises errno -1712 which our error handler treats as a normal
+    failure; the AppleScriptCache counter eventually invalidates the
+    compiled handler so the next click rebuilds fresh state."""
+
+    def _assert_timeout_wraps_inner_tells(self, source: str) -> None:
+        assert "with timeout of" in source, (
+            "source must wrap the body in `with timeout` to bound "
+            "execution time"
+        )
+        # Timeout must enclose BOTH the System Events frontmost call
+        # AND the iTerm tell block — those are the two operations that
+        # can hang on a stuck app.
+        i_timeout = source.index("with timeout of")
+        i_se = source.index('tell application "System Events"')
+        i_iterm = source.index('tell application "iTerm"')
+        i_end_timeout = source.index("end timeout")
+        assert i_timeout < i_se, "timeout must enclose System Events tell"
+        assert i_timeout < i_iterm, "timeout must enclose iTerm tell"
+        assert i_se < i_end_timeout
+        assert i_iterm < i_end_timeout
+
+    def test_by_id_source_wraps_in_timeout(self):
+        self._assert_timeout_wraps_inner_tells(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_wraps_in_timeout(self):
+        self._assert_timeout_wraps_inner_tells(fp._FOCUS_BY_TTY_SOURCE)
+
+    def test_timeout_seconds_matches_subprocess_path(self):
+        """The fast-path AppleScript timeout should match the subprocess
+        osascript path's timeout (currently 3s). Two paths failing in
+        the same envelope keeps user-visible latency consistent and
+        prevents one from masking the other's hang."""
+        assert fp._PANE_SELECT_APPLESCRIPT_TIMEOUT_S == 3
+        for src in (fp._FOCUS_BY_ID_SOURCE, fp._FOCUS_BY_TTY_SOURCE):
+            assert "with timeout of 3 seconds" in src
+
+
+class TestFocusSourceGuardsRedundantMutators:
+    """User-reported bug: clicking the apa-origin session caused
+    iTerm to "flash to front and back". The window was already at
+    iTerm index 1 and not minimized; the unconditional
+    ``set miniaturized of w to false`` + ``set index of w to 1``
+    calls fired iTerm-side animations even though nothing needed to
+    change. Other sessions (whose windows were in different states)
+    didn't flash because those mutators were actually doing real
+    work — the visible transition WAS the legitimate focus change.
+
+    Guarding both mutators behind an ``is ...`` check eliminates the
+    redundant work without losing functionality when it's needed
+    (minimized windows still get deminiaturized; windows behind
+    iTerm's idx 1 still get pulled forward)."""
+
+    def _assert_guarded_mutators(self, source: str) -> None:
+        # set miniaturized must be wrapped by ``if miniaturized of w is true then``
+        assert "if miniaturized of w is true then" in source
+        i_guard_min = source.index("if miniaturized of w is true then")
+        i_set_min = source.index("set miniaturized of w to false")
+        assert i_guard_min < i_set_min, "guard must precede the mutator"
+
+        # set index must be wrapped by ``if index of w is not 1 then``
+        assert "if index of w is not 1 then" in source
+        i_guard_idx = source.index("if index of w is not 1 then")
+        i_set_idx = source.index("set index of w to 1")
+        assert i_guard_idx < i_set_idx
+
+    def test_by_id_source_guards_mutators(self):
+        self._assert_guarded_mutators(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_guards_mutators(self):
+        self._assert_guarded_mutators(fp._FOCUS_BY_TTY_SOURCE)
+
+
+class TestFocusSourceRaceTolerance:
+    """Regression: iTerm's ``repeat with x in collection`` could
+    raise ``errAEIllegalIndex (-1719)`` when sessions/tabs/windows
+    closed mid-iteration. Caller's _try_handler would call
+    ``cache.note_failure`` on the error; after 3 such failures the
+    cached compiled handler was invalidated and recompiled — wasted
+    work because the script was fine, only iTerm's runtime state
+    was racy.
+
+    The new scripts wrap the iTerm tell in ``try`` + ``repeat 2 times``
+    so transient races are absorbed (one retry catches the typical
+    case) and persistent failures return "miss" rather than raising,
+    so the cache failure counter isn't tripped spuriously."""
+
+    def _assert_retry_wraps_iterm_tell(self, source: str) -> None:
+        # Retry loop must come BEFORE the iTerm tell block and the
+        # on-error clause must come AFTER, wrapping the entire scan.
+        assert "repeat 2 times" in source
+        assert "on error" in source
+        i_repeat = source.index("repeat 2 times")
+        i_iterm = source.index('tell application "iTerm"')
+        i_on_error = source.index("on error")
+        i_end_repeat = source.rindex("end repeat")
+        assert i_repeat < i_iterm, (
+            "retry must wrap the iTerm tell; got repeat at {} iterm at {}".format(
+                i_repeat, i_iterm,
+            )
+        )
+        assert i_iterm < i_on_error < i_end_repeat, (
+            "on error must catch the iTerm scan and live inside the "
+            "retry loop"
+        )
+
+    def test_by_id_source_wraps_in_retry_try(self):
+        self._assert_retry_wraps_iterm_tell(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_wraps_in_retry_try(self):
+        self._assert_retry_wraps_iterm_tell(fp._FOCUS_BY_TTY_SOURCE)
+
+
+class TestFocusSourceSelectOrder:
+    """I-8: broadest-scope first ordering (window → tab → session).
+    iTerm's ``select`` mutates state on each call; if we did window
+    last, an extra z-order change would happen after we'd already
+    pinned tab + session. Putting the most-precise selection last
+    means it wins regardless of what select w did to the in-tab
+    selection."""
+
+    def _assert_w_before_t_before_s(self, source: str) -> None:
+        i_w = source.index("select w")
+        i_t = source.index("select t")
+        i_s = source.index("select s")
+        assert i_w < i_t < i_s, (
+            f"want w<t<s, got w={i_w} t={i_t} s={i_s}"
+        )
+
+    def test_by_id_source_orders_w_t_s(self):
+        self._assert_w_before_t_before_s(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_orders_w_t_s(self):
+        self._assert_w_before_t_before_s(fp._FOCUS_BY_TTY_SOURCE)
+
+
+class TestFocusSourceSetsWindowIndex:
+    """I-5: ``set index of w to 1`` after ``select w`` forces iTerm's
+    z-order AND in many setups pulls the window onto the current
+    macOS Space (Mission Control). Not a full fix for cross-Space —
+    true transport requires private CGSPrivate APIs — but resolves
+    the common case where the user's preference "switch to a Space
+    with open windows" is OFF.
+
+    Must come AFTER select w (which sets the window selection inside
+    iTerm) so the index assignment doesn't get reordered behind the
+    selection change."""
+
+    def _assert_index_after_select_w(self, source: str) -> None:
+        assert "set index of w to 1" in source
+        i_select = source.index("select w")
+        i_index = source.index("set index of w to 1")
+        assert i_select < i_index
+
+    def test_by_id_source_sets_index(self):
+        self._assert_index_after_select_w(fp._FOCUS_BY_ID_SOURCE)
+
+    def test_by_tty_source_sets_index(self):
+        self._assert_index_after_select_w(fp._FOCUS_BY_TTY_SOURCE)

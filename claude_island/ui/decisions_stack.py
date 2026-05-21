@@ -282,6 +282,7 @@ def _build_card(
     *,
     on_resolve: ResolveCallback,
     on_focus_terminal: FocusTerminalCallback | None,
+    on_terminal_answer_default: "Callable[[str], None] | None" = None,
 ) -> QWidget:
     """Pick the right card widget for a decision kind."""
     if view.kind is DecisionKind.ASK_QUESTION:
@@ -290,7 +291,21 @@ def _build_card(
             on_resolve=on_resolve,
             on_focus_terminal=on_focus_terminal,
         )
-    return ApprovalCard(view, on_resolve=on_resolve)
+    return ApprovalCard(
+        view,
+        on_resolve=on_resolve,
+        # Same plumbing as QuestionCard — Allow/Deny focuses the
+        # terminal so the user can verify Claude proceeded (or type
+        # 1 / 2 manually if Claude is still waiting on its own prompt).
+        on_focus_terminal=on_focus_terminal,
+        # On Allow, also inject "1\n" into the target session's pane
+        # via iTerm AppleScript so Claude's terminal prompt for
+        # sensitive ops (which the hook ``allow`` alone doesn't
+        # dismiss) gets cleared automatically. See
+        # ApprovalCard._on_allow + platform_.terminals.iterm2.
+        # ``write_text_to_iterm_session``.
+        on_terminal_answer_default=on_terminal_answer_default,
+    )
 
 
 class StackedDecisionsPanel(QWidget):
@@ -307,11 +322,13 @@ class StackedDecisionsPanel(QWidget):
         *,
         on_resolve: ResolveCallback,
         on_focus_terminal: FocusTerminalCallback | None = None,
+        on_terminal_answer_default: "Callable[[str], None] | None" = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_resolve = on_resolve
         self._on_focus_terminal = on_focus_terminal
+        self._on_terminal_answer_default = on_terminal_answer_default
         self.setObjectName("stackedDecisionsPanel")
         self.setStyleSheet(_QSS)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -533,6 +550,7 @@ class StackedDecisionsPanel(QWidget):
             view,
             on_resolve=self._on_resolve,
             on_focus_terminal=self._on_focus_terminal,
+            on_terminal_answer_default=self._on_terminal_answer_default,
         )
         # Slight upward bleed so the card overlaps the lowest sliver
         # ⇒ the stack reads as a pile, not a list. Achieved by

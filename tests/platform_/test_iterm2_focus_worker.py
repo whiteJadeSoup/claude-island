@@ -212,3 +212,101 @@ class TestPaneSelectTaskIntegration:
                 fresh_worker._pool.waitForDone(2000)
         assert any("_PaneSelectTask raised" in r.message for r in caplog.records)
         assert fresh_worker.backlog() == 0
+
+
+class TestSubmitBacklogRaceFree:
+    """I-3: read-decision-increment must run as a single critical
+    section. Without the lock spanning all three, two concurrent
+    submits at backlog=BACKLOG_REJECT-1 can both observe "room
+    available" and both increment, exceeding the threshold."""
+
+    def test_concurrent_submits_never_exceed_reject_threshold(
+        self, fresh_worker,
+    ):
+        """Hammer submit() from many threads while it's at the edge
+        of the reject threshold. Without atomic read+decide+increment
+        the counter would tick past BACKLOG_REJECT; with the fix it
+        is bounded."""
+        import concurrent.futures
+
+        # Replace the pool with a no-op stub so start() doesn't actually
+        # consume the tasks — we want them ALL to "queue" (logically)
+        # and verify the counter respects the cap.
+        fresh_worker._pool = mock.Mock()
+        # Prime at REJECT-1 so the very next accepted submit pushes it
+        # to exactly REJECT; any concurrent extra must be rejected.
+        target_start = fp.FocusWorker.BACKLOG_REJECT - 1
+        with fresh_worker._counter_lock:
+            fresh_worker._inflight = target_start
+
+        def hammer(_n):
+            task = fp._PaneSelectTask(host_pid=1, session_id="x", tty=None)
+            try:
+                return fresh_worker.submit(task)
+            except Exception:
+                return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+            results = list(ex.map(hammer, range(32)))
+
+        # Exactly one submit should have been accepted (the one that
+        # incremented from REJECT-1 to REJECT); all others must have
+        # been rejected because the counter check is atomic with the
+        # increment. Without the fix, multiple submits could race past
+        # the check and accept simultaneously.
+        accepted = sum(1 for r in results if r is True)
+        rejected = sum(1 for r in results if r is False)
+        assert accepted == 1, (
+            f"expected exactly one accept at the boundary, got {accepted}; "
+            f"counter race let extras through"
+        )
+        assert accepted + rejected == 32
+        # Counter must end at exactly REJECT (one accept added 1).
+        assert fresh_worker.backlog() == target_start + 1
+
+        # Reset for clean shutdown.
+        with fresh_worker._counter_lock:
+            fresh_worker._inflight = 0
+
+
+class TestSubmitInflightLeak:
+    """C-2: ``_pool.start(task)`` can raise (pool shut down, Qt internal
+    corruption). The increment happens BEFORE start, so without the
+    decrement-on-exception guard the counter leaks forever — driving
+    backlog up to BACKLOG_REJECT and silently breaking pane-select
+    until app restart."""
+
+    def test_inflight_decrements_when_pool_start_raises(self, fresh_worker):
+        """If _pool.start raises, backlog must NOT leak. The exception
+        re-raises so the caller knows submit didn't actually queue."""
+        fake_pool = mock.Mock()
+        fake_pool.start.side_effect = RuntimeError("pool gone")
+        fresh_worker._pool = fake_pool
+        task = fp._PaneSelectTask(host_pid=1, session_id="x", tty=None)
+
+        assert fresh_worker.backlog() == 0
+        with pytest.raises(RuntimeError, match="pool gone"):
+            fresh_worker.submit(task)
+        # Counter conserved — leak fixed.
+        assert fresh_worker.backlog() == 0
+
+    def test_repeated_start_failures_dont_block_future_submits(
+        self, fresh_worker,
+    ):
+        """Without the fix, 10 failed submits would saturate the counter
+        at BACKLOG_REJECT and every subsequent submit would silently
+        return False — even after the pool recovered. Verify the
+        counter stays at 0 across many failures so submission can
+        recover the moment the pool starts working again."""
+        fake_pool = mock.Mock()
+        fake_pool.start.side_effect = RuntimeError("flake")
+        fresh_worker._pool = fake_pool
+
+        for _ in range(fp.FocusWorker.BACKLOG_REJECT + 5):
+            task = fp._PaneSelectTask(host_pid=1, session_id="x", tty=None)
+            with pytest.raises(RuntimeError):
+                fresh_worker.submit(task)
+
+        assert fresh_worker.backlog() == 0, (
+            "leak: counter should still be 0 after every failed start"
+        )

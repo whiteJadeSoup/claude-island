@@ -189,6 +189,72 @@ def test_session_click_dispatches_focus_with_latest_view(qtbot):
     assert view.last_activity == fresh.last_activity
 
 
+def test_dispatch_success_does_not_show_focus_toast(qtbot):
+    """I-2: when dispatch returns True (focus succeeded), no toast
+    is shown — silent success is the expected behaviour."""
+    capsule = QWidget(); capsule.show()
+    controller = IslandController()
+    panel = ExpandedWindow(
+        capsule=capsule,
+        controller=controller,
+        get_usage_totals=lambda period: UsageTotals(period=period),
+        dispatch=lambda v, cap, **kw: True,
+    )
+    qtbot.addWidget(panel); qtbot.addWidget(capsule)
+    panel._render_sessions([_session(1, "/a")])
+    panel._rows[1].click()
+    # ``isHidden()`` checks the widget's own visibility state
+    # independent of whether the parent panel was shown in the test
+    # harness — sufficient to assert the toast was never displayed.
+    assert panel._focus_toast.isHidden() is True
+
+
+def test_dispatch_failure_shows_focus_toast(qtbot):
+    """I-2: when dispatch returns False (no capability, all adapters
+    declined, click reached an unfocusable view), the user previously
+    got zero feedback — the panel just stayed open looking unchanged
+    and the user assumed Island was broken. Now a toast appears at
+    the bottom of the panel so the failure is visible."""
+    capsule = QWidget(); capsule.show()
+    controller = IslandController()
+    panel = ExpandedWindow(
+        capsule=capsule,
+        controller=controller,
+        get_usage_totals=lambda period: UsageTotals(period=period),
+        dispatch=lambda v, cap, **kw: False,   # simulate hard failure
+    )
+    qtbot.addWidget(panel); qtbot.addWidget(capsule)
+    panel._render_sessions([_session(1, "/a")])
+    panel._rows[1].click()
+    assert panel._focus_toast.isHidden() is False
+    txt = panel._focus_toast.text().lower()
+    # Toast text must hint at what to do — name the likely causes so
+    # the user has a starting point rather than a blank failure.
+    assert "terminal" in txt
+    assert ("space" in txt) or ("closed" in txt) or ("logs" in txt)
+
+
+def test_focus_toast_hides_after_timeout(qtbot):
+    """I-2: toast auto-hides after 5s so a stale failure doesn't
+    persist across the user's next click. Test via direct timer
+    invocation rather than real sleep to keep the suite fast."""
+    capsule = QWidget(); capsule.show()
+    controller = IslandController()
+    panel = ExpandedWindow(
+        capsule=capsule,
+        controller=controller,
+        get_usage_totals=lambda period: UsageTotals(period=period),
+        dispatch=lambda v, cap, **kw: False,
+    )
+    qtbot.addWidget(panel); qtbot.addWidget(capsule)
+    panel._render_sessions([_session(1, "/a")])
+    panel._rows[1].click()
+    assert panel._focus_toast.isHidden() is False
+    # Trigger the timer's timeout slot directly (don't wait 5s).
+    panel._focus_toast_timer.timeout.emit()
+    assert panel._focus_toast.isHidden() is True
+
+
 # ── Auto-hide-on-focus-loss (Esc + WindowDeactivate hooks) ───────────
 
 

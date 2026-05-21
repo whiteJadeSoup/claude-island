@@ -114,9 +114,37 @@ _HIGH_RISK_WARNING_TEMPLATE = (
 
 _NO_PREVIEW_PLACEHOLDER = "(no preview)"
 
+# Why this hint exists
+# --------------------
+# Claude Code surfaces a permission prompt in BOTH places concurrently:
+# (a) PermissionRequest hook → Island shows this card; (b) Claude's own
+# terminal UI ("Do you want to proceed? 1. Yes / 2. No"). Clicking
+# Allow/Deny here sends a decision via the hook channel — but if
+# Claude already started rendering its terminal prompt by the time the
+# hook response arrives, OR if the hook response races, the terminal
+# prompt stays visible and Claude keeps waiting on stdin there.
+#
+# Honest signal beats silent failure: the hint tells the user that
+# the terminal is still the source of truth, and Allow/Deny will
+# focus the terminal so they can verify (and type a digit there if
+# the prompt is still waiting). Mirror of the same pattern in
+# ui/question_card.py.
+_HINT_TEXT = (
+    "Also focuses the terminal — if Claude's prompt is still showing "
+    "there, type 1 (Allow) or 2 (Deny)."
+)
+
 
 # Callback signature: (decision_id, decision)
 ResolveCallback = Callable[[str, Decision], None]
+FocusTerminalCallback = Callable[[str], None]
+# Inject the default-accept answer (digit "1" + newline) into the
+# target session's terminal pane. Used by Allow to dismiss Claude's
+# terminal-side permission prompt that the hook ``allow`` response
+# alone doesn't clear for sensitive operations (out-of-cwd Read,
+# multi-option Bash, etc.). Implementation in platform_.terminals.iterm2
+# (``write_text_to_iterm_session``).
+TerminalAnswerCallback = Callable[[str], None]
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +231,16 @@ QPushButton#approvalDeny:hover {{
     background-color: {_C.surface_hi};
     border-color: {_C.rule_active};
 }}
+QLabel#approvalCardHint {{
+    font-family: {UI_FONT_STACK};
+    font-size: 10px;
+    color: #888;
+    background-color: #161616;
+    border-top: 1px solid #2a2a2a;
+    padding: 6px 10px;
+    border-bottom-left-radius: 10px;
+    border-bottom-right-radius: 10px;
+}}
 """ + TOOLTIP_QSS
 
 
@@ -223,11 +261,28 @@ class ApprovalCard(QFrame):
         view: PendingDecisionView,
         *,
         on_resolve: ResolveCallback | None = None,
+        on_focus_terminal: FocusTerminalCallback | None = None,
+        on_terminal_answer_default: TerminalAnswerCallback | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._view = view
         self._on_resolve = on_resolve
+        # Allow/Deny here doesn't always actually dismiss Claude's
+        # terminal prompt (concurrent rendering + hook timing). Focusing
+        # the terminal on click gives the user a chance to verify and,
+        # if needed, answer in the terminal directly. Mirror of
+        # ui/question_card.py:QuestionCard.
+        self._on_focus_terminal = on_focus_terminal
+        # Inject "1\n" into the target session's terminal pane on Allow
+        # so Claude's terminal-side prompt for sensitive operations
+        # (out-of-cwd Read, multi-option Bash) gets dismissed even
+        # when the hook ``allow`` alone isn't sufficient. None ⇒
+        # feature disabled (no injection). Only Allow injects — Deny
+        # leaves the prompt alone (we don't know which digit means
+        # "deny" for an unknown prompt shape, and the hook ``deny``
+        # already aborts the tool call).
+        self._on_terminal_answer_default = on_terminal_answer_default
         self._expanded = False
         self._build_ui()
 
@@ -271,6 +326,7 @@ class ApprovalCard(QFrame):
 
         outer.addWidget(self._build_top_bar())
         outer.addLayout(self._build_body())
+        outer.addWidget(self._build_hint())
 
     def _build_top_bar(self) -> QFrame:
         bar = QFrame()
@@ -486,9 +542,34 @@ class ApprovalCard(QFrame):
             text = f"{h}h {m}m" if m else f"{h}h"
         self._countdown_label.setText(text)
 
+    def _build_hint(self) -> QLabel:
+        hint = QLabel(f"ℹ {_HINT_TEXT}")
+        hint.setObjectName("approvalCardHint")
+        hint.setWordWrap(True)
+        return hint
+
     # ── handlers ────────────────────────────────────────────────────────
 
     def _on_allow(self) -> None:
+        # Inject the default-accept digit into the target session's
+        # terminal pane BEFORE emitting the resolve. Two reasons for
+        # the ordering:
+        #   1. The injection's iTerm AppleScript runs on a worker
+        #      thread (subprocess osascript ~50 ms); kicking it off
+        #      early gives it the most head-room to dismiss the
+        #      terminal prompt before Claude moves on.
+        #   2. If injection fails or the callback is None, the resolve
+        #      still happens — degrade gracefully to the pre-fix
+        #      behaviour (user must answer in terminal manually).
+        # Only on Allow — Deny intentionally skips injection because
+        # we don't know which digit means "deny" for an arbitrary
+        # prompt shape, and the hook ``deny`` already aborts the tool
+        # call so the terminal prompt becomes obsolete anyway.
+        try:
+            if self._on_terminal_answer_default is not None:
+                self._on_terminal_answer_default(self._view.session_uuid)
+        except Exception:
+            log.exception("ApprovalCard.on_terminal_answer_default raised")
         # v4c: no remember checkbox on this card — always one-shot allow.
         # Decision.remember stays False; persistence belongs to a future
         # settings surface, not this banner.
@@ -503,6 +584,18 @@ class ApprovalCard(QFrame):
         ))
 
     def _emit(self, decision: Decision) -> None:
+        # Focus the terminal first so the user lands on Claude's prompt
+        # if it's still showing — the hook channel can race with
+        # Claude's own terminal-side rendering, and the user may need
+        # to type the digit there if our Allow/Deny didn't dismiss the
+        # prompt in time. ``on_focus_terminal`` swallows its own
+        # exceptions; we wrap defensively here too so a backend miss
+        # never blocks resolve emission.
+        try:
+            if self._on_focus_terminal is not None:
+                self._on_focus_terminal(self._view.session_uuid)
+        except Exception:
+            log.exception("ApprovalCard.on_focus_terminal raised")
         try:
             if self._on_resolve is not None:
                 self._on_resolve(self._view.id, decision)
