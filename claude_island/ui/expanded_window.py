@@ -5847,10 +5847,26 @@ class ExpandedWindow(QWidget):
         # ONE line while a long thinking row wraps to TWO — exactly
         # as prototype-v4c-github.html's `.row .body { flex-wrap:
         # wrap }` does.
+        # body — vertical 2-row stack (user 2026-05-21: 排版要统一).
+        # Top row carries identity + action (name · branch · status ·
+        # elapsed).  Bottom row carries location + model (cwd · chip).
+        # Same shape for every phase; no dynamic single-vs-double-line
+        # wrapping.  Earlier we tried FlowLayout's flex-wrap, but the
+        # user explicitly asked for consistent 2-row layout — "let
+        # idle look like thinking, less visual jitter".
         body_widget = QWidget()
         body_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        body = FlowLayout(body_widget, spacing=8)
+        body = QVBoxLayout(body_widget)
         body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(2)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(8)
 
         # Status glyph — the 4-bar wave that signals "this session is
         # actively producing tokens".  Lives in the outer QHBoxLayout's
@@ -5889,7 +5905,7 @@ class ExpandedWindow(QWidget):
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         name_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         name_label.setMaximumWidth(280)
-        body.addWidget(name_label)
+        top_row.addWidget(name_label)
 
         status_inline = QLabel("")
         status_inline.setObjectName("status_inline")
@@ -5897,7 +5913,8 @@ class ExpandedWindow(QWidget):
         status_inline.setStyleSheet(
             f"color: {_LabColor.paper_dim}; font-size: 12.5px;"
         )
-        body.addWidget(status_inline)
+        top_row.addWidget(status_inline)
+        top_row.addStretch(1)
 
         # cwd path on the bottom row, mono — prototype's `.row .body .cwd`
         # rule.  No stretch on cwd / chip themselves; a trailing
@@ -5918,7 +5935,7 @@ class ExpandedWindow(QWidget):
         cwd_label.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred,
         )
-        body.addWidget(cwd_label)
+        bottom_row.addWidget(cwd_label)
 
         # Model chip text is short ("opus-4.7" / "sonnet-4.6" / etc.).
         # FlowLayout wraps it to a new line if the cwd already filled
@@ -5927,20 +5944,20 @@ class ExpandedWindow(QWidget):
         model_chip.setObjectName("model_chip")
         model_chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         model_chip.setStyleSheet(_STYLE_MODEL_CHIP.format(color=_MODEL_COLOR_FALLBACK))
-        body.addWidget(model_chip)
+        bottom_row.addWidget(model_chip)
+        bottom_row.addStretch(1)
+
+        # Mount the two rows into body's QVBoxLayout.
+        body.addLayout(top_row)
+        body.addLayout(bottom_row)
 
         # status_label retained as a 0×0 hidden child for legacy
-        # callers that reach for it by objectName.  FlowLayout skips
-        # invisible children, so it doesn't affect the wrap geometry.
+        # callers that reach for it by objectName.
         status_label = _ElidingLabel()
         status_label.setObjectName("status_label")
         status_label.setVisible(False)
         status_label.setFixedSize(0, 0)
         status_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        # Parent the hidden status_label to body_widget so findChild
-        # picks it up, but DON'T addWidget — FlowLayout would still
-        # iterate over it (then skip via the isVisible() guard) which
-        # is fine, but parenting alone is enough.
         status_label.setParent(body_widget)
 
         # body_widget owns the FlowLayout; add the widget (not the

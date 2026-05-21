@@ -489,34 +489,44 @@ def test_session_row_status_label_absorbs_remaining_width(qtbot):
         "don't crash."
     )
 
-    # v4c-Y (2026-05-21): cwd_label + model_chip now live in a custom
-    # FlowLayout-backed body widget that mimics CSS `flex-wrap: wrap`.
-    # Single-line idle rows put name+status+cwd+chip on ONE line; long
-    # thinking rows wrap to TWO lines.  The test now pins the
-    # FlowLayout structure rather than the old stretch-priority
-    # contract.
-    from claude_island.ui.expanded_window import FlowLayout
+    # v4c (revised 2026-05-21 again, after user feedback "排版要统一"):
+    # back to a forced 2-row body — top row carries name+status, bottom
+    # row carries cwd+chip.  FlowLayout was tried but the user prefers
+    # consistent layout across phases (less visual jitter between
+    # idle / thinking / tool_use rows).  This test pins the 2-row
+    # structure: body is QVBoxLayout containing top + bottom HBoxes.
+    from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout
     body_widget = cwd_label.parentWidget()
     assert body_widget is not None
     body_layout = body_widget.layout()
-    assert isinstance(body_layout, FlowLayout), (
-        "Row body must use FlowLayout so content wraps naturally. "
-        "Regressing to QVBoxLayout(top+bottom) means single-line idle "
-        "rows can't fit on one line."
+    assert isinstance(body_layout, QVBoxLayout), (
+        "Row body must use QVBoxLayout(top, bottom) for a consistent "
+        "2-row layout across phases."
     )
+    # cwd_label lives in the BOTTOM row inside body — walk to find it.
+    bottom_row = None
+    for i in range(body_layout.count()):
+        sub = body_layout.itemAt(i).layout()
+        if not isinstance(sub, QHBoxLayout):
+            continue
+        for j in range(sub.count()):
+            if sub.itemAt(j).widget() is cwd_label:
+                bottom_row = sub
+                break
+        if bottom_row is not None:
+            break
+    assert bottom_row is not None, "bottom row containing cwd missing"
 
     widget_order: list = []
-    for i in range(body_layout.count()):
-        item = body_layout.itemAt(i)
-        w = item.widget() if item is not None else None
+    for i in range(bottom_row.count()):
+        w = bottom_row.itemAt(i).widget()
         if isinstance(w, QLabel):
             widget_order.append(w)
     cwd_idx = widget_order.index(cwd_label)
     chip_idx = widget_order.index(chip_label)
     assert chip_idx == cwd_idx + 1, (
-        f"chip is at index {chip_idx} but cwd is at {cwd_idx} — "
-        "v4c-Y contract is cwd → chip immediately adjacent so a wrap "
-        "lands them on the same secondary line."
+        f"chip at idx {chip_idx} but cwd at {cwd_idx} — bottom row "
+        "should read cwd → chip immediately adjacent."
     )
 
 
