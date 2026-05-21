@@ -5939,7 +5939,19 @@ class ExpandedWindow(QWidget):
         # body_widget owns the FlowLayout; add the widget (not the
         # layout) to outer.  FlowLayout's hasHeightForWidth=True
         # propagates content-driven height up to the row.
-        outer.addWidget(body_widget, 1, Qt.AlignmentFlag.AlignVCenter)
+        #
+        # IMPORTANT: do NOT pass an alignment flag here.  Qt treats
+        # ``addWidget(w, stretch, alignment)`` as "size the cell by
+        # stretch but shrink the widget inside the cell to its
+        # sizeHint" — body_widget would collapse to ~0 width because
+        # FlowLayout.minimumSize() reports the smallest child size,
+        # not the full row.  Without alignment, the widget fills the
+        # stretched cell, which is what FlowLayout needs to compute
+        # its wrap based on the actual available width.
+        body_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
+        )
+        outer.addWidget(body_widget, 1)
 
         # ---- right-side cluster: wave + rate + cost --------------------
         # All vertically centered against the 2-row body, mirroring the
