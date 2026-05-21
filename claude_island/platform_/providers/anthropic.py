@@ -19,6 +19,7 @@ from claude_island.core.models import (
     register_model_short_names,
     register_pricing,
 )
+from claude_island.core.safe_stderr import safe_stderr_write
 
 from . import (
     HTTP_TIMEOUT,
@@ -118,6 +119,14 @@ class AnthropicProvider:
         token = read_oauth_token(_CREDENTIALS_PATH)
         if not token:
             if bypass_cache:
+                # Manual ⟳ must leave a trail — UI copy promises
+                # "errors print to the terminal". Bypass-cache path
+                # skips log_fetch_failure (which is paired with state
+                # writes), so emit the line directly here.
+                safe_stderr_write(
+                    "[claude-island] anthropic manual ⟳ failed: "
+                    "OAuth credentials not found"
+                )
                 return None
             log_fetch_failure(state, reason="OAuth credentials not found", now=now)
             new_state = state.with_failed_attempt(now=now)
@@ -127,6 +136,15 @@ class AnthropicProvider:
         data, reason = _fetch_http(token)
         if data is None:
             if bypass_cache:
+                # Manual ⟳ failure: mirror the auto-refresh log line so
+                # the user can tell the click was processed (just the
+                # server / network said no). State is intentionally not
+                # updated — manual probes don't count against the
+                # circuit-breaker streak.
+                safe_stderr_write(
+                    f"[claude-island] anthropic manual ⟳ failed: "
+                    f"{reason or 'unknown error'}"
+                )
                 return None
             # log_fetch_failure must run BEFORE with_failed_attempt — the
             # helper reads state.last_attempt_at as the prior-attempt
