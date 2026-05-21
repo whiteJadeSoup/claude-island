@@ -31,7 +31,6 @@ from typing import Callable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -204,11 +203,6 @@ QPushButton#approvalDeny:hover {{
     background-color: {_C.surface_hi};
     border-color: {_C.rule_active};
 }}
-QCheckBox#approvalRemember {{
-    color: {_C.paper_dim};
-    font-family: {_F.mono_stack};
-    font-size: 11px;
-}}
 """ + TOOLTIP_QSS
 
 
@@ -329,8 +323,37 @@ class ApprovalCard(QFrame):
         title.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         header.addWidget(title, 1)
 
-        self._chevron = QLabel(_CHEVRON_COLLAPSED)
+        # v4c: queue-position pill ("1 of 3") on the right of the
+        # header — replaces v3's chevron.  Populated by
+        # ``set_queue_position`` which StackedDecisionsPanel calls when
+        # the active card is rebuilt.  Hidden when there's only one
+        # decision in flight.
+        self._queue_pill = QLabel("")
+        self._queue_pill.setObjectName("approvalQueuePill")
+        self._queue_pill.setFixedHeight(20)
+        self._queue_pill.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed,
+        )
+        self._queue_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._queue_pill.setStyleSheet(
+            f"QLabel#approvalQueuePill {{"
+            f"  color: {_C.paper_dim};"
+            f"  background: {_C.ink};"
+            f"  border: 1px solid {_C.rule};"
+            f"  border-radius: 10px;"
+            f"  padding: 0 9px;"
+            f"  font-size: 11px;"
+            f"  font-weight: 500;"
+            f"}}"
+        )
+        self._queue_pill.setVisible(False)
+        header.addWidget(self._queue_pill)
+
+        # v3 chevron kept as a 0-width placeholder so any test still
+        # looking up "approvalCardChevron" doesn't crash.
+        self._chevron = QLabel("")
         self._chevron.setObjectName("approvalCardChevron")
+        self._chevron.setFixedSize(0, 0)
         header.addWidget(self._chevron)
 
         # Make the whole header row clickable for toggling. Implemented
@@ -414,12 +437,19 @@ class ApprovalCard(QFrame):
         self._countdown_timer.timeout.connect(self._update_countdown)
         self._countdown_timer.start()
 
-        self._remember = QCheckBox(self._format_remember_label())
-        self._remember.setObjectName("approvalRemember")
-        self._remember.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        row.addWidget(self._remember, 1)
+        # v4c: the "Auto-allow {tool} in this session" checkbox that
+        # v3 painted on the card is gone — prototype-v4c-github.html
+        # shows only countdown + Deny + Allow once, no checkbox.  The
+        # remember-decision flow stays available on the Decision model
+        # (other surfaces can still set remember=True), it's only the
+        # one-tap-from-this-card path that's removed.
+        row.addStretch(1)
 
-        deny_btn = QPushButton("Deny")
+        # v4c: prototype labels show "Deny D" and "Allow once A" with
+        # the keyboard shortcut printed inline.  Plain text — no
+        # rich-text key chip widget — keeps QPushButton happy and
+        # still surfaces the keys for muscle memory.
+        deny_btn = QPushButton("Deny  D")
         deny_btn.setObjectName("approvalDeny")
         deny_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         deny_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -427,7 +457,7 @@ class ApprovalCard(QFrame):
         deny_btn.clicked.connect(self._on_deny)
         row.addWidget(deny_btn)
 
-        allow_btn = QPushButton("Allow")
+        allow_btn = QPushButton("Allow once  A")
         allow_btn.setObjectName("approvalAllow")
         allow_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         allow_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -456,17 +486,13 @@ class ApprovalCard(QFrame):
             text = f"{h}h {m}m" if m else f"{h}h"
         self._countdown_label.setText(text)
 
-    def _format_remember_label(self) -> str:
-        tool = self._view.tool_name or "this tool"
-        return f"Auto-allow {tool} in this session"
-
     # ── handlers ────────────────────────────────────────────────────────
 
     def _on_allow(self) -> None:
-        self._emit(Decision(
-            result=DecisionResult.ALLOW,
-            remember=self._remember.isChecked(),
-        ))
+        # v4c: no remember checkbox on this card — always one-shot allow.
+        # Decision.remember stays False; persistence belongs to a future
+        # settings surface, not this banner.
+        self._emit(Decision(result=DecisionResult.ALLOW, remember=False))
 
     def _on_deny(self) -> None:
         # v1 kept Deny one-click — no reason text box. Empty reason
@@ -483,6 +509,20 @@ class ApprovalCard(QFrame):
             self.resolved.emit(self._view.id, decision)
         except Exception:
             log.exception("ApprovalCard.on_resolve raised")
+
+    def set_queue_position(self, position: int, total: int) -> None:
+        """v4c: surface the "1 of 3" pill on the card's top-right.
+
+        ``position`` is 1-indexed (so the head reads as "1 of N").
+        Hidden when there's only one decision in flight (total == 1
+        means there's nothing to queue behind — the pill would just
+        add chrome without information).
+        """
+        if total <= 1:
+            self._queue_pill.setVisible(False)
+            return
+        self._queue_pill.setText(f"{position} of {total}")
+        self._queue_pill.setVisible(True)
 
 
 # ---------------------------------------------------------------------------

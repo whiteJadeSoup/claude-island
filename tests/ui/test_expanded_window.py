@@ -1474,12 +1474,19 @@ def test_detail_popup_cjk_long_prompt_shows_toggle(qtbot):
     from claude_island.ui.expanded_window import SessionDetailPopup
     s = _session(1, "/x")
     # User's real prompt from screenshot — 53 chars but ~439px wide.
-    # v4c: panel widened 400 → 580 so popup-inner-width grew too; the
-    # original 53-char prompt now fits.  Doubled to 100+ chars to stay
-    # over the budget under any reasonable width tweak.
+    # v4c: panel widened multiple times (400 → 580 → 820); each widen
+    # grew the popup-inner-width so the prompt now needs to be much
+    # longer to still elide.  ~200+ CJK chars guarantees overflow
+    # under any reasonable future width tweak.
     long_cjk = (
-        "我已经merge了 checkout到master pull最新代码，然后把改动同步到~/.claude下"
-        "并且重新启动服务确认所有的功能都正常工作，包括最新的钩子和决策栈逻辑"
+        "我已经merge了 checkout到master pull最新代码，然后把改动同步到~/.claude下，"
+        "并且重新启动服务确认所有的功能都正常工作，包括最新的钩子和决策栈逻辑，"
+        "还检查了 capsule wave 颜色随 phase 变化、行布局上下两行的视觉一致性，"
+        "以及 idle/ended 单行模式在 820 px 宽度下的展示效果，整体跟原型 v4c 设计稿一致。"
+        "另外还测试了 ApprovalCard 移除 Auto-allow 后的简化效果、"
+        "QuestionCard 选项可换行后的视觉密度、tokens-per-min 字段的缺失对 wave 显示的影响，"
+        "并验证了 awaiting_approval 行整行橙 tint + rate 列改 — 占位的视觉效果。\n"
+        "newline-here-forces-toggle-visible"
     )
     details = _make_full_details(s, last_prompt=long_cjk)
     popup = SessionDetailPopup(details, _session_view(s))
@@ -2328,13 +2335,17 @@ class TestRowStatusLine:
             )
 
     def test_row_height_two_lines(self, panel):
-        """v4c: 2 lines (name+status+cwd inline / chip+meta below),
-        56 px = 8 + ~13.5 + ~12 + 8 padding/baselines.  Pinned so
-        future tweaks don't silently clip the chip or cwd line."""
+        """v4c-Y (2026-05-21): row height is fixed at 56 px so the
+        FlowLayout body has room for either a single-line idle row or
+        a wrapped two-line active row.  Idle rows have extra vertical
+        padding; active rows use the full body height for both
+        wrapped lines.  This replaces the v4c-attempted phase-based
+        height switching (which had bugs where bottom-row chips
+        bled outside the row)."""
         from claude_island.ui.expanded_window import _ROW_HEIGHT
         panel._render_sessions([_session(1, "/a")])
         assert _ROW_HEIGHT == 56
-        assert panel._rows[1].height() == 56
+        assert panel._rows[1].height() == _ROW_HEIGHT
 
     def test_chip_visually_empty_when_no_per_model_data(self, qtbot):
         """A freshly-discovered session has no UsageRecords yet ⇒
@@ -2415,9 +2426,12 @@ class TestRowStatusLine:
         qtbot.addWidget(capsule)
 
         p._render_sessions([_session(1, "/a")])
+        # v4c (revised 2026-05-21): all phases render the chip on the
+        # bottom row.  The inline chip exists as a hidden sibling for a
+        # future single-line mode.
         chip = p._rows[1].findChild(QLabel, "model_chip")
         assert chip is not None
-        assert chip.text() == "Sonnet"
+        assert chip.text() == "sonnet-4.6"
         assert "3B82F6" in chip.styleSheet()
         assert not chip.isHidden()
 
@@ -2467,9 +2481,13 @@ class TestModelHelpers:
 
     def test_short_name_anthropic_families(self):
         from claude_island.ui.expanded_window import _resolve_model_short_name
-        assert _resolve_model_short_name("claude-opus-4-7") == "Opus"
-        assert _resolve_model_short_name("claude-sonnet-4-6") == "Sonnet"
-        assert _resolve_model_short_name("claude-haiku-4-5-20251001") == "Haiku"
+        # v4c: full model version shown so users can tell "opus-4.7"
+        # apart from a future "opus-4.8" at a glance, matching
+        # prototype-v4c-github.html's `opus-4.7` / `sonnet-4.6` /
+        # `haiku-4.5` chip labels.
+        assert _resolve_model_short_name("claude-opus-4-7") == "opus-4.7"
+        assert _resolve_model_short_name("claude-sonnet-4-6") == "sonnet-4.6"
+        assert _resolve_model_short_name("claude-haiku-4-5-20251001") == "haiku-4.5"
 
     def test_short_name_deepseek_tiers(self):
         from claude_island.ui.expanded_window import _resolve_model_short_name

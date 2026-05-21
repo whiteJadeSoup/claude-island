@@ -161,7 +161,12 @@ FontStack = _FontStack()
 # Mirrors prototype-v4c-github.html's wave + the existing
 # _RowStatusGlyph in expanded_window.py.  Centralised so the capsule's
 # mini-wave and the row's wave can't drift.
-WAVE_BAR_COUNT = 5            # five 1.5px bars
+# v4c: 4 bars per prototype-v4c-github.html `.row .wave i:nth-child(1..4)`
+# — reads as a piano-key equalizer rather than a 5-bar VU meter.
+# Animation delays at 0 / 300 / 600 / 900 ms per the prototype's
+# nth-child schedule, so the bars cascade left-to-right with an
+# offset-quarter phase each.
+WAVE_BAR_COUNT = 4            # four narrow piano-key bars
 WAVE_PERIOD_MS = 1200         # full loop, linear easing
 WAVE_MIN_PCT = 0.20           # min bar height (proportion of widget)
 WAVE_MAX_PCT = 1.00           # max bar height

@@ -81,19 +81,28 @@ def test_deny_click_emits_deny_decision_with_reason(app):
     assert decision.reason  # non-empty (Decision invariant)
 
 
-def test_remember_checkbox_propagates(app):
+def test_no_remember_checkbox_in_v4c(app):
+    """v4c removed the 'Auto-allow {tool} in this session' checkbox
+    from the ApprovalCard — prototype-v4c-github.html's decision
+    banner has only countdown + Deny + Allow once, no checkbox. The
+    Decision.remember field stays available on the model so a future
+    settings surface can still set it; this test only pins down that
+    the card no longer offers it as a one-tap option."""
     from claude_island.ui.approval_card import ApprovalCard
     from PySide6.QtWidgets import QCheckBox, QPushButton
     captured: list = []
     card = ApprovalCard(_view(), on_resolve=lambda i, d: captured.append((i, d)))
     app.addWidget(card)
     cb = card.findChild(QCheckBox, "approvalRemember")
-    assert cb is not None
-    cb.setChecked(True)
+    assert cb is None, (
+        "v4c removed the Auto-allow checkbox from ApprovalCard — "
+        "if it's back, update the test to match the prototype."
+    )
     buttons = {b.objectName(): b for b in card.findChildren(QPushButton)}
     buttons["approvalAllow"].click()
     _, decision = captured[0]
-    assert decision.remember is True
+    # remember always defaults to False from this card.
+    assert decision.remember is False
 
 
 def test_signal_also_emits(app, qtbot):

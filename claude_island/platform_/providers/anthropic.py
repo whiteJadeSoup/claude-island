@@ -48,9 +48,26 @@ register_model_colors({
     "haiku":  "#10B981",  # green  — fast tier
 })
 register_model_short_names({
-    "opus":   "Opus",
-    "sonnet": "Sonnet",
-    "haiku":  "Haiku",
+    # v4c: surface the full model version on the row chip so users can
+    # tell "claude-opus-4-7" apart from "claude-opus-4-5" at a glance.
+    # Mirrors prototype-v4c-github.html's `opus-4.7` / `sonnet-4.6` /
+    # `haiku-4.5` chip labels.  Longer keys are matched first by the
+    # resolver, so a specific version (e.g. claude-opus-4-7) wins over
+    # the generic family fallback ("opus") when both could match.
+    "claude-opus-4-7":   "opus-4.7",
+    "claude-opus-4-6":   "opus-4.6",
+    "claude-opus-4-5":   "opus-4.5",
+    "claude-sonnet-4-6": "sonnet-4.6",
+    "claude-sonnet-4-5": "sonnet-4.5",
+    "claude-sonnet-4":   "sonnet-4",
+    "claude-haiku-4-5":  "haiku-4.5",
+    "claude-haiku-4":    "haiku-4",
+    # Family fallbacks — kept lowercase to match the v4c style ("opus"
+    # not "Opus") so a future model version we haven't registered yet
+    # still reads consistently in the row chip.
+    "opus":   "opus",
+    "sonnet": "sonnet",
+    "haiku":  "haiku",
 })
 
 

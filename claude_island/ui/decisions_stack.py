@@ -321,6 +321,7 @@ class StackedDecisionsPanel(QWidget):
         self._header_widget: QWidget | None = None
         self._active_card: QWidget | None = None
         self._peek_widgets: list[_PeekSliver] = []
+        self._queued_count: int = 0
         self._overflow_label: QLabel | None = None
         self.hide()
 
@@ -335,12 +336,31 @@ class StackedDecisionsPanel(QWidget):
         self.show()
 
         self._layout.addWidget(self._build_header(len(view_tuple)))
-        for sliver in self._build_peeks(view_tuple):
-            self._layout.addWidget(sliver)
-        self._layout.addWidget(self._build_active(view_tuple[0]))
-        overflow = self._compute_overflow(view_tuple)
-        if overflow > 0:
-            self._layout.addWidget(self._build_overflow_label(overflow))
+        # v4c: peek slivers hidden — the prototype's "Queued · N more"
+        # list replaces them as a sibling INSIDE the active card.
+        active = self._build_active(view_tuple[0])
+        # Wire the queue-position pill on the active card so it reads
+        # "1 of N" — only the head card carries the pill.
+        if hasattr(active, "set_queue_position"):
+            active.set_queue_position(1, len(view_tuple))
+        elif hasattr(self._active_card, "set_queue_position"):
+            self._active_card.set_queue_position(1, len(view_tuple))
+        self._layout.addWidget(active)
+        # v4c: queued-list under the active card (replaces v3 peeks
+        # above it). Shows session · tool · elapsed for each queued
+        # decision so the user reads queue depth at a glance.
+        if len(view_tuple) > 1:
+            queued_rest = view_tuple[1:]
+            # v4c keeps the v3 _MAX_PEEKS soft cap so the panel can't
+            # grow without bound when many decisions pile up. Anything
+            # past the cap rolls into the "+N more queued behind"
+            # overflow label below the queued list, matching v3 UX.
+            visible = queued_rest[:_MAX_PEEKS]
+            overflow = len(queued_rest) - len(visible)
+            self._queued_count = len(visible)
+            self._layout.addWidget(self._build_queued_list(visible))
+            if overflow > 0:
+                self._layout.addWidget(self._build_overflow_label(overflow))
 
     @property
     def active_card(self) -> QWidget | None:
@@ -349,7 +369,15 @@ class StackedDecisionsPanel(QWidget):
 
     @property
     def peek_count(self) -> int:
-        return len(self._peek_widgets)
+        """In v3 this returned the count of peek slivers above the
+        active card.  In v4c there are no slivers — the prototype puts
+        a "Queued · N more" mini-list **inside** the active card
+        instead.  The public attribute name is kept (so external
+        tests and callers don't have to be renamed in lockstep), but
+        the value now reads as "how many queued decisions are
+        surfaced visually below the active card".
+        """
+        return self._queued_count
 
     # ── internal ───────────────────────────────────────────────────────
 
@@ -363,6 +391,7 @@ class StackedDecisionsPanel(QWidget):
         self._header_widget = None
         self._active_card = None
         self._peek_widgets = []
+        self._queued_count = 0
         self._overflow_label = None
 
     def _build_header(self, total: int) -> QWidget:
@@ -416,6 +445,87 @@ class StackedDecisionsPanel(QWidget):
         wlayout.setContentsMargins(inset, 0, inset, 0)
         wlayout.setSpacing(0)
         wlayout.addWidget(sliver)
+        return host
+
+    def _build_queued_list(
+        self, rest: tuple[PendingDecisionView, ...],
+    ) -> QWidget:
+        """v4c: render the "Queued · N more" list that sits below the
+        active card (mirrors prototype-v4c-github.html).  Each row
+        names the session, the tool/preview, and the elapsed time —
+        gives the user queue depth without forcing them to click
+        through.
+        """
+        from datetime import datetime, timezone
+        from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+        from claude_island.ui.lab_palette import Color as _C, FontStack as _F
+
+        host = QFrame()
+        host.setObjectName("decisionsQueuedList")
+        host.setStyleSheet(
+            f"QFrame#decisionsQueuedList {{"
+            f"  background: rgba(219, 109, 40, 0.06);"
+            f"  border: 1px solid rgba(219, 109, 40, 0.20);"
+            f"  border-top: none;"
+            f"  border-radius: 0 0 4px 4px;"
+            f"}}"
+        )
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(14, 8, 14, 10)
+        layout.setSpacing(4)
+
+        # Header "Queued · N more"
+        header = QLabel(f"Queued · {len(rest)} more")
+        header.setStyleSheet(
+            f"color: {_C.paper_dim}; font-size: 10.5px; "
+            f"font-weight: 600; letter-spacing: 0.04em;"
+        )
+        layout.addWidget(header)
+
+        # One row per queued decision.
+        now = datetime.now(timezone.utc)
+        for v in rest:
+            row_h = QHBoxLayout()
+            row_h.setContentsMargins(0, 0, 0, 0)
+            row_h.setSpacing(8)
+            sess = v.session_name or "session"
+            tool = v.tool_name or ""
+            preview = (v.tool_input_preview or "").splitlines()[0][:50] if v.tool_input_preview else ""
+            text = f"<b>{sess}</b>"
+            if tool:
+                text += f" <span style='color:{_C.paper_dim}'>{tool}</span>"
+            if preview:
+                text += f" <span style='color:{_C.paper_faint}'>{preview}</span>"
+            label = QLabel(text)
+            label.setStyleSheet(
+                f"color: {_C.paper}; font-size: 11.5px;"
+            )
+            label.setTextFormat(Qt.TextFormat.RichText)
+            row_h.addWidget(label, 1)
+
+            # Elapsed time on the right (red_warm).
+            delta = v.expires_at - now
+            # invert (we want elapsed from received, not remaining) —
+            # but PendingDecisionView only carries expires_at; assume
+            # a 600s window and compute elapsed = 600 - remaining.
+            remaining = max(0, int(delta.total_seconds()))
+            window = 600
+            elapsed = max(0, window - remaining)
+            if elapsed < 60:
+                elapsed_str = f"{elapsed}s"
+            else:
+                m = elapsed // 60
+                s = elapsed % 60
+                elapsed_str = f"{m}m {s}s" if s else f"{m}m"
+            time_label = QLabel(elapsed_str)
+            time_label.setStyleSheet(
+                f"color: {_C.red_warm}; font-size: 11.5px; "
+                f"font-weight: 600;"
+            )
+            row_h.addWidget(time_label)
+
+            layout.addLayout(row_h)
+
         return host
 
     def _build_active(self, view: PendingDecisionView) -> QWidget:

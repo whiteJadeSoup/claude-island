@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QMenu,
     QProgressBar,
     QPushButton,
@@ -206,7 +207,11 @@ class _HoverRevealRow(QFrame):
 # rate + cost all on one row.  400 px was clipping at the cwd column,
 # turning every row into "review… ~/coding-proj…" which defeats the
 # whole point of the inline-cwd 2-line layout.
-_PANEL_W = 580
+# v4c: 680 px matches prototype-v4c-github.html's `.island { max-width:
+# 680px }` — the panel size the prototype's CSS was actually designed
+# around.  Wider panels (820 px tried) read as too sparse; narrower
+# (580 px tried) crowd the idle row content.
+_PANEL_W = 680
 # Visible gap (in px) between the capsule's bottom and the panel's top.
 # 6 px ≈ 12 physical px on Retina — small but clearly perceived.
 # The historical "6 px gap collapses to 0 visible px" bug was *not*
@@ -382,6 +387,96 @@ def _group_bg_color(idx: int) -> str:
     them appears / disappears. Worth the trade vs the previous
     "absolutely stable but visually broken" hash."""
     return _GROUP_BG_PALETTE[idx % len(_GROUP_BG_PALETTE)]
+
+
+class FlowLayout(QLayout):
+    """Mimics CSS ``display: flex; flex-wrap: wrap`` for QWidget
+    children — items flow left-to-right and wrap to the next line
+    once the row width is exhausted.  Used in v4c's session row body
+    so the (name, status, cwd, chip) tuple wraps naturally based on
+    available width — same behaviour as prototype-v4c-github.html's
+    ``.row .body { display: flex; flex-wrap: wrap; gap: 8px; }``.
+
+    Replaces the heuristic "phase-based 1-vs-2-line" branching: now
+    the layout itself decides per-row whether content fits inline or
+    needs to wrap to a second line, exactly as the CSS prototype does.
+    """
+
+    def __init__(self, parent: QWidget | None = None, spacing: int = 8) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self._h_spacing = spacing
+        self._v_spacing = spacing
+        if parent is None:
+            self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        from PySide6.QtCore import QRect
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> "QSize":
+        from PySide6.QtCore import QSize
+        return self.minimumSize()
+
+    def minimumSize(self) -> "QSize":
+        from PySide6.QtCore import QSize
+        size = QSize()
+        for it in self._items:
+            size = size.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _do_layout(self, rect, test_only: bool) -> int:
+        from PySide6.QtCore import QRect
+        m = self.contentsMargins()
+        eff = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = eff.x()
+        y = eff.y()
+        line_h = 0
+        for it in self._items:
+            wid = it.widget()
+            if wid is not None and not wid.isVisible():
+                continue   # match CSS: invisible children take no slot
+            sz = it.sizeHint()
+            next_x = x + sz.width() + self._h_spacing
+            if next_x - self._h_spacing > eff.right() and line_h > 0:
+                # Wrap to next line.
+                x = eff.x()
+                y += line_h + self._v_spacing
+                next_x = x + sz.width() + self._h_spacing
+                line_h = 0
+            if not test_only:
+                from PySide6.QtCore import QRect as _QR
+                it.setGeometry(_QR(x, y, sz.width(), sz.height()))
+            x = next_x
+            line_h = max(line_h, sz.height())
+        return y + line_h - rect.y() + m.bottom()
 
 
 class HoverRow(QPushButton):
@@ -609,13 +704,18 @@ class _RowStatusGlyph(QWidget):
     signals on this widget caused user confusion ("why is this ⚡
     instead of EQ when it's also running?")."""
 
-    # 5 narrow bars (1.5 px each) read as a traveling wave; 3 bars at
-    # period/3 phase offset reads as "all bouncing in sync" because
-    # the eye doesn't get enough samples to perceive the wavefront.
-    # Width still ~10 px total to fit the dot slot.
-    _BAR_W = 1
-    _BAR_GAP = 1
-    _BAR_COUNT = 5
+    # v4c: 4 piano-key bars per prototype-v4c-github.html — each
+    # ~3 px wide with 2 px gap → 18 px total (matches the prototype's
+    # `.row .wave { width: 18px }` rule).  Bars grow upward from a
+    # baseline (transform-origin: bottom in the prototype CSS) so the
+    # animation reads as "keys jumping" rather than "wave traveling".
+    # These are the DEFAULT sizes (row use); the capsule overrides via
+    # the constructor to use smaller bars that don't dwarf its 36 px
+    # pill height.
+    _BAR_W = 3
+    _BAR_GAP = 2
+    _BAR_COUNT = 4
+    _WAVE_H = 11    # prototype CSS `.row .wave { height: 11px }`
     # 1200 ms full wave traversal — slower than the previous 900 ms
     # bounce because the wave needs more time per cycle to read as
     # "scrolling left to right" rather than "all bars wiggling".
@@ -632,10 +732,29 @@ class _RowStatusGlyph(QWidget):
     STATE_IDLE = "idle"
     STATE_RUNNING = "running"
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        bar_w: int | None = None,
+        bar_gap: int | None = None,
+        bar_count: int | None = None,
+        wave_h: int | None = None,
+    ) -> None:
         super().__init__(parent)
+        # Per-instance bar dimensions — capsule passes smaller values so
+        # the wave fits its narrow pill without dwarfing surrounding
+        # text.  None ⇒ keep the class default (prototype 18×11 spec).
+        self._bar_w = bar_w if bar_w is not None else self._BAR_W
+        self._bar_gap = bar_gap if bar_gap is not None else self._BAR_GAP
+        self._bar_count = bar_count if bar_count is not None else self._BAR_COUNT
+        self._wave_h = wave_h if wave_h is not None else self._WAVE_H
+        slot_w = (
+            self._bar_w * self._bar_count
+            + self._bar_gap * (self._bar_count - 1)
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setFixedWidth(max(self._DEFAULT_W, self._MIN_SLOT_W))
+        self.setFixedWidth(max(slot_w, self._MIN_SLOT_W))
         self._state = self.STATE_IDLE
         self._dot_color = _DOT_GRAY
         # Bar colour for the RUNNING state.
@@ -778,33 +897,35 @@ class _RowStatusGlyph(QWidget):
 
         if self._state == self.STATE_RUNNING:
             painter.setBrush(QColor(self._bar_color))
-            # Traveling-wave equalizer: each bar's height is a sin()
-            # of (phase + i / N). The phase scrolls 0→1 over the
-            # period, so the wavefront moves left-to-right by exactly
-            # one wavelength per cycle. Bars centered vertically (top
-            # + bottom grow together) so the wave reads as a true
-            # waveform, not as bars rising off a floor.
+            # v4c piano-key equalizer: each bar's height varies with
+            # phase, but bars all stand on the same BOTTOM baseline
+            # (mirrors prototype CSS `align-items: flex-end` +
+            # `transform-origin: bottom`).  Wave height is capped at
+            # ``self._wave_h`` (prototype's 11 px by default) so the
+            # bars don't grow to fill an oversized parent widget — the
+            # capsule's 36 px pill would otherwise paint 30+ px bars.
             total_w = (
-                self._BAR_W * self._BAR_COUNT
-                + self._BAR_GAP * (self._BAR_COUNT - 1)
+                self._bar_w * self._bar_count
+                + self._bar_gap * (self._bar_count - 1)
             )
             x0 = (wgt_w - total_w) // 2
-            usable_h = max(8, wgt_h - 4)  # 2 px breathing room top/bottom
+            usable_h = min(self._wave_h, max(8, wgt_h - 2))
+            baseline_y = cy + usable_h // 2
             import math
             amplitude_range = self._MAX_PCT - self._MIN_PCT
-            for i in range(self._BAR_COUNT):
-                # sin returns -1..1; map to MIN_PCT..MAX_PCT.
-                # Two wavelengths visible across the bar set so the
-                # wave reads as denser / more obviously moving.
-                t = self._phase + (i / self._BAR_COUNT) * 2.0
+            for i in range(self._bar_count):
+                # Per-bar phase offset = i / N — each bar lands a
+                # quarter-cycle after the previous, matching
+                # prototype's nth-child(1..4) delay schedule of
+                # 0 / 300 / 600 / 900 ms over a 1200 ms period.
+                t = self._phase + (i / self._bar_count)
                 normalized = (math.sin(t * 2 * math.pi) + 1) / 2  # 0..1
                 fraction = self._MIN_PCT + normalized * amplitude_range
                 bar_h = max(2, int(usable_h * fraction))
-                bx = x0 + i * (self._BAR_W + self._BAR_GAP)
-                by = cy - bar_h // 2
+                bx = x0 + i * (self._bar_w + self._bar_gap)
+                by = baseline_y - bar_h     # grow upward from baseline
                 painter.drawRoundedRect(
-                    bx, by, self._BAR_W, bar_h,
-                    self._BAR_W / 2, self._BAR_W / 2,
+                    bx, by, self._bar_w, bar_h, 1, 1,
                 )
         else:
             # IDLE — single dot, colour picked by caller. Skipped
@@ -826,6 +947,9 @@ class _RowStatusGlyph(QWidget):
 # + ~12 (chip line) + 8 — leaves the bottom chip row a comfortable
 # 12 px slot without clipping descenders.
 _ROW_HEIGHT = 56
+# v4c: idle / ended rows collapse to a single line per prototype-v4c-
+# github.html, so the bottom row hides and the overall height drops.
+_ROW_HEIGHT_COMPACT = 36
 _ROW_PAD_H = 14
 
 # Activity heuristic for the row status text. Same threshold as the
@@ -1069,6 +1193,16 @@ _STYLE_SINGLE_ROW = f"""
     }}
     QPushButton:hover {{ background: {_LabColor.surface_hi}; }}
     QPushButton:pressed {{ background: {_LabColor.surface}; }}
+    /* v4c: waiting_approval rows paint a full-row orange tint to
+       mirror the prototype's row-waiting CSS class — the row itself
+       carries the "needs attention" signal, not just a left rail. */
+    QPushButton[phase_tint="waiting"] {{
+        background: #1f1106;
+        border-bottom: 1px solid rgba(219, 109, 40, 0.40);
+    }}
+    QPushButton[phase_tint="waiting"]:hover {{
+        background: #2a1809;
+    }}
 """
 # Group card (multiple sessions sharing a cwd) keeps its rounded
 # container, but the rows inside it now use a dashed inner divider —
@@ -1113,9 +1247,25 @@ _STYLE_AGE = f"color: {_LabColor.paper_faint}; font-size: 11px;"
 # The "high" tier is what flips when cumulative spend crosses the alert
 # threshold; the value being expensive IS the warning, no separate icon.
 _STYLE_COST_DEFAULT = f"color: {_LabColor.paper}; font-size: 11px; font-weight: 500;"
+# v4c: middle tier between default and "high" — mirrors prototype's
+# `$5.18` (yellow) sitting between `$0.84` (white) and `$11.07` (red).
+# Uses amber_dim → in v4c palette this lands on a warm yellow that
+# reads as "noticeable but not alarming". Threshold _COST_MID_USD is
+# the visual cue band — distinct from HIGH_COST_USD_THRESHOLD which
+# is the core's invariant for is_high_cost.
+_STYLE_COST_MID = (
+    f"color: #d29922; font-size: 11px; font-weight: 600;"
+)
 _STYLE_COST_HIGH = (
     f"color: {_LabColor.red_warm}; font-size: 11px; font-weight: 600;"
 )
+# Visual cost-color tiers (in USD).  Sourced from prototype-v4c-github.html's
+# tier examples ($3.42 white, $5.18 yellow, $11.07 red).  Kept separate
+# from core's HIGH_COST_USD_THRESHOLD = 50.0 because the latter is the
+# data invariant ("is this cost officially high?") while these are the
+# visual mapping ("how loudly should the row's cost paint?").
+_COST_MID_USD = 5.0
+_COST_HIGH_USD_VISUAL = 10.0
 # Small coloured pill label used in the row's status line. Background
 # is the model's hue at 18 % alpha so the chip reads as "tinted" against
 # the row bg without overpowering the name typography. Border shares
@@ -1590,32 +1740,77 @@ def _phase_icon_char(phase) -> str:
     }.get(phase, "·")
 
 
+def _fmt_short_elapsed(seconds: int) -> str:
+    """Format elapsed seconds as "Xs" / "Xm Ys" / "Xh Ym".  Used by
+    the row's inline status to render the prototype's "1m 4s
+    elapsed" / "4s ago" / "1h 4m" hints."""
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    h, rem = divmod(seconds, 3600)
+    m = rem // 60
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
 def _phase_inline_text(view) -> str:
     """v4c: phase-tinted status text that sits inline next to the
     session name on the top row.
 
     Format follows prototype-v4c-github.html's .row .status-text:
-      THINKING         → "· thinking · turn N"     (turn count if known)
-      TOOL_USE         → "· tool_use · ToolName"   (current tool)
-      WAITING_APPROVAL → "· awaiting consent · Xs elapsed"
+      THINKING         → "· thinking"               (turn count not tracked)
+      TOOL_USE         → "· tool_use · ToolName"    (current tool from hook)
+      WAITING_APPROVAL → "· awaiting consent · X elapsed"
       COMPACTING       → "· compacting"
-      IDLE             → ""   (the bottom-row "active Xm ago" already
-                                 carries this; no need to duplicate)
-      ENDED            → "· ended"
+      IDLE             → "· idle · X ago"           (last_activity relative)
+      ENDED            → "· ended · X ago"
     """
     from claude_island.core.session_phase import SessionPhase as _SP
     phase = getattr(view, "phase", _SP.IDLE)
+    turn_count = getattr(view, "turn_count", 0) or 0
     if phase == _SP.THINKING:
+        # `· thinking · turn N` mirrors prototype "build-mini-cc thinking · turn 3".
+        if turn_count > 0:
+            return f"· thinking · turn {turn_count}"
         return "· thinking"
     if phase == _SP.TOOL_USE:
         tool = getattr(view, "current_tool", None)
         return f"· tool_use · {tool}" if tool else "· tool_use"
     if phase == _SP.WAITING_APPROVAL:
+        # Render elapsed seconds since the row entered waiting state.
+        # No dedicated "phase_entered_at" field on SessionView yet —
+        # last_activity is the closest proxy (hook bridge stamps it
+        # when the PreToolUse fires).  Off by a few seconds at worst.
+        last = getattr(view, "last_activity", None)
+        if last is not None:
+            try:
+                delta = datetime.now(timezone.utc) - last.astimezone(timezone.utc)
+                return f"· awaiting consent · {_fmt_short_elapsed(int(delta.total_seconds()))} elapsed"
+            except Exception:
+                pass
         return "· awaiting consent"
     if phase == _SP.COMPACTING:
         return "· compacting"
     if phase == _SP.ENDED:
-        return "· ended"
+        last = getattr(view, "last_activity", None)
+        ago_part = ""
+        if last is not None:
+            try:
+                delta = datetime.now(timezone.utc) - last.astimezone(timezone.utc)
+                ago_part = f" · {_fmt_short_elapsed(int(delta.total_seconds()))} ago"
+            except Exception:
+                pass
+        turn_part = f" · {turn_count} turns" if turn_count > 0 else ""
+        return f"· ended{ago_part}{turn_part}"
+    # IDLE
+    last = getattr(view, "last_activity", None)
+    if last is not None:
+        try:
+            delta = datetime.now(timezone.utc) - last.astimezone(timezone.utc)
+            return f"· idle · {_fmt_short_elapsed(int(delta.total_seconds()))} ago"
+        except Exception:
+            pass
     return ""
 
 
@@ -5616,36 +5811,46 @@ class ExpandedWindow(QWidget):
         btn.setProperty("_session", view)
         btn.setProperty("_siblings", [])
 
-        outer = QVBoxLayout(btn)
-        # v4c: 8/14 padding mirrors prototype's .row { padding: 8px 14px }.
+        # v4c (revised 2026-05-21): outer is QHBoxLayout so cost / wave /
+        # rate can be vertically centered across the 2-row body.
+        # Prototype-v4c-github.html uses CSS grid `14px | 1fr | auto |
+        # auto` with `align-items: center` — same effect.
+        outer = QHBoxLayout(btn)
         outer.setContentsMargins(_ROW_PAD_H, 8, _ROW_PAD_H, 8)
-        outer.setSpacing(2)
-
-        # ---- top row: dot + name + cost ---------------------------------
-        top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
-        top.setSpacing(8)
+        outer.setSpacing(12)  # gap: 12px in prototype's .row CSS
 
         # v4c: phase icon — 14 px wide (matches prototype's .row
         # grid-template-columns: 14px ...).  Paints a single character
         # glyph (◐ ▶ ! ⇕ ○ ✓) coloured by SessionPhase via _update_row.
+        # Vertically centered against the body's two rows.
         phase_icon = QLabel("")
         phase_icon.setObjectName("phase_icon")
         phase_icon.setFixedWidth(14)
         phase_icon.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
         phase_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         btn._phase_icon = phase_icon
-        top.addWidget(phase_icon)
+        outer.addWidget(phase_icon, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        # Status glyph — the 5-bar wave that signals "this session is
-        # actively producing tokens".  v4c moves it from the leftmost
-        # slot (where v3 put it) to a position adjacent to the cost
-        # number on the top row — same right-side spot where the
-        # prototype paints it next to "1.4k tk/min".  Stays mounted on
-        # the row object as ``btn._status_glyph`` so existing
-        # set_phase / capabilities dispatch hooks keep working.
+        # body — v4c-Y: a FlowLayout (custom QLayout) that mimics
+        # CSS flex-wrap.  Children flow left-to-right and wrap to
+        # additional lines naturally when the available width runs
+        # out.  Replaces the previous heuristic 1-vs-2 row branching
+        # (which had bugs: chips lingered on hidden bottom layouts).
+        # The single FlowLayout means a short idle row renders on
+        # ONE line while a long thinking row wraps to TWO — exactly
+        # as prototype-v4c-github.html's `.row .body { flex-wrap:
+        # wrap }` does.
+        body_widget = QWidget()
+        body_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        body = FlowLayout(body_widget, spacing=8)
+        body.setContentsMargins(0, 0, 0, 0)
+
+        # Status glyph — the 4-bar wave that signals "this session is
+        # actively producing tokens".  Lives in the outer QHBoxLayout's
+        # right-side cluster (between body and cost) so it's vertically
+        # centered against the 2-row body — matches prototype.
         status_glyph = _RowStatusGlyph(btn)
-        status_glyph.setFixedHeight(_ROW_HEIGHT - 12)
+        status_glyph.setFixedHeight(14)  # piano-key height per prototype
         status_glyph.set_idle_visible(False)
         btn._status_glyph = status_glyph
 
@@ -5666,105 +5871,107 @@ class ExpandedWindow(QWidget):
         # them.  Maximum size policy + 280 px cap matches prototype's
         # .body .name { max-width: 280px } — cwd elides first
         # because it's the stretch slot next to name.
+        # v4c body order (matches prototype `.row .body` DOM order):
+        #   name → status_inline → cwd → chip
+        # FlowLayout wraps these into 1 or 2 visual lines based on
+        # available width — exactly as the CSS `flex-wrap: wrap`
+        # would.  No phase-based branching, no hidden inline siblings.
         name_label = QLabel()
         name_label.setObjectName("name_label")
         name_label.setStyleSheet(_STYLE_NAME)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         name_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         name_label.setMaximumWidth(280)
-        top.addWidget(name_label)
+        body.addWidget(name_label)
 
-        # v4c: status text inline next to the name on the top row
-        # ("thinking · turn 3", "tool_use · Bash · 1.2s", etc.).
-        # Phase-tinted; populated by _update_row from view.phase.
-        # The bottom row's status_label is kept for backwards compat
-        # (older meta strings like "active 3m ago") — they live
-        # alongside each other as two complementary signals.
         status_inline = QLabel("")
         status_inline.setObjectName("status_inline")
         status_inline.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        # v4c: status text size 12.5 (matches prototype-v4c row CSS).
         status_inline.setStyleSheet(
             f"color: {_LabColor.paper_dim}; font-size: 12.5px;"
         )
-        top.addWidget(status_inline)
+        body.addWidget(status_inline)
 
-        # v4c: cwd path INLINE on the top row, mono 11.5 (prototype CSS).
-        cwd_label_top = _ElidingLabel()
-        cwd_label_top.setObjectName("cwd_label")
-        cwd_label_top.setStyleSheet(
+        # cwd path on the bottom row, mono — prototype's `.row .body .cwd`
+        # rule.  No stretch on cwd / chip themselves; a trailing
+        # ``addStretch`` absorbs the slack so both stay LEFT-aligned
+        # (chip immediately after cwd).  When cwd's sizeHint exceeds
+        # the row width, _ElidingLabel's minimumSize=0 lets it shrink
+        # while chip keeps its sizeHint — chip stays visible, cwd
+        # elides on overflow.  This matches the user-flagged
+        # 2026-05-21 layout: "下面展示当前目录、模型" with chip next
+        # to cwd, not floating in the right column under the cost.
+        cwd_label = _ElidingLabel()
+        cwd_label.setObjectName("cwd_label")
+        cwd_label.setStyleSheet(
             f"color: {_LabColor.paper_faint}; font-size: 11.5px; "
             f"font-family: {FontStack.mono_stack};"
         )
-        cwd_label_top.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        cwd_label_top.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        top.addWidget(cwd_label_top, 1)
+        cwd_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        cwd_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred,
+        )
+        body.addWidget(cwd_label)
 
-        # v4c: wave glyph immediately before the cost number — that's
-        # where prototype-v4c-github.html paints "live signal next to
-        # live number".  Glyph is the same instance bound above as
-        # btn._status_glyph (so set_phase / set_running still flip it);
-        # we just attach it to a different layout slot here than v3 did.
-        top.addWidget(status_glyph)
-
-        # Right-side meta slot. Shows cumulative session cost ("$XX.XX").
-        # elide=False: cost strings are bounded short, eliding right-
-        # aligned money would be visually broken ("$1,2…").
-        meta_label = mk_label("", elide=False)
-        meta_label.setObjectName("meta_label")
-        meta_label.setStyleSheet(_STYLE_COST_DEFAULT)
-        meta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        meta_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        top.addWidget(meta_label)
-
-        outer.addLayout(top)
-
-        # ---- bottom row: indent + model chip + status -------------------
-        # Indent the bottom row so the model chip sits under the name,
-        # not under the dot — visually couples the two lines as one block.
-        bottom = QHBoxLayout()
-        bottom.setContentsMargins(20, 0, 0, 0)  # 12 (dot width) + 8 (spacing)
-        bottom.setSpacing(6)
-
-        # Model chip text is short ("Sonnet" / "Opus" / "Haiku" / etc.);
-        # elide=False is safe and avoids spurious eliding overhead.
+        # Model chip text is short ("opus-4.7" / "sonnet-4.6" / etc.).
+        # FlowLayout wraps it to a new line if the cwd already filled
+        # row 1 — same behaviour as prototype's flex-wrap CSS.
         model_chip = mk_label("", elide=False)
         model_chip.setObjectName("model_chip")
         model_chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         model_chip.setStyleSheet(_STYLE_MODEL_CHIP.format(color=_MODEL_COLOR_FALLBACK))
-        bottom.addWidget(model_chip)
+        body.addWidget(model_chip)
 
-        # _ElidingLabel: status text composes "active <relative> ·
-        # v<version>" — usually short, but long version strings or a
-        # localised relative-time phrase can exceed the row width on
-        # narrow allocations. Same dual rationale as name_label:
-        # neuter width-propagation + elide on overflow rather than
-        # hard-clip.
-        #
-        # stretch=1 is load-bearing here. Without it, the bottom-row
-        # layout is `[chip + status + addStretch()]` with all three
-        # at default sizePolicy. When available width drops below
-        # `chip.sizeHint + status.sizeHint`, Qt picks the most
-        # compressible widget — status (because _ElidingLabel reports
-        # minimumSize=0) — and squeezes it preferentially, eliding
-        # text well before chip ever yields a pixel. Result: rows
-        # whose status would comfortably fit displayed as "active
-        # 8d a…" while chip stayed at its full sizeHint, even with
-        # plenty of slack on the right (caught by user feedback;
-        # see test_status_label_keeps_full_width_in_card).
-        # stretch=1 on status (and dropping the trailing
-        # addStretch) flips the priority: status absorbs both the
-        # surplus AND deficit. Surplus → status renders wider but
-        # text stays left-aligned (visually identical to before).
-        # Deficit → status still elides first, which is the correct
-        # behaviour ("active …" is more graceful than "Opu…").
+        # status_label retained as a 0×0 hidden child for legacy
+        # callers that reach for it by objectName.  FlowLayout skips
+        # invisible children, so it doesn't affect the wrap geometry.
         status_label = _ElidingLabel()
         status_label.setObjectName("status_label")
-        status_label.setStyleSheet(_STYLE_STATUS)
+        status_label.setVisible(False)
+        status_label.setFixedSize(0, 0)
         status_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        bottom.addWidget(status_label, 1)
+        # Parent the hidden status_label to body_widget so findChild
+        # picks it up, but DON'T addWidget — FlowLayout would still
+        # iterate over it (then skip via the isVisible() guard) which
+        # is fine, but parenting alone is enough.
+        status_label.setParent(body_widget)
 
-        outer.addLayout(bottom)
+        # body_widget owns the FlowLayout; add the widget (not the
+        # layout) to outer.  FlowLayout's hasHeightForWidth=True
+        # propagates content-driven height up to the row.
+        outer.addWidget(body_widget, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        # ---- right-side cluster: wave + rate + cost --------------------
+        # All vertically centered against the 2-row body, mirroring the
+        # prototype's `align-items: center` grid rule.
+        outer.addWidget(
+            status_glyph, 0, Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        rate_label = QLabel("")
+        rate_label.setObjectName("rate_label")
+        rate_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        rate_label.setStyleSheet(
+            f"color: {_LabColor.paper_faint}; font-size: 11.5px; "
+            f"font-family: {FontStack.mono_stack};"
+        )
+        rate_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        rate_label.setVisible(False)
+        outer.addWidget(rate_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        # Right-side meta slot — cumulative session cost.  Vertically
+        # centered between the two body rows (prototype's $X.XX sits in
+        # the visual middle of the row, not flush with the top line).
+        meta_label = mk_label("", elide=False)
+        meta_label.setObjectName("meta_label")
+        meta_label.setStyleSheet(_STYLE_COST_DEFAULT)
+        meta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        meta_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        outer.addWidget(meta_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._update_row(btn, view)
         btn.clicked.connect(lambda: self._on_row_clicked(
@@ -5837,30 +6044,54 @@ class ExpandedWindow(QWidget):
         # is more direct than a separate icon or edge bar (YNAB /
         # Mint pattern: the expensive value highlights itself).
         glyph: _RowStatusGlyph | None = getattr(btn, "_status_glyph", None)
-        if glyph is not None:
-            # v3: drive wave-vs-dot AND the wave's tint from view.phase.
-            # set_phase routes IDLE/ENDED to the dot path with the
-            # freshness colour we'd pick anyway, and active phases to
-            # the wave with the phase-specific tint.  Legacy bool
-            # glyphs that don't have set_phase fall back to set_state.
-            if hasattr(glyph, "set_phase"):
-                glyph.set_phase(
-                    view.phase,
-                    idle_dot_color=_activity_color(view.last_activity),
-                )
-                glyph.setToolTip(
-                    "Currently running — JSONL recently updated"
-                    if running else ""
-                )
-            elif running:
-                glyph.set_state(_RowStatusGlyph.STATE_RUNNING)
-                glyph.setToolTip("Currently running — JSONL recently updated")
+        # v4c: waiting_approval rows render "—" in the rate slot and
+        # hide the wave entirely — the orange row tint + status_inline
+        # text are signal enough; a green wave next to an orange tint
+        # would conflict (one says "live", the other "blocked").
+        from claude_island.core.session_phase import SessionPhase as _SP
+        is_waiting = view.phase == _SP.WAITING_APPROVAL
+
+        rate_label = btn.findChild(QLabel, "rate_label")
+        if rate_label is not None:
+            if is_waiting:
+                if rate_label.text() != "—":
+                    rate_label.setText("—")
+                rate_label.setVisible(True)
             else:
-                glyph.set_state(
-                    _RowStatusGlyph.STATE_IDLE,
-                    dot_color=_activity_color(view.last_activity),
-                )
-                glyph.setToolTip("")
+                if rate_label.text() != "":
+                    rate_label.setText("")
+                rate_label.setVisible(False)
+
+        if glyph is not None:
+            if is_waiting:
+                # Hide the wave entirely for waiting — rate_label = "—"
+                # is the only signal in this slot.
+                glyph.setVisible(False)
+            else:
+                glyph.setVisible(True)
+                # v3: drive wave-vs-dot AND the wave's tint from view.phase.
+                # set_phase routes IDLE/ENDED to the dot path with the
+                # freshness colour we'd pick anyway, and active phases to
+                # the wave with the phase-specific tint.  Legacy bool
+                # glyphs that don't have set_phase fall back to set_state.
+                if hasattr(glyph, "set_phase"):
+                    glyph.set_phase(
+                        view.phase,
+                        idle_dot_color=_activity_color(view.last_activity),
+                    )
+                    glyph.setToolTip(
+                        "Currently running — JSONL recently updated"
+                        if running else ""
+                    )
+                elif running:
+                    glyph.set_state(_RowStatusGlyph.STATE_RUNNING)
+                    glyph.setToolTip("Currently running — JSONL recently updated")
+                else:
+                    glyph.set_state(
+                        _RowStatusGlyph.STATE_IDLE,
+                        dot_color=_activity_color(view.last_activity),
+                    )
+                    glyph.setToolTip("")
 
         # Left-edge accent bar — animates while phase is active.
         # v3: tint follows view.phase (amber for thinking, phosphor for
@@ -5872,6 +6103,23 @@ class ExpandedWindow(QWidget):
             btn.set_phase(view.phase)
         elif hasattr(btn, "set_running"):
             btn.set_running(running)
+
+        # v4c: full-row tint for waiting_approval — toggles via the
+        # dynamic "phase_tint" QSS property.  Prototype-v4c-github.html
+        # paints the whole row orange when a session is asking for
+        # consent so the user can't miss it scanning the list.
+        try:
+            from claude_island.core.session_phase import SessionPhase as _SP
+            current_tint = btn.property("phase_tint") or ""
+            new_tint = "waiting" if view.phase == _SP.WAITING_APPROVAL else ""
+            if current_tint != new_tint:
+                btn.setProperty("phase_tint", new_tint)
+                # Qt's stylesheet engine doesn't re-evaluate selectors
+                # on a property change unless we kick it manually.
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+        except Exception:
+            log.exception("failed to apply phase_tint property")
 
         name_label = btn.findChild(QLabel, "name_label")
         if name_label is not None and name_label.text() != title:
@@ -5901,30 +6149,45 @@ class ExpandedWindow(QWidget):
         # common case.  Empty paths (degraded SessionView) show "—" to
         # keep the row's three-line geometry stable across states.
         cwd_label = btn.findChild(QLabel, "cwd_label")
+        try:
+            import os as _os
+            p = str(view.project_path) if view.project_path else ""
+            home = str(_os.path.expanduser("~"))
+            if p and p.startswith(home):
+                cwd_text = "~" + p[len(home):]
+            else:
+                cwd_text = p or "—"
+        except Exception:
+            cwd_text = str(view.project_path) if view.project_path else "—"
+        if cwd_label is not None and cwd_label.text() != cwd_text:
+            cwd_label.setText(cwd_text)
+
+        # v4c-Y: FlowLayout now does single-vs-double-line wrapping
+        # automatically based on content width — no more phase-based
+        # compact/expanded branching.  cwd_label is always visible;
+        # FlowLayout decides whether it shares a line with name+status
+        # (idle case) or wraps below (long thinking case).
         if cwd_label is not None:
-            try:
-                import os as _os
-                p = str(view.project_path) if view.project_path else ""
-                home = str(_os.path.expanduser("~"))
-                if p and p.startswith(home):
-                    cwd_text = "~" + p[len(home):]
-                else:
-                    cwd_text = p or "—"
-            except Exception:
-                cwd_text = str(view.project_path) if view.project_path else "—"
-            if cwd_label.text() != cwd_text:
-                cwd_label.setText(cwd_text)
+            cwd_label.setVisible(True)
+        compact = False  # legacy flag, kept so downstream chip-sync still compiles
 
         meta_label = btn.findChild(QLabel, "meta_label")
         if meta_label is not None and meta_label.text() != meta_text:
             meta_label.setText(meta_text)
 
-        # Cost label colour — yellow + bold when high-cost so the
-        # number itself flags the warning without a separate icon.
+        # Cost label colour — three visual tiers per prototype-v4c-
+        # github.html: $0–$5 white (default), $5–$10 yellow (mid),
+        # $10+ red (high).  Raw cost_usd drives the band; ``high_cost``
+        # alone wouldn't be expressive enough (it's a single bool at
+        # the $50 threshold).
         if meta_label is not None:
-            target_cost_style = (
-                _STYLE_COST_HIGH if high_cost else _STYLE_COST_DEFAULT
-            )
+            raw_cost = getattr(view, "cost_usd", 0.0) or 0.0
+            if raw_cost >= _COST_HIGH_USD_VISUAL or high_cost:
+                target_cost_style = _STYLE_COST_HIGH
+            elif raw_cost >= _COST_MID_USD:
+                target_cost_style = _STYLE_COST_MID
+            else:
+                target_cost_style = _STYLE_COST_DEFAULT
             if meta_label.styleSheet() != target_cost_style:
                 meta_label.setStyleSheet(target_cost_style)
 
@@ -6022,6 +6285,12 @@ class ExpandedWindow(QWidget):
                     parent.layout().invalidate()
                     parent.layout().activate()
                 parent.updateGeometry()
+
+        # v4c-Y: FlowLayout always shows model_chip; the inline_chip
+        # widget is gone (single chip handles both 1-line and 2-line
+        # wrap naturally).
+        if chip_label is not None:
+            chip_label.setVisible(True)
 
         status_label = btn.findChild(QLabel, "status_label")
         if status_label is not None:

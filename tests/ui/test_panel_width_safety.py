@@ -420,14 +420,26 @@ def test_eliding_label_sizehint_stays_at_full_text_width(qtbot):
 
 
 def test_session_row_status_label_absorbs_remaining_width(qtbot):
-    """Regression: status_label in the bottom row of a session row
-    must absorb leftover horizontal space (stretch=1), so it never
-    gets squeezed below its sizeHint when the chip stays at its own
-    sizeHint. Without stretch=1, Qt's deficit-shrinking heuristic
-    picks the most-compressible widget — status (_ElidingLabel,
-    minimumSize=0) — and elides it preferentially even when the row
-    has plenty of slack on the right. User-reported as 'active 8d a…'
-    with visible space remaining."""
+    """v4c regression: the bottom row's deficit-shrink target is
+    ``cwd_label`` (the new visible elidable widget), not the old
+    ``status_label`` (now a hidden 0×0 sibling that exists only so
+    callers reaching by objectName don't crash).
+
+    The historical deficit-shrink bug ("active 8d a…" truncation) is
+    about Qt picking the most compressible widget when width is
+    tight.  In v4c the visible compressible widget is cwd_label
+    (_ElidingLabel with minimumSize=0); chip stays at its sizeHint
+    because it has stretch=0; the trailing addStretch is intentional
+    so cwd + chip both stay LEFT-aligned and the cost column on the
+    top row reads as the only "right edge" content.
+
+    What this test pins down for v4c:
+      1. cwd_label exists on the bottom row
+      2. model_chip is immediately after cwd_label (no gap widget)
+      3. A trailing QSpacerItem is present (the v4c addStretch slot)
+      4. The hidden status_label sibling is still findable by
+         objectName (back-compat with the legacy lookup pattern)
+    """
     from claude_island.core.models import Session, UsageTotals, SessionDetails
     from claude_island.ui.controller import IslandController
     from claude_island.ui.expanded_window import ExpandedWindow
@@ -464,54 +476,48 @@ def test_session_row_status_label_absorbs_remaining_width(qtbot):
     qtbot.waitExposed(panel)
 
     btn = panel._rows[99]
-    status = btn.findChild(QLabel, "status_label")
+    cwd_label = btn.findChild(QLabel, "cwd_label")
+    chip_label = btn.findChild(QLabel, "model_chip")
+    status_label = btn.findChild(QLabel, "status_label")
 
-    # Structural assertion: the bottom row's LAST layout item must be
-    # status_label itself (added with stretch=1), NOT a trailing
-    # QSpacerItem from `addStretch()`. The deficit-shrink bug
-    # (status truncated as 'active 8d a…') manifests when status has
-    # default stretch=0 and competes with chip for space; Qt picks
-    # status to squeeze because it's the only widget with
-    # minimumSize=0 (`_ElidingLabel`). Putting stretch on status
-    # itself flips the priority — surplus AND deficit hit status,
-    # never chip. Verifying the *structure* (status is the stretch
-    # slot) catches a regression even in offscreen tests where the
-    # offscreen font metrics don't reproduce the deficit case.
-    # v4c: row layout grew a middle row (cwd_label) so the bottom row
-    # is now at index 2, not 1.  Walk the outer layout and find the
-    # one carrying the status_label rather than hard-coding the index.
-    btn_layout = btn.layout()
-    bottom_layout = None
-    for i in range(btn_layout.count()):
-        item = btn_layout.itemAt(i)
-        inner = item.layout() if hasattr(item, "layout") else None
-        if inner is None:
-            continue
-        for j in range(inner.count()):
-            w = inner.itemAt(j).widget()
-            if w is status:
-                bottom_layout = inner
-                break
-        if bottom_layout is not None:
-            break
-    assert bottom_layout is not None, "bottom row layout missing"
-
-    last_item = bottom_layout.itemAt(bottom_layout.count() - 1)
-    assert last_item.widget() is status, (
-        f"Bottom row's last item is {last_item}, expected status_label. "
-        "If a trailing addStretch() / spacer slot is back, status no "
-        "longer has stretch priority and will get squeezed first when "
-        "the row width is tight (the 'active 8d a…' truncation)."
+    # Sanity: all three widgets exist on the row tree.
+    assert cwd_label is not None, "cwd_label missing"
+    assert chip_label is not None, "model_chip missing"
+    assert status_label is not None, (
+        "status_label removed entirely — it must stay as a hidden "
+        "sibling so legacy callers reaching for it by objectName "
+        "don't crash."
     )
 
-    # Defense in depth: also assert the layout uses no spacer items.
-    from PySide6.QtWidgets import QSpacerItem
-    for i in range(bottom_layout.count()):
-        item = bottom_layout.itemAt(i)
-        assert not isinstance(item, QSpacerItem), (
-            f"bottom_layout item {i} is a QSpacerItem — addStretch() "
-            "got reintroduced; status_label must own the stretch."
-        )
+    # v4c-Y (2026-05-21): cwd_label + model_chip now live in a custom
+    # FlowLayout-backed body widget that mimics CSS `flex-wrap: wrap`.
+    # Single-line idle rows put name+status+cwd+chip on ONE line; long
+    # thinking rows wrap to TWO lines.  The test now pins the
+    # FlowLayout structure rather than the old stretch-priority
+    # contract.
+    from claude_island.ui.expanded_window import FlowLayout
+    body_widget = cwd_label.parentWidget()
+    assert body_widget is not None
+    body_layout = body_widget.layout()
+    assert isinstance(body_layout, FlowLayout), (
+        "Row body must use FlowLayout so content wraps naturally. "
+        "Regressing to QVBoxLayout(top+bottom) means single-line idle "
+        "rows can't fit on one line."
+    )
+
+    widget_order: list = []
+    for i in range(body_layout.count()):
+        item = body_layout.itemAt(i)
+        w = item.widget() if item is not None else None
+        if isinstance(w, QLabel):
+            widget_order.append(w)
+    cwd_idx = widget_order.index(cwd_label)
+    chip_idx = widget_order.index(chip_label)
+    assert chip_idx == cwd_idx + 1, (
+        f"chip is at index {chip_idx} but cwd is at {cwd_idx} — "
+        "v4c-Y contract is cwd → chip immediately adjacent so a wrap "
+        "lands them on the same secondary line."
+    )
 
 
 def test_eliding_label_respects_user_set_tooltip(qtbot):

@@ -242,6 +242,13 @@ class CapsuleData(NamedTuple):
     quota_pct: int | None                # None if no quota, else 0..100 truncated
     awaiting_count: int = 0              # v4c: pending decisions count
     active_name: str = ""                # v4c: most-prominent live session name
+    # v4c: phase of the active session, used to colour the equalizer
+    # wave so the capsule reads the same hue as the corresponding row
+    # in the expanded list ("review" thinking → purple wave both in
+    # the row and on the pill).  Stored as the string ``value`` so
+    # CapsuleData stays hashable + structurally comparable for
+    # ``distinct_until_changed``.  Empty string when no active session.
+    active_phase: str = ""
 
 # Right-click menu — v3 surface tints + mono font.  No rounded corners
 # on items (v3 reserves rounded for the wax-stamp / red shock visuals
@@ -396,7 +403,13 @@ class CapsuleWindow(QWidget):
         # currently producing turns" from the capsule's perspective).
         # When running, the equalizer bars wave; when idle, a single
         # static dot.
-        self._dot_label = _RowStatusGlyph(self)
+        # v4c (2026-05-21): capsule overrides the default bar sizes —
+        # the pill is much narrower than a row, so 18 px wide / 11 px
+        # tall bars would dwarf the surrounding text.  Small bars
+        # (~10 px wide × 8 px tall) read as a discreet "live" cue.
+        self._dot_label = _RowStatusGlyph(
+            self, bar_w=2, bar_gap=1, bar_count=4, wave_h=8,
+        )
 
         # Three-region layout (see _apply_capsule): [dot] [name] [cost].
         # ``_label`` holds the elided session name (left-aligned in its
@@ -645,20 +658,36 @@ class CapsuleWindow(QWidget):
         # capsule headline reads "vibe-ipad · awaiting consent" instead
         # of the generic "3 sessions".
         awaiting = len(snap.pending_decisions or ())
-        # Active name resolution:
+        # Active name + phase resolution.
         #   1. Any session whose phase says "waiting_approval"
-        #   2. First running session name
+        #   2. First running session (highest-priority view by compose)
         #   3. First flat name (idle / ended snapshots)
+        # The phase tracks the same priority chain so the pill's wave
+        # tints match the same row's wave in the expanded panel.
         active = ""
+        active_phase = ""
         if snap.pending_decisions:
             # Use the session name carried by the first pending decision
             # so the capsule names the same session the user will see
             # in the awaiting-consent row.
             active = snap.pending_decisions[0].session_name
+            # Find that session in flat to read its phase — pending
+            # implies WAITING_APPROVAL but we trust the resolved phase.
+            for v in flat:
+                if v.name == active:
+                    active_phase = getattr(v.phase, "value", "")
+                    break
         if not active and running_names:
             active = running_names[0]
+            # First running session — pull its phase from the same flat
+            # view used for the name (matches `is_running` filter above).
+            for v in flat:
+                if v.is_running and v.name == active:
+                    active_phase = getattr(v.phase, "value", "")
+                    break
         if not active and flat:
             active = flat[0].name
+            active_phase = getattr(flat[0].phase, "value", "")
         return CapsuleData(
             flat_count=len(flat),
             running_names=running_names,
@@ -666,6 +695,7 @@ class CapsuleWindow(QWidget):
             quota_pct=quota_pct,
             awaiting_count=awaiting,
             active_name=active,
+            active_phase=active_phase,
         )
 
     def render(self, data: CapsuleData) -> None:
@@ -913,12 +943,18 @@ class CapsuleWindow(QWidget):
     def _refresh_active_state(self) -> None:
         """Sync the equalizer-glyph state with whether any session is
         running (per the latest data). Idempotent — set_state is a
-        no-op when the target state matches."""
+        no-op when the target state matches.
+
+        v4c: bar colour follows the active session's phase via
+        ``Color.for_phase`` so the capsule wave matches the matching
+        row's wave in the expanded list (review thinking → purple
+        wave in both surfaces).
+        """
         has_active = bool(self._data.running_names)
         if has_active:
             self._dot_label.set_state(
                 _RowStatusGlyph.STATE_RUNNING,
-                bar_color=_DOT_RUNNING_COLOR,
+                bar_color=self._phase_wave_color(),
             )
             self._is_breathing = True
         else:
@@ -927,6 +963,20 @@ class CapsuleWindow(QWidget):
                 dot_color=_DOT_IDLE_COLOR,
             )
             self._is_breathing = False
+
+    def _phase_wave_color(self) -> str:
+        """Resolve the equalizer-bar colour from the active session's
+        phase.  Falls back to the green phosphor token (v3's old
+        hardcoded value) when phase is empty / unrecognised."""
+        from claude_island.core.session_phase import SessionPhase
+        phase_val = self._data.active_phase
+        if not phase_val:
+            return _DOT_RUNNING_COLOR
+        try:
+            phase = SessionPhase(phase_val)
+        except ValueError:
+            return _DOT_RUNNING_COLOR
+        return _C.for_phase(phase)
 
     # ------------------------------------------------------------------
     # Paint + events

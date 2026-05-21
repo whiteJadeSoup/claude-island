@@ -46,6 +46,7 @@ from claude_island.core.pending_decisions import (
     PendingDecisionView,
 )
 from claude_island.ui.fonts import MONO_FONT_STACK, UI_FONT_STACK
+from claude_island.ui.lab_palette import Color as _C, FontStack as _F
 from claude_island.ui.session_color import session_accent
 
 log = logging.getLogger(__name__)
@@ -56,24 +57,28 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _CARD_MIN_HEIGHT_PX = 180
-_TOP_BAR_HEIGHT_PX = 3
 
-_BODY_MARGIN_PX = 12
-_BODY_SPACING_PX = 6
+# v4c: banner aesthetic — no rounded card chrome, no top stripe. The
+# orange-tinted bg + 3px orange left border are the visual signal,
+# matching prototype-v4c-github.html's `.decision` rule. _TOP_BAR_HEIGHT_PX
+# is kept as a 0-height legacy stub so older callers don't break.
+_TOP_BAR_HEIGHT_PX = 0
+
+_BODY_MARGIN_H_PX = 14    # mirrors prototype `padding: 12px 14px`
+_BODY_MARGIN_V_PX = 12
+_BODY_SPACING_PX = 8
+_TEXT_INDENT_PX = 24      # `margin-left: 24px` on .what / .preview / etc.
 
 _QUESTION_TEXT_MAX_HEIGHT_PX = 60
-_OPTION_LIST_MAX_HEIGHT_PX = 200  # scrolls internally past this
-_OPTION_ROW_MIN_HEIGHT_PX = 36
-_OPTION_BUTTON_HEIGHT_PX = 36
+_OPTION_LIST_MAX_HEIGHT_PX = 200
+_OPTION_BUTTON_HEIGHT_PX = 30  # tighter than v3 (was 36) to read as banner row
 
-_BUTTON_ROW_HEIGHT_PX = 36
+_BUTTON_ROW_HEIGHT_PX = 30
 
-# The ASK_QUESTION top-bar colour is fixed (medium / amber) — questions
-# have no risk gradient like Bash/Read do.
-_QUESTION_TOP_BAR_COLOR = "#f59e0b"
-
-# Decoration only — question kind icon.
-_QUESTION_TOOL_ICON = "❓"
+# Small filled orange disc with a "?" glyph — mirrors the prototype's
+# `.decision .head .ico` (16x16 circle, white char inside).
+_QUESTION_ICON_GLYPH = "?"
+_QUESTION_ICON_PX = 16
 
 # Keycap labels for the option buttons. The numbers visually echo
 # what the user types in Claude's terminal prompt (1 / 2 / 3 …) so
@@ -99,100 +104,241 @@ FocusTerminalCallback = Callable[[str], None]
 # QSS
 # ---------------------------------------------------------------------------
 
+# v4c QSS — banner aesthetic, mirrors prototype-v4c-github.html's
+# `.decision` rule.  Token references go through lab_palette so a tint
+# tweak in the prototype's :root block propagates here in lockstep.
 _QSS = f"""
+/* v4c banner: flat, no rounded chrome, only a bottom hairline.
+   Mirrors prototype-v4c-github.html's `.decision` rule — dark
+   orange-tinted bg + bottom border, nothing else. */
 QFrame#questionCard {{
-    background-color: #1f1f1f;
-    border-radius: 10px;
-    border: 1px solid #2a2a2a;
+    background-color: #1f1106;
+    border: none;
+    border-bottom: 1px solid rgba(219, 109, 40, 0.40);
+    border-radius: 0;
 }}
-QFrame#questionCardTopBar {{
-    background-color: {_QUESTION_TOP_BAR_COLOR};
-    border-top-left-radius: 10px;
-    border-top-right-radius: 10px;
+QFrame#questionCardTopBar {{ background-color: transparent; }}
+QLabel {{ color: {_C.paper}; }}
+
+/* Small filled orange disc — same role as prototype `.decision .head .ico`. */
+QLabel#questionCardIcon {{
+    background-color: {_C.red_warm};
+    color: white;
+    border-radius: {_QUESTION_ICON_PX // 2}px;
+    font-family: {_F.sans_stack};
+    font-size: 11px;
+    font-weight: 700;
+    qproperty-alignment: AlignCenter;
 }}
-QLabel {{ color: #e8e8e8; }}
+
 QLabel#questionCardHeaderTitle {{
-    font-family: {UI_FONT_STACK};
+    font-family: {_F.sans_stack};
     font-size: 13px;
     font-weight: 600;
-    color: #fff;
+    color: {_C.paper};
 }}
+
+/* Session chip on the right — outlined "● {{session}}" matching ApprovalCard. */
 QLabel#questionCardSessionBadge {{
-    font-family: {MONO_FONT_STACK};
-    font-size: 10px;
-    color: #ddd;
-    background-color: rgba(255,255,255,0.06);
-    border-radius: 9px;
-    padding: 2px 8px;
+    font-family: {_F.mono_stack};
+    font-size: 10.5px;
+    color: {_C.paper_dim};
+    background-color: transparent;
+    border: 1px solid {_C.rule};
+    border-radius: 10px;
+    padding: 1px 7px;
 }}
+
+/* "1 of N" pill — same shape as approval card's queue pill so the
+   visual queue indicator reads the same across kinds. */
+QLabel#questionQueuePill {{
+    color: {_C.paper_dim};
+    background: {_C.ink};
+    border: 1px solid {_C.rule};
+    border-radius: 10px;
+    padding: 0 9px;
+    font-family: {_F.mono_stack};
+    font-size: 11px;
+    font-weight: 500;
+}}
+
 QLabel#questionCardText {{
-    font-family: {UI_FONT_STACK};
-    font-size: 13px;
-    color: #fff;
+    font-family: {_F.sans_stack};
+    font-size: 13.5px;
+    color: {_C.paper};
 }}
 QLabel#questionCardMeta {{
-    font-family: {MONO_FONT_STACK};
-    font-size: 10px;
-    color: #888;
+    font-family: {_F.mono_stack};
+    font-size: 10.5px;
+    color: {_C.paper_faint};
+    letter-spacing: 0.02em;
 }}
+
+/* Hint reads as a quiet caption, not as another card section. */
 QLabel#questionCardHint {{
-    font-family: {UI_FONT_STACK};
-    font-size: 10px;
-    color: #888;
-    background-color: #161616;
-    border-top: 1px solid #2a2a2a;
-    padding: 6px 10px;
-    border-bottom-left-radius: 10px;
-    border-bottom-right-radius: 10px;
+    font-family: {_F.sans_stack};
+    font-size: 10.5px;
+    color: {_C.paper_faint};
+    background: transparent;
+    border: none;
+    padding: 0;
 }}
+
 QPushButton#questionOption {{
-    background-color: #0e0e0e;
-    color: #e8e8e8;
-    border: 1px solid #2a2a2a;
+    background-color: {_C.ink};
+    /* Native button text hidden — the child labels render the visible
+       content so they can word-wrap (QPushButton.text() doesn't). */
+    color: transparent;
+    border: 1px solid {_C.rule};
     border-radius: 6px;
-    padding: 7px 10px;
+    padding: 0;
     text-align: left;
-    font-family: {UI_FONT_STACK};
-    font-size: 12px;
 }}
 QPushButton#questionOption:hover {{
-    background-color: #1d1d1d;
-    border-color: #3a3a3a;
+    background-color: {_C.surface_hi};
+    border-color: {_C.rule_active};
 }}
 QPushButton#questionOption[picked="true"] {{
-    background-color: #1d4ed8;
-    border-color: #1d4ed8;
+    background-color: {_C.accent};
+    border-color: {_C.accent};
+}}
+QLabel#questionOptionKeycap {{
+    color: {_C.paper_dim};
+    font-family: {_F.mono_stack};
+    font-size: 11px;
+    font-weight: 500;
+}}
+QLabel#questionOptionTitle {{
+    color: {_C.paper};
+    font-family: {_F.sans_stack};
+    font-size: 12.5px;
+    font-weight: 500;
+}}
+QLabel#questionOptionDesc {{
+    color: {_C.paper_dim};
+    font-family: {_F.sans_stack};
+    font-size: 11.5px;
+}}
+QPushButton#questionOption[picked="true"] QLabel#questionOptionTitle,
+QPushButton#questionOption[picked="true"] QLabel#questionOptionDesc,
+QPushButton#questionOption[picked="true"] QLabel#questionOptionKeycap {{
     color: white;
 }}
-QPushButton#questionOption[picked="true"]:hover {{
-    background-color: #2563eb;
-}}
+
 QPushButton#questionSkip {{
     background-color: transparent;
-    color: #888;
+    color: {_C.paper_dim};
     border: none;
     text-align: left;
-    padding: 4px 0;
-    font-family: {UI_FONT_STACK};
-    font-size: 11px;
+    padding: 2px 0;
+    font-family: {_F.sans_stack};
+    font-size: 11.5px;
 }}
-QPushButton#questionSkip:hover {{ color: #ccc; }}
+QPushButton#questionSkip:hover {{ color: {_C.paper}; text-decoration: underline; }}
+
 QPushButton#questionSubmit {{
-    background-color: #1d4ed8;
+    background-color: {_C.accent};
     color: white;
     border-radius: 6px;
-    padding: 6px 14px;
-    font-family: {UI_FONT_STACK};
+    padding: 5px 14px;
+    font-family: {_F.sans_stack};
     font-size: 12px;
     font-weight: 600;
-    border: none;
+    border: 1px solid {_C.accent};
 }}
-QPushButton#questionSubmit:hover {{ background-color: #2563eb; }}
+QPushButton#questionSubmit:hover {{ filter: brightness(1.05); }}
 QPushButton#questionSubmit:disabled {{
-    background-color: #2a2a2a;
-    color: #666;
+    background-color: {_C.surface};
+    border-color: {_C.rule};
+    color: {_C.paper_faint};
 }}
 """
+
+
+# ---------------------------------------------------------------------------
+# Option button — keeps QPushButton as the outer widget so existing
+# tests (``findChildren(QPushButton, "questionOption")``) keep working,
+# but internally uses a QHBoxLayout with proper word-wrapping QLabels.
+# QPushButton's native text rendering doesn't wrap; we hide it via
+# ``color: transparent`` in QSS and let the child labels paint the
+# visible content.  ``.text()`` still returns the structured
+# "[N]  title\n      description" string so tests asserting on
+# ``btn.text()`` keep working without changes.
+# ---------------------------------------------------------------------------
+
+
+class _OptionButton(QPushButton):
+    """Clickable option row with wrap-friendly title + description.
+
+    Layout:
+        [N]  Title text (bold, wraps)
+             Description text (dim, wraps)
+    """
+
+    def __init__(
+        self,
+        *,
+        index: int,
+        keycap: str,
+        title: str,
+        description: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        # Native text — kept so QPushButton.text() returns content the
+        # existing tests assert on.  Visually hidden via QSS
+        # (color: transparent); the labels below paint the real text.
+        plain = f"[{keycap}]  {title}"
+        if description:
+            plain += f"\n      {description}"
+        self.setText(plain)
+        self.setObjectName("questionOption")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.setProperty("picked", False)
+        self._index = index
+
+        inner = QHBoxLayout(self)
+        inner.setContentsMargins(12, 8, 12, 8)
+        inner.setSpacing(10)
+
+        keycap_lbl = QLabel(f"[{keycap}]")
+        keycap_lbl.setObjectName("questionOptionKeycap")
+        keycap_lbl.setFixedWidth(28)
+        keycap_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+        )
+        keycap_lbl.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+        )
+        inner.addWidget(keycap_lbl, 0, Qt.AlignmentFlag.AlignTop)
+
+        content = QVBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(2)
+
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("questionOptionTitle")
+        title_lbl.setWordWrap(True)
+        title_lbl.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+        )
+        content.addWidget(title_lbl)
+
+        if description:
+            desc_lbl = QLabel(description)
+            desc_lbl.setObjectName("questionOptionDesc")
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            )
+            content.addWidget(desc_lbl)
+
+        inner.addLayout(content, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -248,9 +394,10 @@ class QuestionCard(QFrame):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
+        # The 0-height top-bar widget stays so legacy callers / tests
+        # looking for ``questionCardTopBar`` still find it.
         outer.addWidget(self._build_top_bar())
         outer.addLayout(self._build_body())
-        outer.addWidget(self._build_hint())
 
     def _build_top_bar(self) -> QFrame:
         bar = QFrame()
@@ -261,26 +408,50 @@ class QuestionCard(QFrame):
     def _build_body(self) -> QVBoxLayout:
         body = QVBoxLayout()
         body.setContentsMargins(
-            _BODY_MARGIN_PX, _BODY_MARGIN_PX - 2,
-            _BODY_MARGIN_PX, _BODY_MARGIN_PX - 2,
+            _BODY_MARGIN_H_PX, _BODY_MARGIN_V_PX,
+            _BODY_MARGIN_H_PX, _BODY_MARGIN_V_PX,
         )
         body.setSpacing(_BODY_SPACING_PX)
 
+        # Row 1 — small "?" disc + topic title + session chip + queue
+        # pill.  Single line, mirrors prototype `.decision .head`.
         body.addLayout(self._build_header_row())
-        body.addWidget(self._build_question_label())
-        body.addWidget(self._build_meta_label())
+        # Row 2 — the question itself, indented 24px to baseline-align
+        # with the title text (not the icon).  Same trick the prototype
+        # uses on `.what` / `.preview` / `.actions`.
+        body.addLayout(self._build_question_row())
+        # Row 3 — meta caption (small, mono).
+        meta = self._build_meta_label()
+        if meta is not None:
+            body.addLayout(self._indented_row(meta))
+        # Row 4..N — one option button per choice, also indented.
         for w in self._build_option_widgets():
-            body.addWidget(w)
+            body.addLayout(self._indented_row(w))
+        # Row N+1 — footer (skip on the left, submit on the right).
         body.addLayout(self._build_footer_row())
+        # Row N+2 — quiet hint caption.
+        body.addLayout(self._indented_row(self._build_hint()))
         return body
+
+    def _indented_row(self, widget: QWidget) -> QHBoxLayout:
+        """Wrap ``widget`` in an HBox indented 24px from the left edge
+        so it lines up under the title text rather than the icon.
+        Mirrors the prototype's `margin-left: 24px` rule on
+        `.decision .what` / `.preview` / `.actions`."""
+        row = QHBoxLayout()
+        row.setContentsMargins(_TEXT_INDENT_PX, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(widget)
+        return row
 
     def _build_header_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
 
-        icon = QLabel(_QUESTION_TOOL_ICON)
-        icon.setFixedWidth(18)
+        icon = QLabel(_QUESTION_ICON_GLYPH)
+        icon.setObjectName("questionCardIcon")
+        icon.setFixedSize(_QUESTION_ICON_PX, _QUESTION_ICON_PX)
         row.addWidget(icon)
 
         # Prefer the question's header (a short topic label) over the
@@ -300,23 +471,38 @@ class QuestionCard(QFrame):
             f"{self._view.session_name}"
         )
         row.addWidget(badge)
+
+        # v4c: "1 of N" pill, populated by ``set_queue_position`` from
+        # StackedDecisionsPanel.  Hidden when only one decision in
+        # flight — see :meth:`set_queue_position`.
+        self._queue_pill = QLabel("")
+        self._queue_pill.setObjectName("questionQueuePill")
+        self._queue_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._queue_pill.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed,
+        )
+        self._queue_pill.setVisible(False)
+        row.addWidget(self._queue_pill)
+
         return row
 
-    def _build_question_label(self) -> QLabel:
+    def _build_question_row(self) -> QHBoxLayout:
         label = QLabel(self._view.question_text or "")
         label.setObjectName("questionCardText")
         label.setWordWrap(True)
         label.setMaximumHeight(_QUESTION_TEXT_MAX_HEIGHT_PX)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        return label
+        return self._indented_row(label)
 
-    def _build_meta_label(self) -> QLabel:
+    def _build_meta_label(self) -> QLabel | None:
         bits: list[str] = []
         if self._view.tool_name:
             bits.append(f"via {self._view.tool_name}")
         if self._view.multi_select:
             bits.append("multi-select")
-        label = QLabel(" · ".join(bits) if bits else "")
+        if not bits:
+            return None
+        label = QLabel(" · ".join(bits))
         label.setObjectName("questionCardMeta")
         return label
 
@@ -324,34 +510,32 @@ class QuestionCard(QFrame):
         widgets: list[QPushButton] = []
         descs = self._view.question_option_descriptions
         for idx, label in enumerate(self._view.question_options):
-            btn = QPushButton(self._format_option_text(idx, label, descs))
-            btn.setObjectName("questionOption")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setMinimumHeight(_OPTION_BUTTON_HEIGHT_PX)
-            btn.setProperty("picked", False)
-            btn.clicked.connect(lambda _checked=False, i=idx: self._on_option(i))
+            keycap = (
+                _OPTION_KEYCAPS[idx]
+                if idx < len(_OPTION_KEYCAPS)
+                else "·"
+            )
+            description = ""
+            if descs and idx < len(descs) and descs[idx]:
+                description = descs[idx]
+            btn = _OptionButton(
+                index=idx,
+                keycap=keycap,
+                title=label,
+                description=description,
+            )
+            btn.clicked.connect(
+                lambda _checked=False, i=idx: self._on_option(i)
+            )
             widgets.append(btn)
             self._option_buttons.append(btn)
         return widgets
 
-    def _format_option_text(
-        self, idx: int, label: str, descs: tuple[str, ...],
-    ) -> str:
-        # Keycap is purely visual cue; user clicks the button, doesn't
-        # type the digit.
-        keycap = (
-            _OPTION_KEYCAPS[idx]
-            if idx < len(_OPTION_KEYCAPS)
-            else "·"
-        )
-        if descs and idx < len(descs) and descs[idx]:
-            return f"[{keycap}]  {label}\n      {descs[idx]}"
-        return f"[{keycap}]  {label}"
-
     def _build_footer_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        row.setContentsMargins(0, 4, 0, 0)
+        # Indent 24px to match the question/options column — keeps the
+        # "Skip" link visually anchored under the question text.
+        row.setContentsMargins(_TEXT_INDENT_PX, 4, 0, 0)
         row.setSpacing(8)
         row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
@@ -379,6 +563,22 @@ class QuestionCard(QFrame):
         hint.setObjectName("questionCardHint")
         hint.setWordWrap(True)
         return hint
+
+    # ── public API used by StackedDecisionsPanel ───────────────────────
+
+    def set_queue_position(self, position: int, total: int) -> None:
+        """v4c: surface the "1 of N" pill on the card's top-right.
+
+        Hidden when ``total <= 1`` — the pill carries no information
+        in that case, so its presence would just add chrome.  Mirrors
+        :meth:`ApprovalCard.set_queue_position` so the StackedDecisions
+        panel can call the same method on either card kind.
+        """
+        if total <= 1:
+            self._queue_pill.setVisible(False)
+            return
+        self._queue_pill.setText(f"{position} of {total}")
+        self._queue_pill.setVisible(True)
 
     # ── handlers ────────────────────────────────────────────────────────
 

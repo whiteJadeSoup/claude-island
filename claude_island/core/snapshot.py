@@ -171,6 +171,14 @@ class SessionView:
     # ``phase`` because phase defaults to IDLE for both cases — only
     # this flag tells them apart.
     has_live_state: bool = False
+    # ── Turn count (v4c row inline status) ──────────────────────────
+    # Number of assistant turns in this session's transcript. Sourced
+    # from ``usage_registry.get_session_summary``'s second return value
+    # (the same number SessionDetails surfaces in the popup).  UI uses
+    # it to render `· turn N` next to "thinking" and `· N turns` next
+    # to "ended", mirroring prototype-v4c-github.html's status strings.
+    # Default 0 keeps legacy degraded views compiling.
+    turn_count: int = 0
 
     def __post_init__(self) -> None:
         # Self-consistency invariant — guards against the UI and the
@@ -539,7 +547,7 @@ def compose_session_view(
     sess_uuid = resume_uuid or pid_json_uuid or session.session_uuid
     meta = _safe(metadata_provider.get_session_metadata, sess_uuid) or {}
 
-    cost, _turns, _sides = _safe_or(
+    cost, turns, _sides = _safe_or(
         lambda: usage_registry.get_session_summary(sess_uuid),
         default=(0.0, 0, 0),
     )
@@ -661,6 +669,7 @@ def compose_session_view(
         last_assistant_message=last_assistant_message,
         jump_target=jump_target,
         has_live_state=live is not None,
+        turn_count=int(turns or 0),
     )
 
 

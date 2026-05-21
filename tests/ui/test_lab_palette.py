@@ -121,10 +121,12 @@ class TestWaveParameters:
         in one place is forced to update the other."""
         assert WAVE_PERIOD_MS == 1200
 
-    def test_wave_bar_count_is_five(self):
-        """Five bars at 1/5 period offset reads as a travelling wave;
-        three bars at 1/3 offset reads as 'all wiggling in sync'."""
-        assert WAVE_BAR_COUNT == 5
+    def test_wave_bar_count_is_four(self):
+        """v4c: four bars at 1/4 period offset matches prototype-v4c-
+        github.html's `.row .wave i:nth-child(1..4)` schedule — reads
+        as a piano-key equalizer rather than a 5-bar VU meter (user
+        feedback 2026-05-21: "更像是跳动的钢琴键")."""
+        assert WAVE_BAR_COUNT == 4
 
     def test_wave_delay_step_evenly_divides_period(self):
         assert WAVE_DELAY_STEP_MS * WAVE_BAR_COUNT == WAVE_PERIOD_MS
