@@ -1747,6 +1747,21 @@ def _phase_icon_char(phase) -> str:
     }.get(phase, "·")
 
 
+def _fmt_token_rate(tokens_per_min: int) -> str:
+    """v4c Phase 3b: format a tokens-per-minute integer for the row's
+    rate slot.  Prototype-v4c-github.html shows "1.4k tk/min" (one
+    decimal place) for values ≥ 1000, otherwise the bare integer.
+
+    Examples:
+        300   → "300 tk/min"
+        1437  → "1.4k tk/min"
+        12500 → "12.5k tk/min"
+    """
+    if tokens_per_min < 1000:
+        return f"{tokens_per_min} tk/min"
+    return f"{tokens_per_min / 1000:.1f}k tk/min"
+
+
 def _fmt_short_elapsed(seconds: int) -> str:
     """Format elapsed seconds as "Xs" / "Xm Ys" / "Xh Ym".  Used by
     the row's inline status to render the prototype's "1m 4s
@@ -6105,9 +6120,27 @@ class ExpandedWindow(QWidget):
                     rate_label.setText("—")
                 rate_label.setVisible(True)
             else:
-                if rate_label.text() != "":
-                    rate_label.setText("")
-                rate_label.setVisible(False)
+                # v4c Phase 3b: token rate (e.g. "1.4k tk/min").
+                # Visible only when view.tokens_per_min is non-None;
+                # silent when the session is idle or has no usage in
+                # the last minute.  Compacting / ended rows also
+                # hide the rate (they're not "producing" right now).
+                tpm = getattr(view, "tokens_per_min", None)
+                show_rate = (
+                    tpm is not None
+                    and tpm > 0
+                    and view.phase
+                    not in (_SP.COMPACTING, _SP.ENDED, _SP.IDLE)
+                )
+                if show_rate:
+                    formatted = _fmt_token_rate(tpm)
+                    if rate_label.text() != formatted:
+                        rate_label.setText(formatted)
+                    rate_label.setVisible(True)
+                else:
+                    if rate_label.text() != "":
+                        rate_label.setText("")
+                    rate_label.setVisible(False)
 
         if glyph is not None:
             if is_waiting:

@@ -190,6 +190,12 @@ class SessionView:
     # which gracefully degrades the row to no inline elapsed display.
     tool_elapsed_s: float | None = None
     compact_elapsed_s: float | None = None
+    # v4c Phase 3b: rolling token-rate (input + output tokens / min)
+    # over the last ~60 s.  Populated only when there's recent usage;
+    # None when the session has been silent for over a minute, so the
+    # UI can hide the rate label cleanly instead of showing "0 tk/min"
+    # next to a stalled session.
+    tokens_per_min: int | None = None
 
     def __post_init__(self) -> None:
         # Self-consistency invariant — guards against the UI and the
@@ -692,6 +698,16 @@ def compose_session_view(
             except Exception:
                 compact_elapsed_s = None
 
+    # v4c Phase 3b: rolling token-rate over the last 60s.  Cheap
+    # in-memory aggregation via the per-uuid inverted index.  Wrapped
+    # in a lambda + getattr so older / test-stub UsageRegistry impls
+    # without get_session_token_rate degrade to None (rather than
+    # AttributeError).
+    rate_fn = getattr(usage_registry, "get_session_token_rate", None)
+    tokens_per_min = (
+        _safe(rate_fn, sess_uuid) if (sess_uuid and rate_fn is not None) else None
+    )
+
     return SessionView(
         pid=session.pid,
         name=name,
@@ -713,6 +729,7 @@ def compose_session_view(
         turn_count=int(turns or 0),
         tool_elapsed_s=tool_elapsed_s,
         compact_elapsed_s=compact_elapsed_s,
+        tokens_per_min=tokens_per_min,
     )
 
 

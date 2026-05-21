@@ -333,6 +333,45 @@ class UsageRegistry:
                     turns += 1
         return cost, turns, sides
 
+    def get_session_token_rate(
+        self,
+        session_uuid: str,
+        *,
+        window_s: int = 60,
+    ) -> int | None:
+        """v4c Phase 3b: return the session's token-per-minute rate
+        over the last ``window_s`` seconds, or None when there's no
+        usage in the window.
+
+        Formula: ``(sum_tokens_in_window / window_s) * 60``.  Tokens
+        counted = input + output (cache tokens excluded — they're a
+        prompt-level cost, not a "generating right now" signal).
+
+        Returns None when:
+          - no UsageRecord for ``session_uuid`` (session has never
+            produced a turn)
+          - all records are older than ``window_s`` (session went idle)
+
+        Lock-protected scan of the per-uuid inverted index — cheap at
+        the user's scale (≤ a few hundred records per session).
+        """
+        if not session_uuid:
+            return None
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_s)
+        total_tokens = 0
+        with self._lock:
+            for r in self._by_uuid.get(session_uuid, ()):
+                if r.timestamp < cutoff:
+                    continue
+                total_tokens += r.input_tokens + r.output_tokens
+        if total_tokens <= 0:
+            return None
+        # Rate over the FULL window — yields stable values even when
+        # the most recent record landed at t=window-1s (instead of
+        # extrapolating from a tiny span).  Reads as "average over
+        # last minute" rather than "instantaneous rate at last turn".
+        return int(total_tokens * 60 / window_s)
+
     def get_session_per_model(self, session_uuid: str) -> tuple[ModelTotals, ...]:
         """Per-model aggregation for a single transcript file.
 
