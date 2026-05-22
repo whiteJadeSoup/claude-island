@@ -80,9 +80,10 @@ class _ColorTokens:
     # ── action / status extras ──
     accent:       str = "#89b4fa"   # blue     — primary action buttons
     success:      str = "#a6e3a1"   # green    — quota OK band
-    danger:       str = "#eba0ac"   # maroon   — high-cost cost tier; pink-red is
-                                    #            friendlier than Mocha "red" #f38ba8
-                                    #            which we reserve for genuine errors
+    danger:       str = "#ef4444"   # red      — true red (Tailwind red-500) for the
+                                    #            high-cost tier; user wanted "红色"
+                                    #            not "粉红", so we step outside the
+                                    #            Mocha pastel set for this one alarm.
 
     def for_phase(self, phase: SessionPhase) -> str:
         """Map a SessionPhase to its dominant tint.

@@ -3034,13 +3034,10 @@ class TestHighCostRowAlert:
         meta = btn.findChild(QLabel, "meta_label")
         assert meta is not None
         css = meta.styleSheet()
-        # v4c Mocha: high-cost tint moved from orange red_warm → maroon
-        # (danger token), a friendlier pink-red.  Comment trail:
-        # v3 yellow #facc15 → v4c-interim red_warm #db6d28 → Mocha
-        # danger #eba0ac.
-        from claude_island.ui.lab_palette import Color as _Lab
-        expected_tint = _Lab.danger.lstrip("#").lower()
-        assert expected_tint in css.lower()
+        # v4c Mocha (2026-05-22 re-tier): cost $50–$200 paints yellow
+        # (#f9e2af).  The test uses cost_usd=132 which falls in this
+        # band — "worth noticing" but not the red ≥$200 alarm tier.
+        assert "f9e2af" in css.lower()
         assert "600" in css  # font-weight bold-ish
         # No row-level tooltip — verify so a refactor that adds one
         # back has to update this assertion, prompting reconsideration.
@@ -3102,12 +3099,10 @@ class TestHighCostRowAlert:
         assert btn._status_glyph.state() == _RowStatusGlyph.STATE_RUNNING
         assert btn._running is True
         meta = btn.findChild(QLabel, "meta_label")
-        # v4c Mocha: high-cost cost label tints to maroon (danger
-        # token).  Asserts on the resolved tint rather than a literal
-        # so a future palette tweak doesn't have to land in this file.
-        from claude_island.ui.lab_palette import Color as _Lab
-        expected_tint = _Lab.danger.lstrip("#").lower()
-        assert expected_tint in meta.styleSheet().lower()
+        # v4c Mocha (2026-05-22 re-tier): cost $50–$200 = yellow tier
+        # (#f9e2af).  Test cost_usd is $132 (above the $50 yellow
+        # floor, below the $200 red ceiling).
+        assert "f9e2af" in meta.styleSheet().lower()
         # v3: equalizer bar tint follows view.phase (THINKING → amber)
         # via lab_palette.Color.for_phase.  The high-cost signal still
         # rides on the cost label colour — the two channels remain
