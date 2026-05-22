@@ -1002,6 +1002,44 @@ class _ElasticRichLabel(QLabel):
 _ElasticLabel = _ElasticRichLabel
 
 
+def _elide_path_segments(
+    full: str,
+    width: int,
+    advance: "Callable[[str], int]",
+) -> "str | None":
+    """Path-aware ellipsis: ``~/workProject/origin/made`` → ``~/workProject/…/made``.
+
+    Keeps as many leading path segments as fit and always preserves the
+    final segment (basename — the most identifying part of a cwd).
+    Char-level ``ElideRight`` on the same input would produce
+    ``~/workProject/origin/ma…``, losing the folder name the user
+    actually wants to read.
+
+    Returns ``full`` unchanged when it already fits, or ``None`` when no
+    segment-level rewrite fits (path has <3 segments, or even
+    ``<first>/…/<last>`` overflows). Callers fall back to char-level
+    middle-elision in that case.
+
+    ``advance`` measures rendered width — pass ``QFontMetrics.horizontalAdvance``
+    in production, ``len`` in tests.
+    """
+    if not full:
+        return full
+    if advance(full) <= width:
+        return full
+    parts = full.split("/")
+    # Need at least 3 parts to elide the middle: keep one prefix
+    # segment, replace ≥1 with "…", keep the basename.
+    if len(parts) < 3:
+        return None
+    for keep in range(len(parts) - 2, 0, -1):
+        head = "/".join(parts[:keep])
+        candidate = f"{head}/…/{parts[-1]}"
+        if advance(candidate) <= width:
+            return candidate
+    return None
+
+
 class _ElidingLabel(QLabel):
     """Plain-text QLabel that visually elides with ``…`` when its text
     exceeds the allocated width, AND reports
@@ -1029,7 +1067,7 @@ class _ElidingLabel(QLabel):
     matches what we last auto-set (tracked in ``_auto_tooltip``).
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, path_mode: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         # Source-of-truth text. Diverges from QLabel's internal text
         # whenever elision kicks in (which sets the *visible* shorter
@@ -1039,6 +1077,11 @@ class _ElidingLabel(QLabel):
         # detect "user has set a custom tooltip since" — if the
         # current toolTip() differs from this, we leave it alone.
         self._auto_tooltip: str = ""
+        # When True, _apply_elision rewrites overflowing paths as
+        # ``<prefix>/…/<basename>`` before falling back to char-level
+        # middle elision — preserving the folder name a user reads to
+        # identify a session.
+        self._path_mode: bool = path_mode
 
     def setText(self, text: str) -> None:  # type: ignore[override]
         # Dedupe on the *full* text — _update_row calls setText every
@@ -1100,7 +1143,21 @@ class _ElidingLabel(QLabel):
             self._sync_tooltip(elided=False)
             return
         metrics = QFontMetrics(self.font())
-        elided = metrics.elidedText(full, _Qt.TextElideMode.ElideRight, w)
+        elided: "str | None" = None
+        if self._path_mode:
+            elided = _elide_path_segments(full, w, metrics.horizontalAdvance)
+        if elided is None:
+            # Path mode disabled, or segment-level rewrite couldn't fit
+            # even ``<first>/…/<last>``. Char-level middle elision is
+            # the right fallback for paths (preserves both head and
+            # basename within the available chars); right elision is
+            # the right default for non-path labels.
+            mode = (
+                _Qt.TextElideMode.ElideMiddle
+                if self._path_mode
+                else _Qt.TextElideMode.ElideRight
+            )
+            elided = metrics.elidedText(full, mode, w)
         if super().text() != elided:
             super().setText(elided)
         self._sync_tooltip(elided=(elided != full))
@@ -6024,7 +6081,11 @@ class ExpandedWindow(QWidget):
         # elides on overflow.  This matches the user-flagged
         # 2026-05-21 layout: "下面展示当前目录、模型" with chip next
         # to cwd, not floating in the right column under the cost.
-        cwd_label = _ElidingLabel()
+        # path_mode keeps the basename visible: a path that would right-
+        # elide to ``~/workProject/origin/ma…`` instead renders as
+        # ``~/workProject/…/made`` — the trailing folder is the
+        # identifying part of a cwd.
+        cwd_label = _ElidingLabel(path_mode=True)
         cwd_label.setObjectName("cwd_label")
         cwd_label.setStyleSheet(
             f"color: {_LabColor.paper_faint}; font-size: 11.5px; "
