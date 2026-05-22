@@ -3721,47 +3721,20 @@ class ExpandedWindow(QWidget):
         self._summary_card = self._build_summary_card()
         root.addWidget(self._summary_card)
 
-        # ── Sessions header (with count badge + recents chip) ───────
-        # Count badge makes overflow discoverable: when the list scrolls,
-        # the user sees "· 14" and knows there's more below the fold.
-        # The chip on the right surfaces dormant sessions (offline
-        # sessions on disk with no live process) — click opens the
-        # RecentsDrawer. Hidden when there are zero dormant sessions.
-        # v4c: sessions title reads "N sessions · M awaiting consent"
-        # instead of the all-caps "CLAUDE SESSIONS · N" — matches the
-        # prototype-v4c-github.html card-head layout the user picked.
-        # The label uses normal-case sans (not the v3 small-caps title
-        # style) so it reads as content, not chrome.
+        # ── Sessions header ─────────────────────────────────────────
+        # v4c: sessions title reads "N sessions · M awaiting consent".
+        # The on-by-default "Recents · N" chip that used to sit on the
+        # right edge of this header was removed 2026-05-22 — the user
+        # opens the drawer via ⌘J (also surfaced as a chip in the top
+        # header bar), so a second affordance here was redundant
+        # chrome.  ``_recents_toggle`` and ``_on_recents_chip_clicked``
+        # are still wired because ⌘J + the top-bar chip both use them.
         self._sessions_title = mk_label("0 sessions", elide=False)
         self._sessions_title.setStyleSheet(
             f"color: {_LabColor.paper}; font-size: 12.5px; font-weight: 600;"
         )
-        # v4c Recents chip — rounded pill with a phosphor (green) dot
-        # signalling "dormant sessions exist".  Uses lab_palette so the
-        # tones stay in lock-step with everything else.
-        self._recents_chip = QPushButton("● Recents · 0")
-        self._recents_chip.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._recents_chip.setStyleSheet(
-            f"QPushButton {{"
-            f"  background: {_LabColor.ink};"
-            f"  color: {_LabColor.paper};"
-            f"  border: 1px solid {_LabColor.rule};"
-            f"  border-radius: 100px;"
-            f"  padding: 3px 9px;"
-            f"  font-size: 11px;"
-            f"  font-weight: 500;"
-            f"  text-align: left;"
-            f"}}"
-            f"QPushButton:hover {{"
-            f"  background: {_LabColor.surface_hi};"
-            f"  border-color: {_LabColor.rule_bright};"
-            f"}}"
-        )
-        self._recents_chip.setFlat(True)
-        self._recents_chip.setVisible(False)
         # Toggle slot — wired from __main__.py via set_recents_toggle().
         self._recents_toggle: Callable[[], None] | None = None
-        self._recents_chip.clicked.connect(self._on_recents_chip_clicked)
         # ── Pending decisions section (Bidirectional Hooks v1) ─────
         # Sits ABOVE the sessions header so any approval / question
         # card the user must act on is the first thing visible when
@@ -3786,7 +3759,6 @@ class ExpandedWindow(QWidget):
         sessions_header.setSpacing(6)
         sessions_header.addWidget(self._sessions_title)
         sessions_header.addStretch(1)
-        sessions_header.addWidget(self._recents_chip)
         root.addLayout(sessions_header)
 
         # ── Sessions scroll area ────────────────────────────────────
@@ -4113,28 +4085,14 @@ class ExpandedWindow(QWidget):
         return f"{base} · {suffix}"
 
     def update_recents_count(self, n: int) -> None:
-        """Refresh the chip's "● Recents · N" label.
-
-        v4c: chip stays visible at n == 0 too — its presence advertises
-        the ⌘J entry-point even when there are no dormant sessions yet,
-        and tucking it on a "● Recents · 0" label is less surprising
-        than a chip that pops in and out.  The dot tints by content:
-        phosphor when there's something to resume, paper_faint when not.
-        """
-        if n <= 0:
-            # Faint dot when nothing dormant — chip stays so ⌘J is
-            # discoverable as a permanent affordance.
-            text = "● Recents · 0"
-            self._recents_chip.setStyleSheet(
-                self._recents_chip.styleSheet().replace(
-                    f"color: {_LabColor.paper};",
-                    f"color: {_LabColor.paper_dim};",
-                )
-            )
-        else:
-            text = f"● Recents · {n}"
-        self._recents_chip.setText(text)
-        self._recents_chip.setVisible(True)
+        """v4c (2026-05-22): no-op.  The "● Recents · N" chip used to
+        sit in the sessions header but was removed — ⌘J is the
+        canonical entry-point now, also surfaced as a small chip in
+        the top header bar.  Kept as a method so existing callers
+        (``render(snap)``) continue to compile; will be deleted
+        outright in a future cleanup pass once render() stops
+        invoking it."""
+        del n   # explicitly ignored
 
     def _on_recents_chip_clicked(self) -> None:
         if self._recents_toggle is not None:
