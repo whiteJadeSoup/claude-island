@@ -158,9 +158,10 @@ TerminalAnswerCallback = Callable[[str], None]
 # (the user is rejecting something).
 _CARD_QSS = f"""
 QFrame#approvalCard {{
-    background-color: rgba(219, 109, 40, 0.08);
+    /* Mocha: peach-tinted warm dark, same family as waiting row + question banner. */
+    background-color: rgba(250, 179, 135, 0.08);
     border-radius: 4px;
-    border: 1px solid rgba(219, 109, 40, 0.30);
+    border: 1px solid rgba(250, 179, 135, 0.30);
     border-left: 3px solid {_C.red_warm};
 }}
 QFrame#approvalCardTopBar {{
@@ -206,7 +207,9 @@ QLabel#approvalCardWarning {{
 }}
 QPushButton#approvalAllow {{
     background-color: {_C.phosphor};
-    color: #062911;
+    /* Mocha crust (#11111b) on sage green — high-contrast for legibility
+       without being pure black. */
+    color: #11111b;
     border-radius: 6px;
     padding: 7px {_BUTTON_PADDING_H_PX}px;
     font-size: 12px;
@@ -215,8 +218,9 @@ QPushButton#approvalAllow {{
     border: 1px solid {_C.phosphor};
 }}
 QPushButton#approvalAllow:hover {{
-    background-color: #4ec766;
-    border-color: #4ec766;
+    /* Slightly brighter sage on hover. */
+    background-color: #b9e7b4;
+    border-color: #b9e7b4;
 }}
 QPushButton#approvalDeny {{
     background-color: {_C.ink};

@@ -3034,9 +3034,12 @@ class TestHighCostRowAlert:
         meta = btn.findChild(QLabel, "meta_label")
         assert meta is not None
         css = meta.styleSheet()
-        # v4c: high-cost tint moved from yellow #facc15 → orange (red_warm).
+        # v4c Mocha: high-cost tint moved from orange red_warm → maroon
+        # (danger token), a friendlier pink-red.  Comment trail:
+        # v3 yellow #facc15 → v4c-interim red_warm #db6d28 → Mocha
+        # danger #eba0ac.
         from claude_island.ui.lab_palette import Color as _Lab
-        expected_tint = _Lab.red_warm.lstrip("#").lower()
+        expected_tint = _Lab.danger.lstrip("#").lower()
         assert expected_tint in css.lower()
         assert "600" in css  # font-weight bold-ish
         # No row-level tooltip — verify so a refactor that adds one
@@ -3099,13 +3102,11 @@ class TestHighCostRowAlert:
         assert btn._status_glyph.state() == _RowStatusGlyph.STATE_RUNNING
         assert btn._running is True
         meta = btn.findChild(QLabel, "meta_label")
-        # v4c: high-cost cost label tints to orange (red_warm) — was
-        # yellow #facc15 in v3.  Token is lab_palette.Color.red_warm.
+        # v4c Mocha: high-cost cost label tints to maroon (danger
+        # token).  Asserts on the resolved tint rather than a literal
+        # so a future palette tweak doesn't have to land in this file.
         from claude_island.ui.lab_palette import Color as _Lab
-        # red_warm hex starts with "#db6d28" (orange-500) in v4c; the
-        # test asserts on the resolved tint rather than a literal so a
-        # future palette tweak doesn't have to land in this file.
-        expected_tint = _Lab.red_warm.lstrip("#").lower()
+        expected_tint = _Lab.danger.lstrip("#").lower()
         assert expected_tint in meta.styleSheet().lower()
         # v3: equalizer bar tint follows view.phase (THINKING → amber)
         # via lab_palette.Color.for_phase.  The high-cost signal still

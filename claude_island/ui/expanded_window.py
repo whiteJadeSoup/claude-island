@@ -1201,15 +1201,16 @@ _STYLE_SINGLE_ROW = f"""
     }}
     QPushButton:hover {{ background: {_LabColor.surface_hi}; }}
     QPushButton:pressed {{ background: {_LabColor.surface}; }}
-    /* v4c: waiting_approval rows paint a full-row orange tint to
-       mirror the prototype's row-waiting CSS class — the row itself
-       carries the "needs attention" signal, not just a left rail. */
+    /* v4c (Mocha): waiting_approval rows paint a peach-tinted warm
+       dark — softer than the burnt-amber #1f1106 we used pre-Mocha.
+       Tints with Mocha peach (#fab387) at low alpha so the row sits
+       naturally on the new base #1e1e2e. */
     QPushButton[phase_tint="waiting"] {{
-        background: #1f1106;
-        border-bottom: 1px solid rgba(219, 109, 40, 0.40);
+        background: #2e1d28;
+        border-bottom: 1px solid rgba(250, 179, 135, 0.40);
     }}
     QPushButton[phase_tint="waiting"]:hover {{
-        background: #2a1809;
+        background: #3a2832;
     }}
 """
 # Group card (multiple sessions sharing a cwd) keeps its rounded
@@ -1262,10 +1263,14 @@ _STYLE_COST_DEFAULT = f"color: {_LabColor.paper}; font-size: 11px; font-weight: 
 # the visual cue band — distinct from HIGH_COST_USD_THRESHOLD which
 # is the core's invariant for is_high_cost.
 _STYLE_COST_MID = (
-    f"color: #d29922; font-size: 11px; font-weight: 600;"
+    # Catppuccin Mocha "yellow" #f9e2af — warm sunlight tone, draws
+    # the eye without the urgency of the old #d29922.
+    f"color: #f9e2af; font-size: 11px; font-weight: 600;"
 )
 _STYLE_COST_HIGH = (
-    f"color: {_LabColor.red_warm}; font-size: 11px; font-weight: 600;"
+    # Catppuccin Mocha "maroon" #eba0ac — friendly pink-red warning;
+    # via danger token so a palette tweak propagates.
+    f"color: {_LabColor.danger}; font-size: 11px; font-weight: 600;"
 )
 # Visual cost-color tiers (in USD).  Sourced from prototype-v4c-github.html's
 # tier examples ($3.42 white, $5.18 yellow, $11.07 red).  Kept separate

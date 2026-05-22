@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Color Palette Research · claude-island</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..700,0..100,0..1&family=Inter+Tight:wght@300..700&family=JetBrains+Mono:wght@400..700&display=swap" rel="stylesheet">
+<style>
+/* ─────────────────────────────────────────────────────────────────────
+   Document aesthetics — editorial design-system documentation.
+   Warm dark + Fraunces serif + Inter Tight body + JetBrains Mono code.
+   This document IS the new palette, applied to itself.
+   ──────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Catppuccin Mocha — exact reference values */
+  --base:       #1e1e2e;
+  --mantle:     #181825;
+  --crust:      #11111b;
+  --surface0:   #313244;
+  --surface1:   #45475a;
+  --surface2:   #585b70;
+  --overlay0:   #6c7086;
+  --overlay1:   #7f849c;
+  --overlay2:   #9399b2;
+  --subtext0:   #a6adc8;
+  --subtext1:   #bac2de;
+  --text:       #cdd6f4;
+  --lavender:   #b4befe;
+  --blue:       #89b4fa;
+  --sapphire:   #74c7ec;
+  --sky:        #89dceb;
+  --teal:       #94e2d5;
+  --green:      #a6e3a1;
+  --yellow:     #f9e2af;
+  --peach:      #fab387;
+  --maroon:     #eba0ac;
+  --red:        #f38ba8;
+  --mauve:      #cba6f7;
+  --pink:       #f5c2e7;
+  --flamingo:   #f2cdcd;
+  --rosewater:  #f5e0dc;
+
+  /* Current v4c (GitHub Primer + Tailwind) — for the comparison column */
+  --gh-bg:       #0d1117;
+  --gh-card:     #151b23;
+  --gh-rule:     #30363d;
+  --gh-text:     #f0f6fc;
+  --gh-text-dim: #9198a1;
+  --gh-purple:   #a371f7;
+  --gh-green:    #3fb950;
+  --gh-orange:   #db6d28;
+  --gh-blue:     #4493f8;
+  --gh-yellow:   #d29922;
+
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --font-body:    "Inter Tight", ui-sans-serif, system-ui, "Helvetica Neue", sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { background: var(--base); }
+
+body {
+  font-family: var(--font-body);
+  color: var(--text);
+  background: var(--base);
+  font-size: 15px;
+  line-height: 1.55;
+  letter-spacing: 0.005em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  padding: 64px 48px 96px;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+/* Subtle film grain on the page background — adds warmth + atmosphere */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.04 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  opacity: 0.55;
+  z-index: 1;
+  mix-blend-mode: overlay;
+}
+
+main { position: relative; z-index: 2; }
+
+/* ─── Hero ─────────────────────────────────────────────────────────── */
+
+.hero { margin-bottom: 80px; }
+.hero .eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--peach);
+  margin-bottom: 18px;
+}
+.hero h1 {
+  font-family: var(--font-display);
+  font-weight: 380;
+  font-size: clamp(48px, 6vw, 84px);
+  line-height: 0.96;
+  letter-spacing: -0.02em;
+  font-variation-settings: "opsz" 144, "SOFT" 100, "WONK" 1;
+  color: var(--text);
+  margin-bottom: 24px;
+}
+.hero h1 em {
+  font-style: italic;
+  font-variation-settings: "opsz" 144, "SOFT" 100, "WONK" 1;
+  color: var(--mauve);
+  font-weight: 320;
+}
+.hero .lede {
+  font-size: 19px;
+  line-height: 1.5;
+  color: var(--subtext0);
+  max-width: 620px;
+  font-weight: 320;
+}
+
+/* ─── Section ─────────────────────────────────────────────────────── */
+
+section { margin-bottom: 96px; }
+.section-num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  color: var(--overlay1);
+  margin-bottom: 10px;
+}
+.section-title {
+  font-family: var(--font-display);
+  font-weight: 350;
+  font-size: 36px;
+  line-height: 1.1;
+  letter-spacing: -0.015em;
+  font-variation-settings: "opsz" 60, "SOFT" 50;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.section-title em {
+  font-style: italic;
+  color: var(--peach);
+  font-weight: 320;
+}
+.section-sub {
+  font-size: 15px;
+  color: var(--subtext0);
+  max-width: 640px;
+  margin-bottom: 36px;
+}
+
+/* ─── Panel mockups (side by side) ─────────────────────────────────── */
+
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 28px;
+}
+
+.panel-frame {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.panel-label {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.panel-label .name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+.panel-label .name.cur { color: var(--overlay1); }
+.panel-label .name.new { color: var(--peach); }
+.panel-label .meta {
+  font-size: 12px;
+  color: var(--overlay0);
+}
+
+/* ── Mock island panel — shared shell, swappable palette ──────────── */
+
+.island {
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.45),
+              0 6px 18px rgba(0, 0, 0, 0.30);
+  font-family: var(--font-body);
+  font-size: 13px;
+}
+
+/* CURRENT palette (cur) */
+.island.cur {
+  background: var(--gh-bg);
+  border: 1px solid var(--gh-rule);
+  color: var(--gh-text);
+}
+.island.cur .head      { background: var(--gh-bg); border-bottom: 1px solid var(--gh-rule); }
+.island.cur .today     { background: var(--gh-card); border-bottom: 1px solid var(--gh-rule); }
+.island.cur .session-bar { color: var(--gh-text-dim); }
+.island.cur .row       { border-bottom: 1px solid var(--gh-rule); }
+.island.cur .row[data-phase="thinking"] .ico,
+.island.cur .row[data-phase="thinking"] .status,
+.island.cur .row[data-phase="thinking"] .wave i { background: var(--gh-purple); color: var(--gh-purple); }
+.island.cur .row[data-phase="tool_use"] .ico,
+.island.cur .row[data-phase="tool_use"] .status,
+.island.cur .row[data-phase="tool_use"] .wave i { background: var(--gh-green); color: var(--gh-green); }
+.island.cur .row[data-phase="waiting"]  { background: #1f1106; border-bottom: 1px solid rgba(219,109,40,0.40); }
+.island.cur .row[data-phase="waiting"] .ico,
+.island.cur .row[data-phase="waiting"] .status { color: var(--gh-orange); }
+.island.cur .row[data-phase="compacting"] .ico,
+.island.cur .row[data-phase="compacting"] .status,
+.island.cur .row[data-phase="compacting"] .wave i { background: var(--gh-blue); color: var(--gh-blue); }
+.island.cur .row[data-phase="idle"] .ico { color: var(--gh-text-dim); }
+.island.cur .cost { color: var(--gh-text); }
+.island.cur .cost[data-tier="mid"]  { color: var(--gh-yellow); }
+.island.cur .cost[data-tier="hi"]   { color: var(--gh-orange); font-weight: 600; }
+.island.cur .quota { background: var(--gh-card); border-top: 1px solid var(--gh-rule); }
+.island.cur .chip {
+  background: var(--gh-card);
+  border: 1px solid var(--gh-rule);
+  color: var(--gh-text-dim);
+}
+.island.cur .pct { color: var(--gh-green); }
+.island.cur .progress    { background: var(--gh-rule); }
+.island.cur .progress i  { background: var(--gh-green); }
+.island.cur .bigcost     { color: var(--gh-text); }
+.island.cur .stat b      { color: var(--gh-text); }
+.island.cur .stat        { color: var(--gh-text-dim); }
+.island.cur .head .titlewrap b { color: var(--gh-text); }
+.island.cur .head .titlewrap span { color: var(--gh-text-dim); }
+.island.cur .kbd {
+  background: var(--gh-card);
+  border: 1px solid var(--gh-rule);
+  color: var(--gh-text-dim);
+}
+.island.cur .ci-logo { background: var(--gh-text); color: var(--gh-bg); }
+
+/* NEW palette (new) — Catppuccin Mocha */
+.island.new {
+  background: var(--base);
+  border: 1px solid var(--surface1);
+  color: var(--text);
+}
+.island.new .head      { background: var(--base); border-bottom: 1px solid var(--surface1); }
+.island.new .today     { background: var(--mantle); border-bottom: 1px solid var(--surface1); }
+.island.new .session-bar { color: var(--subtext0); }
+.island.new .row       { border-bottom: 1px solid var(--surface0); }
+.island.new .row[data-phase="thinking"] .ico,
+.island.new .row[data-phase="thinking"] .status,
+.island.new .row[data-phase="thinking"] .wave i { background: var(--mauve); color: var(--mauve); }
+.island.new .row[data-phase="tool_use"] .ico,
+.island.new .row[data-phase="tool_use"] .status,
+.island.new .row[data-phase="tool_use"] .wave i { background: var(--green); color: var(--green); }
+.island.new .row[data-phase="waiting"]  { background: #2e1d28; border-bottom: 1px solid rgba(250,179,135,0.40); }
+.island.new .row[data-phase="waiting"] .ico,
+.island.new .row[data-phase="waiting"] .status { color: var(--peach); }
+.island.new .row[data-phase="compacting"] .ico,
+.island.new .row[data-phase="compacting"] .status,
+.island.new .row[data-phase="compacting"] .wave i { background: var(--sapphire); color: var(--sapphire); }
+.island.new .row[data-phase="idle"] .ico { color: var(--overlay0); }
+.island.new .cost { color: var(--subtext1); }
+.island.new .cost[data-tier="mid"] { color: var(--yellow); }
+.island.new .cost[data-tier="hi"]  { color: var(--maroon); font-weight: 600; }
+.island.new .quota { background: var(--mantle); border-top: 1px solid var(--surface1); }
+.island.new .chip {
+  background: var(--surface0);
+  border: 1px solid var(--surface1);
+  color: var(--subtext0);
+}
+.island.new .pct { color: var(--green); }
+.island.new .progress    { background: var(--surface0); }
+.island.new .progress i  { background: var(--green); }
+.island.new .bigcost     { color: var(--text); }
+.island.new .stat b      { color: var(--text); }
+.island.new .stat        { color: var(--subtext0); }
+.island.new .head .titlewrap b { color: var(--text); }
+.island.new .head .titlewrap span { color: var(--subtext0); }
+.island.new .kbd {
+  background: var(--surface0);
+  border: 1px solid var(--surface1);
+  color: var(--subtext0);
+}
+.island.new .ci-logo { background: var(--text); color: var(--base); }
+
+/* ── shared panel structure ───────────────────────────────────────── */
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+}
+.ci-logo {
+  width: 22px; height: 22px;
+  border-radius: 5px;
+  display: grid; place-items: center;
+  font-size: 10px; font-weight: 700;
+  font-family: var(--font-mono);
+}
+.titlewrap {
+  flex: 1; min-width: 0;
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 13.5px;
+}
+.titlewrap b { font-weight: 600; }
+.titlewrap span { font-size: 12.5px; }
+.kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
+.today { padding: 14px 16px 12px; }
+.today .top {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 12px;
+}
+.today .lbl {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+.today .bigcost {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.today .ctx { font-size: 12px; margin-top: 4px; opacity: 0.8; }
+.today .bar-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+}
+.progress { height: 4px; border-radius: 2px; overflow: hidden; }
+.progress i { display: block; height: 100%; border-radius: 2px; }
+.pct {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+.pct .of { opacity: 0.55; font-weight: 400; margin-left: 2px; }
+.stats-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 14px;
+  margin-top: 9px;
+  padding-top: 8px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+}
+.island.cur .stats-strip { border-top: 1px solid var(--gh-rule); }
+.island.new .stats-strip { border-top: 1px solid var(--surface0); }
+.stat b {
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.session-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.recents {
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 100px;
+}
+.island.cur .recents { background: var(--gh-card); color: var(--gh-text-dim); border: 1px solid var(--gh-rule); }
+.island.new .recents { background: var(--surface0); color: var(--subtext0); border: 1px solid var(--surface1); }
+
+.row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 14px;
+}
+.row .ico {
+  width: 14px; height: 14px;
+  display: grid; place-items: center;
+  font-size: 11px;
+  background: transparent !important;
+}
+.row .body {
+  display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+  min-width: 0;
+}
+.row .name { font-weight: 600; font-size: 13.5px; }
+.row .status { font-size: 12.5px; }
+.row .cwd {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  opacity: 0.75;
+}
+.row .chip {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 100px;
+}
+.row .rate {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  min-width: 64px;
+  justify-content: flex-end;
+  opacity: 0.75;
+}
+.wave {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 11px;
+  width: 18px;
+}
+.wave i {
+  flex: 1;
+  background: transparent;
+  border-radius: 1px;
+  animation: wave 1200ms linear infinite;
+  transform-origin: bottom;
+}
+.wave i:nth-child(1) { animation-delay: 0ms;   }
+.wave i:nth-child(2) { animation-delay: 300ms; }
+.wave i:nth-child(3) { animation-delay: 600ms; }
+.wave i:nth-child(4) { animation-delay: 900ms; }
+.row[data-phase="idle"] .wave,
+.row[data-phase="waiting"] .wave { display: none; }
+@keyframes wave {
+  0%, 100% { height: 22%; }
+  20%      { height: 80%; }
+  40%      { height: 40%; }
+  60%      { height: 95%; }
+  80%      { height: 50%; }
+}
+.cost {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.quota {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.quota .qchip {
+  padding: 2px 9px;
+  border-radius: 100px;
+  font-weight: 500;
+}
+.island.cur .quota .qchip { color: var(--gh-blue); border: 1px solid var(--gh-blue); }
+.island.new .quota .qchip { color: var(--blue);    border: 1px solid var(--blue); }
+.quota .qadd {
+  display: inline-grid;
+  place-items: center;
+  width: 20px; height: 20px;
+  border-radius: 100px;
+  font-family: var(--font-body);
+  font-size: 12px;
+}
+.island.cur .qadd { color: var(--gh-text-dim); border: 1px dashed var(--gh-rule); }
+.island.new .qadd { color: var(--subtext0); border: 1px dashed var(--surface2); }
+.quota b { font-weight: 600; }
+.island.cur .quota b { color: var(--gh-text); }
+.island.new .quota b { color: var(--text); }
+.quota .sep { opacity: 0.4; }
+.quota .right { margin-left: auto; }
+
+/* ── Palette swatches ─────────────────────────────────────────────── */
+
+.token-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.swatch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--surface0);
+  border-radius: 8px;
+  background: var(--mantle);
+}
+.swatch .chip-color {
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+.swatch .meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.swatch .meta .label {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  font-style: italic;
+}
+.swatch .meta .hex {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--overlay1);
+  letter-spacing: 0.02em;
+}
+
+/* ── Comparison table ──────────────────────────────────────────────── */
+
+.compare {
+  display: grid;
+  grid-template-columns: 1fr auto auto 1fr;
+  gap: 0;
+  border: 1px solid var(--surface0);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--mantle);
+}
+.compare .h {
+  background: var(--mantle);
+  border-bottom: 1px solid var(--surface0);
+  padding: 12px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--overlay1);
+}
+.compare .cell {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--surface0);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 50px;
+}
+.compare .cell.role {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+  color: var(--subtext1);
+  background: var(--base);
+}
+.compare > div:nth-last-child(-n+4) { border-bottom: none; }
+.cdot { width: 24px; height: 24px; border-radius: 6px; flex-shrink: 0;
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06); }
+.chex {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--subtext0);
+  letter-spacing: 0.01em;
+}
+
+/* ── Annotations ─────────────────────────────────────────────────── */
+
+.annotations {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  margin-top: 32px;
+}
+.note {
+  padding: 22px 22px 24px;
+  background: var(--mantle);
+  border: 1px solid var(--surface0);
+  border-radius: 10px;
+}
+.note .ord {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 350;
+  font-size: 38px;
+  line-height: 1;
+  color: var(--peach);
+  margin-bottom: 14px;
+}
+.note .ord .small {
+  font-family: var(--font-mono);
+  font-style: normal;
+  font-size: 11px;
+  color: var(--overlay1);
+  letter-spacing: 0.15em;
+  margin-left: 8px;
+  vertical-align: 6px;
+}
+.note h3 {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 19px;
+  line-height: 1.2;
+  color: var(--text);
+  margin-bottom: 10px;
+  letter-spacing: -0.01em;
+}
+.note p {
+  font-size: 13.5px;
+  color: var(--subtext0);
+  line-height: 1.55;
+}
+.note code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface0);
+  border: 1px solid var(--surface1);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--peach);
+}
+
+/* ── Footer ───────────────────────────────────────────────────────── */
+footer {
+  margin-top: 80px;
+  padding-top: 32px;
+  border-top: 1px solid var(--surface0);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--overlay0);
+  letter-spacing: 0.08em;
+  display: flex;
+  justify-content: space-between;
+}
+footer .right { color: var(--overlay1); }
+
+/* Responsive guardrails */
+@media (max-width: 1100px) {
+  body { padding: 40px 24px 64px; }
+  .split { grid-template-columns: 1fr; }
+  .annotations { grid-template-columns: 1fr; }
+  .compare { grid-template-columns: 1fr; }
+  .compare .cell, .compare .h { border-bottom: 1px solid var(--surface0); }
+}
+</style>
+</head>
+<body>
+<main>
+
+<!-- ─── Hero ──────────────────────────────────────────────────────── -->
+<header class="hero">
+  <div class="eyebrow">⌘ Palette research · 2026-05-22</div>
+  <h1>From <em>cold blueprint</em><br>to warm workshop.</h1>
+  <p class="lede">
+    The current claude-island uses GitHub Primer's cool near-black with four highly saturated phase colours competing for attention. This document proposes a re-calibration to <strong>Catppuccin Mocha</strong> — a pastel palette beloved in the developer community for its low-contrast warmth and harmonious accent set. Both candidates are rendered live below using the same DOM, so the visual diff is direct.
+  </p>
+</header>
+
+<!-- ─── Section 1 — Side-by-side panel mockups ────────────────────── -->
+<section>
+  <div class="section-num">/01 — Side-by-side</div>
+  <h2 class="section-title">The same panel, two <em>palettes.</em></h2>
+  <p class="section-sub">Identical DOM, identical content. The only differences are the CSS variables. The animated wave in the rate slot runs in both — note how the new palette's mauve / sage / sapphire pulse less aggressively than the old pure purple / pure green / pure blue.</p>
+
+  <div class="split">
+    <!-- ─── CURRENT panel ─── -->
+    <div class="panel-frame">
+      <div class="panel-label">
+        <span class="name cur">Current — GitHub Primer dark</span>
+        <span class="meta">bg #0d1117 · 4 high-saturation phase colours</span>
+      </div>
+      <div class="island cur">
+        <div class="head">
+          <div class="ci-logo">CI</div>
+          <div class="titlewrap"><b>claude-island</b><span>· thinking · 2 active</span></div>
+          <div class="kbd">⌘J</div>
+        </div>
+        <div class="today">
+          <div class="top">
+            <div>
+              <div class="lbl">Today</div>
+              <div class="ctx">Anthropic · resets in 2h 14m</div>
+            </div>
+            <div class="bigcost">$14.84</div>
+          </div>
+          <div class="bar-row">
+            <div class="progress"><i style="width:62%;"></i></div>
+            <div class="pct">62%<span class="of"> of 5h</span></div>
+          </div>
+          <div class="stats-strip">
+            <span class="stat"><b>257</b> reqs</span>
+            <span class="stat"><b>210K</b> tokens</span>
+            <span class="stat"><b>128.9M</b> cache</span>
+            <span class="stat"><b>99.5%</b> hit</span>
+          </div>
+        </div>
+        <div class="session-bar">6 sessions · all clear<span class="recents">● Recents · 6</span></div>
+
+        <div class="row" data-phase="thinking">
+          <span class="ico">◐</span>
+          <div class="body">
+            <span class="name">build-mini-cc</span>
+            <span class="status">thinking · turn 3</span>
+            <span class="cwd">~/coding-projects/build-mini-cc</span>
+            <span class="chip">opus-4.7</span>
+          </div>
+          <span class="rate">
+            <span class="wave"><i></i><i></i><i></i><i></i></span>
+            1.4k tk/min
+          </span>
+          <span class="cost">$3.42</span>
+        </div>
+
+        <div class="row" data-phase="tool_use">
+          <span class="ico">▶</span>
+          <div class="body">
+            <span class="name">claude-island · master</span>
+            <span class="status">tool_use · Bash · 1.2s</span>
+            <span class="cwd">~/coding-projects/claude-island</span>
+            <span class="chip">opus-4.7</span>
+          </div>
+          <span class="rate">
+            <span class="wave"><i></i><i></i><i></i><i></i></span>
+            2.1k tk/min
+          </span>
+          <span class="cost" data-tier="hi">$11.07</span>
+        </div>
+
+        <div class="row" data-phase="waiting">
+          <span class="ico">!</span>
+          <div class="body">
+            <span class="name">vibe-ipad</span>
+            <span class="status">awaiting consent · 1m 4s elapsed</span>
+            <span class="cwd">~/coding-projects/open-vibe-island/ipad</span>
+            <span class="chip">sonnet-4.6</span>
+          </div>
+          <span class="rate">—</span>
+          <span class="cost">$0.84</span>
+        </div>
+
+        <div class="row" data-phase="compacting">
+          <span class="ico">⇕</span>
+          <div class="body">
+            <span class="name">design-review · feat/perf</span>
+            <span class="status">compacting · 142 KB · 8s</span>
+            <span class="cwd">~/coding-projects/cc-review</span>
+            <span class="chip">haiku-4.5</span>
+          </div>
+          <span class="rate">
+            <span class="wave"><i></i><i></i><i></i><i></i></span>
+            8s
+          </span>
+          <span class="cost">$0.12</span>
+        </div>
+
+        <div class="row" data-phase="idle">
+          <span class="ico">○</span>
+          <div class="body">
+            <span class="name">notes · drafting reply</span>
+            <span class="status">idle · 1h 4m</span>
+            <span class="cwd">~/Documents/notes</span>
+            <span class="chip">opus-4.7</span>
+          </div>
+          <span class="rate"></span>
+          <span class="cost">$0.31</span>
+        </div>
+
+        <div class="row" data-phase="idle">
+          <span class="ico">✓</span>
+          <div class="body">
+            <span class="name">prototype-review · v2</span>
+            <span class="status">ended · 4s ago · 247 turns</span>
+            <span class="cwd">~/coding-projects/claude-island/design</span>
+            <span class="chip">opus-4.7</span>
+          </div>
+          <span class="rate"></span>
+          <span class="cost" data-tier="mid">$5.18</span>
+        </div>
+
+        <div class="quota">
+          <span>QUOTA</span>
+          <span class="qchip">Anthropic</span>
+          <span class="qadd">+</span>
+          <span>5h <b style="color:var(--gh-orange);">62%</b><span class="sep"> · </span>2h 14m</span>
+          <span class="sep">|</span>
+          <span>Weekly <b style="color:var(--gh-green);">41%</b><span class="sep"> · </span>4d 22h</span>
+          <span class="right">⟳</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── NEW panel ─── -->
+    <div class="panel-frame">
+      <div class="panel-label">
+        <span class="name new">Proposed — Catppuccin Mocha</span>
+        <span class="meta">bg #1e1e2e · 4 pastel phase colours</span>
+      </div>
+      <div class="island new">
+        <div class="head">
+          <div class="ci-logo">CI</div>
+          <div class="titlewrap"><b>claude-island</b><span>· thinking · 2 active</span></div>
+          <div class="kbd">⌘J</div>
+        </div>
+        <div class="today">
+          <div class="top">
+            <div>
+              <div class="lbl">Today</div>
+              <div class="ctx">Anthropic · resets in 2h 14m</div>
+            </div>
+            <div class="bigcost">$14.84</div>
+          </div>
+          <div class="bar-row">
+            <div class="progress"><i style="width:62%;"></i></div>
+            <div class="pct">62%<span class="of"> of 5h</span></div>
+          </div>
+          <div class="stats-strip">
+            <span class="stat"><b>257</b> reqs</span>
+            <span class="stat"><b>210K</b> tokens</span>
+            <span class="stat"><b>128.9M</b> cache</span>
+            <span class="stat"><b>99.5%</b> hit</span>
+          </div>
+        </div>
+        <div class="session-bar">6 sessions · all clear<span class="recents">● Recents · 6</span></div>
+
+        <div class="row" data-phase="thinking">
+          <span class="ico">◐</span>
+          <div class="body">
+            <span class="name">build-mini-cc</span>
+            <span class="status">thinking · turn 3</span>
+            <span class="cwd">~/coding-projects/build-mini-cc</span>
+            <span class="chip">opus-4.7</span>
+          </div>
+          <span class="rate">
+            <span class="wave"><i></i><i></i><i></i><i></i></span>
+            1.4k tk/min
+          </span>
+          <span class="cost">$3.42</span>
+        </div>
+
+        <div class="row" data-phase="tool_use">
+          <span class="ico">▶</span>
+          <div class="body">
+            <span class="name">claude-island · master</span>
+            <span class="status">tool_use · Bash · 1.2s</span>
+            <span class="cwd">~/coding-projects/claude-island</span>
+            <span class="chip">opus-4.7</span>
+          </div>
+          <span class="rate">
+            <span class="wave"><i></i><i></i><i></i><i></i></span>
+            2.1k tk/min
+          </span>
+          <span class="cost" data-tier="hi">$11.07</span>
+        </div>
+
+        <div class="row" data-phase="waiting">
+          <span class="ico">!</span>
+          <div class="body">
+            <span class="name">vibe-ipad</span>
+            <span class="status">awaiting consent · 1m 4s elapsed</span>
+            <span class="cwd">~/coding-projects/open-vibe-island/ipad</span>
+            <span class="chip">sonnet-4.6</span>
+          </div>
+          <span class="rate">—</span>
+          <span class="cost">$0.84</span>
+        </div>
+
+        <div class="row" data-phase="compacting">
+          <span class="ico">⇕</span>
+          <div class="body">
+            <span class="name">design-review · feat/perf</span>
+            <span class="status">compacting · 142 KB · 8s</span>
+            <span class="cwd">~/coding-projects/cc-review</span>
+            <span class="chip">haiku-4.5</span>
+          </div>
+          <span class="rate">
+            <span class="wave"><i></i><i></i><i></i><i></i></span>
+            8s
+          </span>
+          <span class="cost">$0.12</span>
+        </div>
+
+        <div class="row" data-phase="idle">
+          <span class="ico">○</span>
+          <div class="body">
+            <span class="name">notes · drafting reply</span>
+            <span class="status">idle · 1h 4m</span>
+            <span class="cwd">~/Documents/notes</span>
+            <span class="chip">opus-4.7</span>
+          </div>
+          <span class="rate"></span>
+          <span class="cost">$0.31</span>
+        </div>
+
+        <div class="row" data-phase="idle">
+          <span class="ico">✓</span>
+          <div class="body">
+            <span class="name">prototype-review · v2</span>
+            <span class="status">ended · 4s ago · 247 turns</span>
+            <span class="cwd">~/coding-projects/claude-island/design</span>
+            <span class="chip">opus-4.7</span>
+          </div>
+          <span class="rate"></span>
+          <span class="cost" data-tier="mid">$5.18</span>
+        </div>
+
+        <div class="quota">
+          <span>QUOTA</span>
+          <span class="qchip">Anthropic</span>
+          <span class="qadd">+</span>
+          <span>5h <b style="color:var(--peach);">62%</b><span class="sep"> · </span>2h 14m</span>
+          <span class="sep">|</span>
+          <span>Weekly <b style="color:var(--green);">41%</b><span class="sep"> · </span>4d 22h</span>
+          <span class="right">⟳</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Section 2 — Token tables ──────────────────────────────────── -->
+<section>
+  <div class="section-num">/02 — Token migration</div>
+  <h2 class="section-title">Mapped, not just <em>swapped.</em></h2>
+  <p class="section-sub">Each token in <code style="font-family:var(--font-mono);font-size:13px;background:var(--surface0);padding:2px 6px;border-radius:4px;color:var(--peach);">lab_palette.py</code> moves to a Catppuccin Mocha equivalent that preserves the original role (warm vs cool, foreground vs background, primary action vs muted text). Names stay; values move.</p>
+
+  <div class="compare">
+    <div class="h">Role / token</div>
+    <div class="h">Current</div>
+    <div class="h">Mocha</div>
+    <div class="h">Why this swap</div>
+
+    <div class="cell role">ink — panel bg</div>
+    <div class="cell"><span class="cdot" style="background:#0d1117"></span><span class="chex">#0d1117</span></div>
+    <div class="cell"><span class="cdot" style="background:#1e1e2e"></span><span class="chex">#1e1e2e</span></div>
+    <div class="cell">Slight purple cast → warm; lifts pure-black harshness.</div>
+
+    <div class="cell role">paper — primary text</div>
+    <div class="cell"><span class="cdot" style="background:#f0f6fc"></span><span class="chex">#f0f6fc</span></div>
+    <div class="cell"><span class="cdot" style="background:#cdd6f4"></span><span class="chex">#cdd6f4</span></div>
+    <div class="cell">Drops contrast from 14.2:1 → 10.7:1. Easier on the eyes for 8-hour sessions.</div>
+
+    <div class="cell role">amber — thinking</div>
+    <div class="cell"><span class="cdot" style="background:#a371f7"></span><span class="chex">#a371f7</span></div>
+    <div class="cell"><span class="cdot" style="background:#cba6f7"></span><span class="chex">#cba6f7</span></div>
+    <div class="cell">Mauve — softer pastel that says "deliberating", not "alarm".</div>
+
+    <div class="cell role">phosphor — tool_use</div>
+    <div class="cell"><span class="cdot" style="background:#3fb950"></span><span class="chex">#3fb950</span></div>
+    <div class="cell"><span class="cdot" style="background:#a6e3a1"></span><span class="chex">#a6e3a1</span></div>
+    <div class="cell">Sage green; reads as "production OK" without traffic-light brightness.</div>
+
+    <div class="cell role">red_warm — waiting</div>
+    <div class="cell"><span class="cdot" style="background:#db6d28"></span><span class="chex">#db6d28</span></div>
+    <div class="cell"><span class="cdot" style="background:#fab387"></span><span class="chex">#fab387</span></div>
+    <div class="cell">Peach. Friendlier than burnt orange — "needs you" not "FIRE".</div>
+
+    <div class="cell role">amber_dim — compacting</div>
+    <div class="cell"><span class="cdot" style="background:#4493f8"></span><span class="chex">#4493f8</span></div>
+    <div class="cell"><span class="cdot" style="background:#74c7ec"></span><span class="chex">#74c7ec</span></div>
+    <div class="cell">Sapphire — clearly cooler than the new mauve thinking, so the two don't blur.</div>
+
+    <div class="cell role">cost — normal tier</div>
+    <div class="cell"><span class="cdot" style="background:#f0f6fc"></span><span class="chex">#f0f6fc</span></div>
+    <div class="cell"><span class="cdot" style="background:#bac2de"></span><span class="chex">#bac2de</span></div>
+    <div class="cell">No longer screaming-white. Reads "informational", not "headline".</div>
+
+    <div class="cell role">cost — mid ($5+)</div>
+    <div class="cell"><span class="cdot" style="background:#d29922"></span><span class="chex">#d29922</span></div>
+    <div class="cell"><span class="cdot" style="background:#f9e2af"></span><span class="chex">#f9e2af</span></div>
+    <div class="cell">Warm sunlight yellow. Still draws the eye, no longer urgent.</div>
+
+    <div class="cell role">cost — high ($10+)</div>
+    <div class="cell"><span class="cdot" style="background:#db6d28"></span><span class="chex">#db6d28</span></div>
+    <div class="cell"><span class="cdot" style="background:#eba0ac"></span><span class="chex">#eba0ac</span></div>
+    <div class="cell">Maroon — pink-red. Still warning, but warm, not industrial.</div>
+
+    <div class="cell role">accent — primary action</div>
+    <div class="cell"><span class="cdot" style="background:#4493f8"></span><span class="chex">#4493f8</span></div>
+    <div class="cell"><span class="cdot" style="background:#89b4fa"></span><span class="chex">#89b4fa</span></div>
+    <div class="cell">Same hue family; lower saturation matches the rest of the new palette.</div>
+
+    <div class="cell role">waiting row tint</div>
+    <div class="cell"><span class="cdot" style="background:#1f1106"></span><span class="chex">#1f1106</span></div>
+    <div class="cell"><span class="cdot" style="background:#2e1d28"></span><span class="chex">#2e1d28</span></div>
+    <div class="cell">Tints with peach instead of burnt amber — sits on the new base naturally.</div>
+  </div>
+</section>
+
+<!-- ─── Section 3 — Annotations / design rationale ────────────────── -->
+<section>
+  <div class="section-num">/03 — Three design moves</div>
+  <h2 class="section-title">Why this palette <em>specifically.</em></h2>
+  <p class="section-sub">The proposal is not "just dim the colours" — it's three deliberate moves drawn from how the developer community uses long-running dark themes.</p>
+
+  <div class="annotations">
+    <div class="note">
+      <div class="ord">i<span class="small">/01</span></div>
+      <h3>Pastel beats saturated when four colours coexist</h3>
+      <p>The panel can have up to four phase colours visible simultaneously (thinking purple, tool-use green, waiting orange, compacting blue). At GitHub Primer's saturation level they all reach equally hard for the eye. At Catppuccin's pastel level the hue still distinguishes them but each one recedes when it's not the focus.</p>
+    </div>
+
+    <div class="note">
+      <div class="ord">ii<span class="small">/02</span></div>
+      <h3>Warm dark feels like a workshop, cold dark feels like a server room</h3>
+      <p>Catppuccin's <code>#1e1e2e</code> base has a slight purple-blue cast that the eye reads as "warm dark wood" rather than "cold concrete". Same darkness value, very different emotional register — and the same backdrop that the most popular Neovim and VS Code themes are now built on.</p>
+    </div>
+
+    <div class="note">
+      <div class="ord">iii<span class="small">/03</span></div>
+      <h3>Cost colour should signal magnitude, not panic</h3>
+      <p>The current palette puts <code>$58</code> in the same orange as <code>$394</code>. That trains the user to ignore the colour. The new tiers — calm grey under $5, sunshine yellow $5–10, friendly maroon $10+ — keep the same threshold structure but let the high tier actually mean "look here", because the low tier doesn't.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Section 4 — Implementation cost ───────────────────────────── -->
+<section>
+  <div class="section-num">/04 — Implementation</div>
+  <h2 class="section-title">Tokens move. <em>Code doesn't.</em></h2>
+  <p class="section-sub">Because the v4c code already routes everything through <code style="font-family:var(--font-mono);font-size:13px;background:var(--surface0);padding:2px 6px;border-radius:4px;color:var(--peach);">lab_palette.py</code>, this entire migration is ~30 lines of token value replacement plus a handful of scattered hex literals (<code style="font-family:var(--font-mono);font-size:13px;background:var(--surface0);padding:2px 6px;border-radius:4px;color:var(--peach);">_STYLE_COST_MID</code>, the waiting row tint, capsule wave colours).</p>
+
+  <div class="token-grid" style="margin-top:24px;">
+    <div class="swatch"><div class="chip-color" style="background:var(--mauve);"></div><div class="meta"><span class="label">thinking</span><span class="hex">--mauve · #cba6f7</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--green);"></div><div class="meta"><span class="label">tool_use</span><span class="hex">--green · #a6e3a1</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--peach);"></div><div class="meta"><span class="label">waiting</span><span class="hex">--peach · #fab387</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--sapphire);"></div><div class="meta"><span class="label">compacting</span><span class="hex">--sapphire · #74c7ec</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--blue);"></div><div class="meta"><span class="label">accent</span><span class="hex">--blue · #89b4fa</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--yellow);"></div><div class="meta"><span class="label">cost mid</span><span class="hex">--yellow · #f9e2af</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--maroon);"></div><div class="meta"><span class="label">cost high</span><span class="hex">--maroon · #eba0ac</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--text);"></div><div class="meta"><span class="label">paper</span><span class="hex">--text · #cdd6f4</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--subtext0);"></div><div class="meta"><span class="label">paper_dim</span><span class="hex">--subtext0 · #a6adc8</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--base);box-shadow:inset 0 0 0 1px var(--surface1);"></div><div class="meta"><span class="label">ink</span><span class="hex">--base · #1e1e2e</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--mantle);box-shadow:inset 0 0 0 1px var(--surface1);"></div><div class="meta"><span class="label">surface</span><span class="hex">--mantle · #181825</span></div></div>
+    <div class="swatch"><div class="chip-color" style="background:var(--surface0);"></div><div class="meta"><span class="label">surface_hi</span><span class="hex">--surface0 · #313244</span></div></div>
+  </div>
+</section>
+
+<footer>
+  <span>claude-island · color palette research</span>
+  <span class="right">Catppuccin Mocha · catppuccin.com</span>
+</footer>
+
+</main>
+</body>
+</html>
