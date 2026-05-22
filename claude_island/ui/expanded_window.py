@@ -520,6 +520,12 @@ class HoverRow(QPushButton):
         self._hovered = False
         self._running = False
         self._running_alpha = 0.0  # 0..1; driven by _running_anim
+        # Whether _sync_name_tooltip is allowed to manage self.toolTip().
+        # True for the normal click-to-focus path; flipped to False by
+        # _update_row when the session lacks FOCUS capability so the
+        # diagnostic "Click-to-focus unavailable…" tooltip set there
+        # doesn't get clobbered by our sync.
+        self._owns_name_tooltip: bool = True
         # Per-instance pulse colour — defaults to the class-level green
         # so legacy code paths that only call ``set_running(True)`` get
         # exactly the same paint output as before.  ``set_phase`` rebinds
@@ -631,6 +637,47 @@ class HoverRow(QPushButton):
         self._hovered = False
         self.update()
         return super().leaveEvent(event)
+
+    def resizeEvent(self, event):
+        # Row width can change for two reasons: (1) panel resize,
+        # (2) a sibling widget in the row (cost label, status glyph)
+        # grew/shrunk and reclaimed space from the body. Either way,
+        # whether the name_label is being elided may have changed —
+        # re-sync the row's tooltip so hover-reveal stays accurate.
+        super().resizeEvent(event)
+        self._sync_name_tooltip()
+
+    def _sync_name_tooltip(self) -> None:
+        """Show the full session name as a row tooltip iff the
+        name_label is currently being elided. No tooltip when the
+        name fits the allocated width — avoids redundant echo of
+        already-visible text.
+
+        Skipped entirely when ``_owns_name_tooltip`` is False — that's
+        the path _update_row uses for the FOCUS-unavailable diagnostic
+        tooltip, which must take priority over name reveal.
+
+        Relies on _ElidingLabel: ``text()`` returns the full string
+        (not the elided form), ``sizeHint().width()`` returns the
+        QFontMetrics width of the full string. If sizeHint exceeds
+        the actually-allocated width, the label is visually eliding.
+        """
+        if not self._owns_name_tooltip:
+            return
+        name_label = self.findChild(QLabel, "name_label")
+        if name_label is None:
+            return
+        actual_w = name_label.width()
+        # actual_w == 0 means layout hasn't assigned a width yet
+        # (pre-first-show). Skip — resizeEvent will re-run once Qt
+        # finishes the first layout pass.
+        if actual_w <= 0:
+            return
+        hint_w = name_label.sizeHint().width()
+        full = name_label.text()
+        desired = full if (hint_w > actual_w and full) else ""
+        if self.toolTip() != desired:
+            self.setToolTip(desired)
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -1376,45 +1423,6 @@ _STYLE_CWD = (
     f"color: {_LabColor.paper_faint}; font-size: 10px; "
     f"font-family: {FontStack.mono_stack};"
 )
-
-
-def _row_tooltip(view: "SessionView") -> str:
-    """Compose the hover tooltip for a session row.
-
-    Mirrors open-vibe-island's session-detail summary: shows last
-    prompt + last assistant response + terminal context when those
-    fields are populated by the hook pipeline. Returns "" when there's
-    nothing interesting to show (caller treats "" as "no tooltip").
-
-    Format:
-        Prompt: explain the new hook pipeline
-        Last response: We refactored compose_session_view...
-        Terminal: Windows Terminal (pane b2d0e4f0)
-    """
-    last_prompt = getattr(view, "last_prompt", None) or ""
-    last_resp = getattr(view, "last_assistant_message", None) or ""
-    jt = getattr(view, "jump_target", None)
-
-    lines: list[str] = []
-    if last_prompt:
-        # Truncate display — the underlying SessionLiveState already
-        # has 200-char cap from the hook boundary, but defensive
-        # truncate here so future relaxation doesn't blow up the tooltip.
-        clipped = last_prompt if len(last_prompt) <= 180 else last_prompt[:177] + "…"
-        lines.append(f"Prompt: {clipped}")
-    if last_resp:
-        clipped = last_resp if len(last_resp) <= 180 else last_resp[:177] + "…"
-        lines.append(f"Last response: {clipped}")
-    if jt is not None:
-        ta = (jt.terminal_app or "").strip()
-        guid = (jt.wt_session_guid or "").strip()
-        if ta:
-            if guid:
-                # Show first 8 chars of guid — full is too long for tooltip
-                lines.append(f"Terminal: {ta} (pane {guid[:8]})")
-            else:
-                lines.append(f"Terminal: {ta}")
-    return "\n".join(lines)
 
 
 def _row_status_text(
@@ -6033,34 +6041,29 @@ class ExpandedWindow(QWidget):
         status_glyph.set_idle_visible(False)
         btn._status_glyph = status_glyph
 
-        # _ElidingLabel: project names / AI titles are user-supplied
-        # text. Two reasons we need the eliding variant here:
-        #   1. minimumSizeHint=0 stops a long name from propagating
-        #      its full width up the layout chain to ExpandedWindow,
-        #      which would override setFixedWidth(_PANEL_W=400) and
-        #      produce the QWindowsWindow::setGeometry mintrack=480
-        #      warning. setSizePolicy(Expanding, …) alone won't do
-        #      it — see _ElasticRichLabel docstring.
-        #   2. Visual elision (`…`) at paint time so an overflowing
-        #      name reads cleanly instead of getting hard-clipped
-        #      mid-character at the row boundary.
-        # v4c: name uses a plain QLabel (not ElidingLabel) so short
-        # session names render at their natural width without the
-        # eliding label's overzealous minimumSizeHint=0 collapsing
-        # them.  Maximum size policy + 280 px cap matches prototype's
-        # .body .name { max-width: 280px } — cwd elides first
-        # because it's the stretch slot next to name.
-        # v4c body order (matches prototype `.row .body` DOM order):
-        #   name → status_inline → cwd → chip
-        # FlowLayout wraps these into 1 or 2 visual lines based on
-        # available width — exactly as the CSS `flex-wrap: wrap`
-        # would.  No phase-based branching, no hidden inline siblings.
-        name_label = QLabel()
+        # _ElidingLabel: project names / AI-resolved titles are
+        # user-supplied text whose length varies wildly (basename
+        # "cc" vs. "Optimize code review prompt caching strategy").
+        # The previous design hard-capped width at 280 px and used a
+        # plain QLabel, which produced mid-character clipping when
+        # the title exceeded the cap (user feedback 2026-05-23 "session
+        # 名称被截断了").  Now: no width cap, Maximum size policy +
+        # sizeHint=full-text-width means short names render at their
+        # natural width and long names take whatever the row offers,
+        # eliding gracefully with "…" when crowded by status_inline /
+        # the right-side cost cluster.  minimumSizeHint=0 still
+        # prevents the name from propagating its full width up to
+        # ExpandedWindow and breaking setFixedWidth(_PANEL_W).
+        # WA_TransparentForMouseEvents routes hover to the parent btn,
+        # so the auto-tooltip _ElidingLabel sets on elision never
+        # surfaces visually — intentional: the user opted out of
+        # row-level hover tooltips entirely (see btn.setToolTip("")
+        # below).
+        name_label = _ElidingLabel()
         name_label.setObjectName("name_label")
         name_label.setStyleSheet(_STYLE_NAME)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         name_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        name_label.setMaximumWidth(280)
         top_row.addWidget(name_label)
 
         status_inline = QLabel("")
@@ -6418,11 +6421,16 @@ class ExpandedWindow(QWidget):
         focus_supported = Capability.FOCUS in view.capabilities
         if focus_supported:
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            # Open-vibe-island parity (2026-05-14): when hook-captured
-            # data is available, surface it as a hover tooltip — last
-            # prompt, current tool, terminal app. This mirrors their
-            # session row showing summary text + tool icon.
-            btn.setToolTip(_row_tooltip(view))
+            # User feedback 2026-05-23: drop the prompt/response hover
+            # tooltip but keep a hover-reveal for the full session
+            # name when it's being visually elided (long names
+            # truncated by the row's width). HoverRow._sync_name_tooltip
+            # decides whether to surface the tooltip based on
+            # name_label.sizeHint vs name_label.width — driven by
+            # resizeEvent and called explicitly below so a text-only
+            # update (no width change) still re-evaluates.
+            btn._owns_name_tooltip = True
+            btn._sync_name_tooltip()
         else:
             btn.setCursor(Qt.CursorShape.ArrowCursor)
             # FOCUS gets stripped at compose time when no UI app
@@ -6430,9 +6438,10 @@ class ExpandedWindow(QWidget):
             # path: (1) tmux/screen daemonization severs the chain,
             # (2) Privacy & Security ▶ Automation has revoked the
             # System Events permission, (3) osascript hit a transient
-            # timeout. Hint at all three so the user can self-diagnose
-            # rather than assume tmux. The exact failure reason is
-            # logged at WARNING by ``_macos_common`` — see stderr.
+            # timeout. The diagnostic tooltip takes priority over the
+            # elided-name reveal — turn off the auto-sync so the next
+            # resizeEvent doesn't clobber it.
+            btn._owns_name_tooltip = False
             btn.setToolTip(
                 "Click-to-focus unavailable for this session.\n"
                 "Possible causes:\n"

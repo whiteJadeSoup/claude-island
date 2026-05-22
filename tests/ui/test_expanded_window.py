@@ -903,6 +903,82 @@ def test_row_meta_renders_dash_when_no_details(qtbot):
     assert btn.findChild(_QL, "meta_label").text() == "—"
 
 
+class TestNameElisionTooltip:
+    """User feedback 2026-05-23: long session names get visually
+    elided ("Optimize code review prompt caching s…") and hover
+    should reveal the full text. Short names stay tooltip-free so
+    hover doesn't echo already-visible content."""
+
+    def test_long_name_elided_shows_full_in_tooltip(self, qtbot):
+        from PySide6.QtWidgets import QLabel as _QL
+        panel = _panel_with_session(qtbot)
+        panel._render_sessions([_session(1, "/proj/foo")])
+        btn = panel._rows[1]
+        name_label = btn.findChild(_QL, "name_label")
+        long_name = "Optimize code review prompt caching strategy"
+        name_label.setText(long_name)
+        # Force elision: shrink the label below its sizeHint width.
+        name_label.resize(80, name_label.height())
+        btn._sync_name_tooltip()
+        assert btn.toolTip() == long_name
+
+    def test_short_name_fits_no_tooltip(self, qtbot):
+        from PySide6.QtWidgets import QLabel as _QL
+        panel = _panel_with_session(qtbot)
+        panel._render_sessions([_session(1, "/proj/foo")])
+        btn = panel._rows[1]
+        name_label = btn.findChild(_QL, "name_label")
+        name_label.setText("cc")
+        # Give the label plenty of room — sizeHint < width → no elide.
+        name_label.resize(500, name_label.height())
+        btn._sync_name_tooltip()
+        assert btn.toolTip() == ""
+
+    def test_focus_unavailable_keeps_diagnostic_tooltip(self, qtbot):
+        """When the row's session lacks FOCUS capability, _update_row
+        installs a multi-line diagnostic tooltip. The elided-name
+        sync must not clobber it — that's what ``_owns_name_tooltip``
+        guards."""
+        from PySide6.QtWidgets import QLabel as _QL
+        panel = _panel_with_session(qtbot)
+        panel._render_sessions([_session(1, "/proj/foo")])
+        btn = panel._rows[1]
+        # Simulate _update_row's no-FOCUS branch.
+        diagnostic = "Click-to-focus unavailable for this session.\n..."
+        btn._owns_name_tooltip = False
+        btn.setToolTip(diagnostic)
+        # Even with a deliberately elided name, sync stays a no-op.
+        name_label = btn.findChild(_QL, "name_label")
+        name_label.setText("a very long elided name that would normally trigger reveal")
+        name_label.resize(40, name_label.height())
+        btn._sync_name_tooltip()
+        assert btn.toolTip() == diagnostic
+
+    def test_resize_event_resyncs_tooltip(self, qtbot):
+        """Re-evaluating on resizeEvent is what keeps the tooltip
+        accurate when the panel itself changes width (or a sibling
+        column reclaims body space)."""
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QResizeEvent
+        from PySide6.QtCore import QSize
+        from PySide6.QtWidgets import QLabel as _QL
+        panel = _panel_with_session(qtbot)
+        panel._render_sessions([_session(1, "/proj/foo")])
+        btn = panel._rows[1]
+        name_label = btn.findChild(_QL, "name_label")
+        long_name = "Optimize code review prompt caching strategy"
+        name_label.setText(long_name)
+        # Step 1: narrow → elided → tooltip set
+        name_label.resize(80, name_label.height())
+        ev = QResizeEvent(btn.size(), btn.size())
+        btn.resizeEvent(ev)
+        assert btn.toolTip() == long_name
+        # Step 2: widen → not elided → tooltip cleared
+        name_label.resize(800, name_label.height())
+        btn.resizeEvent(ev)
+        assert btn.toolTip() == ""
+
+
 def test_row_has_custom_context_menu_policy(qtbot):
     """Right-click is wired via Qt.CustomContextMenu so we own the
     event. Without this, Qt would either show its built-in
@@ -2709,65 +2785,6 @@ class TestRowStatusText:
         )
         text = _row_status_text(v)
         assert text.startswith("active ")
-
-
-class TestRowTooltip:
-    """Per-row hover tooltip carries hook-captured context:
-    last prompt + last response + terminal app. Open-vibe-island
-    parity (2026-05-14)."""
-
-    def test_empty_view_no_tooltip(self):
-        """A SessionView without hook data → empty tooltip (caller
-        treats "" as 'no tooltip set')."""
-        from claude_island.ui.expanded_window import _row_tooltip
-        from claude_island.core.snapshot import _degraded_view
-        v = _degraded_view(_session(1, "/a", ago_minutes=0))
-        assert _row_tooltip(v) == ""
-
-    def test_view_with_last_prompt_shows_prompt(self):
-        from claude_island.ui.expanded_window import _row_tooltip
-        from claude_island.core.snapshot import _degraded_view
-        from dataclasses import replace as _replace
-        v = _replace(
-            _degraded_view(_session(1, "/a", ago_minutes=0)),
-            last_prompt="explain the new hook pipeline",
-        )
-        tt = _row_tooltip(v)
-        assert "Prompt: explain the new hook pipeline" in tt
-
-    def test_view_with_jump_target_shows_terminal(self):
-        from claude_island.ui.expanded_window import _row_tooltip
-        from claude_island.core.snapshot import _degraded_view
-        from claude_island.core.hook_events import JumpTarget
-        from dataclasses import replace as _replace
-        v = _replace(
-            _degraded_view(_session(1, "/a", ago_minutes=0)),
-            jump_target=JumpTarget(
-                terminal_app="WindowsTerminal",
-                wt_session_guid="b2d0e4f0-1234-5678-90ab-cdef12345678",
-            ),
-        )
-        tt = _row_tooltip(v)
-        assert "Terminal: WindowsTerminal" in tt
-        assert "b2d0e4f0" in tt
-
-    def test_long_prompt_is_truncated(self):
-        """Defensive: even if SessionLiveState's 200-char cap relaxes
-        later, the tooltip truncates to 180 chars + ellipsis."""
-        from claude_island.ui.expanded_window import _row_tooltip
-        from claude_island.core.snapshot import _degraded_view
-        from dataclasses import replace as _replace
-        v = _replace(
-            _degraded_view(_session(1, "/a", ago_minutes=0)),
-            last_prompt="x" * 500,
-        )
-        tt = _row_tooltip(v)
-        # Prompt line is "Prompt: xxx...xxx…" — 177 'x' chars + ellipsis
-        prompt_line = [l for l in tt.splitlines() if l.startswith("Prompt:")][0]
-        # Content (without "Prompt: " prefix) is 178 chars (177 + ellipsis)
-        content = prompt_line[len("Prompt: "):]
-        assert len(content) == 178
-        assert content.endswith("…")
 
 
 # ============================================================================
