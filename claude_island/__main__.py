@@ -103,6 +103,13 @@ from PySide6.QtWidgets import QApplication
 
 
 from claude_island.core.safe_stderr import safe_stderr_write as _safe_stderr_write
+# Crash logger MUST be installed before anything else that could fault:
+# sys.excepthook + threading.excepthook + faulthandler, all routing to
+# ~/.claude-island/crash.log.  Without this, unhandled exceptions on
+# worker threads disappear silently and macOS .app bundles swallow
+# stderr.  See claude_island/core/crash_log.py for the rationale.
+from claude_island.core import crash_log as _crash_log
+_crash_log.install()
 
 
 def _qt_message_filter(msg_type: QtMsgType, _ctx, message: str) -> None:
