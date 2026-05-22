@@ -5204,8 +5204,14 @@ class ExpandedWindow(QWidget):
         )
         lay.addWidget(self._quota_footer_chip)
 
-        # "+" placeholder — future "add provider" affordance.  Sized to
-        # match chip height (dashed border = "potential / inactive").
+        # "+" — opens the AddProviderDialog so the user can paste
+        # credentials for a non-Anthropic provider (Zhipu, DeepSeek,
+        # MiniMax) without editing JSON.  The dialog lives at
+        # ``_AddProviderDialog`` and the click handler at
+        # ``_on_add_provider_clicked`` (both added by commit 901bd26).
+        # v4c initially wired this footer + to a "(coming soon)"
+        # tooltip — restoring the real wiring here so the feature
+        # the user is hovering over actually works (2026-05-22).
         self._quota_footer_add = QPushButton("+")
         self._quota_footer_add.setCursor(Qt.CursorShape.PointingHandCursor)
         self._quota_footer_add.setFixedSize(20, 20)
@@ -5223,7 +5229,8 @@ class ExpandedWindow(QWidget):
             f"  border-color: {_LabColor.rule_active};"
             f"}}"
         )
-        self._quota_footer_add.setToolTip("Add another provider (coming soon)")
+        self._quota_footer_add.setToolTip("Add another quota provider")
+        self._quota_footer_add.clicked.connect(self._on_add_provider_clicked)
         lay.addWidget(self._quota_footer_add)
 
         # 5h figure ("5h 62% · 2h 14m") — mono, dim label + bright bold
