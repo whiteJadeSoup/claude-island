@@ -407,15 +407,19 @@ def test_eliding_label_sizehint_stays_at_full_text_width(qtbot):
     from PySide6.QtWidgets import QLabel as _QL
     assert _QL.text(lbl) != text, "elision should have kicked in"
 
-    # … but sizeHint must still ask for full-text width, otherwise
-    # the layout's next allocation pass will use the shrunken value
-    # and the elision feeds back on itself.
-    assert lbl.sizeHint().width() == full_w, (
+    # … but sizeHint must still ask for full-text width (plus the
+    # small +N px elide-guard added 2026-05-24 to defeat
+    # QFontMetrics.elidedText conservativeness on Microsoft YaHei UI),
+    # otherwise the layout's next allocation pass will use the
+    # shrunken value and the elision feeds back on itself.
+    guard = _ElidingLabel._SIZE_HINT_ELIDE_GUARD_PX
+    assert lbl.sizeHint().width() == full_w + guard, (
         f"sizeHint().width() = {lbl.sizeHint().width()}, "
-        f"expected {full_w} (full-text width). After eliding, "
-        "QLabel.sizeHint reads the now-shrunken internal text — "
-        "the override must report the FULL text width to keep the "
-        "layout from collapsing the label further on each pass."
+        f"expected {full_w + guard} (full-text width + {guard} px guard). "
+        "After eliding, QLabel.sizeHint reads the now-shrunken internal "
+        "text — the override must report the FULL text width (plus "
+        "guard) to keep the layout from collapsing the label further "
+        "on each pass."
     )
 
 

@@ -1152,6 +1152,18 @@ class _ElidingLabel(QLabel):
         h = super().minimumSizeHint().height()
         return QSize(0, h)
 
+    # Width guard added to sizeHint to defeat QFontMetrics.elidedText's
+    # conservativeness: even when the available width exactly equals
+    # ``horizontalAdvance(full_text)``, elidedText still returns the
+    # ELIDED form on some platform/font combos (probe 2026-05-24 with
+    # Microsoft YaHei UI at pixelSize=11 needed +5 px to suppress).
+    # Without this, every row whose status_inline allocation lands on
+    # the exact sizeHint boundary would render as "thinking · turn 16…"
+    # instead of the full "thinking · turn 1670" — visible bug image#43.
+    # 6 px is small enough not to inflate the panel meaningfully but
+    # large enough to clear the platform fudge factor we've observed.
+    _SIZE_HINT_ELIDE_GUARD_PX = 6
+
     def sizeHint(self) -> "QSize":  # type: ignore[override]
         # Always report sizeHint based on the FULL text, NOT the
         # currently-displayed (possibly elided) form. Without this
@@ -1172,6 +1184,7 @@ class _ElidingLabel(QLabel):
             return super().sizeHint()
         metrics = QFontMetrics(self.font())
         w = metrics.horizontalAdvance(self._full_text)
+        w += self._SIZE_HINT_ELIDE_GUARD_PX
         h = super().sizeHint().height()
         return QSize(w, h)
 
