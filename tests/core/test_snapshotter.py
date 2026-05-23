@@ -500,15 +500,31 @@ class TestHookLivePhaseIdleOverride:
         view = self._compose(live=live, pid_status="busy")
         assert view.phase == SessionPhase.IDLE
 
-    def test_hook_compacting_with_pid_idle_preserves_compacting(self):
-        """B-001/C-003 regression: COMPACTING is intentionally EXCLUDED
-        from the idle-override. Compaction's closing event is
-        SessionStart(source='compact'), which is reliably delivered, so
-        the staleness motivation that drove the override doesn't apply.
-        Whether claude writes status='idle' during /compact is
-        undocumented; the safe default is to trust the live phase."""
+    def test_hook_compacting_with_pid_idle_renders_as_idle(self):
+        """User report 2026-05-23: ``/compact`` with "Not enough
+        messages to compact" fires PreCompact (phase → COMPACTING)
+        but errors before spawning a new session, so the
+        SessionStart(source='compact') event that normally closes
+        the compact cycle never arrives. The phase stays stuck in
+        COMPACTING until the next PromptSubmitted, even though
+        Claude is back at the prompt (probe-confirmed
+        ``pid.json.status='idle'``).
+
+        Fix: COMPACTING joins the idle-override set so the
+        authoritative pid.json signal can recover from this
+        dropped-closing-event case, same as it already does for
+        THINKING / TOOL_USE / WAITING_APPROVAL."""
         live = self._live(SessionPhase.COMPACTING)
         view = self._compose(live=live, pid_status="idle")
+        assert view.phase == SessionPhase.IDLE
+
+    def test_hook_compacting_with_pid_busy_preserves_compacting(self):
+        """The override only fires when pid.json reports idle —
+        during a real compact in progress (status='busy'), the
+        live COMPACTING phase is preserved so the UI still shows
+        "compacting · Ns" until the compact finishes."""
+        live = self._live(SessionPhase.COMPACTING)
+        view = self._compose(live=live, pid_status="busy")
         assert view.phase == SessionPhase.COMPACTING
 
     def test_hook_tool_use_with_no_pid_status_preserves_tool_use(self):

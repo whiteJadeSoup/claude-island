@@ -623,21 +623,25 @@ def compose_session_view(
         # (PostToolUse / Stop dropped after a POST timeout, app restart
         # between Pre and Post, an API error mid-turn that prevents
         # Stop from firing), which would otherwise pin the phase at
-        # THINKING / TOOL_USE / WAITING_APPROVAL forever. pid.json is
-        # written by claude on every status transition, so an "idle"
-        # reading is authoritative — fall back to a clean IDLE view.
+        # THINKING / TOOL_USE / WAITING_APPROVAL / COMPACTING forever.
+        # pid.json is written by claude on every status transition, so
+        # an "idle" reading is authoritative — fall back to a clean
+        # IDLE view.
         #
-        # COMPACTING is intentionally EXCLUDED from this override
-        # (B-001/C-003): compaction's closing event is SessionStart
-        # (source='compact'), which is reliably delivered, so the
-        # staleness motivation doesn't apply. Whether claude writes
-        # status='idle' or 'busy' during /compact is undocumented; the
-        # safe default is to trust the live phase for COMPACTING and
-        # let the SessionStart event do the IDLE transition.
+        # COMPACTING was previously excluded under the assumption that
+        # SessionStart(source='compact') would always close the
+        # compact cycle. User report 2026-05-23 broke that assumption:
+        # ``/compact`` with "Not enough messages to compact" emits
+        # PreCompact but errors before spawning a new session, so no
+        # SessionStart ever fires. Direct probe of pid.json in that
+        # state confirmed Claude writes ``status='idle'`` once back
+        # at the prompt — same signal as the other stuck-phase cases,
+        # so the same override applies.
         _idle_override_phases = (
             SessionPhase.THINKING,
             SessionPhase.TOOL_USE,
             SessionPhase.WAITING_APPROVAL,
+            SessionPhase.COMPACTING,
         )
         if status_word == "idle" and live.phase in _idle_override_phases:
             log.info(
