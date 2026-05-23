@@ -954,6 +954,54 @@ class TestNameElisionTooltip:
         btn._sync_name_tooltip()
         assert btn.toolTip() == diagnostic
 
+    def test_active_row_with_rate_label_preserves_min_name_width(self, qtbot):
+        """User report image#37 2026-05-23: cc-learning (active session
+        with tokens_per_min > 0) had name squeezed to ~58 px showing
+        "cc-…" — the visible rate_label ("1.2k tk/min") ate outer
+        width, and name_label's Maximum policy + _ElidingLabel.
+        minimumSizeHint=0 let the layout shrink the name to nothing
+        before squeezing status_inline.  The 100 px minimumWidth
+        guarantees ~6 characters + "…" of name stay visible no matter
+        what the right-side cluster claims."""
+        from PySide6.QtWidgets import QLabel as _QL
+        from claude_island.core.snapshot import _degraded_view, SessionGroup
+        from claude_island.core.session_phase import SessionPhase
+        from claude_island.core.capabilities import Capability, FocusGranularity
+        from dataclasses import replace as _replace
+        panel = _panel_with_session(qtbot)
+        sess = _session(1, "/proj/foo")
+        v = _replace(
+            _degraded_view(sess),
+            phase=SessionPhase.THINKING,
+            name="cc-learning",
+            adapter_id="test",
+            focus_granularity=FocusGranularity.APP,
+            capabilities=frozenset({Capability.FOCUS}),
+            tokens_per_min=1200,
+        )
+        panel._render_session_groups((SessionGroup(
+            group_id="t:1", title_hint=None, adapter_id="test", views=(v,),
+        ),))
+        btn = panel._rows[1]
+        name_label = btn.findChild(_QL, "name_label")
+        # Render path's title resolution may produce something other
+        # than the view.name (it prefers details.name / ai_title).
+        # Drive the label directly to test the LAYOUT contract: a
+        # squeezed-by-rate-label row must still allocate ≥100 px to
+        # name, and HoverRow._sync_name_tooltip must install the row
+        # tooltip when the visible form gets elided.
+        name_label.setText("cc-learning")
+        btn.resize(btn.size())  # nudge layout to re-evaluate
+        btn._sync_name_tooltip()
+        # Layout floor must hold even under squeeze pressure.
+        assert name_label.width() >= 100, (
+            f"name_label.width()={name_label.width()}, expected ≥100"
+        )
+        # Tooltip carries the full name iff the visible form was elided.
+        assert name_label.text() == "cc-learning"
+        if _QL.text(name_label) != "cc-learning":
+            assert btn.toolTip() == "cc-learning"
+
     def test_resize_event_resyncs_tooltip(self, qtbot):
         """Re-evaluating on resizeEvent is what keeps the tooltip
         accurate when the panel itself changes width (or a sibling

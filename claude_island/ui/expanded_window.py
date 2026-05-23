@@ -5993,27 +5993,42 @@ class ExpandedWindow(QWidget):
         # "cc" vs. "Optimize code review prompt caching strategy").
         # The previous design hard-capped width at 280 px and used a
         # plain QLabel, which produced mid-character clipping when
-        # the title exceeded the cap (user feedback 2026-05-23 "session
-        # 名称被截断了").  Now: no width cap, Maximum size policy +
-        # sizeHint=full-text-width means short names render at their
-        # natural width and long names take whatever the row offers,
-        # eliding gracefully with "…" when crowded by status_inline /
-        # the right-side cost cluster.  minimumSizeHint=0 still
-        # prevents the name from propagating its full width up to
-        # ExpandedWindow and breaking setFixedWidth(_PANEL_W).
-        # WA_TransparentForMouseEvents routes hover to the parent btn,
-        # so the auto-tooltip _ElidingLabel sets on elision never
-        # surfaces visually — intentional: the user opted out of
-        # row-level hover tooltips entirely (see btn.setToolTip("")
-        # below).
+        # the title exceeded the cap (user feedback 2026-05-23
+        # "session 名称被截断了").  Now: no width cap, Maximum size
+        # policy + sizeHint=full-text-width means short names render
+        # at their natural width and long names take whatever the
+        # row offers, eliding gracefully with "…" when crowded.
+        # WA_TransparentForMouseEvents routes hover to the parent
+        # btn so HoverRow._sync_name_tooltip can install a row-level
+        # tooltip revealing the full name when elided.
+        #
+        # MinimumWidth = 100 px (~6 chars + "…") so an active row
+        # whose visible rate_label eats outer width can't squeeze
+        # name_label down to "cc-…".  Without this floor, Maximum
+        # policy + _ElidingLabel.minimumSizeHint=0 let the layout
+        # collapse the name to ~58 px (user report image#37 cc-learning
+        # row: rate_label "1.2k tk/min" + status_inline "thinking ·
+        # turn 1670" together squeezed body_widget from 510 → 330 px,
+        # and the name lost out to status_inline's Preferred policy).
+        # 100 is well under _PANEL_W (620) so it doesn't propagate
+        # past the panel boundary.
         name_label = _ElidingLabel()
         name_label.setObjectName("name_label")
         name_label.setStyleSheet(_STYLE_NAME)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         name_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        name_label.setMinimumWidth(100)
         top_row.addWidget(name_label)
 
-        status_inline = QLabel("")
+        # status_inline switches from plain QLabel to _ElidingLabel
+        # so when the row gets squeezed (active session with visible
+        # rate_label), status_inline shrinks via "…" instead of
+        # hard-clipping the rightmost characters.  Without this, the
+        # turn counter half of "thinking · turn 1670" was being
+        # silently chopped off mid-digit.  Preferred policy stays —
+        # status_inline is what the layout shrinks once name_label's
+        # 100 px floor is hit.
+        status_inline = _ElidingLabel("")
         status_inline.setObjectName("status_inline")
         status_inline.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         status_inline.setStyleSheet(
