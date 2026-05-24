@@ -130,12 +130,32 @@ def patched(monkeypatch):
         walk,
     )
 
+    # The cache GC inside _filter_orphans_and_reconcile asks
+    # psutil.pid_exists(pid) for each cached pid; test pids (1234,
+    # 5678, …) typically aren't real OS pids, so without this mock
+    # every cached entry would be evicted on the next call, hiding
+    # cache-hit behaviour. Default: "all test pids are alive".
+    # Tests that need to simulate pid death override
+    # ``patched.set_pid_exists({1234: False, ...})``.
+    import psutil as _psutil
+    pid_exists = mock.Mock(return_value=True)
+    monkeypatch.setattr(_psutil, "pid_exists", pid_exists)
+
     class _Bag:
         def __init__(self):
             self.get_console_info = get_console_info
             self.set_console_title = set_console_title
             self.list_ci_tab_names = list_ci_tab_names
             self.walk = walk
+            self.pid_exists = pid_exists
+
+        def set_pid_exists(self, pid_to_alive: dict[int, bool]):
+            """Stage psutil.pid_exists(pid) → True/False; unknown pid
+            defaults to True (caller only lists the pids they care
+            about; others stay alive)."""
+            def _impl(pid):
+                return pid_to_alive.get(pid, True)
+            self.pid_exists.side_effect = _impl
 
         def set_console(
             self,
@@ -255,40 +275,106 @@ class TestOrphanReprobing:
 # ── GC ────────────────────────────────────────────────────────────────
 
 class TestCacheGC:
+    """Cache GC is keyed on OS pid existence (``psutil.pid_exists``)
+    rather than per-call view inclusion. The view-scoped GC that
+    existed prior to 2026-05-24 broke under multi-bucket routing —
+    when the dispatcher splits the snap into a jump_target-routed
+    bucket and a legacy can_handle-routed bucket, ``group()`` runs
+    twice with disjoint pid sets, and the view-scoped GC would
+    evict each bucket's pids on the OTHER bucket's call. Cache
+    thrashed; every snap re-AttachConsole'd every pid; transient
+    AttachConsole failures dropped rows from the snap (the
+    ``[FLICKER-PROBE 2026-05-24]`` regression captured in
+    flicker.log around 22:47:20)."""
 
-    def test_pid_leaving_views_is_evicted(self, adapter, patched):
+    def test_dead_pid_evicted(self, adapter, patched):
+        """pid that no longer exists on the OS gets dropped from
+        cache on the next group() call. Verified via
+        ``psutil.pid_exists`` (mocked here)."""
         patched.set_console({1234: 0xAA, 5678: 0xBB})
         patched.set_walk({0xAA: 0x11, 0xBB: 0x11})
 
         adapter.group([_view(1234), _view(5678)])
         assert set(adapter._conpty_cache.keys()) == {1234, 5678}
 
-        # 5678 disappears (process exited)
+        # 5678 dies at the OS level. Next group() that doesn't see
+        # 5678 in views evicts the dead pid from cache.
+        patched.set_pid_exists({5678: False})
         adapter.group([_view(1234)])
         assert set(adapter._conpty_cache.keys()) == {1234}
 
-    def test_empty_views_clears_cache(self, adapter, patched):
+    def test_live_pid_survives_disjoint_call(self, adapter, patched):
+        """Regression test for the [FLICKER-PROBE 2026-05-24] cache
+        thrash: when the same adapter's group() is invoked back-to-back
+        with non-overlapping view sets (the multi-bucket routing case),
+        the cache MUST survive — pids not in this call's views are
+        still alive at the OS level. Prior to the fix this test would
+        fail because the view-scoped GC evicted the absent pids."""
+        patched.set_console({1234: 0xAA, 5678: 0xBB})
+        patched.set_walk({0xAA: 0x11, 0xBB: 0x11})
+
+        adapter.group([_view(1234)])
+        assert 1234 in adapter._conpty_cache
+        adapter.group([_view(5678)])  # different bucket — 1234 absent
+        # 1234 must STILL be cached; it's alive, just not in this call.
+        assert 1234 in adapter._conpty_cache
+        assert 5678 in adapter._conpty_cache
+
+    def test_multi_bucket_no_cache_thrash(self, adapter, patched):
+        """Direct repro of the flicker pattern: dispatcher routes one
+        view via jump_target (bucket A) and others via legacy
+        can_handle (bucket B). group() runs twice per snap. Both
+        buckets must end with their pids cached and zero re-probes
+        on subsequent ticks."""
+        patched.set_console({1234: 0xAA, 5678: 0xBB, 9000: 0xCC})
+        patched.set_walk({0xAA: 0x11, 0xBB: 0x11, 0xCC: 0x11})
+
+        # Snap 1: bucket A (single view) then bucket B (two views).
+        adapter.group([_view(1234)])               # bucket A
+        adapter.group([_view(5678), _view(9000)])  # bucket B
+
+        first_probe_count = patched.get_console_info.call_count
+        assert first_probe_count == 3  # one probe per pid
+
+        # Snap 2: same buckets, same pids. Every pid should hit cache.
+        adapter.group([_view(1234)])
+        adapter.group([_view(5678), _view(9000)])
+
+        # Zero re-probes — this is the contract the GC change pins.
+        assert patched.get_console_info.call_count == first_probe_count
+
+    def test_empty_views_does_not_clear_live_pids(
+        self, adapter, patched,
+    ):
+        """An empty-views call (no views routed to this adapter this
+        snap — e.g. all sessions ended up in another adapter's
+        bucket) must NOT wipe a still-alive pid from cache. Prior to
+        the fix, ``alive_pids = {v.pid for v in views} = set()``
+        evicted everything unconditionally."""
         patched.set_console({1234: 0xAA})
         patched.set_walk({0xAA: 0x11})
 
         adapter.group([_view(1234)])
-        assert adapter._conpty_cache
+        assert 1234 in adapter._conpty_cache
 
         adapter.group([])
-        assert adapter._conpty_cache == {}
+        # pid 1234 is still alive (default pid_exists=True) — survives.
+        assert 1234 in adapter._conpty_cache
 
-    def test_returning_pid_repopulates_cache(self, adapter, patched):
-        """A pid GC'd then re-appearing pays one AttachConsole again
-        (this is correct: it might literally be a new process with
-        the same numeric pid after the OS reused the slot)."""
+    def test_returning_pid_uses_cache_when_alive(self, adapter, patched):
+        """A pid absent from some calls but still alive at the OS
+        level pays AttachConsole exactly ONCE — the first sighting.
+        Compare to the pre-fix behaviour where every empty/disjoint
+        call evicted the cache and the next sighting re-probed."""
         patched.set_console({1234: 0xAA})
         patched.set_walk({0xAA: 0x11})
 
         adapter.group([_view(1234)])
-        adapter.group([])  # pid leaves
-        adapter.group([_view(1234)])  # pid back
+        adapter.group([])           # pid not in this bucket
+        adapter.group([_view(1234)])  # pid back in views
 
-        assert patched.get_console_info.call_count == 2
+        # One probe total. No re-probe on the third call.
+        assert patched.get_console_info.call_count == 1
 
 
 # ── Singleton-grouping invariant ──────────────────────────────────────
@@ -539,17 +625,22 @@ class TestSentinelReconcile:
 
         patched.set_console_title.assert_called_once_with(1234, self.EXPECTED)
 
-    def test_pid_eviction_clears_wt_hwnd_cache(self, adapter, patched):
-        """Q-6: a pid leaving views must drop from _wt_hwnd_cache too,
-        so a recycled pid doesn't get assigned a stale window."""
+    def test_pid_death_clears_wt_hwnd_cache(self, adapter, patched):
+        """Q-6 (updated 2026-05-24): a pid that DIES at the OS level
+        must drop from ``_wt_hwnd_cache`` so a recycled pid doesn't
+        get assigned a stale window. (The previous proxy of "pid
+        leaves views" was incorrect under multi-bucket routing — see
+        TestCacheGC docstring.)"""
         patched.set_console({1234: 0xAA})
         patched.set_walk({0xAA: 0x11})
 
         adapter.group([_view(1234)])
         assert adapter._wt_hwnd_cache == {1234: 0x11}
 
-        adapter.group([])  # pid leaves
-        assert adapter._wt_hwnd_cache == {}
+        # pid dies at OS level
+        patched.set_pid_exists({1234: False})
+        adapter.group([_view(5678)])  # any other view to trigger group()
+        assert 1234 not in adapter._wt_hwnd_cache
 
     def test_wt_window_set_change_invalidates_wt_hwnd_cache(
         self, adapter, patched, monkeypatch,
@@ -576,26 +667,29 @@ class TestSentinelReconcile:
 
         assert patched.walk.call_count == 2  # cache was flushed by sig change
 
-    def test_pid_eviction_clears_title_set_attempted(self, adapter, patched):
-        """A pid that leaves views (process exited, or scanner moved
-        it to another adapter) must drop from BOTH _conpty_cache and
-        _title_set_attempted — otherwise a recycled pid would skip
-        its title-set forever, leaving the new session's tab
-        labeled with the previous occupant's sentinel."""
+    def test_pid_death_clears_title_set_attempted(self, adapter, patched):
+        """A pid that DIES at the OS level (updated 2026-05-24 — was
+        previously triggered by "pid leaves views", which broke under
+        multi-bucket routing) must drop from BOTH ``_conpty_cache``
+        and ``_title_set_attempted`` so a recycled pid gets a fresh
+        sentinel attempt instead of skipping it forever."""
         patched.set_console({1234: 0xAA}, title="Claude Code")
 
         adapter.group([_view(1234, session_uuid=self.UUID)])
         assert 1234 in adapter._conpty_cache
         assert 1234 in adapter._title_set_attempted
 
-        # pid leaves views entirely
-        adapter.group([])
+        # pid dies at OS level → GC on next group() call drops it
+        patched.set_pid_exists({1234: False})
+        adapter.group([_view(5678)])  # any view to trigger group()
         assert 1234 not in adapter._conpty_cache
         assert 1234 not in adapter._title_set_attempted
 
-        # pid returns (recycled by OS) → fresh attempt
+        # pid is recycled (OS reuses pid 1234 for a new claude.exe).
+        # set_pid_exists now reports 1234 alive again → fresh probe.
+        patched.set_pid_exists({1234: True, 5678: True})
         adapter.group([_view(1234, session_uuid=self.UUID)])
-        # First call (tick 1) + reset by GC + tick 3 = 2 set calls total.
+        # tick 1 set + tick 3 fresh set = 2 set calls total.
         assert patched.set_console_title.call_count == 2
 
     def test_already_sentinel_caches_without_set(self, adapter, patched):
