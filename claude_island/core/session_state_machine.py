@@ -211,6 +211,7 @@ def _state_eq(a: SessionLiveState, b: SessionLiveState) -> bool:
         and a.cwd == b.cwd
         and a.started_at == b.started_at
         and a.current_tool == b.current_tool
+        and a.current_tool_input == b.current_tool_input
         and a.last_prompt == b.last_prompt
         and a.last_assistant_message == b.last_assistant_message
         and a.pending_permission_tool == b.pending_permission_tool
@@ -243,6 +244,7 @@ def _transition(
                 phase=SessionPhase.IDLE,
                 last_hook_at=event.at,
                 current_tool=None,
+                current_tool_input=None,
                 tool_started_at=None,
                 compact_started_at=None,
                 pending_permission_tool=None,
@@ -281,6 +283,7 @@ def _transition(
             # Clear stale overlays — a new prompt ends the previous
             # tool/permission cycle even if their close events were lost.
             current_tool=None,
+            current_tool_input=None,
             tool_started_at=None,
             pending_permission_tool=None,
         )
@@ -292,6 +295,11 @@ def _transition(
             phase=SessionPhase.TOOL_USE,
             last_hook_at=event.at,
             current_tool=event.tool_name,
+            # Plan F: surface the tool's input preview (Bash command,
+            # file path, etc.) for the row-level ticker line. May be
+            # None when the extractor can't pull a single renderable
+            # string out of tool_input.
+            current_tool_input=event.tool_input_preview,
             # v4c Phase 3a: stamp the tool-start moment so the snapshot
             # can compute elapsed for "Bash · 1.2s" inline display.
             tool_started_at=event.at,
@@ -307,6 +315,7 @@ def _transition(
             phase=SessionPhase.THINKING,
             last_hook_at=event.at,
             current_tool=None,
+            current_tool_input=None,
             # Tool ended → clear the start timestamp (the iff invariant
             # is current_tool ↔ tool_started_at).
             tool_started_at=None,
@@ -324,6 +333,7 @@ def _transition(
             last_hook_at=event.at,
             last_assistant_message=event.last_assistant_message,
             current_tool=None,
+            current_tool_input=None,
             tool_started_at=None,
             compact_started_at=None,
             pending_permission_tool=None,
@@ -355,6 +365,7 @@ def _transition(
             # mid-call to ask. Clear current_tool to satisfy the iff
             # invariant (phase=WAITING_APPROVAL ⇒ current_tool=None).
             current_tool=None,
+            current_tool_input=None,
             tool_started_at=None,
         )
 
@@ -365,6 +376,7 @@ def _transition(
             phase=SessionPhase.COMPACTING,
             last_hook_at=event.at,
             current_tool=None,
+            current_tool_input=None,
             tool_started_at=None,
             # v4c Phase 3c: stamp compact start so the snapshot can
             # compute elapsed for "compacting · 8s" inline display.

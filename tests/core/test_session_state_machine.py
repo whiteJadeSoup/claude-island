@@ -139,6 +139,111 @@ def test_t1_5_multi_tool_turn_ends_idle():
 
 
 # ---------------------------------------------------------------------------
+# Plan F — current_tool_input flows through ToolStarted and gets cleared
+# on every phase exit. The UI ticker row depends on this field staying
+# in sync with current_tool / phase=TOOL_USE.
+# ---------------------------------------------------------------------------
+
+
+def test_plan_f_tool_started_sets_current_tool_input():
+    sm = SessionStateMachine()
+    sm.apply(_started_at())
+    sm.apply(PromptSubmitted(_UUID, "do it", _NOW + timedelta(seconds=1)))
+    sm.apply(ToolStarted(
+        session_uuid=_UUID,
+        tool_name="Bash",
+        tool_input_preview="pytest tests/test_login.py -v",
+        tool_use_id="tu_1",
+        at=_NOW + timedelta(seconds=2),
+    ))
+    state = sm.read(_UUID)
+    assert state.phase == SessionPhase.TOOL_USE
+    assert state.current_tool == "Bash"
+    assert state.current_tool_input == "pytest tests/test_login.py -v"
+
+
+def test_plan_f_tool_finished_clears_tool_input():
+    """The TOOL_USE → THINKING transition must clear both current_tool
+    and current_tool_input — otherwise the invariant
+    ``current_tool_input is not None ⇒ phase=TOOL_USE`` fires an
+    AssertionError and the state gets tombstoned."""
+    sm = SessionStateMachine()
+    sm.apply(_started_at())
+    sm.apply(PromptSubmitted(_UUID, "do it", _NOW + timedelta(seconds=1)))
+    sm.apply(ToolStarted(_UUID, "Bash", "ls -la", None, _NOW + timedelta(seconds=2)))
+    sm.apply(ToolFinished(_UUID, "Bash", None, False, _NOW + timedelta(seconds=3)))
+    state = sm.read(_UUID)
+    assert state.phase == SessionPhase.THINKING
+    assert state.current_tool is None
+    assert state.current_tool_input is None
+
+
+def test_plan_f_tool_input_none_when_extractor_returned_none():
+    """The hook's ``_extract_tool_input_preview`` returns None for
+    opaque tool_input shapes (novel MCP tools, JSON shapes the
+    extractor doesn't know). State machine must accept that — TOOL_USE
+    with current_tool set but current_tool_input=None is valid."""
+    sm = SessionStateMachine()
+    sm.apply(_started_at())
+    sm.apply(PromptSubmitted(_UUID, "do it", _NOW + timedelta(seconds=1)))
+    sm.apply(ToolStarted(
+        session_uuid=_UUID,
+        tool_name="ExoticMcpTool",
+        tool_input_preview=None,  # extractor couldn't render it
+        tool_use_id="tu_1",
+        at=_NOW + timedelta(seconds=2),
+    ))
+    state = sm.read(_UUID)
+    assert state.phase == SessionPhase.TOOL_USE
+    assert state.current_tool == "ExoticMcpTool"
+    assert state.current_tool_input is None
+
+
+def test_plan_f_invariant_violated_when_tool_input_set_outside_tool_use():
+    """The SessionLiveState invariant catches a bug where someone
+    constructs a state with current_tool_input set but phase!=TOOL_USE
+    — the assertion is the safety net for that."""
+    with pytest.raises(AssertionError, match="current_tool_input"):
+        SessionLiveState(
+            session_uuid=_UUID,
+            phase=SessionPhase.THINKING,
+            cwd=_CWD,
+            started_at=_NOW,
+            last_hook_at=_NOW,
+            current_tool=None,
+            current_tool_input="ls -la",  # illegal: phase != TOOL_USE
+        )
+
+
+def test_plan_f_prompt_submitted_clears_stale_tool_input():
+    """PromptSubmitted must clear current_tool_input alongside
+    current_tool — a new prompt ends the previous tool cycle
+    regardless of whether ToolFinished fired."""
+    sm = SessionStateMachine()
+    sm.apply(_started_at())
+    sm.apply(PromptSubmitted(_UUID, "first", _NOW + timedelta(seconds=1)))
+    sm.apply(ToolStarted(_UUID, "Bash", "x", None, _NOW + timedelta(seconds=2)))
+    # Skip ToolFinished — simulate dropped close event.
+    sm.apply(PromptSubmitted(_UUID, "second", _NOW + timedelta(seconds=4)))
+    state = sm.read(_UUID)
+    assert state.phase == SessionPhase.THINKING
+    assert state.current_tool is None
+    assert state.current_tool_input is None
+
+
+def test_plan_f_compact_started_clears_tool_input():
+    sm = SessionStateMachine()
+    sm.apply(_started_at())
+    sm.apply(PromptSubmitted(_UUID, "do it", _NOW + timedelta(seconds=1)))
+    sm.apply(ToolStarted(_UUID, "Bash", "x", None, _NOW + timedelta(seconds=2)))
+    sm.apply(CompactStarted(_UUID, _NOW + timedelta(seconds=3)))
+    state = sm.read(_UUID)
+    assert state.phase == SessionPhase.COMPACTING
+    assert state.current_tool is None
+    assert state.current_tool_input is None
+
+
+# ---------------------------------------------------------------------------
 # T1.6 — THINKING + PermissionRequested → WAITING_APPROVAL, tool set.
 # ---------------------------------------------------------------------------
 

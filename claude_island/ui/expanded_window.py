@@ -1005,6 +1005,12 @@ _ROW_HEIGHT = 56
 # v4c: idle / ended rows collapse to a single line per prototype-v4c-
 # github.html, so the bottom row hides and the overall height drops.
 _ROW_HEIGHT_COMPACT = 36
+# Plan F (2026-05-24): TOOL_USE rows expand to 3 lines when a
+# ``current_tool_input`` preview is available — third line is the
+# command ticker (``╰─ pytest tests/test_login.py``). Height budget:
+# 8 + 13.5 (name) + 12 (cwd) + 14 (ticker) + 8 = 55.5; round to 72
+# so the ticker has comfortable descenders.
+_ROW_HEIGHT_3LINE = 72
 _ROW_PAD_H = 14
 
 # Activity heuristic for the row status text. Same threshold as the
@@ -1856,24 +1862,28 @@ def _fmt_short_elapsed(seconds: int) -> str:
 
 
 def _phase_inline_text(view) -> str:
-    """v4c: phase-tinted status text that sits inline next to the
-    session name on the top row.
+    """Plan F (2026-05-24): phase-tinted status text inline next to
+    the session name.
 
-    Format follows prototype-v4c-github.html's .row .status-text:
-      THINKING         → "· thinking"               (turn count not tracked)
-      TOOL_USE         → "· tool_use · ToolName"    (current tool from hook)
+    Format (Plan F revised):
+      THINKING         → "· thinking"                       (turn moved to IDLE)
+      TOOL_USE         → "· tool_use · ToolName · 1.2s"     (current_tool_input
+                                                            renders on its own
+                                                            ticker line below)
       WAITING_APPROVAL → "· awaiting consent · X elapsed"
-      COMPACTING       → "· compacting"
-      IDLE             → "· idle · X ago"           (last_activity relative)
-      ENDED            → "· ended · X ago"
+      COMPACTING       → "· compacting · 12s"
+      IDLE             → "· idle · X ago · N turns"         (turn count here)
+      ENDED            → "· ended · X ago · N turns"
+
+    Rationale: active rows now spend their status_inline budget on
+    live activity (tool/elapsed/etc.), and the turn count — which is
+    a historical cumulative — moves to the IDLE / ENDED rows where
+    the "what's this session been up to overall" framing fits.
     """
     from claude_island.core.session_phase import SessionPhase as _SP
     phase = getattr(view, "phase", _SP.IDLE)
     turn_count = getattr(view, "turn_count", 0) or 0
     if phase == _SP.THINKING:
-        # `· thinking · turn N` mirrors prototype "build-mini-cc thinking · turn 3".
-        if turn_count > 0:
-            return f"· thinking · turn {turn_count}"
         return "· thinking"
     if phase == _SP.TOOL_USE:
         tool = getattr(view, "current_tool", None)
@@ -1917,12 +1927,17 @@ def _phase_inline_text(view) -> str:
         return f"· ended{ago_part}{turn_part}"
     # IDLE
     last = getattr(view, "last_activity", None)
+    ago_part = ""
     if last is not None:
         try:
             delta = datetime.now(timezone.utc) - last.astimezone(timezone.utc)
-            return f"· idle · {_fmt_short_elapsed(int(delta.total_seconds()))} ago"
+            ago_part = f" · {_fmt_short_elapsed(int(delta.total_seconds()))} ago"
         except Exception:
             pass
+    # Plan F: turn count belongs on IDLE rows now.
+    turn_part = f" · {turn_count} turns" if turn_count > 0 else ""
+    if ago_part or turn_part:
+        return f"· idle{ago_part}{turn_part}"
     return ""
 
 
@@ -6085,9 +6100,51 @@ class ExpandedWindow(QWidget):
         bottom_row.addWidget(model_chip)
         bottom_row.addStretch(1)
 
-        # Mount the two rows into body's QVBoxLayout.
+        # Plan F (2026-05-24): optional third "ticker" line for TOOL_USE
+        # rows. Carries the current Bash command / file path / etc.
+        # surfaced via SessionView.current_tool_input. Hidden by
+        # default; _update_row toggles visibility + row height based on
+        # phase + tool_input availability. The corner glyph (╰─)
+        # visually connects the ticker to the row above so the user
+        # reads it as "what THIS session is doing right now", not as
+        # a separate row.
+        ticker_row = QHBoxLayout()
+        ticker_row.setContentsMargins(0, 0, 0, 0)
+        ticker_row.setSpacing(4)
+
+        ticker_corner = QLabel("╰─")
+        ticker_corner.setObjectName("ticker_corner")
+        ticker_corner.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        ticker_corner.setStyleSheet(
+            f"color: {_LabColor.paper_faint}; font-size: 11px; "
+            f"font-family: {FontStack.mono_stack};"
+        )
+        ticker_row.addWidget(ticker_corner)
+
+        ticker_label = _ElidingLabel()
+        ticker_label.setObjectName("ticker_label")
+        ticker_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # Slightly brighter than cwd_label so the eye jumps to the
+        # current activity, but still secondary to the name/phase line.
+        ticker_label.setStyleSheet(
+            f"color: {_LabColor.phosphor}; font-size: 11px; "
+            f"font-family: {FontStack.mono_stack};"
+        )
+        ticker_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred,
+        )
+        ticker_row.addWidget(ticker_label)
+        ticker_row.addStretch(1)
+
+        # Hidden by default — _update_row reveals it only when phase
+        # is TOOL_USE and current_tool_input is non-empty.
+        ticker_corner.setVisible(False)
+        ticker_label.setVisible(False)
+
+        # Mount the rows into body's QVBoxLayout.
         body.addLayout(top_row)
         body.addLayout(bottom_row)
+        body.addLayout(ticker_row)
 
         # status_label retained as a 0×0 hidden child for legacy
         # callers that reach for it by objectName.
@@ -6362,6 +6419,36 @@ class ExpandedWindow(QWidget):
         if cwd_label is not None:
             cwd_label.setVisible(True)
         compact = False  # legacy flag, kept so downstream chip-sync still compiles
+
+        # Plan F: ticker line — shows the current Bash command / file
+        # path / etc. while phase == TOOL_USE AND
+        # current_tool_input is non-empty.
+        ticker_corner = btn.findChild(QLabel, "ticker_corner")
+        ticker_label = btn.findChild(QLabel, "ticker_label")
+        cti = getattr(view, "current_tool_input", None)
+        show_ticker = (
+            view.phase == _SP.TOOL_USE
+            and cti is not None
+            and cti.strip() != ""
+        )
+        if ticker_label is not None and ticker_corner is not None:
+            if show_ticker:
+                if ticker_label.text() != cti:
+                    ticker_label.setText(cti)
+                ticker_corner.setVisible(True)
+                ticker_label.setVisible(True)
+            else:
+                ticker_corner.setVisible(False)
+                ticker_label.setVisible(False)
+        # Animate the row height transition. setFixedHeight on every
+        # update is cheap; Qt only schedules a re-layout when the value
+        # changes. The TOOL_USE row alternates between the 2-line
+        # default and the 3-line ticker form within a turn — accept
+        # that visual jitter (each tool-call entry/exit) as the cost
+        # of seeing live activity (Plan F's stated trade-off).
+        target_height = _ROW_HEIGHT_3LINE if show_ticker else _ROW_HEIGHT
+        if btn.height() != target_height:
+            btn.setFixedHeight(target_height)
 
         meta_label = btn.findChild(QLabel, "meta_label")
         if meta_label is not None and meta_label.text() != meta_text:
