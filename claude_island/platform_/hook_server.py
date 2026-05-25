@@ -303,10 +303,8 @@ class HookServer:
 
         # Hook payload's ``session_id`` is the in-memory current uuid as
         # set by claude.exe — matches pid.json and the JSONL file claude
-        # is appending to. Forwarded verbatim. (A "remap to OLD via
-        # cmdline --resume" path lived here from 2026-05-17 to 2026-05-25;
-        # see commit history if you wonder why state machine + registry
-        # are keyed off the payload's session_id and not a cmdline lookup.)
+        # is appending to. Forwarded verbatim: cmdline ``--resume`` goes
+        # stale on ``/clear`` and cannot be used as a remap source.
         event = parse_claude_payload(payload)
         if event is not None:
             with self._recent_lock:

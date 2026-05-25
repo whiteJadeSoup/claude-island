@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace as _replace
 
 from reactivex.subject import Subject
 
@@ -223,14 +224,12 @@ class SessionRegistry:
                 and not new.session_uuid
                 and new.pid > 0
             ):
-                from dataclasses import replace as _replace
                 merged.append(_replace(new, session_uuid=placeholder.session_uuid))
                 consumed_placeholders.add(placeholder.session_uuid)
                 continue
 
             preserved_uuid = real_uuids_by_cwd_pid.get((new.project_path, new.pid))
             if preserved_uuid and not new.session_uuid and new.pid > 0:
-                from dataclasses import replace as _replace
                 merged.append(_replace(new, session_uuid=preserved_uuid))
                 continue
 

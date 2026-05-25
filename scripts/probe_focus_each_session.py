@@ -19,25 +19,17 @@ from claude_island.core.models import Session
 from claude_island.core.snapshot import SessionView
 from claude_island.core.session_phase import SessionPhase
 from claude_island.core.hook_events import JumpTarget
-from claude_island.platform_ import session_names as session_names_store
-from claude_island.platform_.process_scanner import (
-    ProcessScanner, resume_uuid_for_pid,
-)
+from claude_island.platform_.process_scanner import ProcessScanner
 from claude_island.platform_.session_state import read_session_state
 from claude_island.platform_.terminals.windows_terminal import (
     WindowsTerminalAdapter,
 )
 
 
-def _resume_uuid_reader(pid: int) -> str | None:
-    return resume_uuid_for_pid(pid, names_lookup=session_names_store.get_uuid_by_name)
-
-
 def _canonical_uuid(session: Session) -> str:
     state = read_session_state(session.pid) or {}
     pid_json_uuid = state.get("sessionId") if isinstance(state.get("sessionId"), str) else None
-    cmdline_uuid = _resume_uuid_reader(session.pid)
-    return cmdline_uuid or pid_json_uuid or session.session_uuid
+    return pid_json_uuid or session.session_uuid
 
 
 def main() -> None:

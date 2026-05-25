@@ -51,6 +51,9 @@ def _jt(host_pid: int = _HOST_PID) -> JumpTarget:
 def _make_triple():
     reg = SessionRegistry()
     sm = SessionStateMachine()
+    # Constructing the bridge wires its subscriptions onto reg and sm;
+    # tests interact with those two directly, but the bridge must stay
+    # alive (returned, not discarded) so its subscriptions aren't GC'd.
     bridge = HookSessionBridge(registry=reg, state_machine=sm)
     return reg, sm, bridge
 

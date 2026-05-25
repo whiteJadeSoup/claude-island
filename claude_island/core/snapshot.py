@@ -1291,7 +1291,6 @@ class Snapshotter:
                 if v.session_uuid:
                     live_uuids.add(v.session_uuid)
 
-
         now_utc = datetime.now(timezone.utc)
         if self._launch_intent is not None:
             try:
