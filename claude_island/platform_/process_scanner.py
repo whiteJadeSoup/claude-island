@@ -5,7 +5,6 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
 
 import psutil
 
@@ -37,73 +36,6 @@ _INACTIVE_STATUSES = frozenset({
     psutil.STATUS_ZOMBIE,
     psutil.STATUS_DEAD,
 })
-
-# RFC 4122 / lowercase hex UUID. Matches the format Claude writes both
-# as JSONL filenames and as ``--resume <uuid>`` accepts. Anchored so we
-# never partially match a longer arg (e.g., a hash suffix).
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
-
-
-def resume_uuid_for_pid(
-    pid: int,
-    *,
-    names_lookup: "Callable[[str], str | None] | None" = None,
-) -> str | None:
-    """Return the canonical OLD uuid for ``pid`` by inspecting cmdline.
-
-    Why this exists: when the user launches ``claude --resume <X>``,
-    claude.exe assigns a NEW in-memory session uuid (visible in
-    ``~/.claude/sessions/<pid>.json`` and on every hook event's
-    ``session_id``) but **keeps writing transcripts to the existing
-    JSONL of the resumed session**. UsageRegistry / sentinel / model
-    lookups all key on that OLD uuid — pid.json's NEW uuid misses them.
-
-    Two resume flavours, both recovered here:
-      * ``--resume <UUID-shaped-arg>``: arg itself IS the OLD uuid.
-        Deterministic, no extra lookup needed.
-      * ``--resume <name>`` (e.g. a user-renamed session): arg is the
-        user-given name. ``names_lookup(name)`` reverse-resolves it to
-        the OLD uuid via ``session_names.json`` (claude-island's rename
-        store, which IS the same set of names ``--resume`` accepts when
-        the user typed one). Pass
-        ``names_lookup=session_names.get_uuid_by_name`` in production;
-        leave None in tests / when the names store isn't available.
-
-    Returns None when:
-      * pid is invalid or not accessible (pid <= 0, NoSuchProcess,
-        AccessDenied)
-      * cmdline has no ``--resume`` flag (fresh session)
-      * arg is a name and either ``names_lookup`` is None or the lookup
-        doesn't know that name — fall back to pid.json downstream.
-    """
-    if pid <= 0:
-        return None
-    try:
-        cmdline = psutil.Process(pid).cmdline()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return None
-    for i, arg in enumerate(cmdline):
-        if arg == "--resume" and i + 1 < len(cmdline):
-            raw = cmdline[i + 1].strip()
-            candidate = raw.lower()
-            if _UUID_RE.match(candidate):
-                return candidate
-            # ``--resume <name>``: try the names store. Pid.json's
-            # ``name`` field also carries this string, but cmdline is
-            # the authoritative source — pid.json's ``name`` can be
-            # absent (UUID-resume) or written later than cmdline (race
-            # at process startup).
-            if names_lookup is not None:
-                try:
-                    looked_up = names_lookup(raw)
-                except Exception:
-                    looked_up = None
-                if looked_up and _UUID_RE.match(looked_up.lower()):
-                    return looked_up.lower()
-            return None
-    return None
 
 
 class ProcessScanner:

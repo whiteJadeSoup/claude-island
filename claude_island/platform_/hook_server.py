@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from claude_island.core.hook_events import (
     CompactStarted,
@@ -160,15 +160,6 @@ class HookServer:
         pending_registry: PendingDecisionRegistry | None = None,
         permission_cache: SessionPermissionCache | None = None,
         notify_queue: NotifyEventQueue | None = None,
-        # ``--resume <UUID>`` recovery (2026-05-17). When set, every
-        # incoming hook event is rewritten to key on the OLD uuid from
-        # cmdline instead of the NEW in-memory uuid Claude sends. Without
-        # this, the SessionStateMachine + SessionRegistry end up keyed on
-        # the NEW uuid while UsageRegistry / sentinel are keyed on OLD —
-        # split-brain that hides the model chip and breaks click-to-focus.
-        # Default None ⇒ legacy behaviour (no remap), so existing tests
-        # / boot paths that don't yet wire the helper still work.
-        resume_uuid_reader: Callable[[int], str | None] | None = None,
     ) -> None:
         self._sm = state_machine
         self._preferred_port = preferred_port
@@ -188,7 +179,6 @@ class HookServer:
         self._pending = pending_registry
         self._perm = permission_cache
         self._notify = notify_queue
-        self._resume_uuid_reader = resume_uuid_reader
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -313,16 +303,10 @@ class HookServer:
 
         # Hook payload's ``session_id`` is the in-memory current uuid as
         # set by claude.exe — matches pid.json and the JSONL file claude
-        # is appending to. Forward verbatim. The previous "remap to OLD
-        # via cmdline --resume reader" (commit 0da1da8, 2026-05-17) was
-        # based on the now-disproven premise that claude keeps writing
-        # to the OLD JSONL post-/clear. In claude v2.1.142, /clear
-        # creates a new JSONL keyed under NEW and switches all writes
-        # to it; rewriting hook session_id to the stale cmdline uuid
-        # locked the state machine on a dead session and hid the active
-        # one (user bug 2026-05-25). ``_resume_uuid_reader`` is still
-        # accepted in ``__init__`` for back-compat with callers but no
-        # longer consulted here.
+        # is appending to. Forwarded verbatim. (A "remap to OLD via
+        # cmdline --resume" path lived here from 2026-05-17 to 2026-05-25;
+        # see commit history if you wonder why state machine + registry
+        # are keyed off the payload's session_id and not a cmdline lookup.)
         event = parse_claude_payload(payload)
         if event is not None:
             with self._recent_lock:

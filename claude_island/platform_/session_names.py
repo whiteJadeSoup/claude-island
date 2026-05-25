@@ -126,34 +126,6 @@ def get_session_name(uuid: str) -> str | None:
     return name if name else None
 
 
-def get_uuid_by_name(name: str) -> str | None:
-    """Reverse lookup: a user-given session name → its uuid.
-
-    Used by ``resume_uuid_for_pid`` to recover the canonical OLD uuid
-    after ``claude --resume <name>``: claude.exe stamps a new in-memory
-    uuid into pid.json but keeps writing transcripts to the renamed
-    session's original JSONL. The cmdline ``<name>`` arg is the only
-    bridge between the two.
-
-    Returns None when the name isn't in the store (user never renamed
-    that session — caller falls back to pid.json's sessionId). When
-    multiple uuids share the same name (rare; only happens if the user
-    reused a name across sessions before our dedup kicks in), returns
-    one of them — first match wins. Same lock-free read as
-    ``get_session_name``: a stale read can at worst miss the latest
-    rename for one tick.
-    """
-    if not name:
-        return None
-    target = name.strip()
-    if not target:
-        return None
-    for uuid, n in _read().items():
-        if n == target:
-            return uuid
-    return None
-
-
 def set_session_name(uuid: str, name: str) -> None:
     """Persist ``name`` as the display override for ``uuid``.
 

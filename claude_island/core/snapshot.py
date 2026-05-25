@@ -424,19 +424,6 @@ class _StateReaderProto(Protocol):
     def read_session_state(self, pid: int) -> dict | None: ...
 
 
-# Callable signature for the cmdline-derived ``--resume <UUID>`` lookup.
-# Production wires ``platform_.process_scanner.resume_uuid_for_pid``;
-# tests/boot default to ``_noop_resume_uuid`` so existing callers don't
-# need the platform layer. Return None when no UUID-shaped --resume arg
-# is present (fresh session, name-resume, pid invalid).
-class _ResumeUuidReaderProto(Protocol):
-    def __call__(self, pid: int) -> str | None: ...
-
-
-def _noop_resume_uuid(_: int) -> str | None:
-    return None
-
-
 class _MetadataProviderProto(Protocol):
     def get_session_metadata(self, uuid: str) -> dict | None: ...
 
@@ -531,7 +518,6 @@ def compose_session_view(
     usage_registry: _UsageRegistryProto,
     names_store: _NamesStoreProto,
     live_state_reader: LiveStateProto = _noop_live_state,
-    resume_uuid_reader: _ResumeUuidReaderProto = _noop_resume_uuid,
     high_cost_threshold: float = HIGH_COST_USD_THRESHOLD,
     active_threshold_s: float = ACTIVE_THRESHOLD_SECONDS,
 ) -> SessionView:
@@ -564,32 +550,19 @@ def compose_session_view(
     #
     #   1. ``pid.json`` ``sessionId``. claude.exe rewrites this on every
     #      status transition, so it always reflects the in-memory current
-    #      session — including the NEW uuid after ``/clear`` and
+    #      session — including the NEW uuid after ``/clear`` /
     #      ``/resume <other>``. Matches the JSONL file claude is actually
     #      appending to (UsageRegistry's index key).
     #   2. ``session.session_uuid`` — populated by the hook bridge from
     #      the SessionStart payload. Same uuid as pid.json for any
     #      session island has observed via hooks; covers the brief
     #      window where pid.json hasn't been written yet.
-    #   3. ``--resume <UUID>`` arg from the process cmdline. Final
-    #      fallback for sessions started before island was running with
-    #      a missing pid.json. The cmdline is FROZEN at process start
-    #      and is wrong after any session change, so it can never
-    #      outrank pid.json / hook-derived sources.
-    #
-    # The previous priority (cmdline > pid.json) was introduced 2026-05-17
-    # under the premise that claude keeps writing transcripts to the OLD
-    # JSONL after --resume. Empirically false in claude v2.1.142:
-    # /clear creates a NEW JSONL and switches all writes to it. Cmdline
-    # priority therefore locked the view on a dormant 3-day-old session
-    # while the active one stayed invisible (user bug 2026-05-25).
     pid_json_uuid = (
         state.get("sessionId")
         if isinstance(state.get("sessionId"), str)
         else None
     )
-    resume_uuid = _safe(resume_uuid_reader, session.pid)
-    sess_uuid = pid_json_uuid or session.session_uuid or resume_uuid
+    sess_uuid = pid_json_uuid or session.session_uuid
     meta = _safe(metadata_provider.get_session_metadata, sess_uuid) or {}
 
     cost, turns, _sides = _safe_or(
@@ -1061,11 +1034,6 @@ class Snapshotter:
         # state" so legacy tests / boot paths that pre-date the hook
         # work unchanged. Production injects ``SessionStateMachine.read``.
         live_state_reader: LiveStateProto = _noop_live_state,
-        # Cmdline ``--resume <UUID>`` lookup. Defaults to "always None" so
-        # tests pre-dating the fix don't need to wire it. Production
-        # injects ``platform_.process_scanner.resume_uuid_for_pid``.
-        # See compose_session_view's docstring for why this matters.
-        resume_uuid_reader: _ResumeUuidReaderProto = _noop_resume_uuid,
         # Resume-offline sources. Both default to None so existing
         # tests that don't use the History drawer still work — when None,
         # dormant_sessions and launching_sessions in the published
@@ -1096,7 +1064,6 @@ class Snapshotter:
         self._usage_registry = usage_registry
         self._names_store = names_store
         self._live_state_reader = live_state_reader
-        self._resume_uuid_reader = resume_uuid_reader
         self._get_quota = get_quota
         self._get_available_providers = get_available_providers
         self._get_selected_provider = get_selected_provider
@@ -1243,7 +1210,6 @@ class Snapshotter:
                         usage_registry=self._usage_registry,
                         names_store=self._names_store,
                         live_state_reader=self._live_state_reader,
-                        resume_uuid_reader=self._resume_uuid_reader,
                     )
                 )
             except Exception:

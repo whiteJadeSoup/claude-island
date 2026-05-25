@@ -656,116 +656,38 @@ def test_stop_idempotent(tmp_port_file: Path):
 # ---------------------------------------------------------------------------
 # Hook session_id passthrough. The hook payload's ``session_id`` is the
 # in-memory current uuid as set by claude.exe (matches pid.json + JSONL
-# writes). The server must NEVER rewrite it. The previous "remap to OLD
-# via cmdline --resume" path (commit 0da1da8, 2026-05-17) was based on
-# the now-disproven premise that claude keeps writing to OLD JSONL after
-# --resume — empirically false in claude v2.1.142, where /clear creates
-# a new JSONL and switches writes to it. Rewriting hook session_id to
-# the stale cmdline uuid hid the active session and locked the state
-# machine on a dead one (user bug 2026-05-25).
+# writes); the server forwards it verbatim. A cmdline-based "remap to
+# OLD" path lived here from 2026-05-17 to 2026-05-25 — removed because
+# its premise that claude keeps writing to OLD JSONL after --resume is
+# empirically false in claude v2.1.142 (/clear creates a new JSONL).
 # ---------------------------------------------------------------------------
 
 
-class TestResumeUuidRemap:
-    def test_does_not_rewrite_session_id_even_if_resume_uuid_reader_returns_old(
-        self, tmp_port_file: Path
-    ):
-        """After ``/clear``, hook payload arrives with NEW uuid and a
-        cmdline-reading helper would happily return the stale OLD uuid.
-        The server must trust the payload — state machine sees NEW."""
+class TestSessionIdPassthrough:
+    def test_session_id_used_verbatim_on_session_start(self, tmp_port_file: Path):
+        """The session_id claude.exe sets in the payload is what the
+        state machine ends up keyed on. No rewriting."""
         sm = SessionStateMachine()
-        old = "413eda01-6271-43cb-934b-035b236c0154"
-        new = "f56fb0ca-649d-4708-8c24-76a18857a0c6"
-        server = HookServer(
-            sm,
-            preferred_port=0,
-            port_file=tmp_port_file,
-            # Reader provided but must NOT influence routing — payload wins.
-            resume_uuid_reader=lambda pid: old if pid > 0 else None,
-        )
+        server = HookServer(sm, preferred_port=0, port_file=tmp_port_file)
         port = server.start()
         try:
             payload = {
                 "hook_event_name": "SessionStart",
-                "session_id": new,            # claude sends NEW (post-/clear)
+                "session_id": "f56fb0ca-649d-4708-8c24-76a18857a0c6",
                 "cwd": "D:\\proj",
                 "source": "clear",
                 "jump_target": {"host_pid": 97372},
             }
             assert _post_hook(port, payload) == 200
-            # State machine got NEW (payload's session_id), reader ignored.
-            assert sm.read(new) is not None, "NEW uuid missing from state machine"
-            assert sm.read(old) is None, "OLD uuid leaked from cmdline reader"
+            assert sm.read("f56fb0ca-649d-4708-8c24-76a18857a0c6") is not None
         finally:
             server.stop()
 
-    def test_passthrough_when_reader_returns_none(self, tmp_port_file: Path):
-        """Fresh / name-resume sessions: reader returns None ⇒ payload's
-        session_id is used verbatim. Preserves legacy behaviour."""
+    def test_jump_target_missing_does_not_affect_routing(self, tmp_port_file: Path):
+        """Older hook.py (pre-jump_target) — payload arrives without a
+        jump_target. session_id is still used verbatim."""
         sm = SessionStateMachine()
-        server = HookServer(
-            sm,
-            preferred_port=0,
-            port_file=tmp_port_file,
-            resume_uuid_reader=lambda _pid: None,
-        )
-        port = server.start()
-        try:
-            payload = {
-                "hook_event_name": "SessionStart",
-                "session_id": "fresh-uuid",
-                "cwd": "D:\\proj",
-                "source": "startup",
-                "jump_target": {"host_pid": 1234},
-            }
-            assert _post_hook(port, payload) == 200
-            assert sm.read("fresh-uuid") is not None
-        finally:
-            server.stop()
-
-    def test_passthrough_when_reader_raises(self, tmp_port_file: Path):
-        """Reader exception must not break the hook ingest — fall through
-        with the original session_id rather than 500ing."""
-        sm = SessionStateMachine()
-
-        def explode(_pid):
-            raise RuntimeError("psutil race")
-
-        server = HookServer(
-            sm,
-            preferred_port=0,
-            port_file=tmp_port_file,
-            resume_uuid_reader=explode,
-        )
-        port = server.start()
-        try:
-            payload = {
-                "hook_event_name": "SessionStart",
-                "session_id": "kept-uuid",
-                "cwd": "D:\\proj",
-                "source": "resume",
-                "jump_target": {"host_pid": 1234},
-            }
-            assert _post_hook(port, payload) == 200
-            assert sm.read("kept-uuid") is not None
-        finally:
-            server.stop()
-
-    def test_passthrough_when_jump_target_missing(self, tmp_port_file: Path):
-        """Older hook.py (pre-jump_target) ⇒ host_pid unknown ⇒ no remap
-        attempted. Backwards-compatible."""
-        sm = SessionStateMachine()
-        server = HookServer(
-            sm,
-            preferred_port=0,
-            port_file=tmp_port_file,
-            # Reader would return OLD, but we must never call it without a
-            # host_pid (no way to know which process the payload belongs
-            # to). Assert by raising if it's invoked.
-            resume_uuid_reader=lambda _pid: (_ for _ in ()).throw(
-                AssertionError("must not be called without host_pid")
-            ),
-        )
+        server = HookServer(sm, preferred_port=0, port_file=tmp_port_file)
         port = server.start()
         try:
             payload = {
