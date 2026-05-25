@@ -332,34 +332,41 @@ class TestComposeSessionView:
 
 
 class TestComposeResumeUuidOverride:
-    """``claude --resume <UUID>`` bug (2026-05-17): claude.exe assigns a
-    NEW in-memory session uuid (written to pid.json and forwarded on every
-    hook ``session_id``) but keeps writing transcripts to the OLD JSONL.
-    UsageRegistry indexes records under OLD; the WT tab title sentinel
-    was locked at launch with OLD too. Without recovering OLD from
-    cmdline, ``get_latest_model(NEW)`` returns None (no model chip) and
-    ``sentinel_title(NEW)`` never matches the tab (click → wrong tab)."""
+    """Session uuid resolution priority. Updated 2026-05-25 (user bug
+    report): cmdline ``--resume <UUID>`` is the BOOT uuid only — it
+    cannot reflect ``/clear`` or ``/resume <other>`` because the process
+    cmdline is frozen at fork time. pid.json's ``sessionId`` (rewritten
+    by claude.exe on every status transition) is the current truth.
 
-    def test_resume_uuid_overrides_pid_json_session_id(self):
-        """Mirrors the live build-mini-cc situation: pid.json reports
-        f56fb0ca (NEW) but cmdline says --resume 413eda01 (OLD). The
-        composed view must surface OLD so the UsageRegistry lookup
-        returns the model recorded against 413eda01."""
+    The previous priority (cmdline > pid.json) was based on commit
+    0da1da8's premise that "claude keeps writing transcripts to the OLD
+    JSONL after --resume". That premise is empirically false in
+    claude v2.1.142: after ``/clear``, claude creates a NEW JSONL and
+    switches all writes to it. Cmdline priority therefore latched the
+    view on a stale dormant session, hiding the actual active one."""
+
+    def test_pid_json_uuid_wins_over_cmdline_resume_after_clear(self):
+        """``/clear`` divergence: cmdline still has --resume OLD (frozen
+        at process launch) but pid.json.sessionId is NEW (claude rewrote
+        it at /clear). UsageRegistry records live under NEW (claude is
+        writing to NEW.jsonl now). View must surface NEW."""
         s = _session(pid=97372, uuid="")
-        old = "413eda01-6271-43cb-934b-035b236c0154"
-        new = "f56fb0ca-649d-4708-8c24-76a18857a0c6"
+        old = "413eda01-6271-43cb-934b-035b236c0154"  # cmdline boot uuid
+        new = "f56fb0ca-649d-4708-8c24-76a18857a0c6"  # pid.json after /clear
         view = compose_session_view(
             s,
             state_reader=FakeStateReader({97372: {"sessionId": new, "status": "idle"}}),
             metadata_provider=FakeMetadataProvider(),
             usage_registry=FakeUsageRegistry(
-                summaries={old: (12.34, 5, 1)},
-                latest_models={old: "claude-opus-4-7"},
+                summaries={new: (12.34, 5, 1)},
+                latest_models={new: "claude-opus-4-7"},
             ),
             names_store=FakeNamesStore(),
             resume_uuid_reader=lambda pid: old if pid == 97372 else None,
         )
-        assert view.session_uuid == old
+        assert view.session_uuid == new, (
+            f"expected NEW (pid.json) to win after /clear, got {view.session_uuid!r}"
+        )
         assert view.cost_usd == 12.34
         assert view.latest_model == "claude-opus-4-7"
 

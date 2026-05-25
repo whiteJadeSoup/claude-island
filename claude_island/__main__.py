@@ -450,11 +450,12 @@ def _build_session_details(session):
     from claude_island.core.models import SessionDetails
     state = session_state_reader.read_session_state(session.pid) or {}
     # uuid resolution mirrors ``core.snapshot.compose_session_view``:
-    # ``claude --resume <OLD_UUID>`` makes claude.exe assign a NEW
-    # in-memory uuid (visible in pid.json) but keep writing transcripts
-    # to OLD's JSONL — so UsageRegistry's records live under OLD. We
-    # must check the cmdline FIRST or the per-row $ aggregate +
-    # latest_model lookup miss entirely.
+    # pid.json's ``sessionId`` is the current in-memory uuid (rewritten
+    # by claude.exe on every status transition and after ``/clear``);
+    # it matches the JSONL file UsageRegistry indexes. Cmdline
+    # ``--resume`` is the frozen boot uuid and only a last-resort
+    # fallback when pid.json is unavailable. See snapshot.py for the
+    # full rationale (user bug 2026-05-25).
     pid_json_uuid = (
         state.get("sessionId")
         if isinstance(state.get("sessionId"), str)
@@ -464,7 +465,7 @@ def _build_session_details(session):
         cmdline_resume_uuid = _resume_uuid_reader(session.pid)
     except Exception:
         cmdline_resume_uuid = None
-    sess_uuid = cmdline_resume_uuid or pid_json_uuid or session.session_uuid
+    sess_uuid = pid_json_uuid or session.session_uuid or cmdline_resume_uuid
     meta = jsonl_parser.get_session_metadata(sess_uuid) or {}
     cost, turns, sides = usage_registry.get_session_summary(sess_uuid)
     per_model = usage_registry.get_session_per_model(sess_uuid)

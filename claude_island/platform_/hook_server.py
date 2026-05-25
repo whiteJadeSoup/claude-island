@@ -311,28 +311,18 @@ class HookServer:
         if not isinstance(payload, dict):
             raise ParseError("hook payload must be a JSON object")
 
-        # --resume <UUID> remap (2026-05-17): when claude.exe was launched
-        # with ``--resume <OLD_UUID>``, it assigns a NEW uuid for the
-        # in-memory session and forwards NEW on every hook event. Rewrite
-        # session_id to OLD here so the SessionStateMachine and the
-        # SessionRegistry-via-hook-bridge end up keyed on the same uuid
-        # UsageRegistry + WT sentinel use. Defensive: never raise if the
-        # reader misbehaves, never replace with falsy value.
-        if self._resume_uuid_reader is not None:
-            jt_raw = payload.get("jump_target")
-            host_pid = 0
-            if isinstance(jt_raw, dict):
-                hp = jt_raw.get("host_pid")
-                if isinstance(hp, int) and not isinstance(hp, bool):
-                    host_pid = hp
-            if host_pid > 0:
-                try:
-                    old_uuid = self._resume_uuid_reader(host_pid)
-                except Exception:
-                    old_uuid = None
-                if old_uuid and old_uuid != payload.get("session_id"):
-                    payload["session_id"] = old_uuid
-
+        # Hook payload's ``session_id`` is the in-memory current uuid as
+        # set by claude.exe — matches pid.json and the JSONL file claude
+        # is appending to. Forward verbatim. The previous "remap to OLD
+        # via cmdline --resume reader" (commit 0da1da8, 2026-05-17) was
+        # based on the now-disproven premise that claude keeps writing
+        # to the OLD JSONL post-/clear. In claude v2.1.142, /clear
+        # creates a new JSONL keyed under NEW and switches all writes
+        # to it; rewriting hook session_id to the stale cmdline uuid
+        # locked the state machine on a dead session and hid the active
+        # one (user bug 2026-05-25). ``_resume_uuid_reader`` is still
+        # accepted in ``__init__`` for back-compat with callers but no
+        # longer consulted here.
         event = parse_claude_payload(payload)
         if event is not None:
             with self._recent_lock:

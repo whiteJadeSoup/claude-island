@@ -654,16 +654,25 @@ def test_stop_idempotent(tmp_port_file: Path):
 
 
 # ---------------------------------------------------------------------------
-# Resume-uuid remap (2026-05-17): claude.exe assigns a NEW in-memory uuid
-# after ``--resume <OLD_UUID>``. The hook server rewrites incoming
-# session_id back to OLD using the host_pid + a cmdline-reading helper.
+# Hook session_id passthrough. The hook payload's ``session_id`` is the
+# in-memory current uuid as set by claude.exe (matches pid.json + JSONL
+# writes). The server must NEVER rewrite it. The previous "remap to OLD
+# via cmdline --resume" path (commit 0da1da8, 2026-05-17) was based on
+# the now-disproven premise that claude keeps writing to OLD JSONL after
+# --resume — empirically false in claude v2.1.142, where /clear creates
+# a new JSONL and switches writes to it. Rewriting hook session_id to
+# the stale cmdline uuid hid the active session and locked the state
+# machine on a dead one (user bug 2026-05-25).
 # ---------------------------------------------------------------------------
 
 
 class TestResumeUuidRemap:
-    def test_remaps_session_id_when_host_pid_has_resume_uuid(
+    def test_does_not_rewrite_session_id_even_if_resume_uuid_reader_returns_old(
         self, tmp_port_file: Path
     ):
+        """After ``/clear``, hook payload arrives with NEW uuid and a
+        cmdline-reading helper would happily return the stale OLD uuid.
+        The server must trust the payload — state machine sees NEW."""
         sm = SessionStateMachine()
         old = "413eda01-6271-43cb-934b-035b236c0154"
         new = "f56fb0ca-649d-4708-8c24-76a18857a0c6"
@@ -671,22 +680,22 @@ class TestResumeUuidRemap:
             sm,
             preferred_port=0,
             port_file=tmp_port_file,
-            # Stand-in resume reader: any positive pid → OLD uuid.
+            # Reader provided but must NOT influence routing — payload wins.
             resume_uuid_reader=lambda pid: old if pid > 0 else None,
         )
         port = server.start()
         try:
             payload = {
                 "hook_event_name": "SessionStart",
-                "session_id": new,            # claude sends NEW
+                "session_id": new,            # claude sends NEW (post-/clear)
                 "cwd": "D:\\proj",
-                "source": "resume",
+                "source": "clear",
                 "jump_target": {"host_pid": 97372},
             }
             assert _post_hook(port, payload) == 200
-            # State machine got OLD uuid, not NEW.
-            assert sm.read(old) is not None
-            assert sm.read(new) is None
+            # State machine got NEW (payload's session_id), reader ignored.
+            assert sm.read(new) is not None, "NEW uuid missing from state machine"
+            assert sm.read(old) is None, "OLD uuid leaked from cmdline reader"
         finally:
             server.stop()
 

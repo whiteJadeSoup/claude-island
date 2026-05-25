@@ -562,26 +562,34 @@ def compose_session_view(
     # Priority for the canonical session uuid (used for UsageRegistry
     # lookups, live state lookups, and the WT focus sentinel):
     #
-    #   1. ``--resume <UUID>`` arg from the process cmdline. When the
-    #      user resumes by UUID (the path Claude Island's launcher
-    #      always takes), claude.exe assigns a NEW in-memory uuid
-    #      (visible in pid.json + every hook event) but keeps writing
-    #      transcripts to the OLD JSONL file and the WT tab title is
-    #      locked to the OLD uuid. The cmdline UUID is the only
-    #      reliable recovery path for the OLD uuid.
-    #   2. ``pid.json`` ``sessionId``. Correct for fresh sessions and
-    #      for name-resume (claude resolves the name and writes the
-    #      resolved uuid here).
-    #   3. The registry's own ``session.session_uuid`` — populated by
-    #      the hook bridge from the hook payload (NEW uuid for
-    #      uuid-resume, OK otherwise). Final fallback.
+    #   1. ``pid.json`` ``sessionId``. claude.exe rewrites this on every
+    #      status transition, so it always reflects the in-memory current
+    #      session — including the NEW uuid after ``/clear`` and
+    #      ``/resume <other>``. Matches the JSONL file claude is actually
+    #      appending to (UsageRegistry's index key).
+    #   2. ``session.session_uuid`` — populated by the hook bridge from
+    #      the SessionStart payload. Same uuid as pid.json for any
+    #      session island has observed via hooks; covers the brief
+    #      window where pid.json hasn't been written yet.
+    #   3. ``--resume <UUID>`` arg from the process cmdline. Final
+    #      fallback for sessions started before island was running with
+    #      a missing pid.json. The cmdline is FROZEN at process start
+    #      and is wrong after any session change, so it can never
+    #      outrank pid.json / hook-derived sources.
+    #
+    # The previous priority (cmdline > pid.json) was introduced 2026-05-17
+    # under the premise that claude keeps writing transcripts to the OLD
+    # JSONL after --resume. Empirically false in claude v2.1.142:
+    # /clear creates a NEW JSONL and switches all writes to it. Cmdline
+    # priority therefore locked the view on a dormant 3-day-old session
+    # while the active one stayed invisible (user bug 2026-05-25).
     pid_json_uuid = (
         state.get("sessionId")
         if isinstance(state.get("sessionId"), str)
         else None
     )
     resume_uuid = _safe(resume_uuid_reader, session.pid)
-    sess_uuid = resume_uuid or pid_json_uuid or session.session_uuid
+    sess_uuid = pid_json_uuid or session.session_uuid or resume_uuid
     meta = _safe(metadata_provider.get_session_metadata, sess_uuid) or {}
 
     cost, turns, _sides = _safe_or(
@@ -1316,6 +1324,7 @@ class Snapshotter:
             for v in g.views:
                 if v.session_uuid:
                     live_uuids.add(v.session_uuid)
+
 
         now_utc = datetime.now(timezone.utc)
         if self._launch_intent is not None:
