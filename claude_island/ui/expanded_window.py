@@ -1339,15 +1339,16 @@ _STYLE_SINGLE_ROW = f"""
     }}
     QPushButton:hover {{ background: {_LabColor.surface_hi}; }}
     QPushButton:pressed {{ background: {_LabColor.surface}; }}
-    /* v4c: waiting_approval rows paint a full-row orange tint to
-       mirror the prototype's row-waiting CSS class — the row itself
-       carries the "needs attention" signal, not just a left rail. */
+    /* v4c (Mocha): waiting_approval rows paint a peach-tinted warm
+       dark — softer than the burnt-amber #1f1106 we used pre-Mocha.
+       Tints with Mocha peach (#fab387) at low alpha so the row sits
+       naturally on the new base #1e1e2e. */
     QPushButton[phase_tint="waiting"] {{
-        background: #1f1106;
-        border-bottom: 1px solid rgba(219, 109, 40, 0.40);
+        background: #2e1d28;
+        border-bottom: 1px solid rgba(250, 179, 135, 0.40);
     }}
     QPushButton[phase_tint="waiting"]:hover {{
-        background: #2a1809;
+        background: #3a2832;
     }}
 """
 # Group card (multiple sessions sharing a cwd) keeps its rounded
@@ -1400,18 +1401,25 @@ _STYLE_COST_DEFAULT = f"color: {_LabColor.paper}; font-size: 11px; font-weight: 
 # the visual cue band — distinct from HIGH_COST_USD_THRESHOLD which
 # is the core's invariant for is_high_cost.
 _STYLE_COST_MID = (
-    f"color: #d29922; font-size: 11px; font-weight: 600;"
+    # Catppuccin Mocha "yellow" #f9e2af — warm sunlight tone, draws
+    # the eye without the urgency of the old #d29922.
+    f"color: #f9e2af; font-size: 11px; font-weight: 600;"
 )
 _STYLE_COST_HIGH = (
-    f"color: {_LabColor.red_warm}; font-size: 11px; font-weight: 600;"
+    # True red — see lab_palette.danger (#ef4444); user explicitly
+    # asked for "红色预警", not the Mocha pink-red maroon.
+    f"color: {_LabColor.danger}; font-size: 11px; font-weight: 600;"
 )
-# Visual cost-color tiers (in USD).  Sourced from prototype-v4c-github.html's
-# tier examples ($3.42 white, $5.18 yellow, $11.07 red).  Kept separate
-# from core's HIGH_COST_USD_THRESHOLD = 50.0 because the latter is the
-# data invariant ("is this cost officially high?") while these are the
-# visual mapping ("how loudly should the row's cost paint?").
-_COST_MID_USD = 5.0
-_COST_HIGH_USD_VISUAL = 10.0
+# Visual cost-color tiers (in USD).  Re-pitched 2026-05-22 per user
+# feedback: low tier extended (most rows shouldn't trigger any
+# warning colour), and high tier only at genuinely high spend.
+#   < $50         calm subtext1 (no alarm)
+#   $50  – $200   yellow (warm, "worth noticing")
+#   ≥ $200        true red (real "this is a lot" signal)
+# Distinct from core's HIGH_COST_USD_THRESHOLD = 50.0 — that's the
+# data flag for is_high_cost; these are the visual mapping.
+_COST_MID_USD = 50.0
+_COST_HIGH_USD_VISUAL = 200.0
 # Small coloured pill label used in the row's status line. Background
 # is the model's hue at 18 % alpha so the chip reads as "tinted" against
 # the row bg without overpowering the name typography. Border shares
@@ -6469,16 +6477,22 @@ class ExpandedWindow(QWidget):
         if meta_label is not None and meta_label.text() != meta_text:
             meta_label.setText(meta_text)
 
-        # Cost label colour — three visual tiers per prototype-v4c-
-        # github.html: $0–$5 white (default), $5–$10 yellow (mid),
-        # $10+ red (high).  Raw cost_usd drives the band; ``high_cost``
-        # alone wouldn't be expressive enough (it's a single bool at
-        # the $50 threshold).
+        # Cost label colour — three visual tiers (2026-05-22):
+        #   < $50         calm subtext (default)
+        #   $50 – $200    yellow (warm "worth noticing")
+        #   ≥ $200        true red (real "this is a lot")
+        # Source of truth = max(view.cost_usd, details.cost_usd) so
+        # both the snapshot-pipeline path (view.cost_usd) and the
+        # legacy `_render_sessions` path (details.cost_usd only) tier
+        # correctly.  `high_cost` flag (≥$50) is NOT short-circuited
+        # into red because $50 is the start of the YELLOW band now.
         if meta_label is not None:
-            raw_cost = getattr(view, "cost_usd", 0.0) or 0.0
-            if raw_cost >= _COST_HIGH_USD_VISUAL or high_cost:
+            view_cost = getattr(view, "cost_usd", 0.0) or 0.0
+            details_cost = (details.cost_usd if details is not None else 0.0) or 0.0
+            tier_cost = max(view_cost, details_cost)
+            if tier_cost >= _COST_HIGH_USD_VISUAL:
                 target_cost_style = _STYLE_COST_HIGH
-            elif raw_cost >= _COST_MID_USD:
+            elif tier_cost >= _COST_MID_USD:
                 target_cost_style = _STYLE_COST_MID
             else:
                 target_cost_style = _STYLE_COST_DEFAULT

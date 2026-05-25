@@ -3104,10 +3104,10 @@ class TestHighCostRowAlert:
         meta = btn.findChild(QLabel, "meta_label")
         assert meta is not None
         css = meta.styleSheet()
-        # v4c: high-cost tint moved from yellow #facc15 → orange (red_warm).
-        from claude_island.ui.lab_palette import Color as _Lab
-        expected_tint = _Lab.red_warm.lstrip("#").lower()
-        assert expected_tint in css.lower()
+        # v4c Mocha (2026-05-22 re-tier): cost $50–$200 paints yellow
+        # (#f9e2af).  The test uses cost_usd=132 which falls in this
+        # band — "worth noticing" but not the red ≥$200 alarm tier.
+        assert "f9e2af" in css.lower()
         assert "600" in css  # font-weight bold-ish
         # Short name ("x") + short cwd ("/a") both fit — no elision,
         # no tooltip. _sync_name_tooltip only fires when something is
@@ -3171,14 +3171,10 @@ class TestHighCostRowAlert:
         assert btn._status_glyph.state() == _RowStatusGlyph.STATE_RUNNING
         assert btn._running is True
         meta = btn.findChild(QLabel, "meta_label")
-        # v4c: high-cost cost label tints to orange (red_warm) — was
-        # yellow #facc15 in v3.  Token is lab_palette.Color.red_warm.
-        from claude_island.ui.lab_palette import Color as _Lab
-        # red_warm hex starts with "#db6d28" (orange-500) in v4c; the
-        # test asserts on the resolved tint rather than a literal so a
-        # future palette tweak doesn't have to land in this file.
-        expected_tint = _Lab.red_warm.lstrip("#").lower()
-        assert expected_tint in meta.styleSheet().lower()
+        # v4c Mocha (2026-05-22 re-tier): cost $50–$200 = yellow tier
+        # (#f9e2af).  Test cost_usd is $132 (above the $50 yellow
+        # floor, below the $200 red ceiling).
+        assert "f9e2af" in meta.styleSheet().lower()
         # v3: equalizer bar tint follows view.phase (THINKING → amber)
         # via lab_palette.Color.for_phase.  The high-cost signal still
         # rides on the cost label colour — the two channels remain

@@ -103,6 +103,13 @@ from PySide6.QtWidgets import QApplication
 
 
 from claude_island.core.safe_stderr import safe_stderr_write as _safe_stderr_write
+# Crash logger MUST be installed before anything else that could fault:
+# sys.excepthook + threading.excepthook + faulthandler, all routing to
+# ~/.claude-island/crash.log.  Without this, unhandled exceptions on
+# worker threads disappear silently and macOS .app bundles swallow
+# stderr.  See claude_island/core/crash_log.py for the rationale.
+from claude_island.core import crash_log as _crash_log
+_crash_log.install()
 
 
 def _qt_message_filter(msg_type: QtMsgType, _ctx, message: str) -> None:
@@ -836,6 +843,45 @@ def _safe_render(target_name: str, render_fn):
                 f"[claude-island] {target_name}.render(snap) raised "
                 f"(stream preserved): {exc}"
             )
+            import logging, traceback
+            logging.getLogger(__name__).error(
+                "%s.render(snap) traceback:\n%s",
+                target_name, traceback.format_exc(),
+            )
+    return _safe
+
+
+def _safe_compute(target_name: str, compute_fn):
+    """Wrap a compute (dedup key extractor) so an exception inside
+    compute() doesn't kill the entire pipeline.
+
+    Same rationale as _safe_render but for the OTHER side of the rx
+    operator chain.  ``ops.distinct_until_changed(key_mapper=compute)``
+    will propagate any exception inside ``compute`` as ``on_error``,
+    which terminates the subscription — the surface never renders
+    again until the process restarts.  Wrapping with a try/except
+    returns a unique sentinel key on failure: ``distinct`` sees the
+    sentinel as a never-before-seen key, calls render with the SAME
+    snap that caused compute to fail, ``_safe_render`` catches any
+    render-side fallout, and the stream stays alive for the next snap.
+    """
+    _counter = [0]
+    def _safe(snap):
+        try:
+            return compute_fn(snap)
+        except Exception as exc:
+            _counter[0] += 1
+            _safe_stderr_write(
+                f"[claude-island] {target_name}.compute(snap) raised "
+                f"(stream preserved): {exc}"
+            )
+            import logging, traceback
+            logging.getLogger(__name__).error(
+                "%s.compute(snap) traceback:\n%s",
+                target_name, traceback.format_exc(),
+            )
+            # Unique sentinel — distinct treats it as a fresh key.
+            return ("__compute_error__", target_name, _counter[0])
     return _safe
 
 
@@ -876,7 +922,7 @@ def _safe_render(target_name: str, render_fn):
 _capsule_subscription = (
     world.observable()
     .pipe(
-        ops.map(capsule.compute),
+        ops.map(_safe_compute("capsule", capsule.compute)),
         ops.distinct_until_changed(),
     )
     .subscribe(
@@ -888,7 +934,9 @@ _capsule_subscription = (
 )
 _expanded_subscription = (
     world.observable()
-    .pipe(ops.distinct_until_changed(key_mapper=expanded.compute))
+    .pipe(ops.distinct_until_changed(
+        key_mapper=_safe_compute("expanded", expanded.compute),
+    ))
     .subscribe(
         on_next=_safe_render("expanded", expanded.render),
         on_error=lambda e: _safe_stderr_write(
@@ -917,7 +965,9 @@ expanded.set_recents_drawer(recents_drawer)
 
 _recents_subscription = (
     world.observable()
-    .pipe(ops.distinct_until_changed(key_mapper=RecentsDrawer.compute))
+    .pipe(ops.distinct_until_changed(
+        key_mapper=_safe_compute("recents", RecentsDrawer.compute),
+    ))
     .subscribe(
         on_next=_safe_render("recents", recents_drawer.render),
         on_error=lambda e: _safe_stderr_write(
