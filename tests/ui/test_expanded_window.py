@@ -889,9 +889,11 @@ def test_row_meta_shows_cost_when_details_available(qtbot):
     btn = panel._rows[1]
     assert btn.findChild(_QL, "name_label").text() == "cc-learning"
     assert btn.findChild(_QL, "meta_label").text() == "$2.67"
-    # Hover tooltip carries the full title + full cwd so the user can
-    # read what the inline labels truncate at the panel boundary.
-    assert btn.toolTip() == "cc-learning\n/some/path/foo"
+    # Short name + short cwd both fit — _sync_name_tooltip leaves the
+    # row tooltip empty so hover doesn't echo already-visible text.
+    # The "long content triggers tooltip" path is covered by
+    # TestNameElisionTooltip below.
+    assert btn.toolTip() == ""
 
 
 def test_row_meta_renders_dash_when_no_details(qtbot):
@@ -901,6 +903,133 @@ def test_row_meta_renders_dash_when_no_details(qtbot):
     panel._render_sessions([_session(7, "/proj/foo")])
     btn = panel._rows[7]
     assert btn.findChild(_QL, "meta_label").text() == "—"
+
+
+class TestNameElisionTooltip:
+    """User feedback 2026-05-23/05-25: long session names and long
+    cwd paths get visually elided in the row; hover should reveal
+    both. Short names + short cwds stay tooltip-free so hover
+    doesn't echo already-visible content."""
+
+    def test_long_name_elided_shows_full_in_tooltip(self, qtbot):
+        from PySide6.QtWidgets import QLabel as _QL
+        panel = _panel_with_session(qtbot)
+        panel._render_sessions([_session(1, "/proj/foo")])
+        btn = panel._rows[1]
+        name_label = btn.findChild(_QL, "name_label")
+        long_name = "Optimize code review prompt caching strategy"
+        name_label.setText(long_name)
+        # Force elision: shrink the label below its sizeHint width.
+        name_label.resize(80, name_label.height())
+        btn._sync_name_tooltip()
+        # Tooltip carries full name + full cwd (cwd "/proj/foo" fits
+        # but the tooltip composes both when either label is elided).
+        assert btn.toolTip() == f"{long_name}\n/proj/foo"
+
+    def test_short_name_fits_no_tooltip(self, qtbot):
+        from PySide6.QtWidgets import QLabel as _QL
+        panel = _panel_with_session(qtbot)
+        panel._render_sessions([_session(1, "/proj/foo")])
+        btn = panel._rows[1]
+        name_label = btn.findChild(_QL, "name_label")
+        name_label.setText("cc")
+        # Give the label plenty of room — sizeHint < width → no elide.
+        name_label.resize(500, name_label.height())
+        btn._sync_name_tooltip()
+        assert btn.toolTip() == ""
+
+    def test_focus_unavailable_keeps_diagnostic_tooltip(self, qtbot):
+        """When the row's session lacks FOCUS capability, _update_row
+        installs a multi-line diagnostic tooltip. The elided-name
+        sync must not clobber it — that's what ``_owns_name_tooltip``
+        guards."""
+        from PySide6.QtWidgets import QLabel as _QL
+        panel = _panel_with_session(qtbot)
+        panel._render_sessions([_session(1, "/proj/foo")])
+        btn = panel._rows[1]
+        # Simulate _update_row's no-FOCUS branch.
+        diagnostic = "Click-to-focus unavailable for this session.\n..."
+        btn._owns_name_tooltip = False
+        btn.setToolTip(diagnostic)
+        # Even with a deliberately elided name, sync stays a no-op.
+        name_label = btn.findChild(_QL, "name_label")
+        name_label.setText("a very long elided name that would normally trigger reveal")
+        name_label.resize(40, name_label.height())
+        btn._sync_name_tooltip()
+        assert btn.toolTip() == diagnostic
+
+    def test_active_row_with_rate_label_preserves_min_name_width(self, qtbot):
+        """User report image#37 2026-05-23: cc-learning (active session
+        with tokens_per_min > 0) had name squeezed to ~58 px showing
+        "cc-…" — the visible rate_label ("1.2k tk/min") ate outer
+        width, and name_label's Maximum policy + _ElidingLabel.
+        minimumSizeHint=0 let the layout shrink the name to nothing
+        before squeezing status_inline.  The 100 px minimumWidth
+        guarantees ~6 characters + "…" of name stay visible no matter
+        what the right-side cluster claims."""
+        from PySide6.QtWidgets import QLabel as _QL
+        from claude_island.core.snapshot import _degraded_view, SessionGroup
+        from claude_island.core.session_phase import SessionPhase
+        from claude_island.core.capabilities import Capability, FocusGranularity
+        from dataclasses import replace as _replace
+        panel = _panel_with_session(qtbot)
+        sess = _session(1, "/proj/foo")
+        v = _replace(
+            _degraded_view(sess),
+            phase=SessionPhase.THINKING,
+            name="cc-learning",
+            adapter_id="test",
+            focus_granularity=FocusGranularity.APP,
+            capabilities=frozenset({Capability.FOCUS}),
+            tokens_per_min=1200,
+        )
+        panel._render_session_groups((SessionGroup(
+            group_id="t:1", title_hint=None, adapter_id="test", views=(v,),
+        ),))
+        btn = panel._rows[1]
+        name_label = btn.findChild(_QL, "name_label")
+        # Render path's title resolution may produce something other
+        # than the view.name (it prefers details.name / ai_title).
+        # Drive the label directly to test the LAYOUT contract: a
+        # squeezed-by-rate-label row must still allocate ≥100 px to
+        # name, and HoverRow._sync_name_tooltip must install the row
+        # tooltip when the visible form gets elided.
+        name_label.setText("cc-learning")
+        btn.resize(btn.size())  # nudge layout to re-evaluate
+        btn._sync_name_tooltip()
+        # Layout floor must hold even under squeeze pressure.
+        assert name_label.width() >= 100, (
+            f"name_label.width()={name_label.width()}, expected ≥100"
+        )
+        # Tooltip carries the full name + cwd iff the visible form
+        # was elided. Smart-merge content: "{name}\n{cwd}".
+        assert name_label.text() == "cc-learning"
+        if _QL.text(name_label) != "cc-learning":
+            assert btn.toolTip() == "cc-learning\n/proj/foo"
+
+    def test_resize_event_resyncs_tooltip(self, qtbot):
+        """Re-evaluating on resizeEvent is what keeps the tooltip
+        accurate when the panel itself changes width (or a sibling
+        column reclaims body space)."""
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QResizeEvent
+        from PySide6.QtCore import QSize
+        from PySide6.QtWidgets import QLabel as _QL
+        panel = _panel_with_session(qtbot)
+        panel._render_sessions([_session(1, "/proj/foo")])
+        btn = panel._rows[1]
+        name_label = btn.findChild(_QL, "name_label")
+        long_name = "Optimize code review prompt caching strategy"
+        name_label.setText(long_name)
+        # Step 1: narrow → elided → tooltip carries name + cwd
+        name_label.resize(80, name_label.height())
+        ev = QResizeEvent(btn.size(), btn.size())
+        btn.resizeEvent(ev)
+        assert btn.toolTip() == f"{long_name}\n/proj/foo"
+        # Step 2: widen → not elided → tooltip cleared
+        name_label.resize(800, name_label.height())
+        btn.resizeEvent(ev)
+        assert btn.toolTip() == ""
 
 
 def test_row_has_custom_context_menu_policy(qtbot):
@@ -2980,11 +3109,11 @@ class TestHighCostRowAlert:
         expected_tint = _Lab.red_warm.lstrip("#").lower()
         assert expected_tint in css.lower()
         assert "600" in css  # font-weight bold-ish
-        # Row-level tooltip carries title + cwd ONLY. Regression guard
-        # against re-introducing prompt/response/terminal content,
-        # which covered too much screen and shadowed the labels the
-        # user wanted to read.
-        assert btn.toolTip() == "x\n/a"
+        # Short name ("x") + short cwd ("/a") both fit — no elision,
+        # no tooltip. _sync_name_tooltip only fires when something is
+        # actually hidden. The elided-content tooltip path is covered
+        # by TestNameElisionTooltip.
+        assert btn.toolTip() == ""
 
     def test_running_high_cost_independent_signals(self, qtbot):
         """A session that is BOTH running AND high-cost runs the
@@ -3086,9 +3215,10 @@ class TestHighCostRowAlert:
         btn = p._rows[1]
         meta = btn.findChild(QLabel, "meta_label")
         assert meta.styleSheet() == _STYLE_COST_DEFAULT
-        # Hover tooltip carries title + cwd (see test_high_cost_idle...
-        # for the regression-guard rationale on this format).
-        assert btn.toolTip() == "x\n/a"
+        # Short name + short cwd both fit — _sync_name_tooltip leaves
+        # the tooltip empty (see TestNameElisionTooltip for the
+        # elided-content path).
+        assert btn.toolTip() == ""
 
     def test_low_cost_dot_keeps_default_glyph(self, qtbot):
         """Cost below threshold ⇒ glyph stays in IDLE state (single

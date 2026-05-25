@@ -404,6 +404,57 @@ class PendingDecisionRegistry:
         )
         return True
 
+    def evict_stale_pending(
+        self,
+        session_uuid: str,
+        *,
+        except_tool_use_id: str | None = None,
+    ) -> int:
+        """Drop pending PRE_TOOL_USE entries for ``session_uuid`` whose
+        ``tool_use_id`` differs from ``except_tool_use_id``.
+
+        Used when a NEW PreToolUse / PermissionRequest arrives for the
+        session: any older entries with a different tool_use_id are
+        stale orphans. The classic trigger is AskUserQuestion declined
+        in the terminal — Claude Code emits no PostToolUse for a
+        declined question (no tool result to report), so
+        ``_maybe_mark_resolved_by_post`` never matches, and the UI card
+        sits stuck for the full 598 s wait timeout. When Claude
+        proceeds to the next tool, this sweeps the orphan.
+
+        Entries with the SAME tool_use_id as ``except_tool_use_id`` (or
+        with no tool_use_id when except is None) are preserved — they
+        represent the active permission request currently being routed.
+
+        Like :meth:`evict_session_pending`, attaches no Decision; the
+        waiting server thread sees ``entry.decision is None`` and
+        HookServer encodes ``"defer"``.
+
+        Returns count dropped. No-op on empty ``session_uuid``.
+        """
+        if not session_uuid:
+            return 0
+        with self._lock:
+            to_drop = [
+                did for did, e in self._entries.items()
+                if (
+                    not e.event.is_set()
+                    and e.request.session_uuid == session_uuid
+                    and e.request.tool_use_id != except_tool_use_id
+                )
+            ]
+            for did in to_drop:
+                entry = self._entries.pop(did)
+                entry.event.set()
+        if to_drop:
+            self._on_change()
+            log.info(
+                "evicted %d stale pending decision(s) for session %s "
+                "(except tool_use_id=%r)",
+                len(to_drop), session_uuid, except_tool_use_id,
+            )
+        return len(to_drop)
+
     def evict_session_pending(self, session_uuid: str) -> int:
         """Drop every pending entry belonging to ``session_uuid``.
 

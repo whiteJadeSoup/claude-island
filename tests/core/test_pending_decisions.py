@@ -810,6 +810,106 @@ class TestEvictSessionPending:
         assert dropped == 0
 
 
+# ── evict_stale_pending — orphan AskUserQuestion cleanup ────────────
+
+
+class TestEvictStalePending:
+    """The decline-in-terminal path: Claude Code emits no PostToolUse
+    when the user declines an AskUserQuestion in the TUI (no tool
+    result to report). Stop doesn't fire either because the turn
+    continues. The pending card sits stuck until the 598 s timeout.
+
+    evict_stale_pending is called on the NEXT PreToolUse /
+    PermissionRequest / UserPromptSubmit for the same session — at
+    that point the orphan is conclusively stale and the UI card
+    must disappear."""
+
+    def test_evicts_other_tool_use_ids_keeps_current(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        old = _req(session_uuid="u1", tool_use_id="tu_old", tool_name="AskUserQuestion")
+        new = _req(session_uuid="u1", tool_use_id="tu_new", tool_name="Bash")
+        registry.register(old)
+        registry.register(new)
+
+        dropped = registry.evict_stale_pending("u1", except_tool_use_id="tu_new")
+
+        assert dropped == 1
+        assert tuple(v.id for v in registry.snapshot()) == (new.id,)
+
+    def test_evicts_all_when_except_is_none(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        a = _req(session_uuid="u1", tool_use_id="tu_a")
+        b = _req(session_uuid="u1", tool_use_id="tu_b")
+        registry.register(a)
+        registry.register(b)
+
+        # except_tool_use_id=None matches no entry (tool_use_id is
+        # always a string when registered), so all drop.
+        dropped = registry.evict_stale_pending("u1", except_tool_use_id=None)
+
+        assert dropped == 2
+        assert registry.snapshot() == ()
+
+    def test_leaves_other_session_alone(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        a = _req(session_uuid="u1", tool_use_id="tu_a")
+        b = _req(session_uuid="u2", tool_use_id="tu_b")
+        registry.register(a)
+        registry.register(b)
+
+        dropped = registry.evict_stale_pending("u1", except_tool_use_id=None)
+
+        assert dropped == 1
+        assert tuple(v.id for v in registry.snapshot()) == (b.id,)
+
+    def test_empty_session_uuid_is_no_op(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        a = _req(session_uuid="u1", tool_use_id="tu_a")
+        registry.register(a)
+        dropped = registry.evict_stale_pending("", except_tool_use_id=None)
+        assert dropped == 0
+        assert len(registry.snapshot()) == 1
+
+    def test_already_resolved_entries_left_alone(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        req = _req(session_uuid="u1", tool_use_id="tu_a")
+        registry.register(req)
+        registry.resolve(req.id, Decision(result=DecisionResult.ALLOW))
+        dropped = registry.evict_stale_pending("u1", except_tool_use_id=None)
+        # Already-resolved entries skipped — wait() side will pop them.
+        assert dropped == 0
+
+    def test_wait_returns_None_after_evict(
+        self,
+        registry: PendingDecisionRegistry,
+    ):
+        """A thread parked in wait() on a stale entry wakes up
+        immediately so HookServer can encode 'defer' and unblock its
+        own client connection."""
+        req = _req(timeout_s=5.0, session_uuid="u1", tool_use_id="tu_x")
+        registry.register(req)
+
+        def _evictor():
+            time.sleep(0.05)
+            registry.evict_stale_pending("u1", except_tool_use_id="tu_y")
+
+        t = threading.Thread(target=_evictor)
+        t.start()
+        result = registry.wait(req.id, timeout_s=5.0)
+        t.join(timeout=1.0)
+        assert result is None
+
+
 # ── PROMPT-flavoured projection ──────────────────────────────────────
 
 

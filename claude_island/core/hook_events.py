@@ -289,6 +289,16 @@ class SessionLiveState:
     # None when the hook didn't ship one (older hook.py, capture failure,
     # or session arrived to state machine via non-SessionStart events).
     jump_target: JumpTarget | None = None
+    # Plan F (Proposal F, 2026-05-24): the renderable preview of the
+    # tool's input — the Bash command line, the file path being read,
+    # the AskUserQuestion text. Forwarded from
+    # ``ToolStarted.tool_input_preview`` (already extracted at the hook
+    # boundary by ``_extract_tool_input_preview``). The UI uses this to
+    # render a third "ticker" row below cwd/[model] when the session
+    # is in TOOL_USE. May be None even during TOOL_USE — the extractor
+    # falls back to None when tool_input has no renderable single
+    # string (rare but possible for novel MCP tools).
+    current_tool_input: str | None = None
 
     def __post_init__(self) -> None:
         # ENDED clears overlays checked FIRST because the next two iff
@@ -306,6 +316,11 @@ class SessionLiveState:
                     f"phase=ENDED requires pending_permission_tool=None, got "
                     f"pending={self.pending_permission_tool!r}"
                 )
+            if self.current_tool_input is not None:
+                raise AssertionError(
+                    f"phase=ENDED requires current_tool_input=None, got "
+                    f"current_tool_input={self.current_tool_input!r}"
+                )
             return
         # Each remaining invariant is independently checked so the error
         # message tells you which one failed (a single big assert with
@@ -321,6 +336,19 @@ class SessionLiveState:
             raise AssertionError(
                 f"phase=WAITING_APPROVAL iff pending_permission_tool!=None violated: "
                 f"phase={self.phase}, pending={self.pending_permission_tool!r}"
+            )
+        # Plan F invariant: current_tool_input is non-None ⇒ phase=TOOL_USE.
+        # (TOOL_USE alone does NOT imply current_tool_input is set —
+        # the hook's extractor may have returned None for an opaque
+        # tool_input shape; UI then renders no ticker line and degrades
+        # to the same 2-line look as THINKING.)
+        if (
+            self.current_tool_input is not None
+            and self.phase != SessionPhase.TOOL_USE
+        ):
+            raise AssertionError(
+                f"current_tool_input set requires phase=TOOL_USE, got "
+                f"phase={self.phase}, current_tool_input={self.current_tool_input!r}"
             )
 
 

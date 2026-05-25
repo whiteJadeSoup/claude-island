@@ -437,7 +437,7 @@ class TestHookLivePhaseIdleOverride:
     """
 
     @staticmethod
-    def _live(phase, uuid="uuid-1", tool=None):
+    def _live(phase, uuid="uuid-1", tool=None, tool_input=None):
         return SessionLiveState(
             session_uuid=uuid,
             phase=phase,
@@ -445,6 +445,7 @@ class TestHookLivePhaseIdleOverride:
             started_at=datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc),
             last_hook_at=datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc),
             current_tool=tool,
+            current_tool_input=tool_input,
         )
 
     def _compose(self, *, live, pid_status):
@@ -466,10 +467,13 @@ class TestHookLivePhaseIdleOverride:
         )
 
     def test_hook_tool_use_with_pid_idle_renders_as_idle(self):
-        live = self._live(SessionPhase.TOOL_USE, tool="Bash")
+        live = self._live(SessionPhase.TOOL_USE, tool="Bash", tool_input="ls -la")
         view = self._compose(live=live, pid_status="idle")
         assert view.phase == SessionPhase.IDLE
         assert view.current_tool is None
+        # Plan F: idle override must also drop current_tool_input,
+        # otherwise the view invariant fires (cti non-None ⇒ TOOL_USE).
+        assert view.current_tool_input is None
 
     def test_hook_thinking_with_pid_idle_renders_as_idle(self):
         live = self._live(SessionPhase.THINKING)
@@ -489,10 +493,27 @@ class TestHookLivePhaseIdleOverride:
         assert view.phase == SessionPhase.IDLE
 
     def test_hook_tool_use_with_pid_busy_preserves_tool_use(self):
-        live = self._live(SessionPhase.TOOL_USE, tool="Bash")
+        live = self._live(
+            SessionPhase.TOOL_USE,
+            tool="Bash",
+            tool_input="pytest tests/test_login.py",
+        )
         view = self._compose(live=live, pid_status="busy")
         assert view.phase == SessionPhase.TOOL_USE
         assert view.current_tool == "Bash"
+        # Plan F: command preview must travel to the view so the
+        # row-ticker has something to render.
+        assert view.current_tool_input == "pytest tests/test_login.py"
+
+    def test_plan_f_tool_use_with_no_tool_input_surfaces_none(self):
+        """The hook's ``_extract_tool_input_preview`` returns None for
+        opaque MCP tools. View must keep current_tool_input=None then
+        — the UI degrades to no ticker line."""
+        live = self._live(SessionPhase.TOOL_USE, tool="ExoticMcp", tool_input=None)
+        view = self._compose(live=live, pid_status="busy")
+        assert view.phase == SessionPhase.TOOL_USE
+        assert view.current_tool == "ExoticMcp"
+        assert view.current_tool_input is None
 
     def test_hook_idle_with_pid_busy_stays_idle(self):
         # Hook fresher than pid.json — keep hook's IDLE without override.
@@ -500,15 +521,31 @@ class TestHookLivePhaseIdleOverride:
         view = self._compose(live=live, pid_status="busy")
         assert view.phase == SessionPhase.IDLE
 
-    def test_hook_compacting_with_pid_idle_preserves_compacting(self):
-        """B-001/C-003 regression: COMPACTING is intentionally EXCLUDED
-        from the idle-override. Compaction's closing event is
-        SessionStart(source='compact'), which is reliably delivered, so
-        the staleness motivation that drove the override doesn't apply.
-        Whether claude writes status='idle' during /compact is
-        undocumented; the safe default is to trust the live phase."""
+    def test_hook_compacting_with_pid_idle_renders_as_idle(self):
+        """User report 2026-05-23: ``/compact`` with "Not enough
+        messages to compact" fires PreCompact (phase → COMPACTING)
+        but errors before spawning a new session, so the
+        SessionStart(source='compact') event that normally closes
+        the compact cycle never arrives. The phase stays stuck in
+        COMPACTING until the next PromptSubmitted, even though
+        Claude is back at the prompt (probe-confirmed
+        ``pid.json.status='idle'``).
+
+        Fix: COMPACTING joins the idle-override set so the
+        authoritative pid.json signal can recover from this
+        dropped-closing-event case, same as it already does for
+        THINKING / TOOL_USE / WAITING_APPROVAL."""
         live = self._live(SessionPhase.COMPACTING)
         view = self._compose(live=live, pid_status="idle")
+        assert view.phase == SessionPhase.IDLE
+
+    def test_hook_compacting_with_pid_busy_preserves_compacting(self):
+        """The override only fires when pid.json reports idle —
+        during a real compact in progress (status='busy'), the
+        live COMPACTING phase is preserved so the UI still shows
+        "compacting · Ns" until the compact finishes."""
+        live = self._live(SessionPhase.COMPACTING)
+        view = self._compose(live=live, pid_status="busy")
         assert view.phase == SessionPhase.COMPACTING
 
     def test_hook_tool_use_with_no_pid_status_preserves_tool_use(self):

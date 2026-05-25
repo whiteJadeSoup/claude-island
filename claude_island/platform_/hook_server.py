@@ -362,9 +362,30 @@ class HookServer:
         # would never have prompted. That over-intercepted, so the
         # approval flow now lives under PermissionRequest, which Claude
         # fires only when it actually intends to ask the user.
+        if hook_name == "PreToolUse":
+            # Any older pending PRE_TOOL_USE for this session whose
+            # tool_use_id differs from the current event's is stale.
+            # The classic case: AskUserQuestion declined in the terminal
+            # — Claude emits no PostToolUse (no tool result), so the
+            # _maybe_mark_resolved_by_post path never fires and the card
+            # sits stuck for 598 s. When Claude moves on to the next
+            # tool, this sweeps the orphan. PermissionRequest will fire
+            # right after PreToolUse and register the fresh entry for
+            # the current tool_use_id — the matching except_tool_use_id
+            # here guards against evicting that one before it lands.
+            self._evict_stale_for_session(payload)
+            return b"{}"
         if hook_name == "PermissionRequest":
+            # Same orphan-sweep as PreToolUse — defensive in case a
+            # permission check fires without a preceding PreToolUse
+            # (e.g. an MCP / dynamic-tool path).
+            self._evict_stale_for_session(payload)
             return self._handle_permission_request(payload)
         if hook_name == "UserPromptSubmit":
+            # New prompt → previous turn's decisions are all moot,
+            # even those that share a tool_use_id with anything (which
+            # never happens across turns anyway). Full session sweep.
+            self._evict_full_session(payload)
             return self._handle_user_prompt_submit(payload)
         if hook_name in ("Stop", "StopFailure"):
             self._handle_stop(payload)
@@ -382,6 +403,37 @@ class HookServer:
             self._maybe_mark_resolved_by_post(payload, hook_name)
             return b"{}"
         return b"{}"
+
+    def _evict_stale_for_session(self, payload: dict) -> None:
+        """Sweep pending PRE_TOOL_USE entries for this payload's session
+        whose tool_use_id differs from the payload's own. Best-effort —
+        any failure stays silent so the dispatch keeps going."""
+        if self._pending is None:
+            return
+        try:
+            uuid = _safe_str(payload.get("session_id"))
+            if not uuid:
+                return
+            tool_use_id = _str_or_none(payload.get("tool_use_id"))
+            self._pending.evict_stale_pending(
+                uuid, except_tool_use_id=tool_use_id,
+            )
+        except Exception:
+            log.exception("evict_stale_pending raised; ignored")
+
+    def _evict_full_session(self, payload: dict) -> None:
+        """Sweep ALL pending entries for this payload's session.
+        Used on UserPromptSubmit (a new turn invalidates everything
+        from the previous turn)."""
+        if self._pending is None:
+            return
+        try:
+            uuid = _safe_str(payload.get("session_id"))
+            if not uuid:
+                return
+            self._pending.evict_session_pending(uuid)
+        except Exception:
+            log.exception("evict_session_pending raised; ignored")
 
     # ── bidirectional handlers ──────────────────────────────────────────
 

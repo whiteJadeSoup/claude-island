@@ -270,20 +270,42 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         from claude_island.platform_ import win32_console
         from claude_island.platform_.wt_session_title import sentinel_title
 
-        # GC: drop cache entries for pids that left views. All three
-        # caches GC'd together — a returning pid (OS recycle, transient
-        # orphan window) gets a fresh title-set attempt and a fresh
-        # wt_hwnd walk.
-        alive_pids = {v.session.pid for v in views}
+        # GC: drop cache entries for pids that no longer exist at the
+        # OS level.
+        #
+        # Why pid-existence and not "pid in this call's views":
+        # ``dispatcher.group_sessions`` may invoke this adapter's
+        # ``group()`` MULTIPLE times per snap — once per routing
+        # bucket (jump_target-routed sessions in one bucket, legacy
+        # can_handle-routed in another). The view-scoped GC that lived
+        # here previously trimmed the caches to whichever bucket's
+        # pids were in the current call, evicting the OTHER bucket's
+        # still-alive pids. Every snap, both calls fired AttachConsole
+        # afresh — and any transient AttachConsole failure under load
+        # then dropped a row from the snap (the flicker bug observed
+        # 2026-05-24, captured in flicker.log around 22:47:20: bucket
+        # A = [cc-learning] and bucket B = [claude-island,
+        # build-mini-cc] thrashed each other's cache).
+        #
+        # ``psutil.pid_exists`` is a cheap O(1)-ish syscall (Windows
+        # PssCaptureSnapshot under the hood). Pid recycle is handled
+        # at the call site by win32 handle validation
+        # (``GetWindowText`` returning "" on dead conhost); a stale
+        # cache value past pid recycle is recovered next probe.
+        import psutil
         if self._conpty_cache:
             self._conpty_cache = {
-                p: h for p, h in self._conpty_cache.items() if p in alive_pids
+                p: h for p, h in self._conpty_cache.items()
+                if psutil.pid_exists(p)
             }
         if self._title_set_attempted:
-            self._title_set_attempted &= alive_pids
+            self._title_set_attempted = {
+                p for p in self._title_set_attempted if psutil.pid_exists(p)
+            }
         if self._wt_hwnd_cache:
             self._wt_hwnd_cache = {
-                p: h for p, h in self._wt_hwnd_cache.items() if p in alive_pids
+                p: h for p, h in self._wt_hwnd_cache.items()
+                if psutil.pid_exists(p)
             }
 
         # Invalidate the wt_hwnd cache on WT-window-set change.

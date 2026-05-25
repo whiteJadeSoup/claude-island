@@ -153,6 +153,14 @@ class SessionView:
     # Tool currently in use (only when phase == TOOL_USE, otherwise None).
     # Populated from SessionLiveState.current_tool.
     current_tool: str | None = None
+    # Plan F (2026-05-24): tool-input preview for the row's third-line
+    # "ticker" — Bash command line, file path being read, etc. Sourced
+    # from ``SessionLiveState.current_tool_input`` which forwards
+    # ``ToolStarted.tool_input_preview``. Invariant parallels the live
+    # state: non-None only when ``phase == TOOL_USE``. May be None even
+    # in TOOL_USE when the hook's extractor couldn't pull a single
+    # renderable string out of tool_input.
+    current_tool_input: str | None = None
     # Latest user prompt seen on this session (truncated to 200 chars at
     # the hook boundary). UI uses this as the row preview text.
     last_prompt: str | None = None
@@ -203,6 +211,18 @@ class SessionView:
         assert self.is_high_cost == (self.cost_usd >= HIGH_COST_USD_THRESHOLD), (
             f"SessionView invariant violated: cost_usd={self.cost_usd}, "
             f"is_high_cost={self.is_high_cost}"
+        )
+        # Plan F invariant — current_tool_input non-None ⇒ phase=TOOL_USE.
+        # Mirrors SessionLiveState.__post_init__; protects the UI from
+        # accidentally getting a tool-input string on a non-TOOL_USE row
+        # (which would then render a stale ticker line).
+        assert (
+            self.current_tool_input is None
+            or self.phase == SessionPhase.TOOL_USE
+        ), (
+            f"SessionView invariant violated: current_tool_input set "
+            f"but phase={self.phase!r}, "
+            f"current_tool_input={self.current_tool_input!r}"
         )
 
     @property
@@ -623,21 +643,25 @@ def compose_session_view(
         # (PostToolUse / Stop dropped after a POST timeout, app restart
         # between Pre and Post, an API error mid-turn that prevents
         # Stop from firing), which would otherwise pin the phase at
-        # THINKING / TOOL_USE / WAITING_APPROVAL forever. pid.json is
-        # written by claude on every status transition, so an "idle"
-        # reading is authoritative — fall back to a clean IDLE view.
+        # THINKING / TOOL_USE / WAITING_APPROVAL / COMPACTING forever.
+        # pid.json is written by claude on every status transition, so
+        # an "idle" reading is authoritative — fall back to a clean
+        # IDLE view.
         #
-        # COMPACTING is intentionally EXCLUDED from this override
-        # (B-001/C-003): compaction's closing event is SessionStart
-        # (source='compact'), which is reliably delivered, so the
-        # staleness motivation doesn't apply. Whether claude writes
-        # status='idle' or 'busy' during /compact is undocumented; the
-        # safe default is to trust the live phase for COMPACTING and
-        # let the SessionStart event do the IDLE transition.
+        # COMPACTING was previously excluded under the assumption that
+        # SessionStart(source='compact') would always close the
+        # compact cycle. User report 2026-05-23 broke that assumption:
+        # ``/compact`` with "Not enough messages to compact" emits
+        # PreCompact but errors before spawning a new session, so no
+        # SessionStart ever fires. Direct probe of pid.json in that
+        # state confirmed Claude writes ``status='idle'`` once back
+        # at the prompt — same signal as the other stuck-phase cases,
+        # so the same override applies.
         _idle_override_phases = (
             SessionPhase.THINKING,
             SessionPhase.TOOL_USE,
             SessionPhase.WAITING_APPROVAL,
+            SessionPhase.COMPACTING,
         )
         if status_word == "idle" and live.phase in _idle_override_phases:
             log.info(
@@ -648,9 +672,22 @@ def compose_session_view(
             )
             phase = SessionPhase.IDLE
             current_tool = None
+            # idle-override leaves the hook-state's tool_input alone but
+            # we MUST drop it from the view too — the invariant
+            # current_tool_input non-None ⇒ phase=TOOL_USE would fire.
+            current_tool_input = None
         else:
             phase = live.phase
             current_tool = live.current_tool
+            # Plan F: ride along on the same gating as current_tool —
+            # only forward when we are actually in TOOL_USE. live.cti
+            # is already guaranteed-None outside TOOL_USE by the state
+            # machine's invariants, but be defensive.
+            current_tool_input = (
+                live.current_tool_input
+                if live.phase == SessionPhase.TOOL_USE
+                else None
+            )
         last_prompt = live.last_prompt
         last_assistant_message = live.last_assistant_message
         jump_target = live.jump_target
@@ -661,6 +698,7 @@ def compose_session_view(
             active_threshold_s=active_threshold_s,
         )
         current_tool = None
+        current_tool_input = None
         last_prompt = None
         last_assistant_message = None
         # Even for ENDED sessions, preserve jump_target so the UI can
@@ -722,6 +760,7 @@ def compose_session_view(
         session=session,
         phase=phase,
         current_tool=current_tool,
+        current_tool_input=current_tool_input,
         last_prompt=last_prompt,
         last_assistant_message=last_assistant_message,
         jump_target=jump_target,

@@ -520,6 +520,12 @@ class HoverRow(QPushButton):
         self._hovered = False
         self._running = False
         self._running_alpha = 0.0  # 0..1; driven by _running_anim
+        # Whether _sync_name_tooltip is allowed to manage self.toolTip().
+        # True for the normal click-to-focus path; flipped to False by
+        # _update_row when the session lacks FOCUS capability so the
+        # diagnostic "Click-to-focus unavailable…" tooltip set there
+        # doesn't get clobbered by our sync.
+        self._owns_name_tooltip: bool = True
         # Per-instance pulse colour — defaults to the class-level green
         # so legacy code paths that only call ``set_running(True)`` get
         # exactly the same paint output as before.  ``set_phase`` rebinds
@@ -631,6 +637,62 @@ class HoverRow(QPushButton):
         self._hovered = False
         self.update()
         return super().leaveEvent(event)
+
+    def resizeEvent(self, event):
+        # Row width can change for two reasons: (1) panel resize,
+        # (2) a sibling widget in the row (cost label, status glyph)
+        # grew/shrunk and reclaimed space from the body. Either way,
+        # whether the name_label is being elided may have changed —
+        # re-sync the row's tooltip so hover-reveal stays accurate.
+        super().resizeEvent(event)
+        self._sync_name_tooltip()
+
+    def _sync_name_tooltip(self) -> None:
+        """Show ``"{full_name}\\n{full_cwd}"`` as the row tooltip iff
+        either the name_label or the cwd_label is currently being
+        elided. No tooltip when both fit — avoids redundant echo of
+        already-visible text.
+
+        Skipped entirely when ``_owns_name_tooltip`` is False — that's
+        the path _update_row uses for the FOCUS-unavailable diagnostic
+        tooltip, which must take priority over the elision reveal.
+
+        Relies on _ElidingLabel: ``text()`` returns the full string
+        (not the elided form), ``sizeHint().width()`` returns the
+        QFontMetrics width of the full string. If sizeHint exceeds
+        the actually-allocated width, the label is visually eliding.
+        Labels with ``width() <= 0`` have not yet been laid out — skip
+        their elision check this pass; resizeEvent will re-run.
+        """
+        if not self._owns_name_tooltip:
+            return
+        name_label = self.findChild(QLabel, "name_label")
+        cwd_label = self.findChild(QLabel, "cwd_label")
+        # Pre-first-show: layout hasn't run yet — bail and wait for
+        # the resizeEvent that follows first layout.
+        if name_label is None or name_label.width() <= 0:
+            return
+        name_full = name_label.text() or ""
+        name_elided = (
+            bool(name_full)
+            and name_label.sizeHint().width() > name_label.width()
+        )
+        cwd_full = ""
+        cwd_elided = False
+        if cwd_label is not None and cwd_label.width() > 0:
+            cwd_full = cwd_label.text() or ""
+            cwd_elided = (
+                bool(cwd_full)
+                and cwd_label.sizeHint().width() > cwd_label.width()
+            )
+        if name_elided or cwd_elided:
+            desired = (
+                f"{name_full}\n{cwd_full}" if cwd_full else name_full
+            )
+        else:
+            desired = ""
+        if self.toolTip() != desired:
+            self.setToolTip(desired)
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -958,6 +1020,12 @@ _ROW_HEIGHT = 56
 # v4c: idle / ended rows collapse to a single line per prototype-v4c-
 # github.html, so the bottom row hides and the overall height drops.
 _ROW_HEIGHT_COMPACT = 36
+# Plan F (2026-05-24): TOOL_USE rows expand to 3 lines when a
+# ``current_tool_input`` preview is available — third line is the
+# command ticker (``╰─ pytest tests/test_login.py``). Height budget:
+# 8 + 13.5 (name) + 12 (cwd) + 14 (ticker) + 8 = 55.5; round to 72
+# so the ticker has comfortable descenders.
+_ROW_HEIGHT_3LINE = 72
 _ROW_PAD_H = 14
 
 # Activity heuristic for the row status text. Same threshold as the
@@ -1105,6 +1173,18 @@ class _ElidingLabel(QLabel):
         h = super().minimumSizeHint().height()
         return QSize(0, h)
 
+    # Width guard added to sizeHint to defeat QFontMetrics.elidedText's
+    # conservativeness: even when the available width exactly equals
+    # ``horizontalAdvance(full_text)``, elidedText still returns the
+    # ELIDED form on some platform/font combos (probe 2026-05-24 with
+    # Microsoft YaHei UI at pixelSize=11 needed +5 px to suppress).
+    # Without this, every row whose status_inline allocation lands on
+    # the exact sizeHint boundary would render as "thinking · turn 16…"
+    # instead of the full "thinking · turn 1670" — visible bug image#43.
+    # 6 px is small enough not to inflate the panel meaningfully but
+    # large enough to clear the platform fudge factor we've observed.
+    _SIZE_HINT_ELIDE_GUARD_PX = 6
+
     def sizeHint(self) -> "QSize":  # type: ignore[override]
         # Always report sizeHint based on the FULL text, NOT the
         # currently-displayed (possibly elided) form. Without this
@@ -1125,6 +1205,7 @@ class _ElidingLabel(QLabel):
             return super().sizeHint()
         metrics = QFontMetrics(self.font())
         w = metrics.horizontalAdvance(self._full_text)
+        w += self._SIZE_HINT_ELIDE_GUARD_PX
         h = super().sizeHint().height()
         return QSize(w, h)
 
@@ -1796,24 +1877,28 @@ def _fmt_short_elapsed(seconds: int) -> str:
 
 
 def _phase_inline_text(view) -> str:
-    """v4c: phase-tinted status text that sits inline next to the
-    session name on the top row.
+    """Plan F (2026-05-24): phase-tinted status text inline next to
+    the session name.
 
-    Format follows prototype-v4c-github.html's .row .status-text:
-      THINKING         → "· thinking"               (turn count not tracked)
-      TOOL_USE         → "· tool_use · ToolName"    (current tool from hook)
+    Format (Plan F revised):
+      THINKING         → "· thinking"                       (turn moved to IDLE)
+      TOOL_USE         → "· tool_use · ToolName · 1.2s"     (current_tool_input
+                                                            renders on its own
+                                                            ticker line below)
       WAITING_APPROVAL → "· awaiting consent · X elapsed"
-      COMPACTING       → "· compacting"
-      IDLE             → "· idle · X ago"           (last_activity relative)
-      ENDED            → "· ended · X ago"
+      COMPACTING       → "· compacting · 12s"
+      IDLE             → "· idle · X ago · N turns"         (turn count here)
+      ENDED            → "· ended · X ago · N turns"
+
+    Rationale: active rows now spend their status_inline budget on
+    live activity (tool/elapsed/etc.), and the turn count — which is
+    a historical cumulative — moves to the IDLE / ENDED rows where
+    the "what's this session been up to overall" framing fits.
     """
     from claude_island.core.session_phase import SessionPhase as _SP
     phase = getattr(view, "phase", _SP.IDLE)
     turn_count = getattr(view, "turn_count", 0) or 0
     if phase == _SP.THINKING:
-        # `· thinking · turn N` mirrors prototype "build-mini-cc thinking · turn 3".
-        if turn_count > 0:
-            return f"· thinking · turn {turn_count}"
         return "· thinking"
     if phase == _SP.TOOL_USE:
         tool = getattr(view, "current_tool", None)
@@ -1857,12 +1942,17 @@ def _phase_inline_text(view) -> str:
         return f"· ended{ago_part}{turn_part}"
     # IDLE
     last = getattr(view, "last_activity", None)
+    ago_part = ""
     if last is not None:
         try:
             delta = datetime.now(timezone.utc) - last.astimezone(timezone.utc)
-            return f"· idle · {_fmt_short_elapsed(int(delta.total_seconds()))} ago"
+            ago_part = f" · {_fmt_short_elapsed(int(delta.total_seconds()))} ago"
         except Exception:
             pass
+    # Plan F: turn count belongs on IDLE rows now.
+    turn_part = f" · {turn_count} turns" if turn_count > 0 else ""
+    if ago_part or turn_part:
+        return f"· idle{ago_part}{turn_part}"
     return ""
 
 
@@ -3731,47 +3821,28 @@ class ExpandedWindow(QWidget):
         self._summary_card = self._build_summary_card()
         root.addWidget(self._summary_card)
 
-        # ── Sessions header (with count badge + recents chip) ───────
+        # ── Sessions header ─────────────────────────────────────────
         # Count badge makes overflow discoverable: when the list scrolls,
         # the user sees "· 14" and knows there's more below the fold.
-        # The chip on the right surfaces dormant sessions (offline
-        # sessions on disk with no live process) — click opens the
-        # RecentsDrawer. Hidden when there are zero dormant sessions.
         # v4c: sessions title reads "N sessions · M awaiting consent"
         # instead of the all-caps "CLAUDE SESSIONS · N" — matches the
         # prototype-v4c-github.html card-head layout the user picked.
         # The label uses normal-case sans (not the v3 small-caps title
         # style) so it reads as content, not chrome.
+        #
+        # The "● Recents · N" chip that used to live to the right of
+        # this title was removed 2026-05-23 — the top-right ⌘J chip
+        # already exposes the same RecentsDrawer toggle, so the duplicate
+        # pill was just visual noise. The toggle slot below still feeds
+        # the ⌘J chip (see _top_jjk_chip below).
         self._sessions_title = mk_label("0 sessions", elide=False)
         self._sessions_title.setStyleSheet(
             f"color: {_LabColor.paper}; font-size: 12.5px; font-weight: 600;"
         )
-        # v4c Recents chip — rounded pill with a phosphor (green) dot
-        # signalling "dormant sessions exist".  Uses lab_palette so the
-        # tones stay in lock-step with everything else.
-        self._recents_chip = QPushButton("● Recents · 0")
-        self._recents_chip.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._recents_chip.setStyleSheet(
-            f"QPushButton {{"
-            f"  background: {_LabColor.ink};"
-            f"  color: {_LabColor.paper};"
-            f"  border: 1px solid {_LabColor.rule};"
-            f"  border-radius: 100px;"
-            f"  padding: 3px 9px;"
-            f"  font-size: 11px;"
-            f"  font-weight: 500;"
-            f"  text-align: left;"
-            f"}}"
-            f"QPushButton:hover {{"
-            f"  background: {_LabColor.surface_hi};"
-            f"  border-color: {_LabColor.rule_bright};"
-            f"}}"
-        )
-        self._recents_chip.setFlat(True)
-        self._recents_chip.setVisible(False)
-        # Toggle slot — wired from __main__.py via set_recents_toggle().
+        # Toggle slot — wired from __main__.py via set_recents_toggle()
+        # and consumed by both the (removed) _recents_chip and the
+        # still-present _top_jjk_chip.
         self._recents_toggle: Callable[[], None] | None = None
-        self._recents_chip.clicked.connect(self._on_recents_chip_clicked)
         # ── Pending decisions section (Bidirectional Hooks v1) ─────
         # Sits ABOVE the sessions header so any approval / question
         # card the user must act on is the first thing visible when
@@ -3796,7 +3867,6 @@ class ExpandedWindow(QWidget):
         sessions_header.setSpacing(6)
         sessions_header.addWidget(self._sessions_title)
         sessions_header.addStretch(1)
-        sessions_header.addWidget(self._recents_chip)
         root.addLayout(sessions_header)
 
         # ── Sessions scroll area ────────────────────────────────────
@@ -4004,12 +4074,6 @@ class ExpandedWindow(QWidget):
         self._pending_panel.render(snap.pending_decisions)
         self._render_session_groups(snap.session_groups)
         self._render_cards()
-        # Update history chip from dormant + launching counts (resume-offline
-        # feature). Hide entirely when zero — keeps the header clean for
-        # users who never closed terminals while island was running.
-        self.update_recents_count(
-            len(snap.dormant_sessions) + len(snap.launching_sessions)
-        )
 
     # ── Pending-decision rendering (Bidirectional Hooks v2) ─────────
     #
@@ -4122,30 +4186,6 @@ class ExpandedWindow(QWidget):
         suffix = "1 awaiting consent" if pending == 1 else f"{pending} awaiting consent"
         return f"{base} · {suffix}"
 
-    def update_recents_count(self, n: int) -> None:
-        """Refresh the chip's "● Recents · N" label.
-
-        v4c: chip stays visible at n == 0 too — its presence advertises
-        the ⌘J entry-point even when there are no dormant sessions yet,
-        and tucking it on a "● Recents · 0" label is less surprising
-        than a chip that pops in and out.  The dot tints by content:
-        phosphor when there's something to resume, paper_faint when not.
-        """
-        if n <= 0:
-            # Faint dot when nothing dormant — chip stays so ⌘J is
-            # discoverable as a permanent affordance.
-            text = "● Recents · 0"
-            self._recents_chip.setStyleSheet(
-                self._recents_chip.styleSheet().replace(
-                    f"color: {_LabColor.paper};",
-                    f"color: {_LabColor.paper_dim};",
-                )
-            )
-        else:
-            text = f"● Recents · {n}"
-        self._recents_chip.setText(text)
-        self._recents_chip.setVisible(True)
-
     def _on_recents_chip_clicked(self) -> None:
         if self._recents_toggle is not None:
             self._recents_toggle()
@@ -4236,9 +4276,6 @@ class ExpandedWindow(QWidget):
         self._last_struct_sig = new_struct_sig
         self._clear_session_layout()
         self._sessions_title.setText(self._sessions_title_text(total_views))
-        # History chip count is updated separately via update_recents_count;
-        # render() in __main__'s subscription wires the count from
-        # snap.dormant_sessions, not from session_groups.
 
         if not groups:
             self._show_placeholder()
@@ -4450,8 +4487,8 @@ class ExpandedWindow(QWidget):
         self._top_awaiting_pill.setVisible(False)
         lay.addWidget(self._top_awaiting_pill)
 
-        # ⌘J chip — opens the recents drawer (same handler the
-        # _recents_chip uses farther down the panel).
+        # ⌘J chip — opens the recents drawer (sole entry point; the
+        # in-panel "● Recents · N" chip was removed 2026-05-23).
         self._top_jjk_chip = QPushButton("⌘J")
         self._top_jjk_chip.setCursor(Qt.CursorShape.PointingHandCursor)
         self._top_jjk_chip.setFixedHeight(24)
@@ -5994,37 +6031,47 @@ class ExpandedWindow(QWidget):
         status_glyph.set_idle_visible(False)
         btn._status_glyph = status_glyph
 
-        # _ElidingLabel: project names / AI titles are user-supplied
-        # text. Two reasons we need the eliding variant here:
-        #   1. minimumSizeHint=0 stops a long name from propagating
-        #      its full width up the layout chain to ExpandedWindow,
-        #      which would override setFixedWidth(_PANEL_W=400) and
-        #      produce the QWindowsWindow::setGeometry mintrack=480
-        #      warning. setSizePolicy(Expanding, …) alone won't do
-        #      it — see _ElasticRichLabel docstring.
-        #   2. Visual elision (`…`) at paint time so an overflowing
-        #      name reads cleanly instead of getting hard-clipped
-        #      mid-character at the row boundary.
-        # v4c: name uses a plain QLabel (not ElidingLabel) so short
-        # session names render at their natural width without the
-        # eliding label's overzealous minimumSizeHint=0 collapsing
-        # them.  Maximum size policy + 280 px cap matches prototype's
-        # .body .name { max-width: 280px } — cwd elides first
-        # because it's the stretch slot next to name.
-        # v4c body order (matches prototype `.row .body` DOM order):
-        #   name → status_inline → cwd → chip
-        # FlowLayout wraps these into 1 or 2 visual lines based on
-        # available width — exactly as the CSS `flex-wrap: wrap`
-        # would.  No phase-based branching, no hidden inline siblings.
-        name_label = QLabel()
+        # _ElidingLabel: project names / AI-resolved titles are
+        # user-supplied text whose length varies wildly (basename
+        # "cc" vs. "Optimize code review prompt caching strategy").
+        # The previous design hard-capped width at 280 px and used a
+        # plain QLabel, which produced mid-character clipping when
+        # the title exceeded the cap (user feedback 2026-05-23
+        # "session 名称被截断了").  Now: no width cap, Maximum size
+        # policy + sizeHint=full-text-width means short names render
+        # at their natural width and long names take whatever the
+        # row offers, eliding gracefully with "…" when crowded.
+        # WA_TransparentForMouseEvents routes hover to the parent
+        # btn so HoverRow._sync_name_tooltip can install a row-level
+        # tooltip revealing the full name when elided.
+        #
+        # MinimumWidth = 100 px (~6 chars + "…") so an active row
+        # whose visible rate_label eats outer width can't squeeze
+        # name_label down to "cc-…".  Without this floor, Maximum
+        # policy + _ElidingLabel.minimumSizeHint=0 let the layout
+        # collapse the name to ~58 px (user report image#37 cc-learning
+        # row: rate_label "1.2k tk/min" + status_inline "thinking ·
+        # turn 1670" together squeezed body_widget from 510 → 330 px,
+        # and the name lost out to status_inline's Preferred policy).
+        # 100 is well under _PANEL_W (620) so it doesn't propagate
+        # past the panel boundary.
+        name_label = _ElidingLabel()
         name_label.setObjectName("name_label")
         name_label.setStyleSheet(_STYLE_NAME)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         name_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        name_label.setMaximumWidth(280)
+        name_label.setMinimumWidth(100)
         top_row.addWidget(name_label)
 
-        status_inline = QLabel("")
+        # status_inline switches from plain QLabel to _ElidingLabel
+        # so when the row gets squeezed (active session with visible
+        # rate_label), status_inline shrinks via "…" instead of
+        # hard-clipping the rightmost characters.  Without this, the
+        # turn counter half of "thinking · turn 1670" was being
+        # silently chopped off mid-digit.  Preferred policy stays —
+        # status_inline is what the layout shrinks once name_label's
+        # 100 px floor is hit.
+        status_inline = _ElidingLabel("")
         status_inline.setObjectName("status_inline")
         status_inline.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         status_inline.setStyleSheet(
@@ -6068,9 +6115,51 @@ class ExpandedWindow(QWidget):
         bottom_row.addWidget(model_chip)
         bottom_row.addStretch(1)
 
-        # Mount the two rows into body's QVBoxLayout.
+        # Plan F (2026-05-24): optional third "ticker" line for TOOL_USE
+        # rows. Carries the current Bash command / file path / etc.
+        # surfaced via SessionView.current_tool_input. Hidden by
+        # default; _update_row toggles visibility + row height based on
+        # phase + tool_input availability. The corner glyph (╰─)
+        # visually connects the ticker to the row above so the user
+        # reads it as "what THIS session is doing right now", not as
+        # a separate row.
+        ticker_row = QHBoxLayout()
+        ticker_row.setContentsMargins(0, 0, 0, 0)
+        ticker_row.setSpacing(4)
+
+        ticker_corner = QLabel("╰─")
+        ticker_corner.setObjectName("ticker_corner")
+        ticker_corner.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        ticker_corner.setStyleSheet(
+            f"color: {_LabColor.paper_faint}; font-size: 11px; "
+            f"font-family: {FontStack.mono_stack};"
+        )
+        ticker_row.addWidget(ticker_corner)
+
+        ticker_label = _ElidingLabel()
+        ticker_label.setObjectName("ticker_label")
+        ticker_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # Slightly brighter than cwd_label so the eye jumps to the
+        # current activity, but still secondary to the name/phase line.
+        ticker_label.setStyleSheet(
+            f"color: {_LabColor.phosphor}; font-size: 11px; "
+            f"font-family: {FontStack.mono_stack};"
+        )
+        ticker_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred,
+        )
+        ticker_row.addWidget(ticker_label)
+        ticker_row.addStretch(1)
+
+        # Hidden by default — _update_row reveals it only when phase
+        # is TOOL_USE and current_tool_input is non-empty.
+        ticker_corner.setVisible(False)
+        ticker_label.setVisible(False)
+
+        # Mount the rows into body's QVBoxLayout.
         body.addLayout(top_row)
         body.addLayout(bottom_row)
+        body.addLayout(ticker_row)
 
         # status_label retained as a 0×0 hidden child for legacy
         # callers that reach for it by objectName.
@@ -6346,6 +6435,36 @@ class ExpandedWindow(QWidget):
             cwd_label.setVisible(True)
         compact = False  # legacy flag, kept so downstream chip-sync still compiles
 
+        # Plan F: ticker line — shows the current Bash command / file
+        # path / etc. while phase == TOOL_USE AND
+        # current_tool_input is non-empty.
+        ticker_corner = btn.findChild(QLabel, "ticker_corner")
+        ticker_label = btn.findChild(QLabel, "ticker_label")
+        cti = getattr(view, "current_tool_input", None)
+        show_ticker = (
+            view.phase == _SP.TOOL_USE
+            and cti is not None
+            and cti.strip() != ""
+        )
+        if ticker_label is not None and ticker_corner is not None:
+            if show_ticker:
+                if ticker_label.text() != cti:
+                    ticker_label.setText(cti)
+                ticker_corner.setVisible(True)
+                ticker_label.setVisible(True)
+            else:
+                ticker_corner.setVisible(False)
+                ticker_label.setVisible(False)
+        # Animate the row height transition. setFixedHeight on every
+        # update is cheap; Qt only schedules a re-layout when the value
+        # changes. The TOOL_USE row alternates between the 2-line
+        # default and the 3-line ticker form within a turn — accept
+        # that visual jitter (each tool-call entry/exit) as the cost
+        # of seeing live activity (Plan F's stated trade-off).
+        target_height = _ROW_HEIGHT_3LINE if show_ticker else _ROW_HEIGHT
+        if btn.height() != target_height:
+            btn.setFixedHeight(target_height)
+
         meta_label = btn.findChild(QLabel, "meta_label")
         if meta_label is not None and meta_label.text() != meta_text:
             meta_label.setText(meta_text)
@@ -6380,11 +6499,12 @@ class ExpandedWindow(QWidget):
         if focus_supported:
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             # Hover tooltip surfaces what the inline labels truncate:
-            # the full session title and the full cwd path. The
-            # previous tooltip (last prompt + last response + terminal
-            # app) covered too much screen and shadowed the labels the
-            # user actually wanted to read.
-            btn.setToolTip(f"{title}\n{cwd_text}")
+            # full title and/or full cwd. _sync_name_tooltip checks
+            # both labels on every resize and on each row update; when
+            # neither is elided the tooltip stays empty so hover
+            # doesn't redundantly echo already-visible text.
+            btn._owns_name_tooltip = True
+            btn._sync_name_tooltip()
         else:
             btn.setCursor(Qt.CursorShape.ArrowCursor)
             # FOCUS gets stripped at compose time when no UI app
@@ -6392,9 +6512,10 @@ class ExpandedWindow(QWidget):
             # path: (1) tmux/screen daemonization severs the chain,
             # (2) Privacy & Security ▶ Automation has revoked the
             # System Events permission, (3) osascript hit a transient
-            # timeout. Hint at all three so the user can self-diagnose
-            # rather than assume tmux. The exact failure reason is
-            # logged at WARNING by ``_macos_common`` — see stderr.
+            # timeout. The diagnostic tooltip takes priority over the
+            # elided-name reveal — turn off the auto-sync so the next
+            # resizeEvent doesn't clobber it.
+            btn._owns_name_tooltip = False
             btn.setToolTip(
                 "Click-to-focus unavailable for this session.\n"
                 "Possible causes:\n"
