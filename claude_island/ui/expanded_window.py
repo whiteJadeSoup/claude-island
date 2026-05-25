@@ -1378,45 +1378,6 @@ _STYLE_CWD = (
 )
 
 
-def _row_tooltip(view: "SessionView") -> str:
-    """Compose the hover tooltip for a session row.
-
-    Mirrors open-vibe-island's session-detail summary: shows last
-    prompt + last assistant response + terminal context when those
-    fields are populated by the hook pipeline. Returns "" when there's
-    nothing interesting to show (caller treats "" as "no tooltip").
-
-    Format:
-        Prompt: explain the new hook pipeline
-        Last response: We refactored compose_session_view...
-        Terminal: Windows Terminal (pane b2d0e4f0)
-    """
-    last_prompt = getattr(view, "last_prompt", None) or ""
-    last_resp = getattr(view, "last_assistant_message", None) or ""
-    jt = getattr(view, "jump_target", None)
-
-    lines: list[str] = []
-    if last_prompt:
-        # Truncate display — the underlying SessionLiveState already
-        # has 200-char cap from the hook boundary, but defensive
-        # truncate here so future relaxation doesn't blow up the tooltip.
-        clipped = last_prompt if len(last_prompt) <= 180 else last_prompt[:177] + "…"
-        lines.append(f"Prompt: {clipped}")
-    if last_resp:
-        clipped = last_resp if len(last_resp) <= 180 else last_resp[:177] + "…"
-        lines.append(f"Last response: {clipped}")
-    if jt is not None:
-        ta = (jt.terminal_app or "").strip()
-        guid = (jt.wt_session_guid or "").strip()
-        if ta:
-            if guid:
-                # Show first 8 chars of guid — full is too long for tooltip
-                lines.append(f"Terminal: {ta} (pane {guid[:8]})")
-            else:
-                lines.append(f"Terminal: {ta}")
-    return "\n".join(lines)
-
-
 def _row_status_text(
     view: "SessionView",
 ) -> str:
@@ -6418,11 +6379,12 @@ class ExpandedWindow(QWidget):
         focus_supported = Capability.FOCUS in view.capabilities
         if focus_supported:
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            # Open-vibe-island parity (2026-05-14): when hook-captured
-            # data is available, surface it as a hover tooltip — last
-            # prompt, current tool, terminal app. This mirrors their
-            # session row showing summary text + tool icon.
-            btn.setToolTip(_row_tooltip(view))
+            # Hover tooltip surfaces what the inline labels truncate:
+            # the full session title and the full cwd path. The
+            # previous tooltip (last prompt + last response + terminal
+            # app) covered too much screen and shadowed the labels the
+            # user actually wanted to read.
+            btn.setToolTip(f"{title}\n{cwd_text}")
         else:
             btn.setCursor(Qt.CursorShape.ArrowCursor)
             # FOCUS gets stripped at compose time when no UI app

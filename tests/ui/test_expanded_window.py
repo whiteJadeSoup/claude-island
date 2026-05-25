@@ -889,9 +889,9 @@ def test_row_meta_shows_cost_when_details_available(qtbot):
     btn = panel._rows[1]
     assert btn.findChild(_QL, "name_label").text() == "cc-learning"
     assert btn.findChild(_QL, "meta_label").text() == "$2.67"
-    # The hover tooltip is now intentionally empty — replaced by
-    # right-click popup. Avoids two competing surfaces for the same info.
-    assert btn.toolTip() == ""
+    # Hover tooltip carries the full title + full cwd so the user can
+    # read what the inline labels truncate at the panel boundary.
+    assert btn.toolTip() == "cc-learning\n/some/path/foo"
 
 
 def test_row_meta_renders_dash_when_no_details(qtbot):
@@ -2711,65 +2711,6 @@ class TestRowStatusText:
         assert text.startswith("active ")
 
 
-class TestRowTooltip:
-    """Per-row hover tooltip carries hook-captured context:
-    last prompt + last response + terminal app. Open-vibe-island
-    parity (2026-05-14)."""
-
-    def test_empty_view_no_tooltip(self):
-        """A SessionView without hook data → empty tooltip (caller
-        treats "" as 'no tooltip set')."""
-        from claude_island.ui.expanded_window import _row_tooltip
-        from claude_island.core.snapshot import _degraded_view
-        v = _degraded_view(_session(1, "/a", ago_minutes=0))
-        assert _row_tooltip(v) == ""
-
-    def test_view_with_last_prompt_shows_prompt(self):
-        from claude_island.ui.expanded_window import _row_tooltip
-        from claude_island.core.snapshot import _degraded_view
-        from dataclasses import replace as _replace
-        v = _replace(
-            _degraded_view(_session(1, "/a", ago_minutes=0)),
-            last_prompt="explain the new hook pipeline",
-        )
-        tt = _row_tooltip(v)
-        assert "Prompt: explain the new hook pipeline" in tt
-
-    def test_view_with_jump_target_shows_terminal(self):
-        from claude_island.ui.expanded_window import _row_tooltip
-        from claude_island.core.snapshot import _degraded_view
-        from claude_island.core.hook_events import JumpTarget
-        from dataclasses import replace as _replace
-        v = _replace(
-            _degraded_view(_session(1, "/a", ago_minutes=0)),
-            jump_target=JumpTarget(
-                terminal_app="WindowsTerminal",
-                wt_session_guid="b2d0e4f0-1234-5678-90ab-cdef12345678",
-            ),
-        )
-        tt = _row_tooltip(v)
-        assert "Terminal: WindowsTerminal" in tt
-        assert "b2d0e4f0" in tt
-
-    def test_long_prompt_is_truncated(self):
-        """Defensive: even if SessionLiveState's 200-char cap relaxes
-        later, the tooltip truncates to 180 chars + ellipsis."""
-        from claude_island.ui.expanded_window import _row_tooltip
-        from claude_island.core.snapshot import _degraded_view
-        from dataclasses import replace as _replace
-        v = _replace(
-            _degraded_view(_session(1, "/a", ago_minutes=0)),
-            last_prompt="x" * 500,
-        )
-        tt = _row_tooltip(v)
-        # Prompt line is "Prompt: xxx...xxx…" — 177 'x' chars + ellipsis
-        prompt_line = [l for l in tt.splitlines() if l.startswith("Prompt:")][0]
-        # Content (without "Prompt: " prefix) is 178 chars (177 + ellipsis)
-        content = prompt_line[len("Prompt: "):]
-        assert len(content) == 178
-        assert content.endswith("…")
-
-
 # ============================================================================
 # Summary card (P1.1) — top focus area with today $ + 5h quota bar
 # ============================================================================
@@ -3039,9 +2980,11 @@ class TestHighCostRowAlert:
         expected_tint = _Lab.red_warm.lstrip("#").lower()
         assert expected_tint in css.lower()
         assert "600" in css  # font-weight bold-ish
-        # No row-level tooltip — verify so a refactor that adds one
-        # back has to update this assertion, prompting reconsideration.
-        assert btn.toolTip() == ""
+        # Row-level tooltip carries title + cwd ONLY. Regression guard
+        # against re-introducing prompt/response/terminal content,
+        # which covered too much screen and shadowed the labels the
+        # user wanted to read.
+        assert btn.toolTip() == "x\n/a"
 
     def test_running_high_cost_independent_signals(self, qtbot):
         """A session that is BOTH running AND high-cost runs the
@@ -3143,7 +3086,9 @@ class TestHighCostRowAlert:
         btn = p._rows[1]
         meta = btn.findChild(QLabel, "meta_label")
         assert meta.styleSheet() == _STYLE_COST_DEFAULT
-        assert btn.toolTip() == ""
+        # Hover tooltip carries title + cwd (see test_high_cost_idle...
+        # for the regression-guard rationale on this format).
+        assert btn.toolTip() == "x\n/a"
 
     def test_low_cost_dot_keeps_default_glyph(self, qtbot):
         """Cost below threshold ⇒ glyph stays in IDLE state (single
