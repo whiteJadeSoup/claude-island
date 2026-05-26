@@ -148,12 +148,17 @@ _DOT_RUNNING_COLOR = _C.phosphor
 _DOT_IDLE_COLOR    = _C.paper_faint
 # Capsule body background — v3 matte near-black.
 _BG_COLOR          = _qcolor_from_hex(_C.ink, 230)
-# Warn / critical washes — still amber / carmine in spirit, but tinted
-# darker so they read as "the body has been stained, not painted" against
-# the v3 ink baseline.  The row chip's amber/red stay vibrant on hover;
-# the pill wash is the ambient cue.
-_BG_COLOR_WARN     = _qcolor_from_hex(_C.amber_dim,    230)
-_BG_COLOR_CRITICAL = _qcolor_from_hex(_C.red_warm_dim, 230)
+# Warn / critical washes — dim variants of the bar palette, hand-tuned
+# so light foreground text (_C.paper / _C.paper_dim / _C.amber /
+# _C.red_warm) keeps WCAG-AA contrast against the wash. Previously
+# bound to _C.amber_dim / _C.red_warm_dim — but the Catppuccin Mocha
+# palette refactor reassigned those tokens to *bright* accent hues
+# (#74c7ec sapphire / #ef9f76 peach), turning the warn capsule into a
+# light cyan pill with white text on it (unreadable). Hand-coding the
+# wash colours here keeps the design intent ("body has been stained")
+# regardless of how upstream tokens get repurposed.
+_BG_COLOR_WARN     = _qcolor_from_hex("#3d351f", 230)  # dark amber wash
+_BG_COLOR_CRITICAL = _qcolor_from_hex("#3d1f1f", 230)  # dark carmine wash
 # v3 dot is the smallest persistent surface — render as a near-black
 # "stamp" rather than a grey pill so it sits as a deliberate desk
 # object (matches prototype-v3.html's .dot baseline) instead of looking
