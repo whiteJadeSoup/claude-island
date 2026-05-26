@@ -259,6 +259,13 @@ class JsonlParser:
     # ------------------------------------------------------------------
 
     def _parse_incremental(self, file_path: Path) -> None:
+        # Time the full parse path so future-us can see boot replay vs
+        # tail-watching cost separately. Counters fire only when we
+        # actually consumed bytes (early returns below don't count).
+        import time as _time
+        from claude_island.core.metrics import metrics as _metrics
+        _t0 = _time.perf_counter()
+
         path_str = str(file_path)
         stored_offset = self._offsets.get(path_str, 0)
 
@@ -286,6 +293,9 @@ class JsonlParser:
 
         if not chunk:
             return
+
+        _metrics.incr("jsonl.file.parsed")
+        _metrics.incr("jsonl.bytes.parsed", n=len(chunk))
 
         # Path-level identity. For a main session the layout is
         #   <projects_dir>/<slug>/<sessionId>.jsonl
@@ -475,6 +485,11 @@ class JsonlParser:
         # which we don't want to do twice.
         self._offsets[path_str] = new_offset - tail_len
         self._usage.record_many(batch)
+
+        _metrics.observe(
+            "jsonl.parse.duration_ms",
+            (_time.perf_counter() - _t0) * 1000.0,
+        )
 
 
 def _parse_ts(entry: dict) -> datetime | None:

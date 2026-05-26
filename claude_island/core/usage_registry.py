@@ -215,7 +215,12 @@ class UsageRegistry:
         Records with message_id=None bypass dedup — these come from
         legacy transcript rows that don't expose the API id; better to
         risk a rare over-count than drop them.
+
+        Records ``usage.record.added`` (kept) and
+        ``usage.record.deduped`` (dropped) so future-us can see the
+        actual dedup-hit rate without re-instrumenting.
         """
+        from claude_island.core.metrics import metrics as _metrics
         batch_in = list(records)
         if not batch_in:
             return
@@ -236,6 +241,8 @@ class UsageRegistry:
                 # line and the kept.append above must stay paired —
                 # whatever lands in _records MUST also land in _by_uuid.
                 self._by_uuid.setdefault(r.session_uuid, []).append(r)
+            _metrics.incr("usage.record.added", n=len(kept))
+            _metrics.incr("usage.record.deduped", n=len(batch_in) - len(kept))
             if not kept:
                 return
             self._records.extend(kept)

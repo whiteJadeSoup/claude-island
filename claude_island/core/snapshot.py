@@ -1184,17 +1184,35 @@ class Snapshotter:
 
         Holds ``_build_lock`` for the full build-and-publish — paired
         with the same lock acquired by ``stop()`` so a teardown waits
-        for in-flight builds to finish before disposing the scheduler."""
+        for in-flight builds to finish before disposing the scheduler.
+
+        Records ``snap.build.count`` and ``snap.build.duration_ms`` to
+        the metrics registry so future perf-claim PRs can show before/
+        after numbers. The build duration excludes publish — publish
+        cost lives downstream (cross-thread marshal + render) and is
+        not the snapshotter's to attribute.
+        """
+        import time as _time
+        from claude_island.core.metrics import metrics as _metrics
         with self._build_lock:
+            t0 = _time.perf_counter()
             try:
                 snap = self._build_snapshot()
             except Exception:
                 log.exception("snapshot build failed; previous snapshot preserved")
+                _metrics.incr("snap.build.error")
                 return
+            finally:
+                _metrics.incr("snap.build.count")
+                _metrics.observe(
+                    "snap.build.duration_ms",
+                    (_time.perf_counter() - t0) * 1000.0,
+                )
             try:
                 self._publish(snap)
             except Exception:
                 log.exception("snapshot publish failed")
+                _metrics.incr("snap.publish.error")
 
     def _build_snapshot(self) -> WorldSnapshot:
         sessions_raw = self._safe_list_sessions()
