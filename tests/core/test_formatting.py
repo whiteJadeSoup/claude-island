@@ -61,10 +61,18 @@ class TestFmtStarted:
 
     def test_microsecond_jitter_within_now_window_unchanged(self):
         """The F4 invariant: micro-changes within the same band
-        produce the same string. This is what enables dedup."""
+        produce the same string. This is what enables dedup.
+
+        Margin is 4.5s (not 4.999999s) because there's a real wall-clock
+        gap between capturing ``now`` here and the fmt_started call's
+        own ``datetime.now()`` reading. With 4.999999s, even a 2µs
+        gap pushes the elapsed delta over the 5s boundary and the band
+        flips to "5s ago". 4.5s leaves comfortable headroom while still
+        proving the invariant.
+        """
         now = datetime.now(timezone.utc)
         a = fmt_started(now - timedelta(microseconds=100))
-        b = fmt_started(now - timedelta(microseconds=4_999_999))  # ~5s
+        b = fmt_started(now - timedelta(seconds=4, microseconds=500_000))
         assert a == "now"
         assert b == "now"
 

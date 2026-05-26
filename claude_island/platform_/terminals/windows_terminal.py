@@ -742,10 +742,17 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         if title:
             argv += ["--title", title, "--suppressApplicationTitle"]
         argv += ["--", "cmd.exe", "/k", *command]
+        # ``subprocess.DETACHED_PROCESS`` is Windows-only. Resolve via
+        # ``getattr`` with a 0 fallback so the *attribute lookup* doesn't
+        # AttributeError on non-Windows platforms — important for tests
+        # that exercise the launch argv with subprocess.Popen mocked.
+        # In production the surrounding ``shutil.which("wt.exe")`` guard
+        # already prevents this branch from running on non-Windows, so
+        # the fallback value is never actually applied to a real spawn.
         try:
             proc = subprocess.Popen(
                 argv,
-                creationflags=subprocess.DETACHED_PROCESS,
+                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
                 close_fds=True,
             )
         except (OSError, FileNotFoundError) as e:
