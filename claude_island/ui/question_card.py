@@ -269,7 +269,7 @@ QPushButton#questionSubmit {{
     font-weight: 600;
     border: 1px solid {_C.accent};
 }}
-QPushButton#questionSubmit:hover {{ filter: brightness(1.05); }}
+QPushButton#questionSubmit:hover {{ background-color: #a4c1ff; }}
 QPushButton#questionSubmit:disabled {{
     background-color: {_C.surface};
     border-color: {_C.rule};
