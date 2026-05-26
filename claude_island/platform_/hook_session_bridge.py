@@ -176,9 +176,21 @@ class HookSessionBridge:
         in seen_uuids/seen_cwds would have the bridge effectively
         "observing itself" and miss_count would never advance. The
         intent of "seen by scanner" requires a real pid (Bug A' 2026-05-13).
+
+        Why cwd-match ONLY for uuidless scanner entries (2026-05-26):
+        a scanner entry WITH a resolved uuid is proof of a *different*
+        session, not the orphan we're miss-counting. If we let any
+        same-cwd live process shield orphan uuids, a crashed session
+        in cwd X (whose SessionEnd hook never fired) is kept "alive"
+        forever as long as ANY other session runs in cwd X — observed
+        2026-05-26 as a phantom THINKING row in the island. The
+        resilience clause for "started before island ran" only needs
+        same-cwd uuid="" entries; once a uuid is resolved (via pid.json
+        or hook host_pid), it identifies a specific session and cannot
+        stand in for an unrelated orphan.
         """
         seen_uuids: set[str] = set()
-        seen_cwds: set = set()
+        seen_uuidless_cwds: set = set()
         for s in sessions:
             if s.pid <= 0:
                 # Placeholder — scanner did NOT actually see this, so
@@ -186,7 +198,10 @@ class HookSessionBridge:
                 continue
             if s.session_uuid:
                 seen_uuids.add(s.session_uuid)
-            seen_cwds.add(s.project_path)
+            else:
+                # Only uuidless entries can stand in for an orphan via
+                # cwd-match — a resolved uuid identifies its own session.
+                seen_uuidless_cwds.add(s.project_path)
 
         with self._lock:
             for uuid, live in self._sm.snapshot().items():
@@ -194,7 +209,7 @@ class HookSessionBridge:
                     self._miss_count.pop(uuid, None)
                     continue
 
-                seen = uuid in seen_uuids or live.cwd in seen_cwds
+                seen = uuid in seen_uuids or live.cwd in seen_uuidless_cwds
                 if seen:
                     self._miss_count.pop(uuid, None)
                     continue
