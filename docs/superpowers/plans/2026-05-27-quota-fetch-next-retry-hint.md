@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Append a "next retry in Xm" (or "auto-refresh paused, manual ⟳ only" at the circuit-breaker boundary) clause to the auto-fetch failure stderr line, so users can read the next-attempt cadence directly off the log.
+**Goal:** Append a "next retry in Xm" (or "auto-refresh paused, manual ↻ only" at the circuit-breaker boundary) clause to the auto-fetch failure stderr line, so users can read the next-attempt cadence directly off the log.
 
 **Architecture:** Single-function change inside `log_fetch_failure()`. Project the post-failure state by calling the pure transition `prior.with_failed_attempt(now=now)`, branch on `consecutive_failures >= AUTO_REFRESH_FAILURE_THRESHOLD`, append one parts entry, done. No signature changes, no new public surface, no UI work.
 
@@ -99,7 +99,7 @@ Insert the new block between them so the function ends like this:
         # a manual ⟳ success resets the counter — surface that here so
         # the user doesn't wait for a 10/20/40/80m window that will
         # never come.
-        parts.append("auto-refresh paused, manual ⟳ only")
+        parts.append("auto-refresh paused, manual ↻ only")
     else:
         next_window_sec = projected._backoff_window_seconds()
         # POLL_TTL and POLL_TTL_MAX are both multiples of 60, so integer
@@ -211,7 +211,7 @@ Append:
         )
         log_fetch_failure(prior, reason="HTTP 429", now=now)
         line = capsys.readouterr().err.strip()
-        assert "auto-refresh paused, manual ⟳ only" in line, \
+        assert "auto-refresh paused, manual ↻ only" in line, \
             f"missing paused copy: {line!r}"
         assert "next retry in" not in line, \
             f"paused state must not advertise a retry window: {line!r}"
@@ -256,7 +256,7 @@ Append:
         )
         log_fetch_failure(prior, reason="HTTP 429", now=now)
         line = capsys.readouterr().err.strip()
-        assert "auto-refresh paused, manual ⟳ only" in line
+        assert "auto-refresh paused, manual ↻ only" in line
         assert "next retry in" not in line
 ```
 
@@ -414,7 +414,7 @@ had to know the internal schedule to interpret which.
 Append one clause to log_fetch_failure() inside providers/__init__.py:
 
   failures 1-4 → "next retry in 10m" / "20m" / "40m" / "80m"
-  failure 5    → "auto-refresh paused, manual ⟳ only"
+  failure 5    → "auto-refresh paused, manual ↻ only"
 
 The hint is computed from the projected post-failure state
 (prior.with_failed_attempt — a pure transition we already trust to

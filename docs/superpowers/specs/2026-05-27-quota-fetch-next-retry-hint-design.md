@@ -61,7 +61,7 @@ clamped at `POLL_TTL_MAX`):
 opens):
 
 ```
-[ts] [claude-island] anthropic quota fetch: HTTP 429 Too Many Requests — last attempt 80m ago — last success 117m ago — auto-refresh paused, manual ⟳ only
+[ts] [claude-island] anthropic quota fetch: HTTP 429 Too Many Requests — last attempt 80m ago — last success 117m ago — auto-refresh paused, manual ↻ only
 ```
 
 After failure 5, `is_fetch_due` returns False permanently — no further
@@ -77,7 +77,7 @@ just before the `safe_stderr_write` call.
 ```python
 new_state = prior.with_failed_attempt(now=now)
 if new_state.consecutive_failures >= AUTO_REFRESH_FAILURE_THRESHOLD:
-    parts.append("auto-refresh paused, manual ⟳ only")
+    parts.append("auto-refresh paused, manual ↻ only")
 else:
     next_window_sec = new_state._backoff_window_seconds()
     parts.append(f"next retry in {int(next_window_sec // 60)}m")
@@ -157,7 +157,7 @@ with the expected `next retry in {10,20,40,80}m`.
 
 `prior_failures=4` (the failure being logged will push counter to 5,
 which equals threshold). Assert the line contains
-`"auto-refresh paused, manual ⟳ only"` and does **not** contain
+`"auto-refresh paused, manual ↻ only"` and does **not** contain
 `"next retry in"`.
 
 ### Defensive — beyond threshold also shows paused copy

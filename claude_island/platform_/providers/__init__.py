@@ -912,9 +912,13 @@ def log_fetch_failure(
     ``prior.last_attempt_at`` as the prior-attempt timestamp, which a
     bumped state would have already overwritten with ``now``.
 
-    Output format::
+    Output format (failures 1–4 of the doubling ladder)::
 
-        [2026-05-16 14:23:45] [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 5m ago — last success 47m ago
+        [2026-05-16 14:23:45] [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 5m ago — last success 47m ago — next retry in 10m
+
+    Output format (failure that opens the circuit breaker)::
+
+        [2026-05-16 14:23:45] [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 80m ago — last success 122m ago — auto-refresh paused, manual ↻ only
 
     The leading bracket is the LOCAL wall-clock timestamp of the
     failure (``now`` converted to the host's local timezone). Stderr
@@ -927,6 +931,9 @@ def log_fetch_failure(
       * No prior attempt → "first attempt"
       * No prior success (token never worked) → "no prior success"
       * Both missing (cold cache) → "first attempt — no prior success"
+      * Circuit open (``consecutive_failures + 1 >=
+        AUTO_REFRESH_FAILURE_THRESHOLD``) → trailing clause becomes
+        ``auto-refresh paused, manual ↻ only`` instead of a retry window
     """
     # now arrives tz-aware in UTC from callers; astimezone() with no
     # arg converts to the host's local zone, matching what the user
@@ -955,7 +962,15 @@ def log_fetch_failure(
         # a manual ⟳ success resets the counter — surface that here so
         # the user doesn't wait for a 10/20/40/80m window that will
         # never come.
-        parts.append("auto-refresh paused, manual ⟳ only")
+        #
+        # Symbol choice: ↻ (U+21BB), NOT ⟳ (U+27F3). The phrase tells
+        # the user to click a specific button — the panel's refresh
+        # button is labelled ↻ — so the stderr message must reference
+        # the same glyph the user will scan for. Sibling stderr lines
+        # that describe an *action* (e.g. anthropic.py's "manual ⟳
+        # failed") keep ⟳ unchanged; those describe what happened, not
+        # where to click.
+        parts.append("auto-refresh paused, manual ↻ only")
     else:
         next_window_sec = projected._backoff_window_seconds()
         # POLL_TTL and POLL_TTL_MAX are both multiples of 60, so integer

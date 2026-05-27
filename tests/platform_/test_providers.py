@@ -1520,7 +1520,12 @@ class TestLogFetchFailure:
             f"missing local-time prefix: {line!r}"
 
     def test_log_includes_reason_and_first_attempt_for_empty_state(self, capsys):
-        """First-ever failure: empty state → 'first attempt — no prior success'."""
+        """First-ever failure: empty state → 'first attempt — no prior
+        success — next retry in 10m'. Cold-start is also failure #1 on
+        the doubling ladder (consecutive_failures: 0 → 1), so the hint
+        clause must be present too — otherwise a regression that drops
+        the hint for the no-prior-attempt path would pass this test
+        without the assertion."""
         from claude_island.platform_.providers import (
             log_fetch_failure, QuotaCacheState,
         )
@@ -1533,6 +1538,7 @@ class TestLogFetchFailure:
         assert "HTTP 401" in line
         assert "first attempt" in line
         assert "no prior success" in line
+        assert "next retry in 10m" in line
 
     def test_log_includes_last_attempt_and_last_success_ages(self, capsys):
         """Prior state has both timestamps → both ages quoted."""
@@ -1637,7 +1643,7 @@ class TestLogFetchFailure:
         )
         log_fetch_failure(prior, reason="HTTP 429", now=now)
         line = capsys.readouterr().err.strip()
-        assert "auto-refresh paused, manual ⟳ only" in line, \
+        assert "auto-refresh paused, manual ↻ only" in line, \
             f"missing paused copy: {line!r}"
         assert "next retry in" not in line, \
             f"paused state must not advertise a retry window: {line!r}"
@@ -1663,7 +1669,7 @@ class TestLogFetchFailure:
         )
         log_fetch_failure(prior, reason="HTTP 429", now=now)
         line = capsys.readouterr().err.strip()
-        assert "auto-refresh paused, manual ⟳ only" in line
+        assert "auto-refresh paused, manual ↻ only" in line
         assert "next retry in" not in line
 
     def test_manual_refresh_failure_does_not_carry_next_retry_hint(
