@@ -331,6 +331,54 @@ def test_t2_16_runs_of_whitespace_preserved():
     assert event.tool_input_preview == "git   commit   -m   'a b'"
 
 
+def test_t2_17_truncate_runs_before_normalise_preserves_source_content():
+    """Order invariant: a 200-char source with N newlines must not
+    lose source characters to truncation. If we normalised first the
+    ``\\n`` → ``↵ `` substitution would expand the string past 200,
+    and the subsequent truncate would silently drop the last N source
+    characters — exactly the bug the order swap fixes.
+
+    Construct 10 lines of 19 ``x``s separated by newlines (200 chars
+    total). After truncate-then-normalise: all 190 ``x``s survive,
+    all 10 newlines render as ``↵``, no ellipsis is emitted."""
+    body = "x" * 19
+    cmd = ("\n" + body) * 10  # 10 × (1 nl + 19 x's) = 200 chars
+    assert len(cmd) == 200, "fixture: command must be exactly 200 chars"
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "Bash",
+        "tool_input": {"command": cmd},
+    }
+    event = parse_claude_payload(payload)
+    assert event.tool_input_preview.count("x") == 190
+    assert event.tool_input_preview.count("↵") == 10
+    assert "…" not in event.tool_input_preview
+
+
+def test_t2_18_json_fallback_path_keeps_json_escaped_newlines():
+    """Pin the invariant that the JSON-fallback path (unknown
+    tool_input shape, no key in ``_TOOL_INPUT_PREVIEW_KEYS``,
+    no AskUserQuestion shape) is a no-op for ``_ticker_preview``'s
+    newline rule: ``json.dumps`` already escapes ``\\n`` to the
+    two-character sequence ``\\\\n``, so the output contains the
+    literal characters ``\\n`` and never the ``↵`` glyph.
+
+    Regression-guards a future refactor that switches the fallback to
+    ``json.dumps(indent=2)``, which WOULD produce literal newlines and
+    silently change the preview shape."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "mcp__custom__do",
+        "tool_input": {"opaque_field": "line1\nline2"},
+    }
+    event = parse_claude_payload(payload)
+    assert event.tool_input_preview is not None
+    assert "\\n" in event.tool_input_preview
+    assert "↵" not in event.tool_input_preview
+
+
 def test_t2_4_malformed_payload_returns_none():
     """JSON is well-formed but content is bogus."""
     assert parse_claude_payload({}) is None
