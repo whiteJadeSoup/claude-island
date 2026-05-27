@@ -1586,3 +1586,108 @@ class TestLogFetchFailure:
         assert "HTTP 401" in line
         # Should quote ~8m, not 0s — proves log ran before record_failed_attempt
         assert "last attempt 8m ago" in line or "last attempt 7m ago" in line
+
+    @pytest.mark.parametrize("prior_failures,expected_minutes", [
+        (0, 10),  # 0 → 1, POLL_TTL × 2  = 600s  = 10m
+        (1, 20),  # 1 → 2, POLL_TTL × 4  = 1200s = 20m
+        (2, 40),  # 2 → 3, POLL_TTL × 8  = 2400s = 40m
+        (3, 80),  # 3 → 4, POLL_TTL × 16 = 4800s = 80m
+    ])
+    def test_log_next_retry_window_follows_backoff_schedule(
+        self, capsys, prior_failures, expected_minutes,
+    ):
+        """Each step on the doubling ladder gets its own hint value.
+        Pins the formula and the schedule simultaneously — a change to
+        either POLL_TTL or the shift expression in
+        _backoff_window_seconds will surface here."""
+        from claude_island.platform_.providers import (
+            log_fetch_failure, QuotaCacheState,
+        )
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        prior = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=None,
+            last_attempt_at=datetime(2026, 5, 5, 11, 55, 0, tzinfo=timezone.utc),
+            five_hour=None, seven_day=None,
+            consecutive_failures=prior_failures,
+        )
+        log_fetch_failure(prior, reason="HTTP 429", now=now)
+        line = capsys.readouterr().err.strip()
+        assert f"next retry in {expected_minutes}m" in line, \
+            f"failures={prior_failures}: missing hint, got {line!r}"
+
+    def test_log_uses_paused_copy_when_failure_reaches_threshold(self, capsys):
+        """Failure that pushes counter to AUTO_REFRESH_FAILURE_THRESHOLD
+        (= 5) is the last auto failure that ever gets logged — the next
+        is_fetch_due check will return False permanently. Surface the
+        circuit-breaker state inline so the user doesn't wait silently
+        for a window that will never come."""
+        from claude_island.platform_.providers import (
+            log_fetch_failure, QuotaCacheState,
+            AUTO_REFRESH_FAILURE_THRESHOLD,
+        )
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        prior = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=None,
+            last_attempt_at=datetime(2026, 5, 5, 11, 55, 0, tzinfo=timezone.utc),
+            five_hour=None, seven_day=None,
+            # prior=4 → projected=5 == THRESHOLD → paused
+            consecutive_failures=AUTO_REFRESH_FAILURE_THRESHOLD - 1,
+        )
+        log_fetch_failure(prior, reason="HTTP 429", now=now)
+        line = capsys.readouterr().err.strip()
+        assert "auto-refresh paused, manual ⟳ only" in line, \
+            f"missing paused copy: {line!r}"
+        assert "next retry in" not in line, \
+            f"paused state must not advertise a retry window: {line!r}"
+
+    def test_log_uses_paused_copy_when_counter_already_beyond_threshold(
+        self, capsys,
+    ):
+        """Edge: a cache file carries a high consecutive_failures from a
+        prior release where the threshold was higher, and we're decoding
+        it with the current (lower) threshold. The hint must still
+        choose the paused copy rather than format an out-of-range
+        backoff window."""
+        from claude_island.platform_.providers import (
+            log_fetch_failure, QuotaCacheState,
+        )
+        now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+        prior = QuotaCacheState(
+            provider="anthropic",
+            fetched_at=None,
+            last_attempt_at=datetime(2026, 5, 5, 11, 55, 0, tzinfo=timezone.utc),
+            five_hour=None, seven_day=None,
+            consecutive_failures=10,  # well past THRESHOLD=5
+        )
+        log_fetch_failure(prior, reason="HTTP 429", now=now)
+        line = capsys.readouterr().err.strip()
+        assert "auto-refresh paused, manual ⟳ only" in line
+        assert "next retry in" not in line
+
+    def test_manual_refresh_failure_does_not_carry_next_retry_hint(
+        self, tmp_path, capsys,
+    ):
+        """Manual ⟳ failure goes through safe_stderr_write directly
+        (anthropic.py:155-165), not log_fetch_failure, so it must not
+        gain the 'next retry in Xm' clause. Manual failures don't bump
+        consecutive_failures and don't change the schedule — quoting a
+        retry window would describe state the click didn't affect."""
+        from claude_island.platform_.providers import anthropic as anth
+        cache_path = tmp_path / "anthropic-quota.json"
+        cache_path.write_text(json.dumps({"provider": "anthropic"}))
+        creds = tmp_path / "credentials.json"
+        creds.write_text(json.dumps({
+            "claudeAiOauth": {"accessToken": "fake"},
+        }))
+        with patch.object(anth, "_CREDENTIALS_PATH", creds), \
+             patch.object(anth, "_fetch_http", return_value=(None, "HTTP 429")):
+            anth.AnthropicProvider().fetch(cache_dir=tmp_path, bypass_cache=True)
+        line = capsys.readouterr().err.strip()
+        assert "manual ⟳ failed" in line, \
+            f"manual path log prefix changed: {line!r}"
+        assert "next retry in" not in line, \
+            f"manual failure must not advertise a retry window: {line!r}"
+        assert "auto-refresh paused" not in line, \
+            f"manual failure must not advertise paused state: {line!r}"

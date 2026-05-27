@@ -943,6 +943,26 @@ def log_fetch_failure(
         if prior.fetched_at is not None
         else "no prior success"
     )
+
+    # Project the post-failure counter so the hint reflects the state
+    # the cache will hold immediately after this call. with_failed_attempt
+    # is a pure transition (no IO); the caller writes the same projected
+    # state to disk right after we return.
+    projected = prior.with_failed_attempt(now=now)
+    if projected.consecutive_failures >= AUTO_REFRESH_FAILURE_THRESHOLD:
+        # Circuit just opened (or is already open in a defensive edge
+        # case). is_fetch_due will gate auto-fetch off permanently until
+        # a manual ⟳ success resets the counter — surface that here so
+        # the user doesn't wait for a 10/20/40/80m window that will
+        # never come.
+        parts.append("auto-refresh paused, manual ⟳ only")
+    else:
+        next_window_sec = projected._backoff_window_seconds()
+        # POLL_TTL and POLL_TTL_MAX are both multiples of 60, so integer
+        # minutes lose no precision and match the existing _fmt_ago
+        # buckets the user is reading on the same line.
+        parts.append(f"next retry in {int(next_window_sec // 60)}m")
+
     safe_stderr_write(" — ".join(parts))
 
 
