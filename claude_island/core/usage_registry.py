@@ -27,10 +27,25 @@ the iteration sees a consistent snapshot.
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from reactivex.subject import Subject
+
+
+# Cap on the dedup memory (``_seen_message_ids``). Above this size the
+# oldest entries fall off FIFO. Sized so a heavy daily user (~5
+# sessions/day × ~350 msg ids/session ≈ 1750/day) gets ~28 days of
+# dedup history before the first eviction. Cross-batch dedup only
+# matters when the same JSONL chunk is reparsed; in practice the
+# duplicate window is one batch wide, well inside 50K. Bounded
+# memory cost: ~50,000 × ~80 B (str + hash + OrderedDict slot) ≈ 4 MB
+# regardless of how long claude-island has been running.
+#
+# When the cap is hit, ``usage.dedup.evict`` increments — production
+# can watch that metric to decide whether to raise the cap.
+SEEN_MESSAGE_IDS_CAP = 50_000
 
 from .models import (
     PRICING,
@@ -180,9 +195,17 @@ class UsageRegistry:
         # Dedup keyed by Anthropic ``message.id``. One API response is
         # spread across N JSONL lines (one per content block: text +
         # each tool_use), and every one of those lines repeats the same
-        # ``usage`` payload. Without this set, a response with 5 blocks
-        # is counted 5×. Records whose message_id is None bypass dedup.
-        self._seen_message_ids: set[str] = set()
+        # ``usage`` payload. Without this dedup a 5-block response is
+        # counted 5×. Records whose message_id is None bypass dedup.
+        #
+        # Backed by an OrderedDict (used as a FIFO set) so we can cap
+        # the size at ``SEEN_MESSAGE_IDS_CAP`` and drop the oldest
+        # entry when the cap is exceeded. Prevents unbounded growth on
+        # a long-running island instance — observed 27K msg ids after
+        # ~5 months of use, would compound past 100 MB over multi-year
+        # uptime without a cap. The dict values are always None; only
+        # the keys carry meaning. Insert order = arrival order.
+        self._seen_message_ids: OrderedDict[str, None] = OrderedDict()
         # Per-uuid inverted index. Built incrementally inside
         # ``record_many`` (post-dedup) so per-session queries
         # (``get_session_summary`` / ``get_session_per_model`` /
@@ -224,6 +247,7 @@ class UsageRegistry:
         batch_in = list(records)
         if not batch_in:
             return
+        evicted = 0
         with self._lock:
             kept: list[UsageRecord] = []
             for r in batch_in:
@@ -234,7 +258,14 @@ class UsageRegistry:
                     continue
                 if mid in self._seen_message_ids:
                     continue
-                self._seen_message_ids.add(mid)
+                # Insert + bounded-FIFO eviction. The cap protects
+                # against multi-year unbounded growth (see
+                # SEEN_MESSAGE_IDS_CAP rationale); in normal operation
+                # ``popitem(last=False)`` never fires.
+                self._seen_message_ids[mid] = None
+                if len(self._seen_message_ids) > SEEN_MESSAGE_IDS_CAP:
+                    self._seen_message_ids.popitem(last=False)
+                    evicted += 1
                 kept.append(r)
                 # Index AFTER dedup decision so duplicates don't double-
                 # count in per-session queries either. Critical: this
@@ -243,6 +274,8 @@ class UsageRegistry:
                 self._by_uuid.setdefault(r.session_uuid, []).append(r)
             _metrics.incr("usage.record.added", n=len(kept))
             _metrics.incr("usage.record.deduped", n=len(batch_in) - len(kept))
+            if evicted:
+                _metrics.incr("usage.dedup.evict", n=evicted)
             if not kept:
                 return
             self._records.extend(kept)

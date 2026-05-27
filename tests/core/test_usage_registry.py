@@ -32,6 +32,7 @@ def _record(
     cache_read_tokens: int = 0,
     project_path: str = "proj",
     session_uuid: str = "sess",
+    message_id: str | None = None,
 ) -> UsageRecord:
     return UsageRecord(
         timestamp=when or datetime.now(timezone.utc),
@@ -42,6 +43,7 @@ def _record(
         output_tokens=output_tokens,
         cache_creation_tokens=cache_creation_tokens,
         cache_read_tokens=cache_read_tokens,
+        message_id=message_id,
     )
 
 
@@ -667,3 +669,59 @@ def test_session_window_explicit_bounds_anchor_to_endpoint(registry):
     assert su.end_time == end_time
     assert len(su.by_model) == 1
     assert su.by_model[0].input_tokens == 7
+
+
+# ── _seen_message_ids cap (P1-a) ───────────────────────────────────────
+
+
+def test_seen_message_ids_evicts_oldest_when_cap_exceeded(monkeypatch):
+    """When _seen_message_ids reaches the cap, the FIFO-oldest entry
+    falls off and ``usage.dedup.evict`` increments. Verified at a
+    deliberately tiny cap so the test stays fast.
+
+    The eviction property protects long-running island instances from
+    unbounded growth — observed 27K msg ids after 5 months of use; without
+    the cap a multi-year instance would reach hundreds of MB of dedup
+    state. See SEEN_MESSAGE_IDS_CAP rationale in usage_registry.py.
+    """
+    from claude_island.core import metrics, usage_registry
+
+    monkeypatch.setattr(usage_registry, "SEEN_MESSAGE_IDS_CAP", 3)
+    reg = usage_registry.UsageRegistry()
+
+    # Insert 5 unique msg ids into a 3-slot cap. msg-0 and msg-1 should
+    # fall off; msg-2, msg-3, msg-4 should remain.
+    reg.record_many([_record(message_id=f"msg-{i}") for i in range(5)])
+
+    assert len(reg._seen_message_ids) == 3
+    assert "msg-0" not in reg._seen_message_ids
+    assert "msg-1" not in reg._seen_message_ids
+    assert "msg-4" in reg._seen_message_ids
+
+    # 2 evictions reported through the metrics primitive.
+    assert metrics.metrics.snapshot().counters.get("usage.dedup.evict") == 2
+
+
+def test_seen_message_ids_no_eviction_below_cap(monkeypatch):
+    """Inserting fewer ids than the cap must never trigger an
+    eviction (counter stays absent — lazy creation = no entry until
+    something happens)."""
+    from claude_island.core import metrics, usage_registry
+    monkeypatch.setattr(usage_registry, "SEEN_MESSAGE_IDS_CAP", 100)
+    reg = usage_registry.UsageRegistry()
+    reg.record_many([_record(message_id=f"msg-{i}") for i in range(50)])
+    assert "usage.dedup.evict" not in metrics.metrics.snapshot().counters
+
+
+def test_seen_message_ids_dedup_still_works_post_eviction(monkeypatch):
+    """The classic dedup contract (one msg id never double-counts) must
+    survive the cap. As long as the duplicate arrives BEFORE the
+    original gets evicted, dedup catches it — this is the in-window
+    case the cap is sized to handle."""
+    from claude_island.core import usage_registry
+    monkeypatch.setattr(usage_registry, "SEEN_MESSAGE_IDS_CAP", 100)
+    reg = usage_registry.UsageRegistry()
+    reg.record_many([_record(message_id="msg-A")])
+    # Duplicate arrives — cap is far from full, so dedup catches it.
+    reg.record_many([_record(message_id="msg-A")])
+    assert len(reg._records) == 1

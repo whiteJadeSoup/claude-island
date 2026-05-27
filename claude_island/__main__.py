@@ -1226,6 +1226,32 @@ _session_names_gc_timer = QTimer()
 _session_names_gc_timer.timeout.connect(_gc_session_names_tick)
 _session_names_gc_timer.start(6 * 60 * 60 * 1000)  # 6 hours
 
+
+def _gc_state_machine_tick() -> None:
+    """Sweep SessionStateMachine ENDED entries older than 1 hour.
+
+    Tombstone leaves an ENDED record in place so any in-flight UI
+    consumer still resolves the uuid; without periodic GC those
+    entries accumulate forever on a long-running island instance
+    (every /clear mints a new uuid, every closed terminal leaves
+    an ENDED state behind). Hour-scale retain window leaves
+    plenty of headroom for snapshot publish + render — UI consumers
+    process within milliseconds, the only reason a longer window
+    would matter is for ad-hoc debugging via the metrics snapshot.
+
+    Cheap (dict scan + a few deletes); run every 30 min so the
+    state machine never holds more than ~30 min of accumulated
+    ENDED churn even on a high-turnover machine."""
+    try:
+        state_machine.gc_ended(retain_seconds=3600.0)
+    except Exception as exc:
+        _safe_stderr_write(f"[claude-island] state_machine gc failed: {exc}")
+
+
+_state_machine_gc_timer = QTimer()
+_state_machine_gc_timer.timeout.connect(_gc_state_machine_tick)
+_state_machine_gc_timer.start(30 * 60 * 1000)  # 30 minutes
+
 # ---------------------------------------------------------------------------
 # Event loop + cleanup
 #

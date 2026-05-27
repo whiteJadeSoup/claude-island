@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Mapping
 
@@ -185,6 +185,51 @@ class SessionStateMachine:
             changed = {uuid}
         self.live_state_changed.on_next(changed)
         return True
+
+    def gc_ended(
+        self,
+        *,
+        retain_seconds: float = 3600.0,
+        now: datetime | None = None,
+    ) -> int:
+        """Drop ENDED entries whose ``last_hook_at`` is older than
+        ``retain_seconds``. Returns the count removed.
+
+        Why GC is needed: ``tombstone()`` writes an ENDED record but
+        keeps the dict entry — the snapshot pipeline and any in-flight
+        UI render might still hold a reference for tens of milliseconds.
+        Without a sweeper the ENDED entries accumulate forever on a
+        long-running instance (every claude session the user has ever
+        run, plus every ``/clear`` that mints a new uuid). Bounded by
+        the number of distinct uuids observed since boot — moderate
+        for a daily user (dozens per day), heavy for a power user (hundreds).
+
+        Why 3600 s default: UI subscribers process a snapshot in well
+        under a second; any consumer still referencing a uuid an hour
+        after it ended is a separate bug. The retain window is mostly
+        a defense against debugging convenience — a doctor probe that
+        inspects ``snapshot()`` minutes after tombstone still finds
+        the entry. Caller may override.
+
+        Records ``sm.ended.gc`` (counter) for visibility — production
+        can watch the rate to confirm GC is keeping pace with churn.
+        """
+        from claude_island.core.metrics import metrics as _metrics
+        cutoff = (
+            (now if now is not None else datetime.now(timezone.utc))
+            - timedelta(seconds=retain_seconds)
+        )
+        with self._lock:
+            to_drop = [
+                uuid for uuid, state in self._states.items()
+                if state.phase == SessionPhase.ENDED
+                and state.last_hook_at < cutoff
+            ]
+            for uuid in to_drop:
+                del self._states[uuid]
+        if to_drop:
+            _metrics.incr("sm.ended.gc", n=len(to_drop))
+        return len(to_drop)
 
 
 # ---------------------------------------------------------------------------
