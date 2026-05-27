@@ -243,6 +243,94 @@ def test_t2_11_preferred_keys_win_over_askuserquestion_shape():
     assert event.tool_input_preview == "ls -la"
 
 
+def test_t2_12_multiline_bash_command_collapses_to_single_line():
+    """A heredoc-style ``python -c "..."`` command (or any other
+    multi-line Bash input) would render two visible rows in the ticker
+    QLabel because ``\\n`` is a hard break in QLabel. The extracted
+    preview must normalise newlines to a visible glyph so the row body
+    keeps its single-line layout while the user can still see that the
+    original spanned multiple lines.
+
+    Pins both the substitution character (``↵``) and the trailing
+    space after it (so the glyph doesn't visually fuse with the next
+    word)."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": 'python -c "\nfrom os import getcwd\nprint(getcwd())\n"',
+        },
+    }
+    event = parse_claude_payload(payload)
+    assert event.tool_input_preview == (
+        'python -c "↵ from os import getcwd↵ print(getcwd())↵ "'
+    )
+    assert "\n" not in event.tool_input_preview
+    assert "\r" not in event.tool_input_preview
+
+
+def test_t2_13_crlf_and_lone_cr_normalise_to_single_glyph():
+    """Windows-style CRLF and lone CR (legacy Mac, malformed input)
+    must both produce a single ``↵`` per logical line break, not two.
+    Without the CRLF normalisation step we would emit ``↵ ↵ `` per line
+    on Windows-authored payloads."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo a\r\necho b\recho c"},
+    }
+    event = parse_claude_payload(payload)
+    assert event.tool_input_preview == "echo a↵ echo b↵ echo c"
+
+
+def test_t2_14_tab_becomes_space_in_preview():
+    """Tabs render with a font-dependent width in QLabel — a leading
+    ``\\t`` can produce a wildly different visual indent than the same
+    payload viewed in a terminal. Substitute a plain space so the
+    preview's apparent width matches the character count."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "Bash",
+        "tool_input": {"command": "if true; then\n\techo nested\nfi"},
+    }
+    event = parse_claude_payload(payload)
+    # \t → space, \n → ↵ + space, all on one line
+    assert event.tool_input_preview == "if true; then↵  echo nested↵ fi"
+    assert "\t" not in event.tool_input_preview
+
+
+def test_t2_15_single_line_command_unchanged_by_normalisation():
+    """The common case (single-line command, no special whitespace)
+    must round-trip unchanged. Regression-guard against future tweaks
+    to ``_ticker_preview`` accidentally rewriting plain text."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls -la /tmp"},
+    }
+    event = parse_claude_payload(payload)
+    assert event.tool_input_preview == "ls -la /tmp"
+
+
+def test_t2_16_runs_of_whitespace_preserved():
+    """Heredoc indentation and multi-arg spacing carry meaning the
+    reader is scanning for. Don't collapse them — only newline-class
+    whitespace needs normalisation for the QLabel-renders-newlines
+    constraint, not every run of spaces."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "u1",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git   commit   -m   'a b'"},
+    }
+    event = parse_claude_payload(payload)
+    assert event.tool_input_preview == "git   commit   -m   'a b'"
+
+
 def test_t2_4_malformed_payload_returns_none():
     """JSON is well-formed but content is bogus."""
     assert parse_claude_payload({}) is None

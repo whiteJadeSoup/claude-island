@@ -895,6 +895,36 @@ def _truncate(s: str, max_len: int) -> str:
     return s[: max_len - 1] + "…"
 
 
+def _ticker_preview(s: str) -> str:
+    """Collapse to a single render-ready line and truncate.
+
+    The expanded-window row ticker is a QLabel; a literal ``\\n`` in
+    its text renders as a hard break and wraps the row to two visible
+    lines, breaking the single-line layout the row body is sized for.
+    Multi-line commands are common in practice (heredocs, ``python -c
+    \"...\"`` with embedded source, backslash continuations), so the
+    extracted preview must be normalised before it travels through the
+    hook event → SessionView pipeline to the UI.
+
+    Substitution choices:
+      * ``\\r\\n`` and lone ``\\r`` → ``\\n`` first, so the next step has
+        a single newline form to translate.
+      * ``\\t`` → space, because tab width is font-dependent in QLabel
+        and the alignment it preserves in a terminal isn't reproducible.
+      * ``\\n`` → ``↵`` + space, preserving the visible signal that the
+        original spanned multiple lines while keeping the result on one
+        rendered row. JetBrains Mono has the glyph; if a future font
+        swap loses it, the fallback is the literal ``↵`` character
+        rendered via the font's notdef glyph — still a single line.
+
+    Multiple spaces are intentionally NOT collapsed: heredoc
+    indentation and multi-arg command spacing both carry meaning that
+    the reader is likely scanning for."""
+    s = s.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+    s = s.replace("\n", "↵ ")
+    return _truncate(s, _TOOL_INPUT_MAX)
+
+
 # ---------------------------------------------------------------------------
 # Hook directive encoders
 #
@@ -1088,17 +1118,16 @@ def _extract_tool_input_preview(tool_input: Any) -> str | None:
         for key in _TOOL_INPUT_PREVIEW_KEYS:
             v = tool_input.get(key)
             if isinstance(v, str) and v:
-                return _truncate(v, _TOOL_INPUT_MAX)
+                return _ticker_preview(v)
         question_text = _extract_ask_user_question_preview(tool_input)
         if question_text is not None:
-            return _truncate(question_text, _TOOL_INPUT_MAX)
-        return _truncate(
-            json.dumps(tool_input, default=str, ensure_ascii=False),
-            _TOOL_INPUT_MAX,
+            return _ticker_preview(question_text)
+        return _ticker_preview(
+            json.dumps(tool_input, default=str, ensure_ascii=False)
         )
     if isinstance(tool_input, str):
-        return _truncate(tool_input, _TOOL_INPUT_MAX) if tool_input else None
-    return _truncate(repr(tool_input), _TOOL_INPUT_MAX)
+        return _ticker_preview(tool_input) if tool_input else None
+    return _ticker_preview(repr(tool_input))
 
 
 # ---------------------------------------------------------------------------
