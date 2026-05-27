@@ -2981,6 +2981,70 @@ class TestSummaryCard:
             f"got {len(calls)} calls"
         )
 
+    def test_summary_sidechain_line_renders_when_subagents_used(self, qtbot):
+        """When today's totals include any sidechain (subagent) records,
+        the TODAY card shows a small annotation line below the 4-stat
+        strip — "↳ incl. {N} subagent calls · ${C}" — reconciling the
+        island headline (main + subagent, matches Anthropic's bill)
+        with ccusage-style tools (main only). Without this line, users
+        comparing the two tools see a ~7-15% cost gap and have no way
+        to explain it."""
+        from claude_island.core.models import UsageTotals
+        capsule = QWidget(); capsule.show()
+        p = ExpandedWindow(
+            capsule=capsule, controller=IslandController(),
+            get_usage_totals=lambda period: UsageTotals(
+                period=period,
+                input_tokens=300, output_tokens=210_000,
+                cache_creation_tokens=630_000, cache_read_tokens=128_000_000,
+                input_cost=5.0, output_cost=1.0,
+                sidechain_request_count=314,
+                sidechain_cost_usd=14.18,
+            ),
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        text = p._summary_sidechain.text()
+        assert "314" in text, f"missing subagent count: {text!r}"
+        assert "$14" in text, f"missing subagent cost: {text!r}"
+        assert "subagent" in text, f"missing label: {text!r}"
+        assert p._summary_sidechain.isVisibleTo(p), \
+            "sidechain line must be visible when subagent records exist"
+
+    def test_summary_sidechain_line_hidden_when_no_subagents(self, qtbot):
+        """No sidechain records today → no annotation. The TODAY card
+        keeps its compact look for the common single-session case
+        instead of forever advertising "0 subagent calls"."""
+        from claude_island.core.models import UsageTotals
+        capsule = QWidget(); capsule.show()
+        p = ExpandedWindow(
+            capsule=capsule, controller=IslandController(),
+            get_usage_totals=lambda period: UsageTotals(
+                period=period,
+                input_tokens=300, output_tokens=210_000,
+                input_cost=5.0, output_cost=1.0,
+                sidechain_request_count=0,
+                sidechain_cost_usd=0.0,
+            ),
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        assert not p._summary_sidechain.isVisibleTo(p), \
+            "sidechain line must be hidden when no subagent activity"
+
+    def test_summary_sidechain_line_hidden_when_totals_fail(self, qtbot):
+        """get_usage_totals raising must hide the sidechain line (same
+        degradation as the rest of the stats strip going blank — keeps
+        the card from advertising stale data)."""
+        capsule = QWidget(); capsule.show()
+        p = ExpandedWindow(
+            capsule=capsule, controller=IslandController(),
+            get_usage_totals=lambda _p: (_ for _ in ()).throw(RuntimeError("x")),
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        assert not p._summary_sidechain.isVisibleTo(p)
+
     def test_summary_stats_blank_when_totals_fail(self, qtbot):
         """If get_usage_totals raises, the stats label should be empty
         rather than carry stale data — same defensive pattern as the

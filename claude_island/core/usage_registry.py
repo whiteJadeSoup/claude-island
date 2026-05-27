@@ -312,6 +312,13 @@ class UsageRegistry:
         UsageRecord rows in the window.  One row = one assistant
         message = one Claude API request, so this is the count the
         TODAY card surfaces as "N reqs".
+
+        Also splits sidechain (subagent) records into a subset
+        (``sidechain_request_count`` / ``sidechain_cost_usd``) so the
+        TODAY card can annotate "↳ incl. {N} subagent calls · ${C}"
+        below the main stat strip. The headline ``cost_usd`` /
+        ``request_count`` STILL include sidechain — that matches the
+        real Anthropic bill, which is what the headline number means.
         """
         since = _period_cutoff(period)
         records = self._records_since(since)
@@ -331,6 +338,25 @@ class UsageRegistry:
             totals.output_cost         += m.output_tokens / 1_000_000 * p.output_per_mtok
             totals.cache_creation_cost += m.cache_creation_tokens / 1_000_000 * p.cw_rate()
             totals.cache_read_cost     += m.cache_read_tokens / 1_000_000 * p.cr_rate()
+
+        # Sidechain slice: walk the raw records once, accumulating just
+        # the subagent ones. We don't reuse _aggregate_by_model because
+        # the model dimension is irrelevant to the annotation — only
+        # the per-record cost and the count are. Pricing matches the
+        # main loop's formula above (same _resolve_pricing → same rates)
+        # so the slice always equals "sum over sidechain records of
+        # what _aggregate_by_model would have priced them at".
+        for r in records:
+            if not r.is_sidechain:
+                continue
+            p = _resolve_pricing(r.model)
+            totals.sidechain_request_count += 1
+            totals.sidechain_cost_usd += (
+                r.input_tokens / 1_000_000 * p.input_per_mtok
+                + r.output_tokens / 1_000_000 * p.output_per_mtok
+                + r.cache_creation_tokens / 1_000_000 * p.cw_rate()
+                + r.cache_read_tokens / 1_000_000 * p.cr_rate()
+            )
         return totals
 
     def get_totals_by_model(self, period: str) -> tuple[ModelTotals, ...]:

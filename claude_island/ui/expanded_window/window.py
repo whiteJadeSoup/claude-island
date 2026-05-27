@@ -4690,6 +4690,25 @@ class ExpandedWindow(QWidget):
         )
         layout.addWidget(self._summary_stats)
 
+        # Sidechain (subagent) annotation: a quieter, smaller line
+        # below the 4-stat strip — "↳ incl. {N} subagent calls · ${C}"
+        # — reconciling the headline cost (which includes subagent
+        # calls, matching Anthropic's actual bill) with ccusage-style
+        # tools (which show main-chain only). Hidden by default; the
+        # refresher shows it only when sidechain_request_count > 0 so
+        # users who don't dispatch subagents never see "0 subagent
+        # calls" advertised forever.
+        self._summary_sidechain = _ElasticRichLabel("")
+        self._summary_sidechain.setStyleSheet(
+            f"color: {_LabColor.paper_faint}; font-size: 10px; "
+            f"font-family: {FontStack.mono_stack};"
+        )
+        self._summary_sidechain.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+        self._summary_sidechain.setVisible(False)
+        layout.addWidget(self._summary_sidechain)
+
         return card
 
     def _refresh_summary_card(self) -> None:
@@ -4801,6 +4820,7 @@ class ExpandedWindow(QWidget):
         provider engine feeds the bar)."""
         if today is None:
             self._summary_stats.setText("")
+            self._summary_sidechain.setVisible(False)
             return
         try:
             total_tok = today.input_tokens + today.output_tokens
@@ -4837,6 +4857,27 @@ class ExpandedWindow(QWidget):
         except Exception as exc:
             log.warning("summary stats render failed: %s", exc)
             self._summary_stats.setText("")
+            self._summary_sidechain.setVisible(False)
+            return
+
+        # Sidechain annotation — shown only when subagent activity exists.
+        # The headline cost above already includes subagent calls (matches
+        # Anthropic's bill); this line tells the user "of that, $X came
+        # from N subagent calls" so they can reconcile with ccusage-style
+        # tools that report main-chain only.
+        sub_n = getattr(today, "sidechain_request_count", 0)
+        sub_c = getattr(today, "sidechain_cost_usd", 0.0)
+        if sub_n > 0:
+            self._summary_sidechain.setText(
+                f"<span style='color:{col_sep}'>↳</span> "
+                f"<span style='color:{col_label}'>incl.</span> "
+                f"<span style='color:{col_num}'><b>{_fmt_tokens(sub_n)}</b></span> "
+                f"<span style='color:{col_label}'>subagent calls ·</span> "
+                f"<span style='color:{col_num}'><b>{_fmt_money(sub_c)}</b></span>"
+            )
+            self._summary_sidechain.setVisible(True)
+        else:
+            self._summary_sidechain.setVisible(False)
 
     def _build_spend_card(self) -> QFrame:
         """Single SPEND card driven by a window dropdown (5h / Today /

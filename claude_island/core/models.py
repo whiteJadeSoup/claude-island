@@ -202,6 +202,19 @@ class UsageTotals:
     # aggregated.  Surfaced in the TODAY card stats strip as
     # "N reqs" — a key headline number alongside tokens / cache.
     request_count: int = 0
+    # Sidechain (subagent) subset of the headline numbers above.
+    # ``request_count`` and ``cost_usd`` are STILL "all records" — they
+    # are what Anthropic actually bills the user (main + subagent),
+    # which is the headline the TODAY card surfaces. These two fields
+    # carry the subagent-only slice of that headline so the panel can
+    # render a "↳ incl. {N} subagent calls · ${C}" annotation under
+    # the main stat strip without the consumer having to call
+    # get_totals twice or aggregate records a second time.
+    # Reconciles the difference between island's headline ($ incl.
+    # subagents) and ccusage-style tools ($ main only), which is the
+    # #1 "why don't our numbers match?" question for this card.
+    sidechain_request_count: int = 0
+    sidechain_cost_usd: float = 0.0
 
     @property
     def cost_usd(self) -> float:

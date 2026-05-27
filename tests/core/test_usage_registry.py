@@ -315,6 +315,61 @@ def test_get_totals_5h_window_excludes_older_records(registry):
 
 
 # --------------------------------------------------------------------------
+# Sidechain breakdown — TODAY card surfaces "incl. N subagent calls · $X"
+# below the main stat strip so users can see the subagent contribution
+# inside the headline cost (which is main + sidechain combined, matching
+# what Anthropic actually bills).
+# --------------------------------------------------------------------------
+
+def test_get_totals_splits_sidechain_request_count_and_cost(registry):
+    """Mix of main + sidechain records: the headline aggregates include
+    everything (request_count, tokens, cost_usd), AND two new fields
+    surface the sidechain-only subset (sidechain_request_count,
+    sidechain_cost_usd). Both totals add up to the headline."""
+    # 2 main + 1 sidechain, all opus, all distinct message_ids so dedup
+    # doesn't drop anything.
+    registry.record_many([
+        UsageRecord(**{**_record(model="claude-opus-4-7",
+                                  input_tokens=1, output_tokens=100).__dict__,
+                       "message_id": "main-1", "is_sidechain": False}),
+        UsageRecord(**{**_record(model="claude-opus-4-7",
+                                  input_tokens=2, output_tokens=200).__dict__,
+                       "message_id": "main-2", "is_sidechain": False}),
+        UsageRecord(**{**_record(model="claude-opus-4-7",
+                                  input_tokens=3, output_tokens=300).__dict__,
+                       "message_id": "sub-1", "is_sidechain": True}),
+    ])
+    t = registry.get_totals("today")
+    # Headline: 3 reqs total, all-records cost.
+    assert t.request_count == 3
+    expected_total = (
+        (1 + 2 + 3) / 1e6 * 5         # input  (opus = $5/Mtok)
+        + (100 + 200 + 300) / 1e6 * 25  # output (opus = $25/Mtok)
+    )
+    assert abs(t.cost_usd - expected_total) < 1e-6
+    # Sidechain subset: 1 req, sub-1's cost only.
+    assert t.sidechain_request_count == 1
+    expected_sub = 3 / 1e6 * 5 + 300 / 1e6 * 25
+    assert abs(t.sidechain_cost_usd - expected_sub) < 1e-6
+
+
+def test_get_totals_sidechain_fields_zero_when_no_sidechain_records(registry):
+    """Cold-start / pure-main use case: both sidechain fields are 0.
+    Backward-compat guarantee — a UI consumer that didn't know about
+    these fields before keeps seeing the same numbers it always saw."""
+    registry.record_many([
+        _record(model="claude-opus-4-7",
+                input_tokens=10, output_tokens=100, message_id="m-1"),
+        _record(model="claude-opus-4-7",
+                input_tokens=20, output_tokens=200, message_id="m-2"),
+    ])
+    t = registry.get_totals("today")
+    assert t.request_count == 2
+    assert t.sidechain_request_count == 0
+    assert t.sidechain_cost_usd == 0.0
+
+
+# --------------------------------------------------------------------------
 # M1-M2: per-model breakdown
 # --------------------------------------------------------------------------
 
