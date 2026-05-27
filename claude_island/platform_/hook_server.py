@@ -895,6 +895,47 @@ def _truncate(s: str, max_len: int) -> str:
     return s[: max_len - 1] + "…"
 
 
+def _ticker_preview(s: str) -> str:
+    """Truncate to ``_TOOL_INPUT_MAX`` then collapse to one render-ready line.
+
+    The downstream ticker widget renders the result on a single visual
+    row, so any literal ``\\n`` in the source would produce a hard line
+    break and wrap the row to two visible lines, breaking the layout
+    the row body is sized for. Multi-line commands are common in
+    practice (heredocs, ``python -c "..."`` with embedded source,
+    backslash continuations), so the extracted preview must be
+    normalised before it travels through the hook event → SessionView
+    pipeline to the UI.
+
+    Order matters — truncate FIRST, normalise SECOND. The ``\\n`` →
+    ``↵ `` substitution expands by one character per newline; doing it
+    before truncation would silently drop real source content past the
+    cap (a 190-char heredoc with 10 newlines would post-expand to 210
+    and lose 10 source characters to the truncate). Truncating first
+    keeps the maximum amount of original content visible; the cost is
+    that the output may overshoot ``_TOOL_INPUT_MAX`` by N characters
+    where N = number of newlines surviving truncation. That overshoot
+    is bounded and acceptable — the cap is for bounding payload size
+    over the wire, not a hard render contract.
+
+    Substitution choices:
+      * ``\\r\\n`` and lone ``\\r`` → ``\\n`` first, so the final step
+        has a single newline form to translate.
+      * ``\\t`` → space, because tab width is font-dependent in the
+        target widget and the alignment a tab preserves in a terminal
+        isn't reproducible.
+      * ``\\n`` → ``↵`` + space, preserving the visible signal that
+        the original spanned multiple lines while keeping the result
+        on one rendered row.
+
+    Multiple spaces are intentionally NOT collapsed: heredoc
+    indentation and multi-arg command spacing both carry meaning that
+    the reader is likely scanning for."""
+    s = _truncate(s, _TOOL_INPUT_MAX)
+    s = s.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+    return s.replace("\n", "↵ ")
+
+
 # ---------------------------------------------------------------------------
 # Hook directive encoders
 #
@@ -1088,17 +1129,16 @@ def _extract_tool_input_preview(tool_input: Any) -> str | None:
         for key in _TOOL_INPUT_PREVIEW_KEYS:
             v = tool_input.get(key)
             if isinstance(v, str) and v:
-                return _truncate(v, _TOOL_INPUT_MAX)
+                return _ticker_preview(v)
         question_text = _extract_ask_user_question_preview(tool_input)
         if question_text is not None:
-            return _truncate(question_text, _TOOL_INPUT_MAX)
-        return _truncate(
-            json.dumps(tool_input, default=str, ensure_ascii=False),
-            _TOOL_INPUT_MAX,
+            return _ticker_preview(question_text)
+        return _ticker_preview(
+            json.dumps(tool_input, default=str, ensure_ascii=False)
         )
     if isinstance(tool_input, str):
-        return _truncate(tool_input, _TOOL_INPUT_MAX) if tool_input else None
-    return _truncate(repr(tool_input), _TOOL_INPUT_MAX)
+        return _ticker_preview(tool_input) if tool_input else None
+    return _ticker_preview(repr(tool_input))
 
 
 # ---------------------------------------------------------------------------
