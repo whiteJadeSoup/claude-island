@@ -126,7 +126,13 @@ QLabel#stackedDecisionsHeader {{
 QLabel#stackedDecisionsBadge {{
     background-color: transparent;
     color: {_C.amber};
-    border: 1px solid {_C.amber_dim};
+    /* Hand-tuned dim mauve (#cba6f7 × ~0.4 brightness) instead of
+       _C.amber_dim. After the Catppuccin Mocha palette refactor,
+       _C.amber is mauve (#cba6f7) and _C.amber_dim is sapphire
+       (#74c7ec) — leaving this as `border: _C.amber_dim` produced
+       a mauve word in a SAPPHIRE box, a clear tier-color mismatch.
+       Same class of bug fixed in capsule_window warn/critical wash. */
+    border: 1px solid #514263;
     border-radius: 0;
     padding: 1px 6px;
     font-family: {_F.mono_stack};

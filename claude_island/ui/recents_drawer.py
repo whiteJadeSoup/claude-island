@@ -130,9 +130,15 @@ _STYLE_PREVIEW_TITLE = (
 # Permission-mode chip — squared (no border-radius), red-warm outline,
 # no fill.  Reads as "this session was given elevated authority" without
 # the screaming red pill v2 used to paint.
+# Border is a hand-tuned dim variant of red_warm (#fab387 × ~0.4 brightness)
+# rather than _C.red_warm_dim — the latter was reassigned to a brighter
+# peach (#ef9f76) during the Catppuccin Mocha palette refactor and as a
+# border would sit at almost the same brightness as the text, defeating
+# the "subtle outline" intent. Same class of bug fixed in capsule_window
+# at warn/critical wash; sweep tracked there.
 _STYLE_MODE_CHIP = (
     f"color: {_C.red_warm}; font-size: 10px; padding: 1px 6px;"
-    f"border: 1px solid {_C.red_warm_dim}; border-radius: 0; "
+    f"border: 1px solid #644836; border-radius: 0; "
     f"background: transparent; font-family: {_F.mono_stack};"
     f"letter-spacing: 0.08em;"
 )
