@@ -52,7 +52,7 @@ from claude_island.core.models import (
 )
 from claude_island.core.capabilities import Capability
 from claude_island.core.snapshot import SessionView, WorldSnapshot
-from .controller import IslandController
+from ..controller import IslandController
 
 
 class _CopyableIdLabel(QFrame):
