@@ -30,10 +30,12 @@ standard cross-platform atomic file rename.
 from __future__ import annotations
 
 import json
+import logging
 import os
-import sys
 import threading
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # Resolved at call time (not module-load time) so tests can monkeypatch
 # this attribute to point at a tmp_path fixture. Mirrors the pattern
@@ -91,7 +93,4 @@ def save_position(x: int, y: int) -> None:
             )
             os.replace(tmp, WINDOW_POSITION_PATH)
         except OSError as exc:
-            print(
-                f"[claude-island] failed to save window position: {exc}",
-                file=sys.stderr,
-            )
+            log.warning("failed to save window position: %s", exc)

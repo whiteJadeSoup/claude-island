@@ -13,11 +13,13 @@ the foreground push.
 """
 from __future__ import annotations
 
-import sys
+import logging
 
 import psutil
 
 from claude_island.platform_ import win32_console
+
+log = logging.getLogger(__name__)
 
 _MAX_ANCESTOR_DEPTH = 10
 
@@ -191,12 +193,10 @@ def _force_foreground(hwnd: int, win32con, win32gui, win32process) -> bool:
             fg_owner = f"{title!r}(hwnd={fg_hwnd})"
         except Exception:
             fg_owner = f"hwnd={fg_hwnd}"
-    print(
-        f"[claude-island] could not surface HWND {hwnd}: "
-        f"GetLastError={last_err}, foreground={fg_owner}, "
-        f"our_thread={our_thread}, target_thread={target_thread}, "
-        f"fg_thread={fg_thread}",
-        file=sys.stderr,
+    log.warning(
+        "could not surface HWND %s: GetLastError=%s, foreground=%s, "
+        "our_thread=%s, target_thread=%s, fg_thread=%s",
+        hwnd, last_err, fg_owner, our_thread, target_thread, fg_thread,
     )
     return False
 

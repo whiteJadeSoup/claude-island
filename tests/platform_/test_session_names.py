@@ -213,22 +213,32 @@ class TestConcurrentWrites:
 class TestReadFailureLogging:
     """Read-time failures (corrupt JSON, wrong shape) used to silently
     return {}, hiding renames from the user with no diagnostic. These
-    tests verify warnings now reach stderr."""
+    tests verify warnings are emitted via the module logger (was
+    stderr-print before commit ``c-2``; the swap-to-logging fix lets
+    callers route the warnings to a log file via standard logging
+    config rather than scraping stderr)."""
 
-    def test_malformed_json_logs_warning(self, tmp_path_patched, capsys):
-        tmp_path_patched.write_text("not json {[", encoding="utf-8")
-        result = session_names.get_session_name("any")
+    def test_malformed_json_logs_warning(self, tmp_path_patched, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING,
+                              logger="claude_island.platform_.session_names"):
+            tmp_path_patched.write_text("not json {[", encoding="utf-8")
+            result = session_names.get_session_name("any")
         assert result is None
-        err = capsys.readouterr().err
-        assert "malformed" in err.lower()
+        assert any("malformed" in r.message.lower() for r in caplog.records)
 
-    def test_wrong_shape_logs_warning(self, tmp_path_patched, capsys):
-        # Top-level array instead of object — JSON-valid but wrong.
-        tmp_path_patched.write_text('["not", "an", "object"]', encoding="utf-8")
-        result = session_names.get_session_name("any")
+    def test_wrong_shape_logs_warning(self, tmp_path_patched, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING,
+                              logger="claude_island.platform_.session_names"):
+            # Top-level array instead of object — JSON-valid but wrong.
+            tmp_path_patched.write_text('["not", "an", "object"]', encoding="utf-8")
+            result = session_names.get_session_name("any")
         assert result is None
-        err = capsys.readouterr().err
-        assert "object" in err.lower() or "ignoring" in err.lower()
+        assert any(
+            "object" in r.message.lower() or "ignoring" in r.message.lower()
+            for r in caplog.records
+        )
 
     def test_missing_file_does_NOT_log(self, tmp_path_patched, capsys):
         # First-time-user case (file never created) — must stay silent

@@ -32,9 +32,11 @@ as the same family of helpers.
 from __future__ import annotations
 
 import json
+import logging
 import os
-import sys
 import threading
+
+log = logging.getLogger(__name__)
 from pathlib import Path
 
 # Resolved at call time (not module-load time) so tests can monkeypatch
@@ -68,21 +70,17 @@ def _read(path: Path | None = None) -> dict[str, str]:
     except FileNotFoundError:
         return {}
     except OSError as e:
-        print(f"[claude-island] session_names.json read failed: {e}", file=sys.stderr)
+        log.warning("session_names.json read failed: %s", e)
         return {}
     try:
         data = json.loads(text)
     except ValueError as e:
-        print(
-            f"[claude-island] session_names.json malformed (renames hidden until fixed): {e}",
-            file=sys.stderr,
+        log.warning(
+            "session_names.json malformed (renames hidden until fixed): %s", e,
         )
         return {}
     if not isinstance(data, dict):
-        print(
-            "[claude-island] session_names.json is not a JSON object — ignoring",
-            file=sys.stderr,
-        )
+        log.warning("session_names.json is not a JSON object — ignoring")
         return {}
     return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
@@ -103,7 +101,7 @@ def _write(names: dict[str, str], path: Path | None = None) -> None:
         tmp.write_text(json.dumps(names, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as e:
-        print(f"[claude-island] session_names.json write failed: {e}", file=sys.stderr)
+        log.warning("session_names.json write failed: %s", e)
 
 
 def get_session_name(uuid: str) -> str | None:

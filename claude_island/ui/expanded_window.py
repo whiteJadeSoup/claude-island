@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+log = logging.getLogger(__name__)
 
 from claude_island.ui.fonts import MONO_FONT_STACK, UI_FONT_STACK
 from claude_island.ui.lab_palette import Color as _LabColor, FontStack
@@ -4381,9 +4384,7 @@ class ExpandedWindow(QWidget):
             try:
                 self._refresh_quota_footer()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] quota footer refresh failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("quota footer refresh failed: %s", exc)
         self.adjustSize()
         self._position()
 
@@ -4401,9 +4402,7 @@ class ExpandedWindow(QWidget):
             except Exception as exc:
                 # Manual refresh must never crash the UI; the worst
                 # case is "you press it and nothing changes".
-                import sys as _sys
-                print(f"[claude-island] manual refresh failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("manual refresh failed: %s", exc)
         self._render_cards()
 
     # ------------------------------------------------------------------
@@ -4710,9 +4709,7 @@ class ExpandedWindow(QWidget):
                 today_totals = self._get_usage_totals("today")
                 self._summary_amount.setText(_fmt_money(today_totals.cost_usd))
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] summary today fetch failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("summary today fetch failed: %s", exc)
                 self._summary_amount.setText("—")
                 today_totals = None
         else:
@@ -4728,9 +4725,7 @@ class ExpandedWindow(QWidget):
             try:
                 snap = self._get_quota_snapshot()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] summary quota fetch failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("summary quota fetch failed: %s", exc)
 
         provider_label = (self.selected_provider_name() or "anthropic").title()
         if snap is None:
@@ -4840,9 +4835,7 @@ class ExpandedWindow(QWidget):
             sep = f" <span style='color:{col_sep}'>·</span> "
             self._summary_stats.setText(sep.join(parts))
         except Exception as exc:
-            import sys as _sys
-            print(f"[claude-island] summary stats render failed: {exc}",
-                  file=_sys.stderr)
+            log.warning("summary stats render failed: %s", exc)
             self._summary_stats.setText("")
 
     def _build_spend_card(self) -> QFrame:
@@ -5061,8 +5054,7 @@ class ExpandedWindow(QWidget):
             try:
                 rows = self._get_totals_by_model(self._period)
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] totals_by_model failed: {exc}", file=_sys.stderr)
+                log.warning("totals_by_model failed: %s", exc)
                 rows = ()
             self._populate_spend_bars(rows, t.cost_usd)
             self._spend_bar_container.show()
@@ -5360,9 +5352,7 @@ class ExpandedWindow(QWidget):
             try:
                 self._on_refresh_clicked()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] quota footer refresh failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("quota footer refresh failed: %s", exc)
 
     def _refresh_quota_footer(self) -> None:
         """Repopulate the footer from the current quota snapshot.
@@ -5378,9 +5368,7 @@ class ExpandedWindow(QWidget):
             try:
                 snap = self._get_quota_snapshot()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] quota footer fetch failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("quota footer fetch failed: %s", exc)
 
         if snap is None:
             self._quota_footer_5h.setText(
@@ -5557,8 +5545,7 @@ class ExpandedWindow(QWidget):
             try:
                 snap = self._get_quota_snapshot()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] quota fetch failed: {exc}", file=_sys.stderr)
+                log.warning("quota fetch failed: %s", exc)
 
         if snap is None:
             self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
@@ -5729,9 +5716,7 @@ class ExpandedWindow(QWidget):
             except Exception as exc:
                 # Persistence failure must never crash the UI; the
                 # in-process selection still works for this session.
-                import sys as _sys
-                print(f"[claude-island] provider-select callback failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("provider-select callback failed: %s", exc)
         self._render_cards()
 
     # ------------------------------------------------------------------
@@ -5890,9 +5875,7 @@ class ExpandedWindow(QWidget):
             try:
                 self._on_provider_config_changed()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] provider-config-changed callback failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("provider-config-changed callback failed: %s", exc)
 
     def _show_provider_context_menu(
         self, name: str, anchor: QPushButton, pos: object
@@ -5927,9 +5910,7 @@ class ExpandedWindow(QWidget):
             try:
                 self._on_provider_config_changed()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] provider-config-changed callback failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("provider-config-changed callback failed: %s", exc)
 
     def set_available_providers(
         self, providers: list[str], selected: str | None = None
@@ -6255,9 +6236,7 @@ class ExpandedWindow(QWidget):
             except Exception as exc:
                 # Detail composition is enrichment, not load-bearing —
                 # never let a composer hiccup take down the row update.
-                import sys as _sys
-                print(f"[claude-island] session details failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("session details failed: %s", exc)
         title = (
             (details.name if details and details.name else None)
             or (details.ai_title if details and details.ai_title else None)
@@ -6831,9 +6810,7 @@ class ExpandedWindow(QWidget):
             try:
                 details = self._get_session_details(view.session)
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] detail popup composer failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("detail popup composer failed: %s", exc)
         # All capability actions flow through the injected dispatch.
         # Each callback closes over `view` so the popup itself never
         # holds capability/scope knowledge — it just calls the closure.

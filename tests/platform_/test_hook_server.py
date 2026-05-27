@@ -476,6 +476,18 @@ def test_t3_3_all_ports_taken_raises(tmp_port_file: Path):
                 blockers.append(s)
             except OSError:
                 s.close()
+        # Skip on the race where _find_free_port_range said the range
+        # was free but another process / a recently-released TIME_WAIT
+        # socket grabbed one before our bind. Without all 23 blocked
+        # HookServer will succeed on the unblocked port and the assertion
+        # below becomes a false negative — masking real regressions
+        # AND polluting CI red signal.
+        if len(blockers) < 23:
+            pytest.skip(
+                f"could not reserve all 23 ports in range starting at "
+                f"{base} ({len(blockers)} acquired); typical cause is "
+                f"TIME_WAIT from a prior test in the same process"
+            )
         sm = SessionStateMachine()
         server = HookServer(sm, preferred_port=base, port_file=tmp_port_file)
         with pytest.raises(HookServerStartError):

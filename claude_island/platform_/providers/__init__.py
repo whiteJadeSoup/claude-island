@@ -12,6 +12,7 @@ Adding a new provider (e.g. Kimi, GLM):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -23,6 +24,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+log = logging.getLogger(__name__)
 
 from claude_island.core.models import QuotaSnapshot
 from claude_island.core.safe_stderr import safe_stderr_write
@@ -348,7 +351,7 @@ def write_provider_config(config: dict, path: Path | None = None) -> None:
         tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as e:
-        print(f"[claude-island] providers.json write failed: {e}", file=sys.stderr)
+        log.warning("providers.json write failed: %s", e)
 
 
 def get_provider_setting(provider_name: str, key: str) -> str | None:
@@ -554,7 +557,7 @@ def write_cache(cache_path: Path, payload: dict) -> None:
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, cache_path)
     except OSError as e:
-        print(f"[claude-island] cache write failed: {e}", file=sys.stderr)
+        log.warning("cache write failed: %s", e)
 
 
 def _parse_iso(s: str) -> datetime | None:
