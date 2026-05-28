@@ -315,7 +315,7 @@ class UsageRegistry:
 
         Also splits sidechain (subagent) records into a subset
         (``sidechain_request_count`` / ``sidechain_cost_usd``) so the
-        TODAY card can annotate "↳ incl. {N} subagent calls · ${C}"
+        TODAY card can annotate "↳ incl. {N} subagent reqs · ${C}"
         below the main stat strip. The headline ``cost_usd`` /
         ``request_count`` STILL include sidechain — that matches the
         real Anthropic bill, which is what the headline number means.
@@ -377,7 +377,8 @@ class UsageRegistry:
 
         ``turn_count`` counts records that are NOT subagent (i.e. the
         main session's assistant turns). ``sidechain_count`` is the
-        number of subagent invocations.
+        number of subagent API requests (one per sidechain assistant
+        message) — NOT the number of subagent dispatches.
         """
         cost = 0.0
         turns = 0

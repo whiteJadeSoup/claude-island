@@ -2984,7 +2984,7 @@ class TestSummaryCard:
     def test_summary_sidechain_line_renders_when_subagents_used(self, qtbot):
         """When today's totals include any sidechain (subagent) records,
         the TODAY card shows a small annotation line below the 4-stat
-        strip — "↳ incl. {N} subagent calls · ${C}" — reconciling the
+        strip — "↳ incl. {N} subagent reqs · ${C}" — reconciling the
         island headline (main + subagent, matches Anthropic's bill)
         with ccusage-style tools (main only). Without this line, users
         comparing the two tools see a ~7-15% cost gap and have no way
@@ -3007,14 +3007,14 @@ class TestSummaryCard:
         text = p._summary_sidechain.text()
         assert "314" in text, f"missing subagent count: {text!r}"
         assert "$14" in text, f"missing subagent cost: {text!r}"
-        assert "subagent" in text, f"missing label: {text!r}"
+        assert "subagent reqs" in text, f"missing label: {text!r}"
         assert p._summary_sidechain.isVisibleTo(p), \
             "sidechain line must be visible when subagent records exist"
 
     def test_summary_sidechain_line_hidden_when_no_subagents(self, qtbot):
         """No sidechain records today → no annotation. The TODAY card
         keeps its compact look for the common single-session case
-        instead of forever advertising "0 subagent calls"."""
+        instead of forever advertising "0 subagent reqs"."""
         from claude_island.core.models import UsageTotals
         capsule = QWidget(); capsule.show()
         p = ExpandedWindow(

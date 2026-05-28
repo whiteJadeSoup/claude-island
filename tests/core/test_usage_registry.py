@@ -315,7 +315,7 @@ def test_get_totals_5h_window_excludes_older_records(registry):
 
 
 # --------------------------------------------------------------------------
-# Sidechain breakdown — TODAY card surfaces "incl. N subagent calls · $X"
+# Sidechain breakdown — TODAY card surfaces "incl. N subagent reqs · $X"
 # below the main stat strip so users can see the subagent contribution
 # inside the headline cost (which is main + sidechain combined, matching
 # what Anthropic actually bills).

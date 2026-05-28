@@ -4691,13 +4691,13 @@ class ExpandedWindow(QWidget):
         layout.addWidget(self._summary_stats)
 
         # Sidechain (subagent) annotation: a quieter, smaller line
-        # below the 4-stat strip — "↳ incl. {N} subagent calls · ${C}"
+        # below the 4-stat strip — "↳ incl. {N} subagent reqs · ${C}"
         # — reconciling the headline cost (which includes subagent
-        # calls, matching Anthropic's actual bill) with ccusage-style
+        # requests, matching Anthropic's actual bill) with ccusage-style
         # tools (which show main-chain only). Hidden by default; the
         # refresher shows it only when sidechain_request_count > 0 so
         # users who don't dispatch subagents never see "0 subagent
-        # calls" advertised forever.
+        # reqs" advertised forever.
         self._summary_sidechain = _ElasticRichLabel("")
         self._summary_sidechain.setStyleSheet(
             f"color: {_LabColor.paper_faint}; font-size: 10px; "
@@ -4861,10 +4861,13 @@ class ExpandedWindow(QWidget):
             return
 
         # Sidechain annotation — shown only when subagent activity exists.
-        # The headline cost above already includes subagent calls (matches
+        # The headline cost above already includes subagent requests (matches
         # Anthropic's bill); this line tells the user "of that, $X came
-        # from N subagent calls" so they can reconcile with ccusage-style
-        # tools that report main-chain only.
+        # from N subagent reqs" so they can reconcile with ccusage-style
+        # tools that report main-chain only. Note: this counts sidechain
+        # API requests (one per subagent assistant message), NOT the number
+        # of subagent dispatches — a single dispatched subagent runs many
+        # turns and so contributes many reqs here.
         sub_n = getattr(today, "sidechain_request_count", 0)
         sub_c = getattr(today, "sidechain_cost_usd", 0.0)
         if sub_n > 0:
@@ -4872,7 +4875,7 @@ class ExpandedWindow(QWidget):
                 f"<span style='color:{col_sep}'>↳</span> "
                 f"<span style='color:{col_label}'>incl.</span> "
                 f"<span style='color:{col_num}'><b>{_fmt_tokens(sub_n)}</b></span> "
-                f"<span style='color:{col_label}'>subagent calls ·</span> "
+                f"<span style='color:{col_label}'>subagent reqs ·</span> "
                 f"<span style='color:{col_num}'><b>{_fmt_money(sub_c)}</b></span>"
             )
             self._summary_sidechain.setVisible(True)

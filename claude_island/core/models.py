@@ -56,7 +56,7 @@ class UsageRecord:
     cache_creation_tokens: int
     cache_read_tokens: int
     message_id: str | None = None
-    is_sidechain: bool = False   # True when the JSONL row was a subagent invocation
+    is_sidechain: bool = False   # True when the row came from a subagent (sidechain) transcript
 
 
 @dataclass(frozen=True)
@@ -207,7 +207,7 @@ class UsageTotals:
     # are what Anthropic actually bills the user (main + subagent),
     # which is the headline the TODAY card surfaces. These two fields
     # carry the subagent-only slice of that headline so the panel can
-    # render a "↳ incl. {N} subagent calls · ${C}" annotation under
+    # render a "↳ incl. {N} subagent reqs · ${C}" annotation under
     # the main stat strip without the consumer having to call
     # get_totals twice or aggregate records a second time.
     # Reconciles the difference between island's headline ($ incl.
@@ -287,7 +287,7 @@ class SessionDetails:
     cc_version: str | None        # Claude Code version (e.g. "2.1.123")
     cost_usd: float               # cumulative cost across all turns of this session
     turn_count: int               # # assistant turns
-    sidechain_count: int          # # subagent invocations
+    sidechain_count: int          # # subagent API requests (1 per sidechain assistant message, NOT # of dispatches)
     # Per-model breakdown for the detail popup's TOKENS section.
     # Empty tuple when the composer / registry isn't wired yet — the
     # popup degrades gracefully (renders just the cumulative cost row).
