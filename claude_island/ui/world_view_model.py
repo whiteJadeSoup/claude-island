@@ -12,6 +12,16 @@ from claude_island.ui.snapshot_projection import project_snapshot
 _EMPTY = {"today_cost_usd": 0.0, "quota": None, "sessions": [], "decisions": [], "recents": []}
 
 
+def _compute_hit_rate(cache_read: int, input_tokens: int) -> float:
+    """Cache hit rate as a 0..1 float.
+
+    Formula: cache_read / (cache_read + input_tokens).
+    Returns 0.0 when both are zero to guard divide-by-zero.
+    """
+    total = cache_read + input_tokens
+    return cache_read / total if total > 0 else 0.0
+
+
 class WorldViewModel(QObject):
     changed = Signal()
 
@@ -121,9 +131,14 @@ class WorldViewModel(QObject):
             # cache_creation_tokens is the "cache write" bucket;
             # cache_read_tokens is the "cache read / hit" bucket.
             "cache_read": int(g(totals, "cache_read_tokens", "cache_read")),
-            # UsageTotals has no hit_rate field — derived externally when
-            # needed; default 0.0 here to keep the shape stable for QML.
-            "hit_rate": 0.0,
+            # hit_rate = cache_read / (cache_read + input_tokens).
+            # UsageTotals has no hit_rate field; derive it here so QML
+            # SpendPage can display it without recomputing in JS.
+            # Guard divide-by-zero: return 0.0 when both buckets are zero.
+            "hit_rate": _compute_hit_rate(
+                int(g(totals, "cache_read_tokens", "cache_read")),
+                int(g(totals, "input_tokens")),
+            ),
             "per_model": per_model,
         }
 

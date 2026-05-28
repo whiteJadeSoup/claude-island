@@ -244,6 +244,25 @@ def test_spend_detail_no_callbacks_returns_zeros():
     assert d["per_model"] == []
 
 
+def test_spend_detail_hit_rate():
+    """hit_rate = cache_read / (cache_read + input_tokens) = 84 / (84 + 16) = 0.84."""
+    vm = WorldViewModel(
+        get_totals=lambda period: _fake_totals(inp=16, cr=84),
+        get_totals_by_model=lambda period: _fake_by_model(),
+    )
+    d = vm.spendDetail()
+    assert abs(d["hit_rate"] - 0.84) < 1e-9
+
+
+def test_spend_detail_hit_rate_zero_when_no_tokens():
+    """Both buckets zero → hit_rate must be 0.0 (guard divide-by-zero)."""
+    vm = WorldViewModel(
+        get_totals=lambda period: _fake_totals(inp=0, cr=0),
+        get_totals_by_model=lambda period: _fake_by_model(),
+    )
+    assert vm.spendDetail()["hit_rate"] == 0.0
+
+
 # ---------------------------------------------------------------------------
 # refreshQuota and resumeSession slot tests
 # ---------------------------------------------------------------------------
