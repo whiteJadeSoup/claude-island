@@ -723,13 +723,12 @@ Window {
                                                     visible: text !== ""
                                                 }
 
-                                                // Activity waveform: Row of bars from rate_series
-                                                // Each bar's height is proportional to its sample value,
-                                                // normalized against the peak of the visible series.
-                                                // Height is fixed at 28px; bars animate in on series change.
-                                                // Bug 1 fix: give Item an id (waveItem) so the Repeater model
-                                                // and delegate can reference waveItem.visibleSeries / .peak
-                                                // directly instead of a fragile parent.parent.parent chain.
+                                                // Activity waveform: fixed 40-bar grid, right-aligned.
+                                                // Always renders 40 thin bars regardless of sample count.
+                                                // With few samples, left bars show a 2px baseline and the
+                                                // real samples rise on the right — filling in over time.
+                                                // Each bar animates height changes via NumberAnimation so
+                                                // the waveform feels "alive" as the rolling rate buffer updates.
                                                 Item {
                                                     id: waveItem
                                                     Layout.fillWidth: true
@@ -745,12 +744,8 @@ Window {
                                                         return mx
                                                     }
 
-                                                    // Show only last 30 samples for the card width
-                                                    property var visibleSeries: {
-                                                        var s = series
-                                                        if (s.length <= 30) return s
-                                                        return s.slice(s.length - 30)
-                                                    }
+                                                    // Fixed bar count — always 40 thin bars fills the row
+                                                    property int barCount: 40
 
                                                     Row {
                                                         anchors.bottom: parent.bottom
@@ -760,27 +755,31 @@ Window {
                                                         spacing: 1
 
                                                         Repeater {
-                                                            // Reference waveItem directly — avoids the one-level-too-deep
-                                                            // parent.parent chain that was producing undefined.length errors.
-                                                            model: waveItem.visibleSeries.length > 0
-                                                                   ? waveItem.visibleSeries.length : 30
+                                                            // Always 40 bars — no huge blocks from tiny sample counts
+                                                            model: waveItem.barCount
 
                                                             delegate: Rectangle {
                                                                 required property int index
-                                                                // Bar width fills the available row width evenly
-                                                                width: Math.max(2, (parent.width - (waveItem.visibleSeries.length > 0 ? waveItem.visibleSeries.length - 1 : 29)) / Math.max(1, waveItem.visibleSeries.length > 0 ? waveItem.visibleSeries.length : 30))
+                                                                // Thin fixed width so 40 bars fill the row (spacing 1 each)
+                                                                width: Math.max(2, (waveItem.width - (waveItem.barCount - 1)) / waveItem.barCount)
                                                                 height: {
-                                                                    var vs = waveItem.visibleSeries
-                                                                    if (!vs || vs.length === 0) return 2
-                                                                    var val = index < vs.length ? vs[index] : 0
-                                                                    var pk = waveItem.peak
-                                                                    var h = Math.max(2, (val / pk) * 24)
-                                                                    return h
+                                                                    var s = waveItem.series
+                                                                    // Right-align: newest sample on the rightmost bar.
+                                                                    // Empty slots on the left when series has fewer than barCount samples.
+                                                                    var offset = waveItem.barCount - s.length
+                                                                    var si = index - offset
+                                                                    if (si < 0 || si >= s.length) return 2  // no data yet → tiny baseline
+                                                                    return Math.max(2, (s[si] / waveItem.peak) * 24)
                                                                 }
                                                                 anchors.bottom: parent.bottom
                                                                 radius: 1
                                                                 color: root.phaseColor(modelData.phase)
-                                                                opacity: 0.7 + 0.3 * (index / Math.max(1, (waveItem.visibleSeries.length > 0 ? waveItem.visibleSeries.length : 30) - 1))
+                                                                // Older (left) bars dimmer; newest (right) bars fully opaque
+                                                                opacity: 0.35 + 0.55 * (index / (waveItem.barCount - 1))
+                                                                // Animate height so bars grow/shrink smoothly as buffer updates
+                                                                Behavior on height {
+                                                                    NumberAnimation { duration: 320; easing.type: Easing.OutCubic }
+                                                                }
                                                             }
                                                         }
                                                     }
