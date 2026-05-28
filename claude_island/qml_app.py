@@ -243,13 +243,75 @@ def main() -> int:
             print(f"[island] reset_thinking_fn error: {exc}", file=sys.stderr)
 
     # ── resume_fn ────────────────────────────────────────────────────────────
-    # DONE_WITH_CONCERNS: Real resume requires the TerminalDispatcher /
-    # LaunchIntentRegistry / DormantSession → claude --resume flow (the full
-    # RecentsDrawer path in __main__.py). That heavyweight wiring is deferred
-    # to a later plan step. For now, log the intent so callers can verify the
-    # signal fires without crashing.
+    # Real resume via TerminalDispatcher LAUNCH + LaunchIntentRegistry.
+    # Mirrors RecentsDrawer._on_resume exactly:
+    #   1. Find the DormantSession by uuid in the current world snapshot.
+    #   2. Build flags from permission_mode + command = ("claude", "--resume", uuid, *flags).
+    #   3. Pick the first LAUNCH-capable adapter via dispatcher.adapters_with(LAUNCH).
+    #   4. Call dispatcher.launch(adapter_name, cwd=..., command=..., session_uuid=...).
+    #   5. Register a LaunchIntent so the next snapshot shows the ⏳ launching row.
+    #   6. Wake the snapshotter so the UI updates within ~100 ms.
+    # On any failure, logs to stderr and returns — best-effort, UI stays alive.
     def resume_fn(uuid: str) -> None:
-        print(f"[island] resume requested: {uuid}", file=sys.stderr)
+        from claude_island.core.snapshot import world as _world
+        from claude_island.core.capabilities import Capability as _Cap, LauncherSpawnError
+        from claude_island.core.launch_intent import LaunchIntent
+        from claude_island.ui.recents_drawer import _flags_for_mode
+
+        try:
+            # Step 1: locate the DormantSession for this uuid.
+            dormant = None
+            for d in _world.current.dormant_sessions:
+                if d.session_uuid == uuid:
+                    dormant = d
+                    break
+            if dormant is None:
+                print(
+                    f"[island] resume: no dormant session found for uuid={uuid!r}",
+                    file=sys.stderr,
+                )
+                return
+
+            # Step 2: build flags + command (same logic as RecentsDrawer).
+            flags = _flags_for_mode(dormant.permission_mode)
+            command = ("claude", "--resume", dormant.session_uuid, *flags)
+
+            # Step 3: pick the first LAUNCH-capable terminal adapter.
+            candidates = _dispatcher.adapters_with(_Cap.LAUNCH)
+            if not candidates:
+                print(
+                    "[island] resume: no terminal launcher available "
+                    "(install Windows Terminal or iTerm2)",
+                    file=sys.stderr,
+                )
+                return
+            adapter_name, _ = candidates[0]
+
+            # Step 4: spawn the terminal.
+            result = _dispatcher.launch(
+                adapter_name,
+                cwd=dormant.cwd,
+                command=command,
+                session_uuid=dormant.session_uuid,
+            )
+
+            # Step 5: register the intent so the next snapshot shows ⏳.
+            launch_intent.add(LaunchIntent(
+                session_uuid=dormant.session_uuid,
+                cwd=dormant.cwd,
+                flags=flags,
+                terminal_name=result.terminal_name,
+                terminal_pid=result.terminal_pid,
+                requested_at=result.started_at,
+            ))
+
+            # Step 6: wake snapshotter — launching row appears in ~100 ms.
+            snapshotter.wake()
+
+        except LauncherSpawnError as exc:
+            print(f"[island] resume: launcher failed: {exc}", file=sys.stderr)
+        except Exception as exc:
+            print(f"[island] resume_fn error: {exc}", file=sys.stderr)
 
     # ── _resume_uuid_reader ───────────────────────────────────────────────────
     # Mirrors __main__.py: wraps resume_uuid_for_pid so HookServer, Snapshotter,
