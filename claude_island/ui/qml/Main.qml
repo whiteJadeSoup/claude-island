@@ -333,14 +333,57 @@ Window {
                         }
 
                         // History link → RecentsPage
-                        Text {
-                            text: "  🕘 History"
-                            color: recentsArea.containsMouse ? "#c8d4de" : "#7e8a97"
-                            font.pixelSize: 12
+                        // Item wrapper so MouseArea can anchors.fill without
+                        // conflicting with Row positioning rules.
+                        Item {
+                            id: historyLink
+                            implicitWidth: clockCanvas.width + 4 + historyLabel.implicitWidth
+                            implicitHeight: 14
+
                             MouseArea {
-                                id: recentsArea; anchors.fill: parent
+                                id: recentsArea
+                                anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor; hoverEnabled: true
                                 onClicked: root.page = "recents"
+                            }
+                            // Clock icon: circle + two hands drawn via Canvas (14×14)
+                            Canvas {
+                                id: clockCanvas
+                                width: 14; height: 14
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                property color strokeColor: recentsArea.containsMouse ? "#c8d4de" : "#7e8a97"
+                                onStrokeColorChanged: requestPaint()
+                                onPaint: {
+                                    var ctx = getContext("2d")
+                                    ctx.clearRect(0, 0, width, height)
+                                    ctx.strokeStyle = strokeColor
+                                    ctx.lineWidth = 1.4
+                                    ctx.lineCap = "round"
+                                    // Outer circle
+                                    ctx.beginPath()
+                                    ctx.arc(7, 7, 5.5, 0, Math.PI * 2)
+                                    ctx.stroke()
+                                    // Minute hand (straight up — 12 o'clock)
+                                    ctx.beginPath()
+                                    ctx.moveTo(7, 7)
+                                    ctx.lineTo(7, 2.5)
+                                    ctx.stroke()
+                                    // Hour hand (~2-3 o'clock, short)
+                                    ctx.beginPath()
+                                    ctx.moveTo(7, 7)
+                                    ctx.lineTo(10, 8.5)
+                                    ctx.stroke()
+                                }
+                            }
+                            Text {
+                                id: historyLabel
+                                text: "History"
+                                color: recentsArea.containsMouse ? "#c8d4de" : "#7e8a97"
+                                font.pixelSize: 12
+                                anchors.left: clockCanvas.right
+                                anchors.leftMargin: 4
+                                anchors.verticalCenter: parent.verticalCenter
                             }
                         }
 
@@ -534,9 +577,27 @@ Window {
                                             anchors.fill: parent
                                             anchors.leftMargin: 10; anchors.rightMargin: 10
                                             spacing: 6
-                                            Text {
-                                                text: "📅 Today"
-                                                color: "#566069"; font.pixelSize: 10
+                                            // 3x14px vertical accent bar — replaces the calendar emoji
+                                            Rectangle {
+                                                width: 3; height: 14
+                                                radius: 2
+                                                color: "#5fd2a8"
+                                                Layout.alignment: Qt.AlignVCenter
+                                            }
+                                            // Outlined "TODAY" chip
+                                            Rectangle {
+                                                height: 14; radius: 3
+                                                color: "transparent"
+                                                border.color: "#2a3a30"; border.width: 1
+                                                Layout.alignment: Qt.AlignVCenter
+                                                implicitWidth: todayChipLabel.implicitWidth + 6
+                                                Text {
+                                                    id: todayChipLabel
+                                                    anchors.centerIn: parent
+                                                    text: "TODAY"
+                                                    color: "#566069"; font.pixelSize: 8
+                                                    font.letterSpacing: 0.5
+                                                }
                                             }
                                             Text {
                                                 text: root.vmTodayCost
