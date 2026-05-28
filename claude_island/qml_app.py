@@ -1,7 +1,6 @@
 """QML walking-skeleton 入口(与 python -m claude_island 并存,不影响现有 app)。"""
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -21,13 +20,18 @@ def main() -> int:
     from claude_island.core.session_registry import SessionRegistry
     from claude_island.core.snapshot import Snapshotter, world
     from claude_island.core.usage_registry import UsageRegistry
-    from claude_island.core.pending_decisions import PendingDecisionRegistry, build_request, DecisionKind
+    from claude_island.core.pending_decisions import PendingDecisionRegistry
     from claude_island.core.dormant_source import DormantSessionSource
     from claude_island.core.launch_intent import LaunchIntentRegistry
     from claude_island.core.notify import NotifyEventQueue
     from claude_island.platform_ import session_state as session_state_reader
     from claude_island.platform_ import session_names as session_names_store
     from claude_island.platform_.process_scanner import ProcessScanner, resume_uuid_for_pid
+    from claude_island.core.session_state_machine import SessionStateMachine
+    from claude_island.platform_ import hook_installer
+    from claude_island.platform_.hook_server import HookServer, HookServerStartError
+    from claude_island.platform_.hook_session_bridge import HookSessionBridge
+    from importlib import resources
     from claude_island.platform_.file_watcher import FileWatcher
     from claude_island.platform_.session_discovery import SessionDiscovery
     from claude_island.platform_.providers import ProviderEngine
@@ -247,6 +251,100 @@ def main() -> int:
     def resume_fn(uuid: str) -> None:
         print(f"[island] resume requested: {uuid}", file=sys.stderr)
 
+    # ── _resume_uuid_reader ───────────────────────────────────────────────────
+    # Mirrors __main__.py: wraps resume_uuid_for_pid so HookServer, Snapshotter,
+    # and compose_session_view all share one consistent uuid-recovery path.
+    # Two-step resolution: cmdline --resume <UUID> → direct; --resume <name>
+    # → reverse-lookup via session_names_store.
+    def _resume_uuid_reader(pid: int) -> str | None:
+        return resume_uuid_for_pid(
+            pid, names_lookup=session_names_store.get_uuid_by_name,
+        )
+
+    # ── Hook subsystem ────────────────────────────────────────────────────────
+    # Mirrors __main__.py's hook block (lines 707–845).
+    # On failure we degrade gracefully: state_machine still exists (pure
+    # in-memory), hook_server and hook_bridge remain None, and the UI
+    # continues working from pid.json scanner data.
+    state_machine = SessionStateMachine()
+    hook_server: HookServer | None = None
+    hook_bridge: HookSessionBridge | None = None
+
+    try:
+        # Step 1: sync bundled hook.py to ~/.claude-island/hook.py
+        with resources.as_file(
+            resources.files("claude_island") / "hook.py"
+        ) as bundled_hook:
+            dest_hook = Path.home() / ".claude-island" / "hook.py"
+            try:
+                hook_installer.sync_hook_script(
+                    bundled_script=Path(bundled_hook), dest=dest_hook,
+                )
+            except OSError as e:
+                print(
+                    f"[island] could not sync hook.py to {dest_hook}: {e}; "
+                    f"hooks disabled this session",
+                    file=sys.stderr,
+                )
+                raise
+
+        # Step 2: idempotently merge hook entries into ~/.claude/settings.json
+        hook_command = hook_installer.build_hook_command(
+            python_exe=sys.executable,
+            hook_script=dest_hook,
+        )
+        try:
+            result = hook_installer.install_if_needed(
+                settings_path=Path.home() / ".claude" / "settings.json",
+                hook_command=hook_command,
+            )
+            if result.changed:
+                print(
+                    f"[island] installed Claude Code hooks "
+                    f"({len(result.installed_events)} events); "
+                    f"preserved {result.user_hooks_preserved} user hook(s)",
+                    file=sys.stderr,
+                )
+        except hook_installer.InstallError as e:
+            print(
+                f"[island] could not install hooks in settings.json: {e}",
+                file=sys.stderr,
+            )
+            # Continue — listener still works if user pre-installed hooks
+
+        # Step 4: start the HTTP listener
+        hook_server = HookServer(
+            state_machine,
+            pending_registry=pending_registry,
+            permission_cache=permission_cache,
+            notify_queue=notify_queue,
+            resume_uuid_reader=_resume_uuid_reader,
+        )
+        try:
+            bound_port = hook_server.start()
+            print(
+                f"[island] hook listener bound on 127.0.0.1:{bound_port}",
+                file=sys.stderr,
+            )
+        except HookServerStartError as e:
+            print(
+                f"[island] hook listener failed to start: {e}; "
+                f"degrading to scanner-only (phase will come from pid.json)",
+                file=sys.stderr,
+            )
+            hook_server = None
+
+        # Step 5: wire registry ↔ state_machine
+        hook_bridge = HookSessionBridge(
+            registry=session_registry, state_machine=state_machine,
+        )
+    except Exception as e:
+        print(
+            f"[island] hook subsystem failed to initialize ({e!r}); "
+            f"running scanner-only",
+            file=sys.stderr,
+        )
+
     marshaler = WorldMarshaler()  # snap_ready → world.push (QueuedConnection, 内部已接)
     snapshotter = Snapshotter(
         session_source=session_registry,
@@ -254,6 +352,11 @@ def main() -> int:
         metadata_provider=jsonl_parser,
         usage_registry=usage_registry,
         names_store=session_names_store,
+        # Real-time phase from HookServer (falls back to pid.json if None).
+        live_state_reader=state_machine.read,
+        # OLD-uuid recovery so UsageRegistry lookups hit the right key after
+        # --resume; mirrors __main__.py's identical injection.
+        resume_uuid_reader=_resume_uuid_reader,
         get_quota=lambda: quota_engine.get(provider_name="anthropic"),
         get_available_providers=lambda: ["anthropic"],
         get_selected_provider=lambda: "anthropic",
@@ -270,6 +373,17 @@ def main() -> int:
     session_registry.sessions_changed.subscribe(lambda _: snapshotter.wake())
     usage_registry.totals_changed.subscribe(lambda _: snapshotter.wake())
     file_watcher.watch(claude_projects, jsonl_parser.parse_file)
+
+    # Step 6: hook events drive snapshotter wakes.  live_state_changed fires
+    # on the HookServer worker thread; snapshotter.wake() is thread-safe and
+    # debounces internally.
+    state_machine.live_state_changed.subscribe(
+        on_next=lambda _: snapshotter.wake(),
+        on_error=lambda e: print(
+            f"[island] live_state_changed subscription died: {e!r}",
+            file=sys.stderr,
+        ),
+    )
 
     vm = WorldViewModel(
         resolve_fn=pending_registry.resolve,
@@ -345,49 +459,17 @@ def main() -> int:
     threading.Thread(target=session_discovery.start, daemon=True).start()
     marshaler.snap_ready.emit(snapshotter.build_now())   # 首帧
 
-    # ── Demo-decision injector ───────────────────────────────────────────────
-    # Set CISLAND_DEMO_DECISION=1 to inject two sample decisions for visual
-    # verification of approval/question cards in QML.
-    #
-    # Real hook-sourced decisions come when qml_app becomes the sole entry
-    # point and a HookServer is wired in (Plan 3); we deliberately skip that
-    # here to avoid port conflicts with the existing __main__.py hook server.
-    if os.environ.get("CISLAND_DEMO_DECISION"):
-        try:
-            req1 = build_request(
-                kind=DecisionKind.PRE_TOOL_USE,
-                session_name="db-migrate",
-                tool_name="Bash",
-                tool_input_preview="kubectl apply -f prod.yaml",
-                timeout_s=3600,
-                cwd=_P.home(),
-                hook_event="PreToolUse",
-                session_uuid="demo-1",
-            )
-            pending_registry.register(req1)
-
-            req2 = build_request(
-                kind=DecisionKind.ASK_QUESTION,
-                session_name="cc-learning",
-                question_text="用哪个库做日期处理?",
-                question_options=("date-fns", "Day.js", "Luxon"),
-                question_option_descriptions=("轻量 tree-shakeable", "2KB Moment 兼容", "时区最强"),
-                multi_select=False,
-                timeout_s=3600,
-                cwd=_P.home(),
-                hook_event="UserPromptSubmit",
-                session_uuid="demo-2",
-                tool_name="AskUserQuestion",
-            )
-            pending_registry.register(req2)
-
-            snapshotter.wake()
-            print("[island] demo decisions injected (CISLAND_DEMO_DECISION=1)", file=sys.stderr)
-        except Exception as exc:
-            print(f"[island] demo injector error (non-fatal): {exc}", file=sys.stderr)
-
     code = app.exec()
-    snapshotter.stop(); session_discovery.stop(); file_watcher.stop()
+    # Shutdown order mirrors __main__.py: stop snapshotter first so in-flight
+    # wakes don't fire into a torn-down pipeline, then tear down the hook
+    # subsystem before the registries it writes into.
+    snapshotter.stop()
+    if hook_server is not None:
+        hook_server.stop()
+    if hook_bridge is not None:
+        hook_bridge.stop()
+    session_discovery.stop()
+    file_watcher.stop()
     jsonl_parser.request_stop()
     return code
 
