@@ -66,6 +66,9 @@ def _decision(p: PendingDecisionView) -> dict[str, Any]:
         "id": p.id,
         "kind": p.kind.value,
         "session_name": p.session_name,
+        # session_uuid is included so DecisionCard can call vm.focusSession() to
+        # jump to the terminal that owns this decision (the "Jump to terminal" row).
+        "session_uuid": p.session_uuid,
         "risk": p.risk_level.value,
         "tool_name": p.tool_name,
         "tool_input_preview": p.tool_input_preview,

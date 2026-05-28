@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls
 
 // Single decision card — approval swipe or question options.
 // Required properties: decision (dict from vmDecisions), vm (worldVm).
@@ -205,6 +206,14 @@ Rectangle {
             spacing: 6
             width: parent ? parent.width : 0
 
+            // Multi-select state: tracks which option indices are checked.
+            // Stored as a JS object (used as a set) for O(1) toggle/check.
+            // Reset when the card decision changes so a new question starts clean.
+            property var selectedIndices: ({})
+
+            // "Other…" state: whether the free-text field is visible
+            property bool showOther: false
+
             // Question text
             Text {
                 Layout.fillWidth: true
@@ -214,49 +223,79 @@ Rectangle {
                 wrapMode: Text.Wrap
             }
 
-            // Option rows
+            // Option rows — behaviour differs for multi-select vs single-select:
+            //   single: click immediately resolves the question (existing behaviour)
+            //   multi:  click toggles a checkbox; a Submit button commits the choice
             Repeater {
                 model: card.decision ? card.decision.options : []
                 delegate: Rectangle {
                     required property var modelData
                     required property int index
 
+                    // Alias for brevity; parent is the ColumnLayout
+                    property bool isMulti: card.decision && card.decision.multi_select
+                    property bool isChecked: parent.selectedIndices && (index in parent.selectedIndices)
+
                     Layout.fillWidth: true
                     height: optCol.height + 14
                     radius: 6
-                    color: optArea.containsMouse ? "#231a10" : "transparent"
-                    border.color: optArea.containsMouse ? "#4a3320" : "transparent"
+                    color: optArea.containsMouse ? "#231a10" : (isChecked ? "#1a2010" : "transparent")
+                    border.color: optArea.containsMouse ? "#4a3320"
+                                : (isChecked ? "#3a5020" : "transparent")
                     border.width: 1
 
-                    ColumnLayout {
-                        id: optCol
+                    RowLayout {
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top
                         anchors.margins: 8
-                        spacing: 2
+                        spacing: 8
 
-                        Text {
-                            Layout.fillWidth: true
-                            text: modelData
-                            color: "#f4efe9"
-                            font.pixelSize: 12
-                            font.bold: true
-                            wrapMode: Text.Wrap
+                        // Checkbox indicator (multi-select only)
+                        Rectangle {
+                            visible: parent.parent.isMulti
+                            width: 14; height: 14; radius: 3
+                            color: parent.parent.isChecked ? "#3a8040" : "#1a2010"
+                            border.color: parent.parent.isChecked ? "#5fd2a8" : "#2a3a20"
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✓"
+                                color: "#5fd2a8"
+                                font.pixelSize: 9
+                                font.bold: true
+                                visible: parent.parent.parent.isChecked
+                            }
                         }
-                        Text {
+
+                        ColumnLayout {
+                            id: optCol
                             Layout.fillWidth: true
-                            visible: {
-                                var desc = card.decision && card.decision.option_descriptions
-                                return desc && index < desc.length && desc[index] !== ""
+                            spacing: 2
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: modelData
+                                color: "#f4efe9"
+                                font.pixelSize: 12
+                                font.bold: true
+                                wrapMode: Text.Wrap
                             }
-                            text: {
-                                var desc = card.decision && card.decision.option_descriptions
-                                return (desc && index < desc.length) ? desc[index] : ""
+                            Text {
+                                Layout.fillWidth: true
+                                visible: {
+                                    var desc = card.decision && card.decision.option_descriptions
+                                    return desc && index < desc.length && desc[index] !== ""
+                                }
+                                text: {
+                                    var desc = card.decision && card.decision.option_descriptions
+                                    return (desc && index < desc.length) ? desc[index] : ""
+                                }
+                                color: "#7e8a97"
+                                font.pixelSize: 11
+                                wrapMode: Text.Wrap
                             }
-                            color: "#7e8a97"
-                            font.pixelSize: 11
-                            wrapMode: Text.Wrap
                         }
                     }
 
@@ -266,38 +305,196 @@ Rectangle {
                         cursorShape: Qt.PointingHandCursor
                         hoverEnabled: true
                         onClicked: {
-                            if (card.decision)
+                            if (!card.decision) return
+                            if (parent.isMulti) {
+                                // Toggle selection: add or remove from selectedIndices
+                                var sel = Object.assign({}, parent.parent.selectedIndices)
+                                if (index in sel) {
+                                    delete sel[index]
+                                } else {
+                                    sel[index] = modelData
+                                }
+                                parent.parent.selectedIndices = sel
+                            } else {
+                                // Single-select: resolve immediately
                                 card.vm.answerQuestion(
                                     card.decision.id,
                                     card.decision.question_text,
                                     modelData
                                 )
+                            }
                         }
                     }
                 }
             }
 
-            // Terminal fallback row (dim, no-op placeholder)
+            // "Other…" toggle row — always visible for question cards
+            Rectangle {
+                Layout.fillWidth: true
+                height: 34
+                radius: 6
+                color: otherToggleArea.containsMouse ? "#231a10" : "transparent"
+                border.color: "transparent"
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 8
+                    spacing: 6
+
+                    // Small pencil icon
+                    Text {
+                        text: "✎"
+                        color: "#7e5a3a"
+                        font.pixelSize: 11
+                    }
+                    Text {
+                        text: parent.parent.parent.showOther ? "Other… (hide)" : "Other…"
+                        color: otherToggleArea.containsMouse ? "#c8a080" : "#566069"
+                        font.pixelSize: 11
+                    }
+                    Item { Layout.fillWidth: true }
+                }
+
+                MouseArea {
+                    id: otherToggleArea
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    hoverEnabled: true
+                    onClicked: parent.parent.showOther = !parent.parent.showOther
+                }
+            }
+
+            // Free-text field — revealed when showOther is true
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                visible: parent.showOther
+
+                TextField {
+                    id: otherField
+                    Layout.fillWidth: true
+                    placeholderText: "Type your answer…"
+                    color: "#e9edf2"
+                    font.pixelSize: 12
+                    background: Rectangle {
+                        radius: 6
+                        color: "#0e141b"
+                        border.color: otherField.activeFocus ? "#3a5020" : "#1c2632"
+                        border.width: 1
+                    }
+                    Keys.onReturnPressed: {
+                        if (text.trim() !== "" && card.decision)
+                            card.vm.answerQuestion(card.decision.id, card.decision.question_text, text.trim())
+                    }
+                }
+
+                // Submit free-text button
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 28
+                    radius: 6
+                    color: otherSubmitArea.containsMouse ? "#1a2a20" : "#0e1a14"
+                    border.color: otherSubmitArea.containsMouse ? "#5fd2a8" : "#2a3a20"
+                    border.width: 1
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "Submit answer"
+                        color: otherSubmitArea.containsMouse ? "#5fd2a8" : "#7e8a97"
+                        font.pixelSize: 11
+                    }
+
+                    MouseArea {
+                        id: otherSubmitArea
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        hoverEnabled: true
+                        onClicked: {
+                            var txt = otherField.text.trim()
+                            if (txt !== "" && card.decision)
+                                card.vm.answerQuestion(card.decision.id, card.decision.question_text, txt)
+                        }
+                    }
+                }
+            }
+
+            // Multi-select Submit button — only shown when multi_select and ≥1 selected
+            Rectangle {
+                Layout.fillWidth: true
+                height: 30
+                radius: 6
+                visible: card.decision && card.decision.multi_select &&
+                         Object.keys(parent.selectedIndices).length > 0
+                color: multiSubmitArea.containsMouse ? "#1a3020" : "#0e2018"
+                border.color: multiSubmitArea.containsMouse ? "#5fd2a8" : "#2a4030"
+                border.width: 1
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "Submit (" + Object.keys(parent.parent.selectedIndices).length + ")"
+                    color: multiSubmitArea.containsMouse ? "#5fd2a8" : "#7eaa8a"
+                    font.pixelSize: 12
+                    font.bold: true
+                }
+
+                MouseArea {
+                    id: multiSubmitArea
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    hoverEnabled: true
+                    onClicked: {
+                        if (!card.decision) return
+                        var sel = parent.parent.selectedIndices
+                        var keys = Object.keys(sel)
+                        if (keys.length === 0) return
+                        // Build the labels array in original option order
+                        var opts = card.decision.options
+                        var labels = []
+                        for (var i = 0; i < opts.length; i++) {
+                            if (i in sel) labels.push(opts[i])
+                        }
+                        card.vm.answerQuestionMulti(card.decision.id, card.decision.question_text, labels)
+                    }
+                }
+            }
+
+            // Jump to terminal row — wired to vm.focusSession via session_uuid
             Rectangle {
                 Layout.fillWidth: true
                 height: 34
                 radius: 6
                 color: termArea.containsMouse ? "#1a1410" : "transparent"
                 border.color: "transparent"
-                Text {
-                    anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
+
+                RowLayout {
+                    anchors.fill: parent
                     anchors.leftMargin: 8
-                    text: "Jump to terminal"
-                    color: "#566069"
-                    font.pixelSize: 11
+                    anchors.rightMargin: 8
+                    spacing: 6
+                    Text {
+                        text: "↗"
+                        color: termArea.containsMouse ? "#7eb8d2" : "#566069"
+                        font.pixelSize: 11
+                    }
+                    Text {
+                        text: "Jump to terminal"
+                        color: termArea.containsMouse ? "#7eb8d2" : "#566069"
+                        font.pixelSize: 11
+                    }
                 }
+
                 MouseArea {
                     id: termArea
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
                     hoverEnabled: true
-                    // no-op placeholder
+                    onClicked: {
+                        // session_uuid is included in the decision dict by _decision()
+                        // in snapshot_projection.py so focusSession can look up the view.
+                        if (card.vm && card.decision && card.decision.session_uuid)
+                            card.vm.focusSession(card.decision.session_uuid)
+                    }
                 }
             }
         }

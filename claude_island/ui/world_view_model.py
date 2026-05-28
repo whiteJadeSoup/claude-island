@@ -99,13 +99,10 @@ class WorldViewModel(QObject):
         # ── R1 Deliverable 1: enrich sessions with rate_series ─────────────
         # Build the current set of session ids so we can prune stale history.
         current_ids: set[str] = set()
-        # Also rebuild _views_by_id for sessionDetail() (Deliverable 3).
-        new_views: dict[str, SessionView] = {}
         for group in snap.session_groups:
             for view in group.views:
                 sid = view.session_uuid or f"{view.project_path}:{view.pid}"
                 current_ids.add(sid)
-                new_views[view.session_uuid] = view if view.session_uuid else new_views.get(view.session_uuid, view)
                 # Append one rate sample (0 when None so the waveform stays
                 # continuous even during idle phases).
                 rate = view.tokens_per_min if view.tokens_per_min is not None else 0
@@ -270,6 +267,18 @@ class WorldViewModel(QObject):
         tuple[tuple[str, str], ...] contract."""
         self._resolve_fn(decision_id, Decision(result=DecisionResult.ALLOW, answers=((question_text, answer),)))
 
+    @Slot(str, str, "QStringList")
+    def answerQuestionMulti(self, decision_id: str, question_text: str, answers: list) -> None:
+        """Relay a multi-select answer back to the hook server.
+
+        Joins the selected option labels with ", " and wraps as a single
+        answer pair, matching Decision's tuple[tuple[str, str], ...] contract.
+        Called from DecisionCard.qml when multi_select===true and the user
+        clicks the Submit button.
+        """
+        joined = ", ".join(str(a) for a in answers)
+        self._resolve_fn(decision_id, Decision(result=DecisionResult.ALLOW, answers=((question_text, joined),)))
+
     @Slot(str)
     def focusSession(self, session_id: str) -> None:
         """Bring the terminal window for session_id to the foreground."""
@@ -308,8 +317,11 @@ class WorldViewModel(QObject):
         per_model = []
         try:
             for mt in (_g(details, "per_model") or ()):
+                raw = str(_g(mt, "model", default=""))
                 per_model.append({
-                    "model": str(_g(mt, "model", default="")),
+                    # Apply friendly label ("opus-4.7") so SessionDetailPage
+                    # doesn't display the raw internal id ("claude-opus-4-7").
+                    "model": _fmt_model(raw) or raw,
                     "cost": float(_g(mt, "cost_usd", "cost", default=0.0)),
                 })
         except Exception:
@@ -331,9 +343,13 @@ class WorldViewModel(QObject):
             except Exception:
                 transcript_path = ""
 
+        # Apply friendly model label so the detail page shows "opus-4.7" not "claude-opus-4-7".
+        raw_model = str(_g(details, "latest_model") or view.latest_model or "")
+        friendly_model = _fmt_model(raw_model) or raw_model
+
         return {
             "name":            str(_g(details, "name") or ""),
-            "model":           str(_g(details, "latest_model") or view.latest_model or ""),
+            "model":           friendly_model,
             "cost":            float(_g(details, "cost_usd", default=0.0)),
             "turns":           int(_g(details, "turn_count", default=0)),
             "input_tokens":    0,   # UsageRegistry per-session input not exposed by SessionDetails
@@ -346,6 +362,10 @@ class WorldViewModel(QObject):
             "latest_prompt":   str(_g(details, "last_prompt") or ""),
             "uuid":            eff_uuid,
             "per_model":       per_model,
+            # Real session phase so SessionDetailPage can show it accurately
+            # instead of hardcoding "active". SessionView.phase is a SessionPhase
+            # enum; .value gives the string used by QML (e.g. "thinking", "idle").
+            "phase":           view.phase.value if view.phase else "",
         }
 
     # ── R7 action slots ───────────────────────────────────────────────────
