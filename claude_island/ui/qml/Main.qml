@@ -3,13 +3,18 @@ import QtQuick.Window
 import QtQuick.Layouts
 import QtQuick.Controls
 
-// Fixed window at max size (480×460). The visible "island" is the inner
-// rootRect which morphs between pill/decision/expanded shapes — this avoids
-// the Qt 6 limitation where Window does not support the `states` property.
-// The window stays transparent and frameless; rootRect provides the chrome.
+// The root Window resizes to match islandState so the OS window itself
+// shrinks to pill size when collapsed — no transparent screen-occupying
+// region left behind. rootRect fills the window and provides the chrome.
 Window {
     id: root
-    width: 480; height: 460; visible: true
+    // Window dimensions driven by islandState. Behavior animates the OS
+    // window resize so the morph is visible at the OS level, not just inside.
+    width:  islandState === "collapsed" ? 240 : 480
+    height: islandState === "collapsed" ? 44  : (islandState === "decision" ? 200 : 460)
+    Behavior on width  { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
+    Behavior on height { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
+    visible: true
     // On macOS Qt.Tool maps to NSPanel which silently refuses to paint a
     // WA_TranslucentBackground surface — the window reports isVisible=True
     // but nothing reaches the screen.  The existing CapsuleWindow._setup_window
@@ -100,22 +105,13 @@ Window {
         if (root.vm) root.today = root.vm.spendDetail()
     }
 
-    // ── Root island rectangle (morphing chrome) ───────────────────────────
+    // ── Root island rectangle (chrome) ────────────────────────────────────
+    // Fills the Window, which now resizes to match islandState directly.
+    // The inner size animation has been removed — the OS window resize (driven
+    // by the Window Behavior above) is the sole morph animation now.
     Rectangle {
         id: rootRect
-        // Geometry driven by islandState
-        width:  root.islandState === "collapsed" ? 240
-              : root.islandState === "decision"  ? 480 : 480
-        height: root.islandState === "collapsed" ? 44
-              : root.islandState === "decision"  ? 180 : 460
-        // Anchor to top-right of the transparent window so the pill
-        // appears at the same screen position as the expanded panel's top bar.
-        anchors.top: parent.top
-        anchors.right: parent.right
-
-        // Smooth morph
-        Behavior on width  { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
-        Behavior on height { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
+        anchors.fill: parent
 
         radius: 18
         color: "#0c0f14"
