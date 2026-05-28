@@ -41,15 +41,45 @@ def _decision(p: PendingDecisionView) -> dict[str, Any]:
     }
 
 
+def _dormant(d: Any) -> dict[str, Any]:
+    # Map DormantSession to a plain dict QML can consume.
+    # last_activity is a datetime — stringify so QML gets a stable string.
+    return {
+        "name": getattr(d, "name", None),
+        "cwd": str(getattr(d, "cwd", "")),
+        "last_seen": str(getattr(d, "last_activity", "")),
+        "cost_usd": float(getattr(d, "cost_usd", 0.0)),
+        "session_uuid": str(getattr(d, "session_uuid", "")),
+    }
+
+
 def project_snapshot(snap: WorldSnapshot) -> dict[str, Any]:
     sessions = [_session(v) for g in snap.session_groups for v in g.views]
     decisions = [_decision(p) for p in (snap.pending_decisions or ())]
     quota = None
     if snap.quota is not None:
-        quota = {"five_hour_pct": int(getattr(snap.quota, "five_hour_pct", 0))}
+        q = snap.quota
+        quota = {
+            "five_hour_pct": int(getattr(q, "five_hour_pct", 0)),
+            # seven-day window — may be missing on old QuotaSnapshot shapes
+            **({
+                "weekly_pct": int(getattr(q, "seven_day_pct", 0)),
+            } if hasattr(q, "seven_day_pct") else {}),
+            # Reset timestamps — keep as strings for QML compatibility
+            **({
+                "five_hour_reset": str(getattr(q, "five_hour_resets_at", "")),
+            } if hasattr(q, "five_hour_resets_at") else {}),
+            **({
+                "weekly_reset": str(getattr(q, "seven_day_resets_at", "")),
+            } if hasattr(q, "seven_day_resets_at") else {}),
+        }
+    # Dormant (offline) sessions — rendered by the Recents drawer.
+    dormant = getattr(snap, "dormant_sessions", ()) or ()
+    recents = [_dormant(d) for d in dormant]
     return {
         "today_cost_usd": float(snap.today_cost_usd),
         "quota": quota,
         "sessions": sessions,
         "decisions": decisions,
+        "recents": recents,
     }

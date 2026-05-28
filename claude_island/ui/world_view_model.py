@@ -9,7 +9,7 @@ from claude_island.core.pending_decisions import Decision, DecisionResult
 from claude_island.core.snapshot import WorldSnapshot
 from claude_island.ui.snapshot_projection import project_snapshot
 
-_EMPTY = {"today_cost_usd": 0.0, "quota": None, "sessions": [], "decisions": []}
+_EMPTY = {"today_cost_usd": 0.0, "quota": None, "sessions": [], "decisions": [], "recents": []}
 
 
 class WorldViewModel(QObject):
@@ -25,12 +25,24 @@ class WorldViewModel(QObject):
         # callbacks continues to work.
         resolve_fn: Callable[[str, Decision], bool] | None = None,
         focus_fn: Callable[[str], None] | None = None,
+        # Spend / quota callbacks — injected from __main__ so VM has no
+        # direct dependency on UsageRegistry or the platform layer.
+        get_totals: Callable | None = None,
+        get_totals_by_model: Callable | None = None,
+        refresh_quota_fn: Callable | None = None,
+        resume_fn: Callable | None = None,
     ) -> None:
         super().__init__(parent)
         self._d = dict(_EMPTY)
         # Default no-ops: resolve returns False (unknown id), focus does nothing.
         self._resolve_fn: Callable[[str, Decision], bool] = resolve_fn or (lambda did, dec: False)
         self._focus_fn: Callable[[str], None] = focus_fn or (lambda sid: None)
+        # Spend / quota callbacks — no-op defaults so callers that don't
+        # inject these still construct without error.
+        self._get_totals: Callable | None = get_totals
+        self._get_totals_by_model: Callable | None = get_totals_by_model
+        self._refresh_quota_fn: Callable = refresh_quota_fn or (lambda: None)
+        self._resume_fn: Callable = resume_fn or (lambda uuid: None)
 
     def update(self, snap: WorldSnapshot) -> None:
         """在 Qt 主线程调用(world.push 已在主线程)。重投影 + 通知 QML。"""
@@ -54,6 +66,70 @@ class WorldViewModel(QObject):
     def quotaPct(self) -> int:
         q = self._d["quota"]
         return int(q["five_hour_pct"]) if q else 0
+
+    @Property("QVariantList", notify=changed)
+    def recents(self):
+        return self._d.get("recents", [])
+
+    # ── Spend / quota / resume slots ──────────────────────────────────────
+
+    @Slot(result="QVariant")
+    def spendDetail(self):
+        """Return today's spend breakdown as a plain dict for QML.
+
+        Calls the injected get_totals / get_totals_by_model callbacks so
+        the VM never imports UsageRegistry directly (UI layer isolation).
+        Returns zeros when no callbacks were injected (e.g. in legacy
+        callers or tests that only care about other functionality).
+        """
+        totals = self._get_totals("today") if self._get_totals else None
+        by_model = self._get_totals_by_model("today") if self._get_totals_by_model else None
+
+        def g(o, *names, default=0):
+            """Defensive multi-name getattr — tries names in order."""
+            for n in names:
+                if o is not None and hasattr(o, n):
+                    return getattr(o, n)
+            return default
+
+        per_model = []
+        if by_model:
+            # get_totals_by_model returns tuple[ModelTotals, ...].
+            # ModelTotals has .model (str) and .cost_usd (float).
+            try:
+                for mt in by_model:
+                    per_model.append({
+                        "model": str(getattr(mt, "model", "")),
+                        "cost": float(g(mt, "cost_usd", "cost")),
+                    })
+            except Exception:
+                per_model = []
+
+        return {
+            # cost_usd is a @property on UsageTotals computed from the
+            # four sub-costs; request_count is an int field.
+            "cost": float(g(totals, "cost_usd", "cost")),
+            "reqs": int(g(totals, "request_count", "reqs")),
+            "input_tokens": int(g(totals, "input_tokens")),
+            "output_tokens": int(g(totals, "output_tokens")),
+            # cache_creation_tokens is the "cache write" bucket;
+            # cache_read_tokens is the "cache read / hit" bucket.
+            "cache_read": int(g(totals, "cache_read_tokens", "cache_read")),
+            # UsageTotals has no hit_rate field — derived externally when
+            # needed; default 0.0 here to keep the shape stable for QML.
+            "hit_rate": 0.0,
+            "per_model": per_model,
+        }
+
+    @Slot()
+    def refreshQuota(self):
+        """Trigger an out-of-band quota refresh via the injected callback."""
+        self._refresh_quota_fn()
+
+    @Slot(str)
+    def resumeSession(self, session_uuid: str):
+        """Resume a dormant session by uuid via the injected callback."""
+        self._resume_fn(session_uuid)
 
     # ── Decision / focus slots (called from QML or test code) ─────────────
 
