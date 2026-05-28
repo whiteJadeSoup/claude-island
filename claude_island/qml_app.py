@@ -141,6 +141,14 @@ def main() -> int:
     from PySide6.QtCore import qInstallMessageHandler
     qInstallMessageHandler(_make_qt_message_filter())
 
+    # Set Basic style BEFORE creating the QML engine (and right after QGuiApplication)
+    # so that our custom ScrollBar contentItem/background work without the
+    # "does not support customization" warnings that the native platform style emits.
+    # Basic is the only fully-customizable built-in style; the entire UI is custom-drawn
+    # so there is no visual regression from switching.
+    from PySide6.QtQuickControls2 import QQuickStyle
+    QQuickStyle.setStyle("Basic")
+
     app = QGuiApplication(sys.argv)
 
     # macOS accessory policy (post-app-creation path): runtime call that
