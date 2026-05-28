@@ -145,6 +145,34 @@ def test_recents_last_seen_is_string():
     assert d["recents"][0]["last_seen"] != ""
 
 
+def test_recents_has_last_activity_ts():
+    """last_activity_ts is a numeric epoch-seconds value for JS sort/group."""
+    dormant = [_dormant_session("proj-a")]
+    d = project_snapshot(_minimal_snap(dormant=dormant))
+    rec = d["recents"][0]
+    assert "last_activity_ts" in rec
+    # _NOW is 2026-05-28 10:00 UTC — its timestamp must be > 0
+    assert isinstance(rec["last_activity_ts"], float)
+    assert rec["last_activity_ts"] > 0.0
+
+
+def test_recents_has_turns():
+    """turns key is present when DormantSession has turn_count."""
+    dormant = [_dormant_session("proj-a")]  # turn_count=5 in helper
+    d = project_snapshot(_minimal_snap(dormant=dormant))
+    rec = d["recents"][0]
+    assert "turns" in rec
+    assert rec["turns"] == 5
+
+
+def test_recents_no_model_key_when_dormant_has_no_model():
+    """DormantSession has no model attr; projection must not fabricate the key."""
+    dormant = [_dormant_session("proj-a")]
+    d = project_snapshot(_minimal_snap(dormant=dormant))
+    # DormantSession dataclass has no 'model' field — key should be absent.
+    assert "model" not in d["recents"][0]
+
+
 # ---------------------------------------------------------------------------
 # WorldViewModel.spendDetail() tests
 # ---------------------------------------------------------------------------

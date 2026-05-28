@@ -44,13 +44,31 @@ def _decision(p: PendingDecisionView) -> dict[str, Any]:
 def _dormant(d: Any) -> dict[str, Any]:
     # Map DormantSession to a plain dict QML can consume.
     # last_activity is a datetime — stringify so QML gets a stable string.
-    return {
+    last_activity = getattr(d, "last_activity", None)
+    # Provide an epoch-seconds sortable timestamp for grouping/sorting in JS.
+    # Timezone-aware datetimes use .timestamp(); naive ones are treated as UTC.
+    try:
+        last_activity_ts = last_activity.timestamp() if last_activity is not None else 0.0
+    except Exception:
+        last_activity_ts = 0.0
+
+    result: dict[str, Any] = {
         "name": getattr(d, "name", None),
         "cwd": str(getattr(d, "cwd", "")),
-        "last_seen": str(getattr(d, "last_activity", "")),
+        "last_seen": str(last_activity) if last_activity is not None else "",
+        "last_activity_ts": last_activity_ts,
         "cost_usd": float(getattr(d, "cost_usd", 0.0)),
         "session_uuid": str(getattr(d, "session_uuid", "")),
     }
+    # turns — DormantSession.turn_count (int); omit key only if attr absent entirely.
+    turns = getattr(d, "turn_count", None)
+    if turns is not None:
+        result["turns"] = int(turns)
+    # model — DormantSession has no model field; omit gracefully if absent.
+    model = getattr(d, "model", None)
+    if model is not None:
+        result["model"] = str(model)
+    return result
 
 
 def project_snapshot(snap: WorldSnapshot) -> dict[str, Any]:
