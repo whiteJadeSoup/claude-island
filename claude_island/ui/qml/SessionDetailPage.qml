@@ -39,6 +39,31 @@ Rectangle {
         return u.length > 8 ? u.substring(0, 8) : u
     }
 
+    // ── Rename state ──────────────────────────────────────────────────────
+    // isRenaming toggles the header name between a read-only label and an
+    // inline TextField so the user can type a new name.
+    property bool isRenaming: false
+
+    // ── Copy feedback state ───────────────────────────────────────────────
+    // copiedFlash shows "✓" on the copy icon for 1 second after a copy.
+    property bool copiedFlash: false
+    Timer {
+        id: copyFlashTimer
+        interval: 1000
+        repeat: false
+        onTriggered: detailPage.copiedFlash = false
+    }
+
+    // ── Reset-thinking confirm state ──────────────────────────────────────
+    // Two-step confirm: first click arms, second click within 3s fires.
+    property bool resetArmed: false
+    Timer {
+        id: resetArmTimer
+        interval: 3000
+        repeat: false
+        onTriggered: detailPage.resetArmed = false
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -69,22 +94,58 @@ Rectangle {
                     }
                 }
 
-                // Session name (center)
-                Text {
+                // Session name (center) — label when not renaming, TextField when renaming
+                Loader {
                     Layout.fillWidth: true
-                    text: dv("name", "Session")
-                    color: "#e9edf2"
-                    font.pixelSize: 13
-                    font.bold: true
-                    elide: Text.ElideRight
-                    horizontalAlignment: Text.AlignHCenter
+                    sourceComponent: detailPage.isRenaming ? renameFieldComp : nameLabelComp
+
+                    component nameLabelComp: Text {
+                        text: dv("name", "Session")
+                        color: "#e9edf2"
+                        font.pixelSize: 13
+                        font.bold: true
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+
+                    component renameFieldComp: TextField {
+                        id: renameField
+                        text: dv("name", "")
+                        color: "#e9edf2"
+                        font.pixelSize: 13
+                        font.bold: true
+                        horizontalAlignment: Text.AlignHCenter
+                        background: Rectangle {
+                            radius: 4
+                            color: "#0e141b"
+                            border.color: "#2a3a50"
+                            border.width: 1
+                        }
+                        Component.onCompleted: {
+                            forceActiveFocus()
+                            selectAll()
+                        }
+                        Keys.onReturnPressed: {
+                            if (text.trim() !== "" && detailPage.vm)
+                                detailPage.vm.renameSession(dv("uuid"), text.trim())
+                            detailPage.isRenaming = false
+                        }
+                        Keys.onEnterPressed: {
+                            if (text.trim() !== "" && detailPage.vm)
+                                detailPage.vm.renameSession(dv("uuid"), text.trim())
+                            detailPage.isRenaming = false
+                        }
+                        Keys.onEscapePressed: {
+                            detailPage.isRenaming = false
+                        }
+                    }
                 }
 
                 // Right-side action icons
                 Row {
                     spacing: 12
 
-                    // ✎ rename — present, inert (no VM slot yet)
+                    // ✎ rename — clicking swaps the title to an inline TextField
                     Text {
                         text: "✎"
                         color: renameArea.containsMouse ? "#a0aab6" : "#566069"
@@ -94,29 +155,33 @@ Rectangle {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             hoverEnabled: true
-                            // rename slot not yet wired — inert
+                            onClicked: detailPage.isRenaming = !detailPage.isRenaming
                         }
                     }
 
-                    // ⧉ copy session id to clipboard
+                    // ⧉ copy session id to clipboard; shows "✓" for 1s after copy
                     Text {
-                        text: "⧉"
-                        color: copyArea.containsMouse ? "#a0aab6" : "#566069"
+                        text: detailPage.copiedFlash ? "✓" : "⧉"
+                        color: detailPage.copiedFlash
+                               ? "#5fd2a8"
+                               : (copyArea.containsMouse ? "#a0aab6" : "#566069")
                         font.pixelSize: 14
                         MouseArea {
                             id: copyArea
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             hoverEnabled: true
-                            // Qt clipboard access from QML: use Qt.labs.platform Clipboard
-                            // or the no-op path — leave as visual affordance for now.
                             onClicked: {
-                                // No-op: clipboard API not available in this QML context
+                                if (detailPage.vm && dv("uuid") !== "") {
+                                    detailPage.vm.copyId(dv("uuid"))
+                                    detailPage.copiedFlash = true
+                                    copyFlashTimer.restart()
+                                }
                             }
                         }
                     }
 
-                    // ↗ open folder
+                    // ↗ open folder — dispatches REVEAL_CWD via VM
                     Text {
                         text: "↗"
                         color: folderArea.containsMouse ? "#a0aab6" : "#566069"
@@ -127,25 +192,37 @@ Rectangle {
                             cursorShape: Qt.PointingHandCursor
                             hoverEnabled: true
                             onClicked: {
-                                // openFolder slot wired in VM if available
-                                if (detailPage.vm && detailPage.vm.openFolder
-                                        && dv("cwd") !== "")
-                                    detailPage.vm.openFolder(dv("cwd"))
+                                if (detailPage.vm && dv("uuid") !== "")
+                                    detailPage.vm.openFolder(dv("uuid"))
                             }
                         }
                     }
 
-                    // ⟲ reset thinking — present, inert (destructive, no VM slot yet)
+                    // ⟲ reset thinking — two-step confirm (arm → confirm within 3s)
                     Text {
-                        text: "⟲"
-                        color: resetArea.containsMouse ? "#e8743b" : "#4a2222"
-                        font.pixelSize: 14
+                        text: detailPage.resetArmed ? "Confirm?" : "⟲"
+                        color: detailPage.resetArmed
+                               ? "#ef4444"
+                               : (resetArea.containsMouse ? "#e8743b" : "#4a2222")
+                        font.pixelSize: detailPage.resetArmed ? 11 : 14
                         MouseArea {
                             id: resetArea
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             hoverEnabled: true
-                            // reset-thinking slot not yet wired — inert
+                            onClicked: {
+                                if (!detailPage.resetArmed) {
+                                    // First click: arm the action
+                                    detailPage.resetArmed = true
+                                    resetArmTimer.restart()
+                                } else {
+                                    // Second click within timeout: fire
+                                    detailPage.resetArmed = false
+                                    resetArmTimer.stop()
+                                    if (detailPage.vm && dv("uuid") !== "")
+                                        detailPage.vm.resetThinking(dv("uuid"))
+                                }
+                            }
                         }
                     }
                 }
@@ -294,12 +371,16 @@ Rectangle {
                     monospace: true
                 }
 
-                // Transcript row (only when non-empty)
-                DetailRow {
+                // Transcript row — clickable to open in default app (only when non-empty)
+                DetailRowClickable {
                     label: "Transcript"
                     value: dv("transcript_path")
                     monospace: true
                     visible: dv("transcript_path") !== ""
+                    onRowClicked: {
+                        if (detailPage.vm && dv("transcript_path") !== "")
+                            detailPage.vm.openTranscript(dv("transcript_path"))
+                    }
                 }
 
                 // Branch row (only when non-empty and not HEAD)
@@ -493,15 +574,20 @@ Rectangle {
                             Layout.fillWidth: true
                         }
 
-                        // Toggle pill — visual only, not wired to a VM slot yet
+                        // Toggle pill — wired to vm.reviewMode / vm.setReviewMode
                         Rectangle {
                             id: toggleTrack
                             width: 40; height: 22; radius: 11
+
+                            // Read current review mode from VM each time detail updates.
+                            // Compute once and cache; avoids calling the slot on every paint.
+                            property bool toggleOn: detailPage.vm && dv("uuid") !== ""
+                                                    ? detailPage.vm.reviewMode(dv("uuid"))
+                                                    : false
+
                             color: toggleOn ? "#1a3a28" : "#151b22"
                             border.color: toggleOn ? "#5fd2a8" : "#26303c"
                             border.width: 1
-
-                            property bool toggleOn: false
 
                             Behavior on color { ColorAnimation { duration: 150 } }
 
@@ -516,7 +602,13 @@ Rectangle {
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: toggleTrack.toggleOn = !toggleTrack.toggleOn
+                                onClicked: {
+                                    if (detailPage.vm && dv("uuid") !== "") {
+                                        var newVal = !toggleTrack.toggleOn
+                                        detailPage.vm.setReviewMode(dv("uuid"), newVal)
+                                        toggleTrack.toggleOn = newVal
+                                    }
+                                }
                             }
                         }
                     }
@@ -563,6 +655,65 @@ Rectangle {
             anchors.leftMargin: 16
             height: 1
             color: "#0f141a"
+        }
+    }
+
+    // Clickable variant of DetailRow — emits rowClicked when the row is pressed.
+    // Used for the Transcript row so the user can open the file directly.
+    component DetailRowClickable: Rectangle {
+        required property string label
+        required property string value
+        property bool monospace: false
+
+        signal rowClicked()
+
+        Layout.fillWidth: true
+        height: 32
+        color: rowClickArea.containsMouse ? "#080c12" : "transparent"
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 16
+            anchors.rightMargin: 16
+            Text {
+                text: label
+                color: "#7e8a97"
+                font.pixelSize: 12
+                Layout.preferredWidth: 80
+                Layout.minimumWidth: 80
+            }
+            Text {
+                text: value
+                // Highlight the value on hover to indicate clickability
+                color: rowClickArea.containsMouse ? "#5fa8d2" : "#c8d4de"
+                font.family: monospace ? "monospace" : ""
+                font.pixelSize: 11
+                elide: Text.ElideLeft
+                Layout.fillWidth: true
+            }
+            // Small "open" affordance shown on hover
+            Text {
+                text: "↗"
+                color: "#5fa8d2"
+                font.pixelSize: 10
+                visible: rowClickArea.containsMouse
+            }
+        }
+        // Separator line
+        Rectangle {
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: 16
+            height: 1
+            color: "#0f141a"
+        }
+        MouseArea {
+            id: rowClickArea
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            hoverEnabled: true
+            onClicked: parent.rowClicked()
         }
     }
 }

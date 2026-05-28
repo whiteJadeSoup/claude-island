@@ -52,13 +52,31 @@ def _dormant(d: Any) -> dict[str, Any]:
     except Exception:
         last_activity_ts = 0.0
 
+    # Derive transcript path: ~/.claude/projects/<hash>/<uuid>.jsonl
+    # Same formula as _transcript_path_for_display in expanded_window.py.
+    # Computed here (projection layer) so RecentsPage.qml can pass the path
+    # directly to vm.openTranscript without any JS path arithmetic.
+    uuid = str(getattr(d, "session_uuid", ""))
+    cwd = getattr(d, "cwd", None)
+    transcript_path = ""
+    if uuid and cwd:
+        try:
+            from pathlib import Path as _Path
+            from claude_island.core.models import project_hash as _ph
+            transcript_path = str(
+                _Path.home() / ".claude" / "projects" / _ph(cwd) / f"{uuid}.jsonl"
+            )
+        except Exception:
+            transcript_path = ""
+
     result: dict[str, Any] = {
         "name": getattr(d, "name", None),
-        "cwd": str(getattr(d, "cwd", "")),
+        "cwd": str(cwd) if cwd is not None else "",
         "last_seen": str(last_activity) if last_activity is not None else "",
         "last_activity_ts": last_activity_ts,
         "cost_usd": float(getattr(d, "cost_usd", 0.0)),
-        "session_uuid": str(getattr(d, "session_uuid", "")),
+        "session_uuid": uuid,
+        "transcript_path": transcript_path,
     }
     # turns — DormantSession.turn_count (int); omit key only if attr absent entirely.
     turns = getattr(d, "turn_count", None)

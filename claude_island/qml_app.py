@@ -44,6 +44,7 @@ def main() -> int:
     from claude_island.ui.world_marshaler import WorldMarshaler
     from claude_island.ui.world_view_model import WorldViewModel
     from claude_island.ui.notification_dispatcher import NotificationDispatcher
+    from claude_island.core.session_permissions import SessionPermissionCache
     import reactivex.operators as ops
 
     claude_projects = _P.home() / ".claude" / "projects"
@@ -108,18 +109,11 @@ def main() -> int:
     # Real terminal focus via TerminalDispatcher.  Looks up the matching
     # SessionView from the current world snapshot and dispatches FOCUS.
     # Falls back to a log on any failure so the UI stays alive.
+    # Note: _view_for is defined later in this function — the closure captures
+    # it by reference, so call order doesn't matter at definition time.
     def focus_fn(session_id: str) -> None:
-        from claude_island.core.snapshot import world as _world
         try:
-            snap = _world.current
-            target_view = None
-            for grp in snap.session_groups:
-                for v in grp.views:
-                    if v.session_uuid == session_id:
-                        target_view = v
-                        break
-                if target_view is not None:
-                    break
+            target_view = _view_for(session_id)
             if target_view is None:
                 print(
                     f"[island] focus: no view for session_id={session_id!r}",
@@ -182,6 +176,68 @@ def main() -> int:
             effective_uuid=sess_uuid or None,
         )
 
+    # ── permission_cache (review-mode toggle) ────────────────────────────────
+    # In-memory only; eviction is session-end-driven. Constructed here so
+    # it can be injected into the VM without the VM importing core directly.
+    permission_cache = SessionPermissionCache(
+        on_change=lambda: globals().get("snapshotter") and globals()["snapshotter"].wake(),
+    )
+
+    # ── _view_for: shared view lookup used by focus_fn and open_folder_fn ──
+    # Extracted so the two callers don't duplicate the world.current walk.
+    def _view_for(session_id: str):
+        """Return the SessionView matching session_id (uuid), or None."""
+        from claude_island.core.snapshot import world as _world
+        snap = _world.current
+        for grp in snap.session_groups:
+            for v in grp.views:
+                if v.session_uuid == session_id:
+                    return v
+        return None
+
+    # ── open_folder_fn ───────────────────────────────────────────────────────
+    # Dispatches REVEAL_CWD for the session. Same lookup as focus_fn but uses
+    # Capability.REVEAL_CWD instead of FOCUS.
+    def open_folder_fn(session_id: str) -> None:
+        try:
+            view = _view_for(session_id)
+            if view is None:
+                print(
+                    f"[island] openFolder: no view for session_id={session_id!r}",
+                    file=sys.stderr,
+                )
+                return
+            ok = _dispatcher.dispatch(view, Capability.REVEAL_CWD)
+            if not ok:
+                print(
+                    f"[island] openFolder: dispatch returned False for {session_id!r}",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(f"[island] open_folder_fn error: {exc}", file=sys.stderr)
+
+    # ── reset_thinking_fn ────────────────────────────────────────────────────
+    # Dispatches RESET_THINKING (strips thinking blocks from the JSONL
+    # transcript) via AppBackend. Destructive — a .bak backup is created by
+    # the backend before modifying the file.
+    def reset_thinking_fn(session_id: str) -> None:
+        try:
+            view = _view_for(session_id)
+            if view is None:
+                print(
+                    f"[island] resetThinking: no view for session_id={session_id!r}",
+                    file=sys.stderr,
+                )
+                return
+            ok = _dispatcher.dispatch(view, Capability.RESET_THINKING)
+            if not ok:
+                print(
+                    f"[island] resetThinking: dispatch returned False for {session_id!r}",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(f"[island] reset_thinking_fn error: {exc}", file=sys.stderr)
+
     # ── resume_fn ────────────────────────────────────────────────────────────
     # DONE_WITH_CONCERNS: Real resume requires the TerminalDispatcher /
     # LaunchIntentRegistry / DormantSession → claude --resume flow (the full
@@ -230,6 +286,13 @@ def main() -> int:
         ),
         resume_fn=resume_fn,
         get_session_details=_get_session_details,
+        # R7 action callbacks — injected so VM stays in the UI layer and never
+        # imports platform_ or core permission code directly.
+        rename_fn=session_names_store.set_session_name,
+        open_folder_fn=open_folder_fn,
+        reset_thinking_fn=reset_thinking_fn,
+        get_review=permission_cache.is_review,
+        set_review=permission_cache.set_review,
     )
     world.observable().subscribe(
         on_next=vm.update,

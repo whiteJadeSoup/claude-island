@@ -51,6 +51,13 @@ class WorldViewModel(QObject):
         # imports platform_ code directly (import-linter contract).
         # Accepts a Session and returns a SessionDetails (or equivalent).
         get_session_details: Callable | None = None,
+        # R7 action callbacks — safe no-op defaults so existing callers
+        # that don't need these actions continue to construct without error.
+        rename_fn: Callable | None = None,
+        open_folder_fn: Callable | None = None,
+        reset_thinking_fn: Callable | None = None,
+        get_review: Callable | None = None,
+        set_review: Callable | None = None,
     ) -> None:
         super().__init__(parent)
         self._d = dict(_EMPTY)
@@ -65,6 +72,15 @@ class WorldViewModel(QObject):
         self._refresh_quota_fn: Callable = refresh_quota_fn or (lambda: None)
         self._resume_fn: Callable = resume_fn or (lambda uuid: None)
         self._get_session_details: Callable | None = get_session_details
+        # R7 action callbacks — no-op lambdas keep the VM callable even
+        # when callers haven't wired the full action set yet.
+        self._rename_fn: Callable = rename_fn or (lambda uuid, name: None)
+        self._open_folder_fn: Callable = open_folder_fn or (lambda sid: None)
+        self._reset_thinking_fn: Callable = reset_thinking_fn or (lambda uuid: None)
+        # Review-mode read/write — default to always-False / no-op so the
+        # toggle renders as "off" when no permission cache is wired.
+        self._get_review: Callable = get_review or (lambda uuid: False)
+        self._set_review: Callable = set_review or (lambda uuid, enabled: None)
 
         # Rolling token-rate history: session_id → list of up-to-60 int samples.
         # One sample (tokens_per_min or 0) appended per update() call.
@@ -297,6 +313,22 @@ class WorldViewModel(QObject):
         except Exception:
             per_model = []
 
+        # Derive transcript path: ~/.claude/projects/<hash>/<uuid>.jsonl
+        # Same formula as _transcript_path_for_display in expanded_window.py.
+        # Done here in the VM (UI layer) so it never touches platform_.
+        eff_uuid = str(_g(details, "effective_uuid") or session_id)
+        transcript_path = ""
+        if eff_uuid:
+            try:
+                from pathlib import Path as _Path
+                from claude_island.core.models import project_hash as _ph
+                transcript_path = str(
+                    _Path.home() / ".claude" / "projects"
+                    / _ph(view.project_path) / f"{eff_uuid}.jsonl"
+                )
+            except Exception:
+                transcript_path = ""
+
         return {
             "name":            str(_g(details, "name") or ""),
             "model":           str(_g(details, "latest_model") or view.latest_model or ""),
@@ -308,8 +340,99 @@ class WorldViewModel(QObject):
             "branch":          str(_g(details, "git_branch") or ""),
             "created":         str(_g(details, "started_at") or ""),
             "ai_title":        str(_g(details, "ai_title") or ""),
-            "transcript_path": "",  # effective_uuid used to locate JSONL externally
+            "transcript_path": transcript_path,
             "latest_prompt":   str(_g(details, "last_prompt") or ""),
-            "uuid":            str(_g(details, "effective_uuid") or session_id),
+            "uuid":            eff_uuid,
             "per_model":       per_model,
         }
+
+    # ── R7 action slots ───────────────────────────────────────────────────
+
+    @Slot(str)
+    def copyId(self, text: str) -> None:
+        """Copy the given text to the system clipboard.
+
+        Uses QGuiApplication.clipboard(). Only available when a
+        QGuiApplication (not just QCoreApplication) is running —
+        offscreen test environments use QCoreApplication which has no
+        clipboard; calling clipboard() without a GUI app crashes on some
+        platforms. We check that a QGuiApplication is present by testing
+        for the 'clipboard' attribute on the app instance (QCoreApplication
+        doesn't have it), which avoids the C-level isinstance issue in
+        PySide6 mocks."""
+        try:
+            from PySide6.QtGui import QGuiApplication
+            app = QGuiApplication.instance()
+            # clipboard() exists only on QGuiApplication, not QCoreApplication.
+            # Use hasattr rather than isinstance so test mocks that spec
+            # QGuiApplication also pass this guard without triggering
+            # PySide6's C-level type check.
+            if app is None or not hasattr(app, "clipboard"):
+                return
+            clipboard = app.clipboard()
+            if clipboard is not None:
+                clipboard.setText(text)
+        except Exception:
+            pass
+
+    @Slot(str, str)
+    def renameSession(self, uuid: str, name: str) -> None:
+        """Persist a custom name for the session via the injected rename callback."""
+        try:
+            self._rename_fn(uuid, name)
+        except Exception as exc:
+            import sys
+            print(f"[island] renameSession error: {exc}", file=sys.stderr)
+
+    @Slot(str)
+    def openFolder(self, session_id: str) -> None:
+        """Open the session's working directory in the OS file manager."""
+        try:
+            self._open_folder_fn(session_id)
+        except Exception as exc:
+            import sys
+            print(f"[island] openFolder error: {exc}", file=sys.stderr)
+
+    @Slot(str)
+    def openTranscript(self, path: str) -> None:
+        """Open the transcript file at `path` with the OS default application.
+
+        Guards against empty path so callers can call unconditionally."""
+        if not path:
+            return
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        except Exception as exc:
+            import sys
+            print(f"[island] openTranscript error: {exc}", file=sys.stderr)
+
+    @Slot(str)
+    def resetThinking(self, uuid: str) -> None:
+        """Strip thinking blocks from the session's JSONL transcript.
+
+        Destructive: delegates to the injected reset_thinking_fn which is
+        expected to create a .bak backup before modifying the file."""
+        try:
+            self._reset_thinking_fn(uuid)
+        except Exception as exc:
+            import sys
+            print(f"[island] resetThinking error: {exc}", file=sys.stderr)
+
+    @Slot(str, bool)
+    def setReviewMode(self, uuid: str, on: bool) -> None:
+        """Set or clear the per-session "Review prompts" toggle."""
+        try:
+            self._set_review(uuid, bool(on))
+        except Exception as exc:
+            import sys
+            print(f"[island] setReviewMode error: {exc}", file=sys.stderr)
+
+    @Slot(str, result=bool)
+    def reviewMode(self, uuid: str) -> bool:
+        """Return the current review-mode state for the session."""
+        try:
+            return bool(self._get_review(uuid))
+        except Exception:
+            return False
