@@ -478,11 +478,14 @@ Rectangle {
                         }
                     }
 
-                    // Open transcript button (inert affordance — no slot wired)
+                    // Open transcript button — calls vm.openTranscript when available
                     Rectangle {
                         width: transcriptLabel.width + 16
                         height: 24
                         radius: 6
+                        // Hide the button when transcript_path is absent so a stale
+                        // click target doesn't appear for sessions without a JSONL file.
+                        visible: item.transcript_path !== undefined && item.transcript_path !== ""
                         color: transcriptArea.containsMouse ? "#1a1a2a" : "transparent"
                         border.color: transcriptArea.containsMouse ? "#5fa8d2" : "#1c2030"
                         border.width: 1
@@ -500,8 +503,10 @@ Rectangle {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             hoverEnabled: true
-                            // Inert — no slot wired; placeholder for future open-transcript action.
-                            onClicked: {} // no-op
+                            onClicked: {
+                                if (vmRef && item.transcript_path)
+                                    vmRef.openTranscript(item.transcript_path)
+                            }
                         }
                     }
 
