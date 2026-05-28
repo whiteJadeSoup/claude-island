@@ -37,7 +37,7 @@ Rectangle {
                 spacing: 8
 
                 Text {
-                    text: "‹ 返回"
+                    text: "‹ Back"
                     color: backArea.containsMouse ? "#c8d4de" : "#7e8a97"
                     font.pixelSize: 13
                     MouseArea {
@@ -52,7 +52,7 @@ Rectangle {
                 Item { Layout.fillWidth: true }
 
                 Text {
-                    text: "历史会话"
+                    text: "History"
                     color: "#e9edf2"
                     font.pixelSize: 13
                     font.bold: true
@@ -72,7 +72,7 @@ Rectangle {
 
             Text {
                 anchors.centerIn: parent
-                text: "暂无历史会话"
+                text: "No history yet"
                 color: "#566069"
                 font.pixelSize: 13
             }
@@ -125,7 +125,7 @@ Rectangle {
                                 // Session name
                                 Text {
                                     Layout.fillWidth: true
-                                    text: modelData.name || "未知会话"
+                                    text: modelData.name || "Unknown session"
                                     color: "#e9edf2"
                                     font.pixelSize: 13
                                     font.bold: true

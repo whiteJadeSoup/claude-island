@@ -220,6 +220,7 @@ def main() -> int:
         focus_fn=focus_fn,
         get_totals=usage_registry.get_totals,
         get_totals_by_model=usage_registry.get_totals_by_model,
+        get_sidechain_totals=usage_registry.get_sidechain_totals,
         # refresh_quota_fn: force-fetch the anthropic provider's quota and
         # immediately poke the snapshotter so the fresh value lands in the
         # next rendered snapshot. Mirrors _force_refresh_selected in __main__.

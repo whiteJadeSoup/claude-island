@@ -266,6 +266,39 @@ def test_spend_detail_hit_rate_zero_when_no_tokens():
     assert vm.spendDetail()["hit_rate"] == 0.0
 
 
+def test_spend_detail_total_tokens():
+    """total_tokens = input_tokens + output_tokens."""
+    vm = WorldViewModel(
+        get_totals=lambda period: _fake_totals(inp=1000, out=500, cr=200),
+        get_totals_by_model=lambda period: _fake_by_model(),
+    )
+    d = vm.spendDetail()
+    assert d["total_tokens"] == 1500
+
+
+def test_spend_detail_subagent_fields_with_callback():
+    """get_sidechain_totals is called and its (count, cost) wired into the dict."""
+    vm = WorldViewModel(
+        get_totals=lambda period: _fake_totals(),
+        get_totals_by_model=lambda period: _fake_by_model(),
+        get_sidechain_totals=lambda period: (3, 1.23),
+    )
+    d = vm.spendDetail()
+    assert d["subagent_reqs"] == 3
+    assert abs(d["subagent_cost"] - 1.23) < 1e-9
+
+
+def test_spend_detail_subagent_fields_zero_without_callback():
+    """When no get_sidechain_totals injected, subagent fields default to zero."""
+    vm = WorldViewModel(
+        get_totals=lambda period: _fake_totals(),
+        get_totals_by_model=lambda period: _fake_by_model(),
+    )
+    d = vm.spendDetail()
+    assert d["subagent_reqs"] == 0
+    assert d["subagent_cost"] == 0.0
+
+
 # ---------------------------------------------------------------------------
 # refreshQuota and resumeSession slot tests
 # ---------------------------------------------------------------------------

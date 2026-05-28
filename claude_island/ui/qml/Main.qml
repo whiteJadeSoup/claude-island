@@ -24,6 +24,9 @@ Window {
     // SpendPage data — populated before switching page="spend"
     property var spendData: ({})
 
+    // ── Today card data — fetched from spendDetail() and kept fresh ───────
+    property var today: ({})
+
     // ── Null-safe VM accessors ─────────────────────────────────────────────
     readonly property var vm:           worldVm || null
     readonly property var vmSessions:   (vm && vm.sessions)  ? vm.sessions  : []
@@ -36,6 +39,15 @@ Window {
     readonly property var activePhases: ["thinking", "tool_use", "compacting", "waiting_approval"]
     function isActive(p) { return activePhases.indexOf(p) !== -1 }
     function fmtCost(n)  { return "$" + (n >= 100 ? n.toFixed(0) : n.toFixed(2)) }
+
+    // Format token counts: ≥1M → "X.YM", ≥1K → "XK", else raw int
+    function fmtNum(n) {
+        n = n || 0
+        if (n >= 1000000) return (n / 1000000).toFixed(1) + "M"
+        if (n >= 1000)    return (n / 1000).toFixed(0) + "K"
+        return String(n)
+    }
+
     function workingCount() {
         var n = 0
         for (var i = 0; i < vmSessions.length; i++)
@@ -49,14 +61,24 @@ Window {
         return "#5fd2a8"
     }
     function kindLabel(kind) {
-        if (kind === "ask_question")       return "提问"
-        if (kind === "user_prompt_submit") return "审核"
-        return "审批"
+        if (kind === "ask_question")       return "question"
+        if (kind === "user_prompt_submit") return "review"
+        return "approval"
+    }
+    // Phase accent colour: amber for thinking, teal for tool_use/other active
+    function phaseColor(phase) {
+        return phase === "thinking" ? "#f0b860" : "#5fd2a8"
+    }
+    // Live tail prefix for the current_tool_input display
+    function tailLine(s) {
+        if (!s) return ""
+        var ti = s.current_tool_input || ""
+        if (ti) return (s.phase === "thinking" ? "╰ " : "$ ") + ti
+        // Fallback to phase label when no command is running
+        return s.phase || ""
     }
 
     // ── Island state: "expanded" | "collapsed" | "decision" ──────────────
-    // Island state drives rootRect geometry; the Window stays fixed at 480×460.
-    // The transparent background means unused window area is click-through.
     property string islandState: "expanded"
 
     // ── Auto-transition: decision drains → collapsed ───────────────────────
@@ -65,7 +87,15 @@ Window {
         function onChanged() {
             if (root.islandState === "decision" && root.vmDecisions.length === 0)
                 root.islandState = "collapsed"
+            // Refresh Today data on every VM change so the card stays live
+            if (root.vm && root.islandState === "expanded")
+                root.today = root.vm.spendDetail()
         }
+    }
+
+    // Initial Today data fetch when the engine first connects worldVm
+    Component.onCompleted: {
+        if (root.vm) root.today = root.vm.spendDetail()
     }
 
     // ── Root island rectangle (morphing chrome) ───────────────────────────
@@ -150,8 +180,8 @@ Window {
                 Text {
                     Layout.fillWidth: true
                     text: root.vmDecisions.length > 0
-                          ? (root.vmDecisions[0].session_name + " 等你")
-                          : (root.workingCount() + " 在跑 · " + root.vmTodayCost)
+                          ? (root.vmDecisions[0].session_name + " needs you")
+                          : (root.workingCount() + " running · " + root.vmTodayCost)
                     color: root.vmDecisions.length > 0 ? "#f4d0a0" : "#c8d4de"
                     font.pixelSize: 13
                     elide: Text.ElideRight
@@ -214,12 +244,12 @@ Window {
                         anchors.leftMargin: 14; anchors.rightMargin: 14
 
                         Text {
-                            text: "等你决策"; color: "#e8884c"
+                            text: "Needs you"; color: "#e8884c"
                             font.pixelSize: 12; font.bold: true
                         }
                         Item { Layout.fillWidth: true }
                         Text {
-                            text: "展开全部"; color: "#7e8a97"; font.pixelSize: 11
+                            text: "Expand"; color: "#7e8a97"; font.pixelSize: 11
                             MouseArea {
                                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                 onClicked: root.islandState = "expanded"
@@ -289,7 +319,7 @@ Window {
                         Text {
                             color: spendArea.containsMouse ? "#f0a860" : "#a0aab6"
                             font.family: "monospace"; font.pixelSize: 12
-                            text: "今天 " + root.vmTodayCost + " · " + root.vmQuotaPct + "%"
+                            text: "Today " + root.vmTodayCost + " · " + root.vmQuotaPct + "%"
                             MouseArea {
                                 id: spendArea; anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor; hoverEnabled: true
@@ -302,7 +332,7 @@ Window {
 
                         // History link → RecentsPage
                         Text {
-                            text: "  🕘 历史"
+                            text: "  🕘 History"
                             color: recentsArea.containsMouse ? "#c8d4de" : "#7e8a97"
                             font.pixelSize: 12
                             MouseArea {
@@ -339,16 +369,29 @@ Window {
                         Behavior on x       { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                         Behavior on opacity { NumberAnimation { duration: 200 } }
 
-                        // ── Empty state: no sessions and no decisions ─────────────
-                        // Shown in place of the three band headers when there is
-                        // nothing to display; hides itself the moment any session
-                        // or decision appears.
+                        // ── Empty state: no sessions and no decisions ─────
+                        // Shown when there is nothing to display.
+                        // Today card still shows above it (inside the Flickable).
                         Item {
                             anchors.fill: parent
                             visible: root.vmSessions.length === 0 && root.vmDecisions.length === 0
 
+                            // Today card at top (empty state variant)
+                            TodayCard {
+                                id: todayCardEmpty
+                                anchors.top: parent.top
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.margins: 0
+                                todayData: root.today
+                                quotaPct: root.vmQuotaPct
+                                vmQuota: root.vmQuota
+                                collapsed: false
+                            }
+
                             Column {
                                 anchors.centerIn: parent
+                                anchors.verticalCenterOffset: 30
                                 spacing: 10
 
                                 // Breathing dot — subtle ambient presence indicator
@@ -374,16 +417,18 @@ Window {
 
                                 Text {
                                     anchors.horizontalCenter: parent.horizontalCenter
-                                    text: "没有运行中的会话 · 一切安静"
+                                    text: "No active sessions · all quiet"
                                     color: "#3a4752"
                                     font.pixelSize: 12
                                 }
                             }
                         }
 
+                        // ── Main scrollable content (sessions + decisions) ─
                         Flickable {
                             anchors.fill: parent
-                            contentHeight: bands.height; clip: true
+                            contentHeight: bands.implicitHeight
+                            clip: true
                             visible: root.vmSessions.length > 0 || root.vmDecisions.length > 0
 
                             // Thin subtle scrollbar — only appears when content overflows
@@ -400,17 +445,21 @@ Window {
                             }
 
                             ColumnLayout {
-                                id: bands; width: parent.width; spacing: 0
+                                id: bands
+                                width: parent.width
+                                spacing: 0
 
-                                // ── 等你决策 ─────────────────────────────
+                                // ── Decision pending: decision on top, Today collapses ──
+                                // Section header: "Needs you · N"
                                 Text {
                                     visible: root.vmDecisions.length > 0
-                                    text: "● 等你决策 · " + root.vmDecisions.length
+                                    text: "● Needs you · " + root.vmDecisions.length
                                     color: "#e8884c"
                                     font.pixelSize: 10; font.letterSpacing: 1.5
                                     Layout.leftMargin: 16; Layout.topMargin: 11; Layout.bottomMargin: 6
                                 }
 
+                                // Primary decision card
                                 Loader {
                                     Layout.fillWidth: true
                                     Layout.leftMargin: 13; Layout.rightMargin: 13; Layout.bottomMargin: 4
@@ -424,6 +473,7 @@ Window {
                                     }
                                 }
 
+                                // Queued decisions preview (index ≥ 1)
                                 Repeater {
                                     model: root.vmDecisions
                                     delegate: RowLayout {
@@ -446,109 +496,284 @@ Window {
                                     }
                                 }
 
-                                // ── 正在干活 ──────────────────────────────
-                                Text {
-                                    text: "◉ 正在干活 · " + root.workingCount()
-                                    color: "#5fd2a8"
-                                    font.pixelSize: 10; font.letterSpacing: 1.5
-                                    Layout.leftMargin: 16; Layout.topMargin: 13; Layout.bottomMargin: 6
-                                }
-                                Repeater {
-                                    model: root.vmSessions
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        visible: root.isActive(modelData.phase)
-                                        Layout.fillWidth: true
-                                        Layout.leftMargin: 13; Layout.rightMargin: 13
-                                        Layout.preferredHeight: visible ? 44 : 0
+                                // ── TODAY card (collapsed one-liner when decision pending) ──
+                                // Full card shown when no decisions; one-liner when decisions present.
+                                Item {
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 13; Layout.rightMargin: 13
+                                    Layout.topMargin: root.vmDecisions.length > 0 ? 4 : 11
+                                    Layout.bottomMargin: 4
+                                    // Height: one-liner (28px) or full card height
+                                    implicitHeight: root.vmDecisions.length > 0 ? 28 : todayCardFull.implicitHeight
+
+                                    // Full today card — shown when no decision pending
+                                    TodayCard {
+                                        id: todayCardFull
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        todayData: root.today
+                                        quotaPct: root.vmQuotaPct
+                                        vmQuota: root.vmQuota
+                                        collapsed: false
+                                        visible: root.vmDecisions.length === 0
+                                    }
+
+                                    // Collapsed one-liner — shown when decision is pending
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        visible: root.vmDecisions.length > 0
                                         radius: 7
-                                        color: rowArea.containsMouse ? "#0e141b" : "transparent"
-                                        border.color: rowArea.containsMouse ? "#1c2632" : "transparent"
+                                        color: "#0a0d12"
+                                        border.color: "#151b22"
                                         border.width: 1
 
                                         RowLayout {
                                             anchors.fill: parent
-                                            anchors.leftMargin: 6; anchors.rightMargin: 6
-                                            spacing: 0
-                                            ColumnLayout {
-                                                spacing: 2
-                                                Layout.fillWidth: true
-                                                Text { text: modelData.name; color: "#e9edf2"; font.pixelSize: 13; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                Text {
-                                                    text: modelData.current_tool_input || modelData.cwd
-                                                    color: "#7e8a97"; font.family: "monospace"; font.pixelSize: 11; elide: Text.ElideRight
-                                                    Layout.fillWidth: true
-                                                }
-                                            }
-                                            // ── Scan-wave accent ──────────────────────────────
-                                            // 4 bars that pulse with a travelling wave — live
-                                            // indicator signature.  Color tracks phase:
-                                            //   thinking   → amber  #f0b860
-                                            //   tool_use   → teal   #5fd2a8
-                                            //   other active → teal
-                                            // Kept small (3×10 each, 40 px total) and right-
-                                            // anchored near the cost so it reads as a discreet
-                                            // "live" cue, not a spotlight.
-                                            Row {
-                                                spacing: 3
-                                                // phase-derived colour — amber for thinking, teal otherwise
-                                                property string waveColor: modelData.phase === "thinking"
-                                                    ? "#f0b860" : "#5fd2a8"
-
-                                                Repeater {
-                                                    model: 4
-                                                    delegate: Rectangle {
-                                                        required property int index
-                                                        width: 3; height: 10; radius: 1
-                                                        color: parent.waveColor
-                                                        opacity: 0.85
-
-                                                        // Each bar pulses from 3 px to 10 px with a
-                                                        // staggered delay so they form a travelling
-                                                        // wave from left to right.
-                                                        property real barH: 5
-                                                        transform: Scale {
-                                                            yScale: barH / 10
-                                                            origin.x: 0; origin.y: 5
-                                                        }
-                                                        SequentialAnimation on barH {
-                                                            loops: Animation.Infinite
-                                                            running: true
-                                                            // Leading pause creates the stagger:
-                                                            // bar 0 starts immediately, bar 3 starts
-                                                            // after ~225 ms so the wave sweeps left→right.
-                                                            PauseAnimation { duration: index * 75 }
-                                                            NumberAnimation { to: 10; duration: 250; easing.type: Easing.InOutSine }
-                                                            NumberAnimation { to: 3;  duration: 250; easing.type: Easing.InOutSine }
-                                                            // Trailing pause so the full cycle is ~800 ms
-                                                            // (4 bars × 75 ms stagger + 500 ms wave = calm).
-                                                            PauseAnimation { duration: 300 - index * 75 }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Item { width: 6 }
+                                            anchors.leftMargin: 10; anchors.rightMargin: 10
+                                            spacing: 6
                                             Text {
-                                                text: root.fmtCost(modelData.cost_usd); color: "#f0a860"
-                                                font.family: "monospace"; font.pixelSize: 13; font.bold: true
+                                                text: "📅 Today"
+                                                color: "#566069"; font.pixelSize: 10
                                             }
-                                        }
-                                        MouseArea {
-                                            id: rowArea; anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor; hoverEnabled: true
-                                            onClicked: root.vm.focusSession(modelData.id)
+                                            Text {
+                                                text: root.vmTodayCost
+                                                color: "#7e8a97"; font.pixelSize: 10
+                                                font.family: "monospace"
+                                            }
+                                            Text {
+                                                visible: (root.today && root.today["total_tokens"]) ? root.today["total_tokens"] > 0 : false
+                                                text: "· " + root.fmtNum((root.today && root.today["total_tokens"]) ? root.today["total_tokens"] : 0) + " tok"
+                                                color: "#566069"; font.pixelSize: 10
+                                            }
+                                            Text {
+                                                text: "· " + root.vmQuotaPct + "% of 5h"
+                                                color: "#566069"; font.pixelSize: 10
+                                            }
+                                            Text {
+                                                visible: root.vmQuota !== null && root.vmQuota !== undefined
+                                                text: "· resets " + ((root.vmQuota && root.vmQuota["five_hour_reset"]) ? root.vmQuota["five_hour_reset"] : "—")
+                                                color: "#566069"; font.pixelSize: 10
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
                                         }
                                     }
                                 }
 
-                                // ── 安静(chips) ───────────────────────────
+                                // ── ACTIVE band: "Live Console" cards ─────────
+                                // Section header visible only when there are active sessions
                                 Text {
-                                    text: "○ 安静 · " + root.quietCount()
+                                    visible: root.workingCount() > 0
+                                    text: "◉ Active · " + root.workingCount()
+                                    color: "#5fd2a8"
+                                    font.pixelSize: 10; font.letterSpacing: 1.5
+                                    Layout.leftMargin: 16; Layout.topMargin: 13; Layout.bottomMargin: 6
+                                }
+
+                                Repeater {
+                                    model: root.vmSessions
+                                    delegate: Item {
+                                        required property var modelData
+                                        // Only render active sessions in this band
+                                        visible: root.isActive(modelData.phase)
+                                        Layout.fillWidth: true
+                                        Layout.leftMargin: 13; Layout.rightMargin: 13
+                                        Layout.bottomMargin: 6
+                                        implicitHeight: visible ? liveCard.implicitHeight : 0
+
+                                        // Live Console card
+                                        Rectangle {
+                                            id: liveCard
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.top: parent.top
+                                            implicitHeight: cardCol.implicitHeight + 16
+                                            radius: 8
+                                            color: liveArea.containsMouse ? "#0e141b" : "#0a1018"
+                                            border.color: liveArea.containsMouse ? "#1c2632" : "#151b22"
+                                            border.width: 1
+
+                                            // Left breathing glow accent — color by phase
+                                            Rectangle {
+                                                anchors.left: parent.left
+                                                anchors.top: parent.top
+                                                anchors.bottom: parent.bottom
+                                                anchors.topMargin: parent.radius
+                                                anchors.bottomMargin: parent.radius
+                                                width: 3
+                                                radius: 1
+                                                color: root.phaseColor(modelData.phase)
+                                                opacity: glowAnim.glowOp
+
+                                                property real glowOp: 0.7
+                                                SequentialAnimation on glowOp {
+                                                    loops: Animation.Infinite
+                                                    running: root.isActive(modelData.phase)
+                                                    NumberAnimation { to: 1.0; duration: 800; easing.type: Easing.InOutSine }
+                                                    NumberAnimation { to: 0.4; duration: 800; easing.type: Easing.InOutSine }
+                                                }
+                                            }
+
+                                            ColumnLayout {
+                                                id: cardCol
+                                                anchors.left: parent.left
+                                                anchors.right: parent.right
+                                                anchors.top: parent.top
+                                                anchors.topMargin: 10
+                                                anchors.leftMargin: 12
+                                                anchors.rightMargin: 12
+                                                spacing: 6
+
+                                                // Top row: name + phase·elapsed + cost
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 6
+
+                                                    Text {
+                                                        text: modelData.name || ""
+                                                        color: "#e9edf2"
+                                                        font.pixelSize: 13; font.bold: true
+                                                        elide: Text.ElideRight
+                                                        Layout.fillWidth: true
+                                                    }
+                                                    Text {
+                                                        text: modelData.phase || ""
+                                                        color: root.phaseColor(modelData.phase)
+                                                        font.pixelSize: 10
+                                                        font.letterSpacing: 0.8
+                                                    }
+                                                    Text {
+                                                        text: root.fmtCost(modelData.cost_usd)
+                                                        color: "#f0a860"
+                                                        font.family: "monospace"
+                                                        font.pixelSize: 12; font.bold: true
+                                                    }
+                                                }
+
+                                                // Live tail line: current_tool_input or phase label
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: root.tailLine(modelData)
+                                                    color: "#566069"
+                                                    font.family: "monospace"
+                                                    font.pixelSize: 10
+                                                    elide: Text.ElideRight
+                                                    visible: text !== ""
+                                                }
+
+                                                // Activity waveform: Row of bars from rate_series
+                                                // Each bar's height is proportional to its sample value,
+                                                // normalized against the peak of the visible series.
+                                                // Height is fixed at 28px; bars animate in on series change.
+                                                Item {
+                                                    Layout.fillWidth: true
+                                                    implicitHeight: 28
+
+                                                    // Access rate_series defensively
+                                                    property var series: modelData.rate_series || []
+                                                    property real peak: {
+                                                        var s = series
+                                                        var mx = 1
+                                                        for (var i = 0; i < s.length; i++)
+                                                            if (s[i] > mx) mx = s[i]
+                                                        return mx
+                                                    }
+
+                                                    // Show only last 30 samples for the card width
+                                                    property var visibleSeries: {
+                                                        var s = series
+                                                        if (s.length <= 30) return s
+                                                        return s.slice(s.length - 30)
+                                                    }
+
+                                                    Row {
+                                                        anchors.bottom: parent.bottom
+                                                        anchors.left: parent.left
+                                                        anchors.right: parent.right
+                                                        height: parent.height
+                                                        spacing: 1
+
+                                                        Repeater {
+                                                            model: parent.parent.visibleSeries.length > 0
+                                                                   ? parent.parent.visibleSeries.length : 30
+
+                                                            delegate: Rectangle {
+                                                                required property int index
+                                                                // Bar width fills the available row width evenly
+                                                                width: Math.max(2, (parent.width - (parent.parent.parent.visibleSeries.length > 0 ? parent.parent.parent.visibleSeries.length - 1 : 29)) / Math.max(1, parent.parent.parent.visibleSeries.length > 0 ? parent.parent.parent.visibleSeries.length : 30))
+                                                                height: {
+                                                                    var vs = parent.parent.parent.visibleSeries
+                                                                    if (!vs || vs.length === 0) return 2
+                                                                    var val = index < vs.length ? vs[index] : 0
+                                                                    var pk = parent.parent.parent.peak
+                                                                    var h = Math.max(2, (val / pk) * 24)
+                                                                    return h
+                                                                }
+                                                                anchors.bottom: parent.bottom
+                                                                radius: 1
+                                                                color: root.phaseColor(modelData.phase)
+                                                                opacity: 0.7 + 0.3 * (index / Math.max(1, (parent.parent.parent.visibleSeries.length > 0 ? parent.parent.parent.visibleSeries.length : 30) - 1))
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                // Bottom info: tokens/min + model chip
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 8
+
+                                                    Text {
+                                                        visible: modelData.tokens_per_min !== undefined && modelData.tokens_per_min !== null && modelData.tokens_per_min > 0
+                                                        text: (modelData.tokens_per_min || 0) + " tk/min · last 60s"
+                                                        color: "#566069"; font.pixelSize: 10
+                                                    }
+                                                    Item { Layout.fillWidth: true }
+                                                    // Model chip
+                                                    Rectangle {
+                                                        visible: modelData.model && modelData.model !== ""
+                                                        radius: 4
+                                                        color: "#0e141b"
+                                                        border.color: "#1c2632"
+                                                        border.width: 1
+                                                        width: modelChipLabel.width + 10
+                                                        height: 18
+                                                        Text {
+                                                            id: modelChipLabel
+                                                            anchors.centerIn: parent
+                                                            text: (modelData.model || "").substring(0, 14)
+                                                            color: "#566069"; font.pixelSize: 9
+                                                        }
+                                                    }
+                                                }
+
+                                                // Bottom spacer
+                                                Item { implicitHeight: 2 }
+                                            }
+
+                                            MouseArea {
+                                                id: liveArea
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                hoverEnabled: true
+                                                onClicked: root.vm.focusSession(modelData.id)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── IDLE band: compact chips ───────────────
+                                // Section header visible only when there are idle sessions
+                                Text {
+                                    visible: root.quietCount() > 0
+                                    text: "○ Idle · " + root.quietCount()
                                     color: "#566069"
                                     font.pixelSize: 10; font.letterSpacing: 1.5
                                     Layout.leftMargin: 16; Layout.topMargin: 13; Layout.bottomMargin: 6
                                 }
                                 Flow {
+                                    visible: root.quietCount() > 0
                                     Layout.fillWidth: true
                                     Layout.leftMargin: 16; Layout.rightMargin: 16; Layout.bottomMargin: 16
                                     spacing: 8
@@ -617,6 +842,122 @@ Window {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // ── TodayCard inline component ────────────────────────────────────────
+    // Displayed at top of home content; full version when no decisions pending,
+    // collapsed to a one-liner when decisions take priority.
+    component TodayCard: Rectangle {
+        required property var todayData         // spendDetail() result dict
+        required property int quotaPct          // vmQuotaPct
+        required property var vmQuota           // vmQuota dict or null
+        property bool collapsed: false
+
+        radius: 8
+        color: "#0a0d12"
+        border.color: "#151b22"
+        border.width: 1
+        implicitHeight: todayCol.implicitHeight + 20
+
+        ColumnLayout {
+            id: todayCol
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 12
+            spacing: 6
+
+            // Header row: "TODAY · resets in X" left, big cost right
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                ColumnLayout {
+                    spacing: 2
+                    Text {
+                        text: "TODAY"
+                        color: "#566069"
+                        font.pixelSize: 9; font.letterSpacing: 2; font.bold: true
+                    }
+                    Text {
+                        visible: vmQuota !== null && vmQuota !== undefined
+                        text: "Anthropic · resets in " + ((vmQuota && vmQuota["five_hour_reset"]) ? vmQuota["five_hour_reset"] : "—")
+                        color: "#3a4752"
+                        font.pixelSize: 9
+                    }
+                }
+                Item { Layout.fillWidth: true }
+                Text {
+                    text: {
+                        var c = (todayData && todayData["cost"]) ? todayData["cost"] : 0
+                        return "$" + (c >= 100 ? c.toFixed(0) : c.toFixed(2))
+                    }
+                    color: "#f0a860"
+                    font.pixelSize: 22; font.bold: true; font.family: "monospace"
+                }
+            }
+
+            // 5h progress bar
+            Item {
+                Layout.fillWidth: true
+                implicitHeight: 18
+
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: 5
+                    radius: 2
+                    color: "#151b22"
+
+                    Rectangle {
+                        height: parent.height
+                        radius: parent.radius
+                        width: parent.width * Math.max(0, Math.min(100, quotaPct)) / 100
+                        color: quotaPct > 80 ? "#e8743b" : "#5fd2a8"
+                        Behavior on width { NumberAnimation { duration: 400 } }
+                    }
+                }
+                Text {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: quotaPct + "% of 5h"
+                    color: "#5fd2a8"; font.pixelSize: 9
+                }
+            }
+
+            // Meta line: reqs · tokens · cache · hit%
+            Text {
+                Layout.fillWidth: true
+                text: {
+                    var reqs  = (todayData && todayData["reqs"])         ? todayData["reqs"] : 0
+                    var toks  = (todayData && todayData["total_tokens"])  ? todayData["total_tokens"] : 0
+                    var cache = (todayData && todayData["cache_read"])    ? todayData["cache_read"] : 0
+                    var hr    = (todayData && todayData["hit_rate"])      ? todayData["hit_rate"] : 0
+                    var parts = []
+                    if (reqs > 0) parts.push(reqs + " reqs")
+                    if (toks > 0) parts.push(fmtNum(toks) + " tokens")
+                    if (cache > 0) parts.push(fmtNum(cache) + " cache")
+                    if (hr > 0) parts.push((hr * 100).toFixed(0) + "% hit")
+                    return parts.length > 0 ? parts.join(" · ") : "no usage today"
+                }
+                color: "#566069"; font.pixelSize: 10
+                elide: Text.ElideRight
+            }
+
+            // Subagent sub-line: "↳ incl. N subagent reqs · $X"
+            Text {
+                Layout.fillWidth: true
+                visible: (todayData && todayData["subagent_reqs"]) ? todayData["subagent_reqs"] > 0 : false
+                text: {
+                    var sr = (todayData && todayData["subagent_reqs"]) ? todayData["subagent_reqs"] : 0
+                    var sc = (todayData && todayData["subagent_cost"]) ? todayData["subagent_cost"] : 0.0
+                    return "↳ incl. " + sr + " subagent reqs · $" + sc.toFixed(2)
+                }
+                color: "#3a4752"; font.pixelSize: 9
+                elide: Text.ElideRight
             }
         }
     }

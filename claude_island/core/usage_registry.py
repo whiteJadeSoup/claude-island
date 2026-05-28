@@ -372,6 +372,32 @@ class UsageRegistry:
         # last minute" rather than "instantaneous rate at last turn".
         return int(total_tokens * 60 / window_s)
 
+    def get_sidechain_totals(self, period: str) -> tuple[int, float]:
+        """Return (sidechain_request_count, sidechain_cost_usd) for the period.
+
+        Counts only UsageRecord rows where ``is_sidechain=True`` — i.e. records
+        that originated from a subagent transcript.  Used by ``spendDetail()``
+        to populate the "↳ incl. N subagent reqs · $X" line on the TODAY card.
+        Cost is recomputed from tokens × pricing (same formula as get_totals)
+        so price-table updates retroactively apply.
+        """
+        since = _period_cutoff(period)
+        records = self._records_since(since)
+        count = 0
+        cost = 0.0
+        for r in records:
+            if not r.is_sidechain:
+                continue
+            count += 1
+            p = _resolve_pricing(r.model)
+            cost += (
+                r.input_tokens / 1_000_000 * p.input_per_mtok
+                + r.output_tokens / 1_000_000 * p.output_per_mtok
+                + r.cache_creation_tokens / 1_000_000 * p.cw_rate()
+                + r.cache_read_tokens / 1_000_000 * p.cr_rate()
+            )
+        return count, cost
+
     def get_session_per_model(self, session_uuid: str) -> tuple[ModelTotals, ...]:
         """Per-model aggregation for a single transcript file.
 

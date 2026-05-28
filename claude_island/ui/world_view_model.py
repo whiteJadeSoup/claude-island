@@ -44,6 +44,7 @@ class WorldViewModel(QObject):
         # direct dependency on UsageRegistry or the platform layer.
         get_totals: Callable | None = None,
         get_totals_by_model: Callable | None = None,
+        get_sidechain_totals: Callable | None = None,
         refresh_quota_fn: Callable | None = None,
         resume_fn: Callable | None = None,
         # Session detail callback — injected from qml_app so VM never
@@ -60,6 +61,7 @@ class WorldViewModel(QObject):
         # inject these still construct without error.
         self._get_totals: Callable | None = get_totals
         self._get_totals_by_model: Callable | None = get_totals_by_model
+        self._get_sidechain_totals: Callable | None = get_sidechain_totals
         self._refresh_quota_fn: Callable = refresh_quota_fn or (lambda: None)
         self._resume_fn: Callable = resume_fn or (lambda uuid: None)
         self._get_session_details: Callable | None = get_session_details
@@ -181,24 +183,42 @@ class WorldViewModel(QObject):
             except Exception:
                 per_model = []
 
+        # Subagent (sidechain) aggregation for the "↳ incl. N subagent reqs" line.
+        # get_sidechain_totals returns (count: int, cost: float) for the period.
+        subagent_reqs = 0
+        subagent_cost = 0.0
+        if self._get_sidechain_totals:
+            try:
+                _sc = self._get_sidechain_totals("today")
+                subagent_reqs = int(_sc[0])
+                subagent_cost = float(_sc[1])
+            except Exception:
+                pass
+
+        cache_read = int(g(totals, "cache_read_tokens", "cache_read"))
+        input_tok = int(g(totals, "input_tokens"))
+        output_tok = int(g(totals, "output_tokens"))
+
         return {
             # cost_usd is a @property on UsageTotals computed from the
             # four sub-costs; request_count is an int field.
             "cost": float(g(totals, "cost_usd", "cost")),
             "reqs": int(g(totals, "request_count", "reqs")),
-            "input_tokens": int(g(totals, "input_tokens")),
-            "output_tokens": int(g(totals, "output_tokens")),
+            "input_tokens": input_tok,
+            "output_tokens": output_tok,
+            # total_tokens = input + output (cache excluded — not "generated now").
+            "total_tokens": input_tok + output_tok,
             # cache_creation_tokens is the "cache write" bucket;
             # cache_read_tokens is the "cache read / hit" bucket.
-            "cache_read": int(g(totals, "cache_read_tokens", "cache_read")),
+            "cache_read": cache_read,
             # hit_rate = cache_read / (cache_read + input_tokens).
             # UsageTotals has no hit_rate field; derive it here so QML
             # SpendPage can display it without recomputing in JS.
             # Guard divide-by-zero: return 0.0 when both buckets are zero.
-            "hit_rate": _compute_hit_rate(
-                int(g(totals, "cache_read_tokens", "cache_read")),
-                int(g(totals, "input_tokens")),
-            ),
+            "hit_rate": _compute_hit_rate(cache_read, input_tok),
+            # Subagent / sidechain breakdown for the TODAY card sub-line.
+            "subagent_reqs": subagent_reqs,
+            "subagent_cost": subagent_cost,
             "per_model": per_model,
         }
 

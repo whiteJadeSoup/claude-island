@@ -52,7 +52,7 @@ Rectangle {
 
                 // Back arrow
                 Text {
-                    text: "‹ 返回"
+                    text: "‹ Back"
                     color: backArea.containsMouse ? "#c8d4de" : "#7e8a97"
                     font.pixelSize: 13
                     MouseArea {
@@ -67,7 +67,7 @@ Rectangle {
                 Item { Layout.fillWidth: true }
 
                 Text {
-                    text: "今日消耗"
+                    text: "Today's usage"
                     color: "#e9edf2"
                     font.pixelSize: 13
                     font.bold: true
@@ -77,7 +77,7 @@ Rectangle {
 
                 // Refresh quota button
                 Text {
-                    text: "↻ 刷新额度"
+                    text: "↻ Refresh quota"
                     color: refreshArea.containsMouse ? "#5fd2a8" : "#7e8a97"
                     font.pixelSize: 12
                     MouseArea {
@@ -123,7 +123,7 @@ Rectangle {
                 Text {
                     Layout.leftMargin: 16
                     Layout.bottomMargin: 4
-                    text: "详细用量"
+                    text: "USAGE DETAIL"
                     color: "#566069"
                     font.pixelSize: 10
                     font.letterSpacing: 1.5
@@ -131,12 +131,12 @@ Rectangle {
 
                 // Each stat row is a small horizontal layout
                 // reqs
-                SpendRow { label: "请求"; value: String(spendVal("reqs", 0)) }
-                SpendRow { label: "输入 token";  value: fmtTok(spendVal("input_tokens",  0)) }
-                SpendRow { label: "输出 token";  value: fmtTok(spendVal("output_tokens", 0)) }
-                SpendRow { label: "缓存 token";  value: fmtTok(spendVal("cache_read",    0)) }
+                SpendRow { label: "Requests"; value: String(spendVal("reqs", 0)) }
+                SpendRow { label: "Input tokens";  value: fmtTok(spendVal("input_tokens",  0)) }
+                SpendRow { label: "Output tokens";  value: fmtTok(spendVal("output_tokens", 0)) }
+                SpendRow { label: "Cache tokens";  value: fmtTok(spendVal("cache_read",    0)) }
                 SpendRow {
-                    label: "命中率"
+                    label: "Hit rate"
                     value: {
                         var r = spendVal("hit_rate", 0)
                         return (r * 100).toFixed(1) + "%"
@@ -148,7 +148,7 @@ Rectangle {
                     Layout.leftMargin: 16
                     Layout.topMargin: 16
                     Layout.bottomMargin: 4
-                    text: "模型分布"
+                    text: "MODEL BREAKDOWN"
                     color: "#566069"
                     font.pixelSize: 10
                     font.letterSpacing: 1.5
@@ -226,7 +226,7 @@ Rectangle {
                     Layout.leftMargin: 16
                     Layout.topMargin: 16
                     Layout.bottomMargin: 4
-                    text: "额度使用"
+                    text: "QUOTA USAGE"
                     color: "#566069"
                     font.pixelSize: 10
                     font.letterSpacing: 1.5
@@ -248,7 +248,7 @@ Rectangle {
                         anchors.right: parent.right
                         height: 20
                         Text {
-                            text: "5 小时窗口"
+                            text: "5-hour window"
                             color: "#a0aab6"
                             font.pixelSize: 11
                             Layout.fillWidth: true
@@ -277,7 +277,7 @@ Rectangle {
                     }
                     Text {
                         anchors.bottom: parent.bottom
-                        text: "重置: " + (quotaVal("five_hour_reset", "") || "—")
+                        text: "Resets: " + (quotaVal("five_hour_reset", "") || "—")
                         color: "#566069"
                         font.pixelSize: 10
                     }
@@ -298,7 +298,7 @@ Rectangle {
                         anchors.right: parent.right
                         height: 20
                         Text {
-                            text: "7 天窗口"
+                            text: "7-day window"
                             color: "#a0aab6"
                             font.pixelSize: 11
                             Layout.fillWidth: true
@@ -327,7 +327,7 @@ Rectangle {
                     }
                     Text {
                         anchors.bottom: parent.bottom
-                        text: "重置: " + (quotaVal("weekly_reset", "") || "—")
+                        text: "Resets: " + (quotaVal("weekly_reset", "") || "—")
                         color: "#566069"
                         font.pixelSize: 10
                     }

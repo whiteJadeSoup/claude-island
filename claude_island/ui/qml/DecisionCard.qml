@@ -100,7 +100,7 @@ Rectangle {
         anchors.left: parent.left
         anchors.leftMargin: 16
         anchors.verticalCenter: parent.verticalCenter
-        text: "允许 →"
+        text: "Allow →"
         color: "#5fd2a8"
         font.pixelSize: 12
         font.bold: true
@@ -112,7 +112,7 @@ Rectangle {
         anchors.right: parent.right
         anchors.rightMargin: 16
         anchors.verticalCenter: parent.verticalCenter
-        text: "← 拒绝"
+        text: "← Deny"
         color: "#e8743b"
         font.pixelSize: 12
         font.bold: true
@@ -152,7 +152,7 @@ Rectangle {
                 Text {
                     id: tagLabel
                     anchors.centerIn: parent
-                    text: card.isQuestion ? "提问" : "审批"
+                    text: card.isQuestion ? "question" : "approval"
                     color: "#e8884c"
                     font.pixelSize: 10
                 }
@@ -170,7 +170,7 @@ Rectangle {
                 Text {
                     id: riskLabel
                     anchors.centerIn: parent
-                    text: "高危"
+                    text: "high risk"
                     color: "#e8743b"
                     font.pixelSize: 10
                     font.bold: true
@@ -288,7 +288,7 @@ Rectangle {
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 8
-                    text: "在终端处理"
+                    text: "Jump to terminal"
                     color: "#566069"
                     font.pixelSize: 11
                 }
@@ -327,7 +327,7 @@ Rectangle {
                 Layout.fillWidth: true
                 spacing: 8
 
-                // 允许这次 (primary)
+                // Allow once (primary)
                 Rectangle {
                     height: 32
                     radius: 7
@@ -335,7 +335,7 @@ Rectangle {
                     Layout.fillWidth: true
                     Text {
                         anchors.centerIn: parent
-                        text: "允许这次"
+                        text: "Allow once"
                         color: "#180c05"
                         font.pixelSize: 12
                         font.bold: true
@@ -349,7 +349,7 @@ Rectangle {
                     }
                 }
 
-                // 总是允许 (secondary)
+                // Always allow (secondary)
                 Rectangle {
                     height: 32
                     radius: 7
@@ -359,7 +359,7 @@ Rectangle {
                     Layout.fillWidth: true
                     Text {
                         anchors.centerIn: parent
-                        text: "总是允许"
+                        text: "Always allow"
                         color: allowAlways.containsMouse ? "#f4efe9" : "#e9c9b3"
                         font.pixelSize: 12
                     }
@@ -372,7 +372,7 @@ Rectangle {
                     }
                 }
 
-                // 拒绝 (secondary)
+                // Deny (secondary)
                 Rectangle {
                     height: 32
                     radius: 7
@@ -383,7 +383,7 @@ Rectangle {
                     Text {
                         id: denyLabel
                         anchors.centerIn: parent
-                        text: "拒绝"
+                        text: "Deny"
                         color: denyBtn.containsMouse ? "#e8743b" : "#e9c9b3"
                         font.pixelSize: 12
                     }
