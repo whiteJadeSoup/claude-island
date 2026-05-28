@@ -1,4 +1,6 @@
-"""Tests for Plan 3 Task 1: extended quota projection, recents, spendDetail slot."""
+"""Tests for Plan 3 Task 1: extended quota projection, recents, spendDetail slot.
+Also covers R1 Deliverable 3: sessionDetail() slot.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -10,6 +12,8 @@ from claude_island.core.models import (
     DormantSession,
     ModelTotals,
     QuotaSnapshot,
+    Session,
+    SessionDetails,
     UsageTotals,
 )
 from claude_island.core.session_phase import SessionPhase
@@ -18,7 +22,6 @@ from claude_island.core.snapshot import (
     SessionView,
     WorldSnapshot,
 )
-from claude_island.core.models import Session
 from claude_island.ui.snapshot_projection import project_snapshot
 from claude_island.ui.world_view_model import WorldViewModel
 
@@ -323,3 +326,130 @@ def test_vm_recents_property_reflects_snapshot():
     assert len(recents) == 1
     assert recents[0]["name"] == "past-proj"
     assert recents[0]["session_uuid"] == "d-42"
+
+
+# ---------------------------------------------------------------------------
+# R1 Deliverable 3: sessionDetail() slot
+# ---------------------------------------------------------------------------
+
+def _make_session(uuid: str = "uuid-detail-1") -> Session:
+    return Session(
+        pid=42,
+        project_path=Path("D:/myproject"),
+        last_activity=_NOW,
+        session_uuid=uuid,
+    )
+
+
+def _make_live_view(uuid: str = "uuid-detail-1") -> SessionView:
+    sess = _make_session(uuid)
+    return SessionView(
+        pid=42,
+        name="detail-test",
+        project_path=Path("D:/myproject"),
+        project_basename="myproject",
+        last_activity=_NOW,
+        cost_usd=3.50,
+        is_high_cost=False,
+        latest_model="claude-sonnet-4-6",
+        status_word=None,
+        session=sess,
+        session_uuid=uuid,
+        phase=SessionPhase.IDLE,
+    )
+
+
+def _snap_with_live_view(view: SessionView) -> WorldSnapshot:
+    return WorldSnapshot(
+        today_cost_usd=0.0,
+        quota=None,
+        available_providers=(),
+        selected_provider=None,
+        fetched_at=_NOW,
+        session_groups=(SessionGroup("g", None, "", (view,)),),
+    )
+
+
+def _stub_details(session: Session) -> SessionDetails:
+    """Fake get_session_details — returns a minimal SessionDetails with known values."""
+    return SessionDetails(
+        session=session,
+        name="my-session",
+        original_name="cc-learning",
+        ai_title="Fixing the authentication bug",
+        git_branch="feat/auth-fix",
+        last_prompt="Can you fix the login flow?",
+        started_at=_NOW,
+        status="idle",
+        cc_version="2.1.0",
+        cost_usd=3.50,
+        turn_count=7,
+        sidechain_count=1,
+        per_model=(
+            ModelTotals(
+                model="claude-sonnet-4-6",
+                input_tokens=500,
+                output_tokens=300,
+                cache_creation_tokens=10,
+                cache_read_tokens=50,
+                cost_usd=3.50,
+            ),
+        ),
+        latest_model="claude-sonnet-4-6",
+        effective_uuid="uuid-detail-1",
+    )
+
+
+def test_session_detail_returns_mapped_dict():
+    """sessionDetail() with a wired callback returns a dict with all expected keys."""
+    uuid = "uuid-detail-1"
+    view = _make_live_view(uuid)
+    vm = WorldViewModel(get_session_details=_stub_details)
+    vm.update(_snap_with_live_view(view))
+
+    detail = vm.sessionDetail(uuid)
+
+    assert detail["name"] == "my-session"
+    assert detail["ai_title"] == "Fixing the authentication bug"
+    assert detail["branch"] == "feat/auth-fix"
+    assert detail["latest_prompt"] == "Can you fix the login flow?"
+    assert abs(detail["cost"] - 3.50) < 1e-9
+    assert detail["turns"] == 7
+    assert detail["uuid"] == "uuid-detail-1"
+    assert detail["model"] == "claude-sonnet-4-6"
+    assert len(detail["per_model"]) == 1
+    assert detail["per_model"][0]["model"] == "claude-sonnet-4-6"
+    assert abs(detail["per_model"][0]["cost"] - 3.50) < 1e-9
+
+
+def test_session_detail_unknown_id_returns_empty():
+    """sessionDetail("nope") returns {} when no matching session in snapshot."""
+    view = _make_live_view("uuid-detail-1")
+    vm = WorldViewModel(get_session_details=_stub_details)
+    vm.update(_snap_with_live_view(view))
+
+    result = vm.sessionDetail("nope")
+    assert result == {}
+
+
+def test_session_detail_no_callback_returns_empty():
+    """When no get_session_details is injected, sessionDetail returns {}."""
+    uuid = "uuid-detail-1"
+    view = _make_live_view(uuid)
+    vm = WorldViewModel()  # no get_session_details
+    vm.update(_snap_with_live_view(view))
+
+    result = vm.sessionDetail(uuid)
+    assert result == {}
+
+
+def test_session_detail_contains_cwd():
+    """sessionDetail() includes the cwd from the view's project_path."""
+    uuid = "uuid-detail-1"
+    view = _make_live_view(uuid)
+    vm = WorldViewModel(get_session_details=_stub_details)
+    vm.update(_snap_with_live_view(view))
+
+    detail = vm.sessionDetail(uuid)
+    # cwd should contain "myproject"
+    assert "myproject" in detail["cwd"]
