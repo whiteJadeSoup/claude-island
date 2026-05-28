@@ -171,6 +171,10 @@ def main() -> int:
 
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("worldVm", vm)
+    # isMac controls window flags in Main.qml: Qt.Tool is dropped on darwin
+    # because NSPanel refuses to paint transparent windows (same rationale as
+    # CapsuleWindow._setup_window — see capsule_window.py for the full comment).
+    engine.rootContext().setContextProperty("isMac", sys.platform == "darwin")
     engine.load(str(_QML))
     if not engine.rootObjects():
         print("QML failed to load", file=sys.stderr)

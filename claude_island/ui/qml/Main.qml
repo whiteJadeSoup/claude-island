@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
+import QtQuick.Controls
 
 // Fixed window at max size (480×460). The visible "island" is the inner
 // rootRect which morphs between pill/decision/expanded shapes — this avoids
@@ -9,7 +10,13 @@ import QtQuick.Layouts
 Window {
     id: root
     width: 480; height: 460; visible: true
-    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+    // On macOS Qt.Tool maps to NSPanel which silently refuses to paint a
+    // WA_TranslucentBackground surface — the window reports isVisible=True
+    // but nothing reaches the screen.  The existing CapsuleWindow._setup_window
+    // drops Qt.Tool on darwin for the same reason (see capsule_window.py).
+    // isMac is injected from qml_app.py via engine.rootContext().
+    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint |
+           (typeof isMac !== "undefined" && isMac ? 0 : Qt.Tool)
     color: "transparent"
 
     // ── Page navigation: "home" | "spend" | "recents" ────────────────────
@@ -332,9 +339,65 @@ Window {
                         Behavior on x       { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                         Behavior on opacity { NumberAnimation { duration: 200 } }
 
+                        // ── Empty state: no sessions and no decisions ─────────────
+                        // Shown in place of the three band headers when there is
+                        // nothing to display; hides itself the moment any session
+                        // or decision appears.
+                        Item {
+                            anchors.fill: parent
+                            visible: root.vmSessions.length === 0 && root.vmDecisions.length === 0
+
+                            Column {
+                                anchors.centerIn: parent
+                                spacing: 10
+
+                                // Breathing dot — subtle ambient presence indicator
+                                Rectangle {
+                                    id: emptyDot
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    width: 8; height: 8; radius: 4
+                                    color: "#26303c"
+
+                                    property real dotScale: 1.0
+                                    transform: Scale {
+                                        xScale: emptyDot.dotScale
+                                        yScale: emptyDot.dotScale
+                                        origin.x: 4; origin.y: 4
+                                    }
+                                    SequentialAnimation on dotScale {
+                                        loops: Animation.Infinite
+                                        running: true
+                                        NumberAnimation { to: 1.3; duration: 1200; easing.type: Easing.InOutSine }
+                                        NumberAnimation { to: 0.7; duration: 1200; easing.type: Easing.InOutSine }
+                                    }
+                                }
+
+                                Text {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    text: "没有运行中的会话 · 一切安静"
+                                    color: "#3a4752"
+                                    font.pixelSize: 12
+                                }
+                            }
+                        }
+
                         Flickable {
                             anchors.fill: parent
                             contentHeight: bands.height; clip: true
+                            visible: root.vmSessions.length > 0 || root.vmDecisions.length > 0
+
+                            // Thin subtle scrollbar — only appears when content overflows
+                            ScrollBar.vertical: ScrollBar {
+                                width: 5
+                                policy: ScrollBar.AsNeeded
+                                contentItem: Rectangle {
+                                    implicitWidth: 5
+                                    radius: 2
+                                    color: "#26303c"
+                                    opacity: parent.active ? 0.8 : 0.4
+                                }
+                                background: Item {}
+                            }
 
                             ColumnLayout {
                                 id: bands; width: parent.width; spacing: 0
@@ -409,13 +472,62 @@ Window {
                                             spacing: 0
                                             ColumnLayout {
                                                 spacing: 2
-                                                Text { text: modelData.name; color: "#e9edf2"; font.pixelSize: 13; font.bold: true }
+                                                Layout.fillWidth: true
+                                                Text { text: modelData.name; color: "#e9edf2"; font.pixelSize: 13; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
                                                 Text {
                                                     text: modelData.current_tool_input || modelData.cwd
                                                     color: "#7e8a97"; font.family: "monospace"; font.pixelSize: 11; elide: Text.ElideRight
+                                                    Layout.fillWidth: true
                                                 }
                                             }
-                                            Item { Layout.fillWidth: true }
+                                            // ── Scan-wave accent ──────────────────────────────
+                                            // 4 bars that pulse with a travelling wave — live
+                                            // indicator signature.  Color tracks phase:
+                                            //   thinking   → amber  #f0b860
+                                            //   tool_use   → teal   #5fd2a8
+                                            //   other active → teal
+                                            // Kept small (3×10 each, 40 px total) and right-
+                                            // anchored near the cost so it reads as a discreet
+                                            // "live" cue, not a spotlight.
+                                            Row {
+                                                spacing: 3
+                                                // phase-derived colour — amber for thinking, teal otherwise
+                                                property string waveColor: modelData.phase === "thinking"
+                                                    ? "#f0b860" : "#5fd2a8"
+
+                                                Repeater {
+                                                    model: 4
+                                                    delegate: Rectangle {
+                                                        required property int index
+                                                        width: 3; height: 10; radius: 1
+                                                        color: parent.waveColor
+                                                        opacity: 0.85
+
+                                                        // Each bar pulses from 3 px to 10 px with a
+                                                        // staggered delay so they form a travelling
+                                                        // wave from left to right.
+                                                        property real barH: 5
+                                                        transform: Scale {
+                                                            yScale: barH / 10
+                                                            origin.x: 0; origin.y: 5
+                                                        }
+                                                        SequentialAnimation on barH {
+                                                            loops: Animation.Infinite
+                                                            running: true
+                                                            // Leading pause creates the stagger:
+                                                            // bar 0 starts immediately, bar 3 starts
+                                                            // after ~225 ms so the wave sweeps left→right.
+                                                            PauseAnimation { duration: index * 75 }
+                                                            NumberAnimation { to: 10; duration: 250; easing.type: Easing.InOutSine }
+                                                            NumberAnimation { to: 3;  duration: 250; easing.type: Easing.InOutSine }
+                                                            // Trailing pause so the full cycle is ~800 ms
+                                                            // (4 bars × 75 ms stagger + 500 ms wave = calm).
+                                                            PauseAnimation { duration: 300 - index * 75 }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Item { width: 6 }
                                             Text {
                                                 text: root.fmtCost(modelData.cost_usd); color: "#f0a860"
                                                 font.family: "monospace"; font.pixelSize: 13; font.bold: true
