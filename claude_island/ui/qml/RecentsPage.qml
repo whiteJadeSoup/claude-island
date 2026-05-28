@@ -273,6 +273,10 @@ Rectangle {
 
         // ── Session list ──────────────────────────────────────────────────
         Flickable {
+            // objectName used by test_qml_no_warnings.py to locate this Flickable
+            // and assert that contentHeight > 0 (geometry regression guard for
+            // the Loader implicitHeight fix — rows must have real height).
+            objectName: "recentsListFlickable"
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentHeight: listCol.height
@@ -299,26 +303,187 @@ Rectangle {
 
                 Repeater {
                     model: recentsPage.flatList
-                    delegate: Loader {
+                    // Inline delegate that switches between header and row layouts
+                    // based on modelData.type.  Using a single delegate with an
+                    // explicit Layout.preferredHeight avoids the Loader-height trap:
+                    // when a Loader is a ColumnLayout child, its item's height is
+                    // not automatically adopted, making every row collapse to 0 and
+                    // the History list appear empty.  A direct delegate with a
+                    // conditional Item has no such issue.
+                    delegate: Item {
                         required property var modelData
                         required property int index
 
+                        readonly property bool isHeader: modelData.type === "header"
+
                         Layout.fillWidth: true
+                        // Preferred height drives ColumnLayout allocation.  Must be
+                        // explicit so Qt 6's layout engine measures correctly.
+                        Layout.preferredHeight: isHeader ? 28 : rowContentHolder.implicitHeight + 20
 
-                        // Choose header vs row component by type
-                        sourceComponent: modelData.type === "header"
-                                         ? GroupHeaderComp : SessionRowComp
+                        // ── Header variant ────────────────────────────────────
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 16
+                            anchors.rightMargin: 16
+                            visible: parent.isHeader
 
-                        // Pass the data down into whichever component is loaded
-                        onLoaded: {
-                            if (modelData.type === "header") {
-                                item.label = modelData.label
-                            } else {
-                                item.item   = modelData.item
-                                item.vmRef  = recentsPage.vm
-                                item.fmtCostFn  = recentsPage.fmtCost
-                                item.fmtAgoFn   = recentsPage.fmtAgo
-                                item.metaLineFn = recentsPage.metaLine
+                            Text {
+                                text: parent.visible ? (parent.parent.modelData.label || "") : ""
+                                color: "#566069"
+                                font.pixelSize: 10
+                                font.letterSpacing: 1.5
+                                font.bold: true
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 1
+                                color: "#151b22"
+                                Layout.alignment: Qt.AlignVCenter
+                                Layout.leftMargin: 8
+                            }
+                        }
+
+                        // ── Session row variant ───────────────────────────────
+                        Rectangle {
+                            id: rowCard
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.leftMargin: 13
+                            anchors.rightMargin: 13
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.bottomMargin: 6
+                            visible: !parent.isHeader
+                            radius: 8
+                            color: rowHover.containsMouse ? "#0e141b" : "#0a1018"
+                            border.color: rowHover.containsMouse ? "#1c2632" : "#151b22"
+                            border.width: 1
+
+                            // Alias for clarity: the item dict from the flat list
+                            readonly property var rowItem: parent.isHeader ? ({}) : (parent.modelData.item || {})
+
+                            ColumnLayout {
+                                id: rowContentHolder
+                                anchors.top: parent.top
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.topMargin: 10
+                                anchors.leftMargin: 12
+                                anchors.rightMargin: 12
+                                spacing: 3
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: rowCard.rowItem.name || "Unknown session"
+                                        color: "#e9edf2"
+                                        font.pixelSize: 13
+                                        font.bold: true
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        text: recentsPage.fmtCost(rowCard.rowItem.cost_usd || 0)
+                                        color: "#f0a860"
+                                        font.family: "monospace"
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                    }
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: rowCard.rowItem.cwd || ""
+                                    color: "#3a4752"
+                                    font.family: "monospace"
+                                    font.pixelSize: 10
+                                    elide: Text.ElideRight
+                                    visible: text !== ""
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: recentsPage.metaLine(rowCard.rowItem)
+                                    color: "#566069"
+                                    font.pixelSize: 10
+                                    elide: Text.ElideRight
+                                    visible: text !== ""
+                                }
+
+                                // Hover-revealed action row
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.topMargin: 4
+                                    spacing: 8
+                                    visible: rowHover.containsMouse
+
+                                    // Resume button
+                                    Rectangle {
+                                        width: resumeLabel.width + 16
+                                        height: 24
+                                        radius: 6
+                                        color: resumeArea.containsMouse ? "#1a2a20" : "transparent"
+                                        border.color: resumeArea.containsMouse ? "#5fd2a8" : "#2a3a30"
+                                        border.width: 1
+                                        Text {
+                                            id: resumeLabel
+                                            anchors.centerIn: parent
+                                            text: "Resume"
+                                            color: resumeArea.containsMouse ? "#5fd2a8" : "#7e8a97"
+                                            font.pixelSize: 11
+                                        }
+                                        MouseArea {
+                                            id: resumeArea
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            hoverEnabled: true
+                                            onClicked: {
+                                                if (recentsPage.vm && rowCard.rowItem.session_uuid)
+                                                    recentsPage.vm.resumeSession(rowCard.rowItem.session_uuid)
+                                            }
+                                        }
+                                    }
+
+                                    // Open transcript button
+                                    Rectangle {
+                                        width: transcriptLabel.width + 16
+                                        height: 24
+                                        radius: 6
+                                        visible: rowCard.rowItem.transcript_path !== undefined &&
+                                                 rowCard.rowItem.transcript_path !== ""
+                                        color: transcriptArea.containsMouse ? "#1a1a2a" : "transparent"
+                                        border.color: transcriptArea.containsMouse ? "#5fa8d2" : "#1c2030"
+                                        border.width: 1
+                                        Text {
+                                            id: transcriptLabel
+                                            anchors.centerIn: parent
+                                            text: "Transcript"
+                                            color: transcriptArea.containsMouse ? "#5fa8d2" : "#566069"
+                                            font.pixelSize: 11
+                                        }
+                                        MouseArea {
+                                            id: transcriptArea
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            hoverEnabled: true
+                                            onClicked: {
+                                                if (recentsPage.vm && rowCard.rowItem.transcript_path)
+                                                    recentsPage.vm.openTranscript(rowCard.rowItem.transcript_path)
+                                            }
+                                        }
+                                    }
+
+                                    Item { Layout.fillWidth: true }
+                                }
+                            }
+
+                            // Hover area for the entire card
+                            MouseArea {
+                                id: rowHover
+                                anchors.fill: parent
+                                hoverEnabled: true
                             }
                         }
                     }
@@ -330,197 +495,4 @@ Rectangle {
         }
     }
 
-    // ── Group header component ─────────────────────────────────────────────
-    component GroupHeaderComp: Item {
-        // label property set by Loader.onLoaded
-        property string label: ""
-        Layout.fillWidth: true
-        height: 28
-
-        RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: 16
-            anchors.rightMargin: 16
-
-            Text {
-                text: label
-                color: "#566069"
-                font.pixelSize: 10
-                font.letterSpacing: 1.5
-                font.bold: true
-            }
-            // Divider line
-            Rectangle {
-                Layout.fillWidth: true
-                height: 1
-                color: "#151b22"
-                Layout.alignment: Qt.AlignVCenter
-                Layout.leftMargin: 8
-            }
-        }
-    }
-
-    // ── Session row component ──────────────────────────────────────────────
-    component SessionRowComp: Item {
-        // These properties are set by Loader.onLoaded
-        property var item: ({})
-        property var vmRef: null
-        property var fmtCostFn: function(n) { return "$" + n.toFixed(2) }
-        property var fmtAgoFn:  function(ts) { return "" }
-        property var metaLineFn: function(it) { return "" }
-
-        Layout.fillWidth: true
-        Layout.leftMargin: 13
-        Layout.rightMargin: 13
-        Layout.bottomMargin: 6
-
-        height: rowContent.height + 20
-
-        // Row card background
-        Rectangle {
-            id: rowCard
-            anchors.fill: parent
-            radius: 8
-            color: rowHover.containsMouse ? "#0e141b" : "#0a1018"
-            border.color: rowHover.containsMouse ? "#1c2632" : "#151b22"
-            border.width: 1
-
-            // ── Main content ──────────────────────────────────────────────
-            ColumnLayout {
-                id: rowContent
-                anchors.top: parent.top
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.topMargin: 10
-                anchors.leftMargin: 12
-                anchors.rightMargin: 12
-                spacing: 3
-
-                // ── Top row: name + cost ─────────────────────────────────
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-
-                    // Session name
-                    Text {
-                        Layout.fillWidth: true
-                        text: item.name || "Unknown session"
-                        color: "#e9edf2"
-                        font.pixelSize: 13
-                        font.bold: true
-                        elide: Text.ElideRight
-                    }
-
-                    // Cost
-                    Text {
-                        text: fmtCostFn(item.cost_usd || 0)
-                        color: "#f0a860"
-                        font.family: "monospace"
-                        font.pixelSize: 12
-                        font.bold: true
-                    }
-                }
-
-                // ── Meta line: cwd ───────────────────────────────────────
-                Text {
-                    Layout.fillWidth: true
-                    text: item.cwd || ""
-                    color: "#3a4752"
-                    font.family: "monospace"
-                    font.pixelSize: 10
-                    elide: Text.ElideRight
-                    visible: text !== ""
-                }
-
-                // ── Meta line: ago · turns · model ───────────────────────
-                Text {
-                    Layout.fillWidth: true
-                    text: metaLineFn(item)
-                    color: "#566069"
-                    font.pixelSize: 10
-                    elide: Text.ElideRight
-                    visible: text !== ""
-                }
-
-                // ── Hover-revealed action row ─────────────────────────────
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.topMargin: 4
-                    spacing: 8
-                    visible: rowHover.containsMouse
-
-                    // Resume button
-                    Rectangle {
-                        width: resumeLabel.width + 16
-                        height: 24
-                        radius: 6
-                        color: resumeArea.containsMouse ? "#1a2a20" : "transparent"
-                        border.color: resumeArea.containsMouse ? "#5fd2a8" : "#2a3a30"
-                        border.width: 1
-
-                        Text {
-                            id: resumeLabel
-                            anchors.centerIn: parent
-                            text: "Resume ↗"
-                            color: resumeArea.containsMouse ? "#5fd2a8" : "#7e8a97"
-                            font.pixelSize: 11
-                        }
-
-                        MouseArea {
-                            id: resumeArea
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            hoverEnabled: true
-                            onClicked: {
-                                if (vmRef && item.session_uuid)
-                                    vmRef.resumeSession(item.session_uuid)
-                            }
-                        }
-                    }
-
-                    // Open transcript button — calls vm.openTranscript when available
-                    Rectangle {
-                        width: transcriptLabel.width + 16
-                        height: 24
-                        radius: 6
-                        // Hide the button when transcript_path is absent so a stale
-                        // click target doesn't appear for sessions without a JSONL file.
-                        visible: item.transcript_path !== undefined && item.transcript_path !== ""
-                        color: transcriptArea.containsMouse ? "#1a1a2a" : "transparent"
-                        border.color: transcriptArea.containsMouse ? "#5fa8d2" : "#1c2030"
-                        border.width: 1
-
-                        Text {
-                            id: transcriptLabel
-                            anchors.centerIn: parent
-                            text: "⧉ Transcript"
-                            color: transcriptArea.containsMouse ? "#5fa8d2" : "#566069"
-                            font.pixelSize: 11
-                        }
-
-                        MouseArea {
-                            id: transcriptArea
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            hoverEnabled: true
-                            onClicked: {
-                                if (vmRef && item.transcript_path)
-                                    vmRef.openTranscript(item.transcript_path)
-                            }
-                        }
-                    }
-
-                    Item { Layout.fillWidth: true }
-                }
-            }
-
-            // Hover area for the entire card — must be on top of content
-            MouseArea {
-                id: rowHover
-                anchors.fill: parent
-                hoverEnabled: true
-                // Row click does nothing — use action buttons
-            }
-        }
-    }
 }
