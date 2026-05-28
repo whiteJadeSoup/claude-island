@@ -6,10 +6,15 @@ from typing import Callable
 from PySide6.QtCore import QObject, Property, Signal, Slot
 
 from claude_island.core.pending_decisions import Decision, DecisionResult
-from claude_island.core.snapshot import WorldSnapshot
+from claude_island.core.snapshot import WorldSnapshot, SessionView
 from claude_island.ui.snapshot_projection import project_snapshot
 
 _EMPTY = {"today_cost_usd": 0.0, "quota": None, "sessions": [], "decisions": [], "recents": []}
+
+# Maximum samples kept in the rolling token-rate buffer per session.
+# One sample is appended per update() call; at ~1 update/s the buffer
+# covers ~60 seconds — enough for the waveform to show meaningful shape.
+_RATE_HISTORY_MAX = 60
 
 
 def _compute_hit_rate(cache_read: int, input_tokens: int) -> float:
@@ -41,6 +46,10 @@ class WorldViewModel(QObject):
         get_totals_by_model: Callable | None = None,
         refresh_quota_fn: Callable | None = None,
         resume_fn: Callable | None = None,
+        # Session detail callback — injected from qml_app so VM never
+        # imports platform_ code directly (import-linter contract).
+        # Accepts a Session and returns a SessionDetails (or equivalent).
+        get_session_details: Callable | None = None,
     ) -> None:
         super().__init__(parent)
         self._d = dict(_EMPTY)
@@ -53,10 +62,61 @@ class WorldViewModel(QObject):
         self._get_totals_by_model: Callable | None = get_totals_by_model
         self._refresh_quota_fn: Callable = refresh_quota_fn or (lambda: None)
         self._resume_fn: Callable = resume_fn or (lambda uuid: None)
+        self._get_session_details: Callable | None = get_session_details
+
+        # Rolling token-rate history: session_id → list of up-to-60 int samples.
+        # One sample (tokens_per_min or 0) appended per update() call.
+        # Pruned when sessions leave the snapshot so memory doesn't grow
+        # unboundedly across session churn.
+        self._rate_history: dict[str, list[int]] = {}
+
+        # Latest SessionView index for detail lookup.  Populated in update()
+        # and read by sessionDetail().  Keyed by session_uuid.
+        self._views_by_id: dict[str, SessionView] = {}
 
     def update(self, snap: WorldSnapshot) -> None:
         """在 Qt 主线程调用(world.push 已在主线程)。重投影 + 通知 QML。"""
         self._d = project_snapshot(snap)
+
+        # ── R1 Deliverable 1: enrich sessions with rate_series ─────────────
+        # Build the current set of session ids so we can prune stale history.
+        current_ids: set[str] = set()
+        # Also rebuild _views_by_id for sessionDetail() (Deliverable 3).
+        new_views: dict[str, SessionView] = {}
+        for group in snap.session_groups:
+            for view in group.views:
+                sid = view.session_uuid or f"{view.project_path}:{view.pid}"
+                current_ids.add(sid)
+                new_views[view.session_uuid] = view if view.session_uuid else new_views.get(view.session_uuid, view)
+                # Append one rate sample (0 when None so the waveform stays
+                # continuous even during idle phases).
+                rate = view.tokens_per_min if view.tokens_per_min is not None else 0
+                hist = self._rate_history.setdefault(sid, [])
+                hist.append(rate)
+                # Cap at _RATE_HISTORY_MAX by dropping the oldest sample.
+                if len(hist) > _RATE_HISTORY_MAX:
+                    del hist[0]
+
+        # Prune history for sessions that are no longer in the snapshot so
+        # the dict doesn't accumulate indefinitely across session churn.
+        stale = [k for k in self._rate_history if k not in current_ids]
+        for k in stale:
+            del self._rate_history[k]
+
+        # Rebuild views_by_id (keyed by session_uuid, used by sessionDetail).
+        self._views_by_id = {}
+        for group in snap.session_groups:
+            for view in group.views:
+                if view.session_uuid:
+                    self._views_by_id[view.session_uuid] = view
+
+        # Attach rate_series to each projected session dict in-place.
+        # The projection produced plain dicts — we can mutate them freely
+        # before handing them to QML.
+        for s in self._d["sessions"]:
+            sid = s["id"]
+            s["rate_series"] = list(self._rate_history.get(sid, []))
+
         self.changed.emit()
 
     @Property("QVariantList", notify=changed)
@@ -176,3 +236,60 @@ class WorldViewModel(QObject):
     def focusSession(self, session_id: str) -> None:
         """Bring the terminal window for session_id to the foreground."""
         self._focus_fn(session_id)
+
+    # ── Session detail slot (Deliverable 3) ──────────────────────────────
+
+    @Slot(str, result="QVariant")
+    def sessionDetail(self, session_id: str) -> dict:
+        """Return a rich detail dict for the given session_uuid.
+
+        Maps SessionDetails fields to a flat dict QML can bind to.
+        Returns {} when no matching view exists (unknown id or not yet
+        in the snapshot) so callers can guard with ``if (detail)`` in QML.
+
+        The get_session_details callback is injected by qml_app so the
+        VM never imports platform_ code directly (import-linter contract).
+        When no callback is wired (tests that don't need detail), returns
+        {} for any id.
+        """
+        view = self._views_by_id.get(session_id)
+        if view is None or self._get_session_details is None:
+            return {}
+        try:
+            details = self._get_session_details(view.session)
+        except Exception:
+            return {}
+
+        def _g(obj, *names, default=None):
+            """Defensive multi-name getattr — tries names in order."""
+            for n in names:
+                if obj is not None and hasattr(obj, n):
+                    return getattr(obj, n)
+            return default
+
+        per_model = []
+        try:
+            for mt in (_g(details, "per_model") or ()):
+                per_model.append({
+                    "model": str(_g(mt, "model", default="")),
+                    "cost": float(_g(mt, "cost_usd", "cost", default=0.0)),
+                })
+        except Exception:
+            per_model = []
+
+        return {
+            "name":            str(_g(details, "name") or ""),
+            "model":           str(_g(details, "latest_model") or view.latest_model or ""),
+            "cost":            float(_g(details, "cost_usd", default=0.0)),
+            "turns":           int(_g(details, "turn_count", default=0)),
+            "input_tokens":    0,   # UsageRegistry per-session input not exposed by SessionDetails
+            "output_tokens":   0,   # same — per_model breakdown covers token detail
+            "cwd":             str(view.project_path),
+            "branch":          str(_g(details, "git_branch") or ""),
+            "created":         str(_g(details, "started_at") or ""),
+            "ai_title":        str(_g(details, "ai_title") or ""),
+            "transcript_path": "",  # effective_uuid used to locate JSONL externally
+            "latest_prompt":   str(_g(details, "last_prompt") or ""),
+            "uuid":            str(_g(details, "effective_uuid") or session_id),
+            "per_model":       per_model,
+        }
