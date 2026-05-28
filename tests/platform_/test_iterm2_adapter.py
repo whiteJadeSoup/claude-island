@@ -916,19 +916,30 @@ class TestFocusByHookCapturedIds:
             ),
         )
 
-    def test_id_path_skips_psutil_entirely_when_capture_present(self):
-        """The fast path runs ONE osascript and returns True. psutil
-        and the parent-walk helper must not be touched."""
+    def test_id_path_skips_parent_walk_when_capture_present(self):
+        """The fast path runs ONE osascript and returns True. The
+        parent-walk helper (_iterm_host_pid) must not be touched —
+        captured host pid is trusted directly after the cheap
+        ``_pid_is_iterm`` liveness check."""
         v = self._view_with_jt(
             pid=12345, iterm_session_id="ABC-123", terminal_pid=90559,
         )
         with (
-            mock.patch("psutil.Process") as p,
+            # Captured pid is still iTerm — short-circuit liveness check
+            # so we don't drag psutil.Process into the assertion surface.
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._pid_is_iterm",
+                return_value=True,
+            ),
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._iterm_host_pid",
+            ) as walk,
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="ok\n")) as run,
         ):
             assert adapter_for_test().focus(v) is True
-            p.assert_not_called()
+            # Real intent: parent-ancestry walk is bypassed.
+            walk.assert_not_called()
             assert run.call_count == 1
             script = run.call_args[0][0][2]
             # The id-match template, not the tty-match template.
@@ -970,7 +981,11 @@ class TestFocusByHookCapturedIds:
             pid=12345, iterm_session_id="ABC-123", terminal_pid=90559,
         )
         with (
-            mock.patch("psutil.Process") as p,
+            # Captured pid is still iTerm — short-circuit liveness check.
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._pid_is_iterm",
+                return_value=True,
+            ),
             mock.patch("subprocess.run",
                        return_value=_mock_run(stdout="ok\n")) as run,
             mock.patch(
@@ -979,7 +994,6 @@ class TestFocusByHookCapturedIds:
         ):
             adapter_for_test().focus(v)
             walk.assert_not_called()
-            p.assert_not_called()
             assert "unix id is 90559" in run.call_args[0][0][2]
 
     def test_id_path_partial_capture_id_only_falls_through(self):
@@ -1014,6 +1028,11 @@ class TestFocusByHookCapturedIds:
             pid=12345, iterm_session_id="", terminal_pid=90559,
         )
         with (
+            # Captured pid is still iTerm — short-circuit liveness check.
+            mock.patch(
+                "claude_island.platform_.terminals.iterm2._pid_is_iterm",
+                return_value=True,
+            ),
             mock.patch("psutil.Process",
                        return_value=_proc_with_tty(
                            "/dev/ttys001",
