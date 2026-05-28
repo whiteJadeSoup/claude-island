@@ -27,10 +27,15 @@ def main() -> int:
     from claude_island.core.notify import NotifyEventQueue
     from claude_island.platform_ import session_state as session_state_reader
     from claude_island.platform_ import session_names as session_names_store
-    from claude_island.platform_.process_scanner import ProcessScanner
+    from claude_island.platform_.process_scanner import ProcessScanner, resume_uuid_for_pid
     from claude_island.platform_.file_watcher import FileWatcher
     from claude_island.platform_.session_discovery import SessionDiscovery
     from claude_island.platform_.providers import ProviderEngine
+    from claude_island.platform_.app_backend import LocalAppBackend
+    from claude_island.platform_.dispatcher import TerminalDispatcher
+    from claude_island.platform_.terminals import build_registry
+    from claude_island.platform_.os import get_os_backend
+    from claude_island.core.capabilities import Capability
     from claude_island.platform_.notify import (
         MacOsNotifyBackend,
         NoopNotifyBackend,
@@ -81,12 +86,101 @@ def main() -> int:
     )
     launch_intent = LaunchIntentRegistry()
 
+    # ── TerminalDispatcher (real focus + other capabilities) ─────────────────
+    # Mirrors __main__.py construction: app_backend wraps the names store and
+    # JSONL dir; os_backend + terminal adapters are platform-specific.
+    # Constructed before Snapshotter so its group_sessions can be injected
+    # (not done here yet — group_fn is left as default for the QML path).
+    _claude_projects = _P.home() / ".claude" / "projects"
+    _app_backend = LocalAppBackend(
+        names_store=session_names_store,
+        claude_projects_dir=_claude_projects,
+        # Wake snapshotter on app-backend changes (renames, etc.).
+        on_change=lambda: globals().get("snapshotter") and globals()["snapshotter"].wake(),
+    )
+    _dispatcher = TerminalDispatcher(
+        terminals=build_registry(),
+        os_backend=get_os_backend(),
+        app_backend=_app_backend,
+    )
+
     # ── focus_fn ─────────────────────────────────────────────────────────────
-    # Best-effort placeholder; full terminal-tab focus requires the
-    # TerminalDispatcher / adapter stack wired in Plan 3. For now we log
-    # so QML testers can see the signal fired without crashing.
+    # Real terminal focus via TerminalDispatcher.  Looks up the matching
+    # SessionView from the current world snapshot and dispatches FOCUS.
+    # Falls back to a log on any failure so the UI stays alive.
     def focus_fn(session_id: str) -> None:
-        print(f"[island] focus requested: {session_id}", file=sys.stderr)
+        from claude_island.core.snapshot import world as _world
+        try:
+            snap = _world.current
+            target_view = None
+            for grp in snap.session_groups:
+                for v in grp.views:
+                    if v.session_uuid == session_id:
+                        target_view = v
+                        break
+                if target_view is not None:
+                    break
+            if target_view is None:
+                print(
+                    f"[island] focus: no view for session_id={session_id!r}",
+                    file=sys.stderr,
+                )
+                return
+            ok = _dispatcher.dispatch(target_view, Capability.FOCUS)
+            if not ok:
+                print(
+                    f"[island] focus: dispatch returned False for {session_id!r} "
+                    "(terminal may not support FOCUS or window is gone)",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(f"[island] focus_fn error: {exc}", file=sys.stderr)
+
+    # ── get_session_details ───────────────────────────────────────────────────
+    # Replicate _build_session_details from __main__.py using the same sources
+    # available in qml_app.  Returns a SessionDetails object.  The VM maps
+    # it to a QML-friendly dict via sessionDetail().
+    def _get_session_details(session):
+        from claude_island.core.models import SessionDetails
+        state = session_state_reader.read_session_state(session.pid) or {}
+        pid_json_uuid = (
+            state.get("sessionId")
+            if isinstance(state.get("sessionId"), str)
+            else None
+        )
+        try:
+            cmdline_resume_uuid = resume_uuid_for_pid(
+                session.pid,
+                names_lookup=session_names_store.get_uuid_by_name,
+            )
+        except Exception:
+            cmdline_resume_uuid = None
+        sess_uuid = cmdline_resume_uuid or pid_json_uuid or session.session_uuid
+        meta = jsonl_parser.get_session_metadata(sess_uuid) or {}
+        cost, turns, sides = usage_registry.get_session_summary(sess_uuid)
+        per_model = usage_registry.get_session_per_model(sess_uuid)
+        started_at = session_state_reader.parse_started_at(state.get("startedAt"))
+        if started_at is None:
+            started_at = meta.get("started_at")
+        custom_name = session_names_store.get_session_name(sess_uuid or "")
+        state_name = state.get("name") if isinstance(state.get("name"), str) else None
+        return SessionDetails(
+            session=session,
+            name=custom_name or state_name,
+            original_name=state_name,
+            ai_title=meta.get("ai_title"),
+            git_branch=meta.get("git_branch"),
+            last_prompt=meta.get("last_prompt"),
+            started_at=started_at,
+            status=state.get("status") if isinstance(state.get("status"), str) else None,
+            cc_version=state.get("version") or meta.get("version"),
+            cost_usd=cost,
+            turn_count=turns,
+            sidechain_count=sides,
+            per_model=per_model,
+            latest_model=usage_registry.get_latest_model(sess_uuid) if sess_uuid else None,
+            effective_uuid=sess_uuid or None,
+        )
 
     # ── resume_fn ────────────────────────────────────────────────────────────
     # DONE_WITH_CONCERNS: Real resume requires the TerminalDispatcher /
@@ -134,6 +228,7 @@ def main() -> int:
             snapshotter.wake(),
         ),
         resume_fn=resume_fn,
+        get_session_details=_get_session_details,
     )
     world.observable().subscribe(
         on_next=vm.update,
