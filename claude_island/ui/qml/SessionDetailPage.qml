@@ -243,20 +243,26 @@ Rectangle {
             Layout.bottomMargin: 8
             spacing: 6
 
+            // Show real phase from the detail dict instead of hardcoded "active".
+            // Hide when phase is absent/empty (e.g. detail not yet loaded).
             Text {
-                text: "active"
-                color: "#5fd2a8"
+                text: dv("phase")
+                // Colour mirrors phaseColor() in Main.qml: amber for thinking,
+                // teal for tool_use / other active phases, grey for idle.
+                color: dv("phase") === "thinking" ? "#f0b860"
+                     : dv("phase") === "idle"     ? "#566069"
+                     : "#5fd2a8"
                 font.pixelSize: 10
-                visible: dv("model") !== ""
+                visible: dv("phase") !== "" && dv("model") !== ""
             }
             Text {
                 text: "·"
                 color: "#3a4752"
                 font.pixelSize: 10
-                visible: dv("model") !== ""
+                visible: dv("phase") !== "" && dv("model") !== ""
             }
             Text {
-                text: dv("model") !== "" ? ("v" + dv("model")) : ""
+                text: dv("model")
                 color: "#566069"
                 font.pixelSize: 10
                 visible: dv("model") !== ""
