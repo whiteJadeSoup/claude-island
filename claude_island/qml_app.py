@@ -1,4 +1,4 @@
-"""QML walking-skeleton 入口(与 python -m claude_island 并存,不影响现有 app)。"""
+"""QML island entry point — used by `python -m claude_island`."""
 from __future__ import annotations
 
 import sys
@@ -10,8 +10,143 @@ from PySide6.QtQml import QQmlApplicationEngine
 _QML = Path(__file__).parent / "ui" / "qml" / "Main.qml"
 
 
+# ---------------------------------------------------------------------------
+# Pre-Qt helpers (macOS dock-hide, Qt message filter)
+# Copied verbatim from the original __main__.py and moved here so that
+# qml_app.main() is the sole entry point and these helpers run in the
+# correct order (dock-hide BEFORE QGuiApplication, filter BEFORE first Qt
+# message, macOS accessory policy AFTER QGuiApplication).
+# ---------------------------------------------------------------------------
+
+def _hide_from_macos_dock() -> None:
+    """Mutate the running app's NSBundle info dict so macOS treats us
+    as a background-only LSUIElement — no dock icon, no Cmd-Tab entry,
+    no menu-bar title.
+
+    Why: launching via ``python -m claude_island`` (or ``uv run``) makes
+    macOS show the generic Python file icon labelled "python3", which
+    is both ugly and confusing for users who don't know they're running
+    Python under the hood. The floating capsule is already the app's
+    persistent affordance — a redundant dock entry adds clutter without
+    adding capability. This matches the menu-bar / floating-utility
+    convention used by Bartender, BetterTouchTool, Ice, Alfred's
+    background mode, and the ActivityWatch tray app.
+
+    Must run BEFORE QApplication() is constructed: Qt instantiates
+    NSApplication during QApplication init, which freezes the activation
+    policy. Mutating ``infoDictionary`` after that point has no effect.
+
+    Graceful degrade: if pyobjc isn't installed (manual install or
+    explicit opt-out) we silently skip — the user sees the original
+    ugly Python icon but the app is otherwise unaffected.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSBundle  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    bundle = NSBundle.mainBundle()
+    info = bundle.infoDictionary()
+    if info is not None:
+        # ``LSUIElement`` is the correct flag for an "accessory" GUI app:
+        # hidden from dock + Cmd-Tab + menu-bar app title, but windows
+        # can still take keyboard focus. ``LSBackgroundOnly`` looks
+        # similar but tells macOS we are a daemon with no UI — under
+        # that policy NSApplication refuses to make our windows key,
+        # which silently breaks every keyboard-driven affordance (arrow
+        # nav, Enter, search input). A previous revision set both as a
+        # "belt and braces" measure; that's wrong — the two flags
+        # express different intents and combining them inherits the
+        # more restrictive one.
+        info["LSUIElement"] = "1"
+
+
+def _apply_macos_accessory_policy() -> None:
+    """Call ``NSApp.setActivationPolicy_(Accessory)`` after QGuiApplication
+    has been created.
+
+    The infoDictionary mutation in ``_hide_from_macos_dock`` runs BEFORE
+    NSApplication is loaded so the early activation policy decision is
+    correct, but on some macOS versions the launcher's cached state
+    overrides our infoDict mutation and the app still ends up in the
+    default Regular policy. The runtime ``setActivationPolicy_`` call
+    is authoritative — once QGuiApplication has constructed NSApplication,
+    we tell it explicitly to switch to Accessory mode. Belt + braces:
+    one of the two paths always wins.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import (  # type: ignore[import-not-found]
+            NSApp,
+            NSApplicationActivationPolicyAccessory,
+        )
+    except ImportError:
+        return
+    try:
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    except Exception:
+        pass
+
+
+def _make_qt_message_filter():
+    """Return a Qt message handler that suppresses known-harmless noise.
+
+    Qt prints "QFont::setPointSize: Point size <= 0 (-1)" any time a
+    stylesheet sets ``font-size`` in pixels (which we do extensively
+    for layout reasons — pt scaling at 1.5× DPI looks fuzzy). The
+    warning is harmless — Qt clamps the value internally — but it
+    spams stderr enough to drown out real diagnostics. Suppress it
+    while passing every other Qt log line through unchanged so we
+    don't accidentally mute something useful.
+
+    QWindowsWindow::setGeometry warnings fire on multi-monitor /
+    high-DPI setups when a frameless popup's natural minimumSizeHint
+    is recomputed after first paint and ends up a few pixels taller
+    than what was originally requested. Cosmetic — the popup paints
+    correctly — but extremely noisy. Suppressed.
+    """
+    from claude_island.core.safe_stderr import safe_stderr_write as _write
+
+    suppressed_substrings = (
+        "QFont::setPointSize",
+        "This plugin does not support raise()",
+        "QWindowsWindow::setGeometry: Unable to set geometry",
+    )
+
+    def _qt_message_filter(msg_type, _ctx, message: str) -> None:
+        text = str(message) if message is not None else ""
+        if any(s in text for s in suppressed_substrings):
+            return
+        _write(text)
+
+    return _qt_message_filter
+
+
 def main() -> int:
+    # ── Pre-Qt setup (must run BEFORE QGuiApplication is created) ──────────
+    # stderr noise filter: catches C-level FD 2 writes from Qt + pyobjc
+    # before they reach the terminal. No-op on non-darwin platforms.
+    from claude_island.platform_.stderr_noise_filter import install as _install_stderr_filter
+    _install_stderr_filter()
+
+    # macOS dock-hide: seeds NSBundle.infoDictionary so the early
+    # activation policy is set before Qt constructs NSApplication.
+    # No-op on Windows / Linux.
+    _hide_from_macos_dock()
+
+    # Qt log noise suppression: intercept Qt's message handler BEFORE
+    # creating QGuiApplication so the first Qt messages are filtered.
+    from PySide6.QtCore import qInstallMessageHandler
+    qInstallMessageHandler(_make_qt_message_filter())
+
     app = QGuiApplication(sys.argv)
+
+    # macOS accessory policy (post-app-creation path): runtime call that
+    # overrides any cached launcher state that ignored our infoDict seed.
+    # No-op on Windows / Linux.
+    _apply_macos_accessory_policy()
 
     # ── 最小后端管线(照 __main__.py 的构造,省略可选 dep)──
     from pathlib import Path as _P
