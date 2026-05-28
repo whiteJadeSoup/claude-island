@@ -491,9 +491,13 @@ def test_session_detail_returns_mapped_dict():
     assert abs(detail["cost"] - 3.50) < 1e-9
     assert detail["turns"] == 7
     assert detail["uuid"] == "uuid-detail-1"
-    assert detail["model"] == "claude-sonnet-4-6"
+    # FIX 4: model must be the friendly label, not the raw internal id.
+    assert detail["model"] == "sonnet-4.6", f"expected friendly label, got {detail['model']!r}"
     assert len(detail["per_model"]) == 1
-    assert detail["per_model"][0]["model"] == "claude-sonnet-4-6"
+    # FIX 4: per_model entries also use friendly labels.
+    assert detail["per_model"][0]["model"] == "sonnet-4.6", (
+        f"per_model raw id leaked: {detail['per_model'][0]['model']!r}"
+    )
     assert abs(detail["per_model"][0]["cost"] - 3.50) < 1e-9
 
 

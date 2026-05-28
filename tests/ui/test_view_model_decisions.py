@@ -47,3 +47,31 @@ def test_focus_session_calls_focus_fn():
     vm, calls = _vm()
     vm.focusSession("sess-1")
     assert calls["focus"] == ["sess-1"]
+
+
+def test_answer_question_multi_joins_labels():
+    """answerQuestionMulti joins selected labels with ', ' and resolves as ALLOW."""
+    vm, calls = _vm()
+    vm.answerQuestionMulti("d5", "选哪个?", ["date-fns", "Day.js"])
+    dec = calls["resolve"][0][1]
+    assert dec.result is DecisionResult.ALLOW
+    # The two selected labels must be joined into a single answer string.
+    assert dec.answers == (("选哪个?", "date-fns, Day.js"),)
+
+
+def test_answer_question_multi_single_selection():
+    """Single-item multi-select still produces a valid answer (no trailing comma)."""
+    vm, calls = _vm()
+    vm.answerQuestionMulti("d6", "用哪个?", ["Luxon"])
+    dec = calls["resolve"][0][1]
+    assert dec.result is DecisionResult.ALLOW
+    assert dec.answers == (("用哪个?", "Luxon"),)
+
+
+def test_answer_question_multi_empty_selection_resolves_empty():
+    """Empty selection is forwarded as an empty-string answer."""
+    vm, calls = _vm()
+    vm.answerQuestionMulti("d7", "pick?", [])
+    dec = calls["resolve"][0][1]
+    assert dec.result is DecisionResult.ALLOW
+    assert dec.answers == (("pick?", ""),)

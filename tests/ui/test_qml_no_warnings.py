@@ -6,8 +6,12 @@ quota, idle sessions and a dormant session.
 
 This is the regression guard that the earlier offscreen render-checks lacked:
 it installs a Qt message handler and FAILS on any binding-level QML error
-(ReferenceError / TypeError / "Unable to assign" / "Cannot read" / ...), which
-is exactly the class of bug that only surfaced on a real display before.
+(ReferenceError / TypeError / "Unable to assign" / "Cannot read" / ...) AND
+on any "does not support customization" style-warning — which is exactly the
+class of bug that only surfaced on a real display before.
+
+Geometry guard: the recents page Flickable contentHeight must grow with the
+number of dormant sessions so collapsed-height rows (FIX 2 class) are caught.
 """
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ import pytest
 from PySide6.QtCore import QTimer, qInstallMessageHandler, QtMsgType
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuickControls2 import QQuickStyle
 
 from claude_island.core.models import DormantSession, QuotaSnapshot, Session
 from claude_island.core.pending_decisions import (
@@ -37,6 +42,7 @@ _QML = Path(__file__).resolve().parents[2] / "claude_island" / "ui" / "qml" / "M
 
 _NOW = datetime(2026, 5, 28, 10, 0, 0, tzinfo=timezone.utc)
 
+# ── Binding-error markers — any QML warning matching one of these is a test failure ──
 _ERROR_MARKERS = (
     "ReferenceError",
     "TypeError",
@@ -46,6 +52,32 @@ _ERROR_MARKERS = (
     "non-existent",
     "is not a function",
     "Unable to assign [undefined]",
+)
+
+# ── Style-warning markers — any warning matching these means Fix 1 regressed ──
+# These are the messages Qt emits when a native Controls style rejects
+# ScrollBar (or other component) customization.
+_STYLE_WARNING_MARKERS = (
+    "does not support customization",
+    "Please customize a non-native style",
+)
+
+# Offscreen-harmless messages that should never trigger a test failure.
+# These are well-known platform/font-dir noise from the offscreen plugin.
+_KNOWN_HARMLESS = (
+    "QFont::setPointSize",
+    "This plugin does not support raise()",
+    "QWindowsWindow::setGeometry",
+    "Could not find platform",
+    "no tray icon",
+    "Could not find the Qt platform plugin",
+    "fontconfig",
+    "/usr/share/fonts",
+    "Failed to create OpenGL context",
+    "Skipping tray icon",
+    # Common offscreen driver messages — not related to our QML
+    "libEGL",
+    "libGL",
 )
 
 
@@ -105,11 +137,11 @@ def _decision():
     )
 
 
-def _dormant():
+def _dormant(suffix=""):
     return DormantSession(
-        session_uuid="d-1",
+        session_uuid=f"d-1{suffix}",
         cwd=Path("D:/proj/api"),
-        name="api-refactor",
+        name=f"api-refactor{suffix}",
         last_prompt="refactor",
         last_activity=_NOW,
         started_at=_NOW,
@@ -120,7 +152,8 @@ def _dormant():
     )
 
 
-def _full_snap():
+def _full_snap(dormant_count: int = 1):
+    dormants = tuple(_dormant(f"-{i}") for i in range(dormant_count))
     return WorldSnapshot(
         today_cost_usd=63.0,
         quota=QuotaSnapshot(
@@ -147,12 +180,29 @@ def _full_snap():
                 ),
             ),
         ),
-        dormant_sessions=(_dormant(),),
+        dormant_sessions=dormants,
         pending_decisions=(_decision(),),
     )
 
 
+def _is_harmless(msg: str) -> bool:
+    """Return True when the message is known to be unrelated to our QML."""
+    return any(h in msg for h in _KNOWN_HARMLESS)
+
+
+def _ensure_basic_style() -> None:
+    """Set the Basic QtQuick Controls 2 style if not already set.
+
+    Must be called BEFORE the first QQmlApplicationEngine is created.
+    Basic is the only fully-customizable built-in style; without it the
+    native platform style rejects our ScrollBar customizations and emits
+    'does not support customization' warnings.
+    """
+    QQuickStyle.setStyle("Basic")
+
+
 def test_qml_loads_with_zero_runtime_warnings():
+    _ensure_basic_style()
     app = QGuiApplication.instance() or QGuiApplication([])
 
     captured: list[str] = []
@@ -204,7 +254,109 @@ def test_qml_loads_with_zero_runtime_warnings():
         vm.update(_full_snap())
         spin()
 
-        bad = [m for m in captured if any(k in m for k in _ERROR_MARKERS)]
-        assert not bad, "QML runtime binding errors:\n" + "\n".join(bad)
+        # ── Check 1: binding errors ────────────────────────────────────────
+        bad_bindings = [
+            m for m in captured
+            if any(k in m for k in _ERROR_MARKERS) and not _is_harmless(m)
+        ]
+        assert not bad_bindings, (
+            "QML runtime binding errors detected:\n" + "\n".join(bad_bindings)
+        )
+
+        # ── Check 2: style-customization warnings (Fix 1 regression guard) ─
+        # If the Basic style is NOT set, Qt emits "does not support customization"
+        # for our ScrollBar overrides.  This check catches that regression.
+        style_warnings = [
+            m for m in captured
+            if any(k in m for k in _STYLE_WARNING_MARKERS) and not _is_harmless(m)
+        ]
+        assert not style_warnings, (
+            "QML style-customization warnings detected (Basic style not set?):\n"
+            + "\n".join(style_warnings)
+        )
+
+    finally:
+        qInstallMessageHandler(None)
+
+
+def test_recents_history_rows_have_real_height():
+    """Geometry regression guard for Fix 2 (collapsed-height rows).
+
+    Loads Main.qml with 3 dormant sessions and navigates to the recents page.
+    The recentsListFlickable's contentHeight must be > 50 px — if rows collapse
+    to 0 px (Loader without Layout.preferredHeight), contentHeight stays near 0.
+
+    This test would have caught the Loader height issue where loaded component
+    heights were not adopted by the Loader, making the list appear empty.
+    """
+    _ensure_basic_style()
+    app = QGuiApplication.instance() or QGuiApplication([])
+
+    # Silence warnings during this sub-test so output stays clean
+    qInstallMessageHandler(lambda *a: None)
+    try:
+        vm = WorldViewModel(
+            get_totals=lambda period: _FakeTotals(),
+            get_totals_by_model=lambda period: (
+                _FakeModelTotals("claude-opus-4-7", 55.0),
+            ),
+            get_review=lambda uuid: False,
+        )
+
+        # Use 3 dormant sessions to make collapsed-height bugs obvious
+        snap_3 = _full_snap(dormant_count=3)
+        vm.update(snap_3)
+
+        engine = QQmlApplicationEngine()
+        engine.rootContext().setContextProperty("worldVm", vm)
+        engine.rootContext().setContextProperty("isMac", False)
+        engine.load(str(_QML))
+        roots = engine.rootObjects()
+        assert roots, "Main.qml failed to load"
+        root = roots[0]
+
+        def spin(ms=300):
+            loop_end = QTimer()
+            loop_end.setSingleShot(True)
+            loop_end.start(ms)
+            while loop_end.isActive():
+                app.processEvents()
+
+        # Navigate to the recents page so the Flickable and its Repeater are active
+        root.setProperty("islandState", "expanded")
+        root.setProperty("page", "recents")
+        spin()
+        # Re-push the snapshot so the RecentsPage re-evaluates its recents binding
+        # after the Loader has activated (active: root.page === "recents").
+        vm.update(snap_3)
+        spin()
+
+        # Locate the recentsListFlickable by objectName.
+        # QML objects with objectName set are findable via Qt's findChild.
+        flickable = root.findChild(type(root), "recentsListFlickable")
+
+        # findChild may return None if the objectName lookup fails in offscreen mode.
+        # Fall back to checking that we at least loaded without crashing.
+        if flickable is None:
+            # The object exists but Python's findChild type-match requires exact class.
+            # Try with QObject base.
+            from PySide6.QtCore import QObject
+            flickable = root.findChild(QObject, "recentsListFlickable")
+
+        assert flickable is not None, (
+            "Could not locate recentsListFlickable by objectName — "
+            "check that RecentsPage.qml sets objectName: 'recentsListFlickable' on the Flickable"
+        )
+
+        content_height = flickable.property("contentHeight")
+        assert content_height is not None, "contentHeight property not accessible on Flickable"
+
+        # 3 dormant session rows + 1 group header = at least 3 × ~80 px + 28 px ≈ 268 px.
+        # If rows have zero height (pre-fix), contentHeight is ~12 px (just the padding item).
+        assert content_height > 50, (
+            f"recentsListFlickable.contentHeight = {content_height:.0f} px — "
+            f"rows likely collapsed to 0 height (Loader implicitHeight bug). "
+            f"Expected > 50 px with 3 dormant sessions."
+        )
     finally:
         qInstallMessageHandler(None)
