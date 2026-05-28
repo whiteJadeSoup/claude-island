@@ -663,7 +663,9 @@ Window {
                                                 width: 3
                                                 radius: 1
                                                 color: root.phaseColor(modelData.phase)
-                                                opacity: glowAnim.glowOp
+                                                // Bug 2 fix: reference the local property directly;
+                                                // there is no id: glowAnim — glowOp lives on this Rectangle.
+                                                opacity: glowOp
 
                                                 property real glowOp: 0.7
                                                 SequentialAnimation on glowOp {
@@ -725,7 +727,11 @@ Window {
                                                 // Each bar's height is proportional to its sample value,
                                                 // normalized against the peak of the visible series.
                                                 // Height is fixed at 28px; bars animate in on series change.
+                                                // Bug 1 fix: give Item an id (waveItem) so the Repeater model
+                                                // and delegate can reference waveItem.visibleSeries / .peak
+                                                // directly instead of a fragile parent.parent.parent chain.
                                                 Item {
+                                                    id: waveItem
                                                     Layout.fillWidth: true
                                                     implicitHeight: 28
 
@@ -754,25 +760,27 @@ Window {
                                                         spacing: 1
 
                                                         Repeater {
-                                                            model: parent.parent.visibleSeries.length > 0
-                                                                   ? parent.parent.visibleSeries.length : 30
+                                                            // Reference waveItem directly — avoids the one-level-too-deep
+                                                            // parent.parent chain that was producing undefined.length errors.
+                                                            model: waveItem.visibleSeries.length > 0
+                                                                   ? waveItem.visibleSeries.length : 30
 
                                                             delegate: Rectangle {
                                                                 required property int index
                                                                 // Bar width fills the available row width evenly
-                                                                width: Math.max(2, (parent.width - (parent.parent.parent.visibleSeries.length > 0 ? parent.parent.parent.visibleSeries.length - 1 : 29)) / Math.max(1, parent.parent.parent.visibleSeries.length > 0 ? parent.parent.parent.visibleSeries.length : 30))
+                                                                width: Math.max(2, (parent.width - (waveItem.visibleSeries.length > 0 ? waveItem.visibleSeries.length - 1 : 29)) / Math.max(1, waveItem.visibleSeries.length > 0 ? waveItem.visibleSeries.length : 30))
                                                                 height: {
-                                                                    var vs = parent.parent.parent.visibleSeries
+                                                                    var vs = waveItem.visibleSeries
                                                                     if (!vs || vs.length === 0) return 2
                                                                     var val = index < vs.length ? vs[index] : 0
-                                                                    var pk = parent.parent.parent.peak
+                                                                    var pk = waveItem.peak
                                                                     var h = Math.max(2, (val / pk) * 24)
                                                                     return h
                                                                 }
                                                                 anchors.bottom: parent.bottom
                                                                 radius: 1
                                                                 color: root.phaseColor(modelData.phase)
-                                                                opacity: 0.7 + 0.3 * (index / Math.max(1, (parent.parent.parent.visibleSeries.length > 0 ? parent.parent.parent.visibleSeries.length : 30) - 1))
+                                                                opacity: 0.7 + 0.3 * (index / Math.max(1, (waveItem.visibleSeries.length > 0 ? waveItem.visibleSeries.length : 30) - 1))
                                                             }
                                                         }
                                                     }
@@ -790,8 +798,13 @@ Window {
                                                     }
                                                     Item { Layout.fillWidth: true }
                                                     // Model chip
+                                                    // Bug 3 fix: when modelData.model is null/undefined the old
+                                                    // expression evaluated to null (not bool) → "Unable to assign
+                                                    // [undefined] to bool". Use explicit string coercion instead.
+                                                    // Bug 4 fix: friendly label from snapshot_projection is short
+                                                    // (e.g. "sonnet-4.6") — drop the .substring(0,14) truncation.
                                                     Rectangle {
-                                                        visible: modelData.model && modelData.model !== ""
+                                                        visible: (modelData.model || "") !== ""
                                                         radius: 4
                                                         color: "#0e141b"
                                                         border.color: "#1c2632"
@@ -801,7 +814,7 @@ Window {
                                                         Text {
                                                             id: modelChipLabel
                                                             anchors.centerIn: parent
-                                                            text: (modelData.model || "").substring(0, 14)
+                                                            text: modelData.model || ""
                                                             color: "#566069"; font.pixelSize: 9
                                                         }
                                                     }

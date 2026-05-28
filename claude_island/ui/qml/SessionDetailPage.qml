@@ -95,9 +95,15 @@ Rectangle {
                 }
 
                 // Session name (center) — label when not renaming, TextField when renaming
+                // Bug fix: inline component declarations inside a Loader are not visible
+                // to the Loader's own sourceComponent binding (evaluated in the parent
+                // scope).  Give the Loader an id and reference its components via
+                // nameLoader.nameLabelComp / nameLoader.renameFieldComp so QML can
+                // resolve them correctly at runtime.
                 Loader {
+                    id: nameLoader
                     Layout.fillWidth: true
-                    sourceComponent: detailPage.isRenaming ? renameFieldComp : nameLabelComp
+                    sourceComponent: detailPage.isRenaming ? nameLoader.renameFieldComp : nameLoader.nameLabelComp
 
                     component nameLabelComp: Text {
                         text: dv("name", "Session")

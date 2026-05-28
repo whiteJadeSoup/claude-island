@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, Property, Signal, Slot
 
 from claude_island.core.pending_decisions import Decision, DecisionResult
 from claude_island.core.snapshot import WorldSnapshot, SessionView
-from claude_island.ui.snapshot_projection import project_snapshot
+from claude_island.ui.snapshot_projection import project_snapshot, _fmt_model
 
 _EMPTY = {"today_cost_usd": 0.0, "quota": None, "sessions": [], "decisions": [], "recents": []}
 
@@ -190,10 +190,12 @@ class WorldViewModel(QObject):
         if by_model:
             # get_totals_by_model returns tuple[ModelTotals, ...].
             # ModelTotals has .model (str) and .cost_usd (float).
+            # Apply _fmt_model so SpendPage shows "opus-4.7" not "claude-opus-4-7".
             try:
                 for mt in by_model:
+                    raw_model = str(getattr(mt, "model", ""))
                     per_model.append({
-                        "model": str(getattr(mt, "model", "")),
+                        "model": _fmt_model(raw_model) or raw_model,
                         "cost": float(g(mt, "cost_usd", "cost")),
                     })
             except Exception:

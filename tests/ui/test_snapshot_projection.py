@@ -3,7 +3,7 @@ from pathlib import Path
 from claude_island.core.snapshot import WorldSnapshot, SessionGroup, SessionView
 from claude_island.core.session_phase import SessionPhase
 from claude_island.core.models import Session
-from claude_island.ui.snapshot_projection import project_snapshot
+from claude_island.ui.snapshot_projection import project_snapshot, _fmt_model
 
 
 def _view(name, phase, cost):
@@ -33,6 +33,60 @@ def test_project_snapshot_shapes_sessions_and_decisions():
     names = {s["name"]: s for s in d["sessions"]}
     assert names["cc-learning"]["phase"] == "thinking"
     assert names["cc-learning"]["cost_usd"] == 227.0
+    # _view() passes latest_model="opus-4.7" which has no "claude-" prefix;
+    # _fmt_model falls through to the fallback (raw[:14]) — stays "opus-4.7".
     assert names["cc-learning"]["model"] == "opus-4.7"
     assert names["build-mini"]["phase"] == "idle"
     assert d["decisions"] == []
+
+
+# ---------------------------------------------------------------------------
+# _fmt_model unit tests (Bug 4)
+# ---------------------------------------------------------------------------
+
+def test_fmt_model_opus_4_7():
+    assert _fmt_model("claude-opus-4-7") == "opus-4.7"
+
+
+def test_fmt_model_sonnet_4_6():
+    assert _fmt_model("claude-sonnet-4-6") == "sonnet-4.6"
+
+
+def test_fmt_model_haiku_3_5():
+    assert _fmt_model("claude-haiku-3-5") == "haiku-3.5"
+
+
+def test_fmt_model_haiku_3_major_only():
+    assert _fmt_model("claude-haiku-3") == "haiku-3"
+
+
+def test_fmt_model_none_returns_none():
+    assert _fmt_model(None) is None
+
+
+def test_fmt_model_empty_returns_none():
+    assert _fmt_model("") is None
+
+
+def test_fmt_model_already_short_falls_through():
+    # Already a short label without the "claude-" prefix — falls to raw[:14].
+    assert _fmt_model("opus-4.7") == "opus-4.7"
+
+
+def test_fmt_model_applied_in_projection():
+    """project_snapshot must apply _fmt_model to the session's model field."""
+    sess = Session(pid=1, project_path=Path("D:/x"),
+                   last_activity=datetime.now(timezone.utc), session_uuid="u-raw")
+    view = SessionView(
+        pid=1, name="raw-model-test", project_path=Path("D:/x"), project_basename="x",
+        last_activity=datetime.now(timezone.utc), cost_usd=0.0,
+        is_high_cost=False, latest_model="claude-opus-4-7", status_word=None,
+        session=sess, session_uuid="u-raw", phase=SessionPhase.IDLE, turn_count=0,
+    )
+    snap = WorldSnapshot(
+        today_cost_usd=0.0, quota=None, available_providers=(),
+        selected_provider=None, fetched_at=datetime.now(timezone.utc),
+        session_groups=(SessionGroup("g", None, "", (view,)),),
+    )
+    d = project_snapshot(snap)
+    assert d["sessions"][0]["model"] == "opus-4.7"

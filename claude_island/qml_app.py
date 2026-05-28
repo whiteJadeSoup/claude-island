@@ -656,10 +656,47 @@ def main() -> int:
     threading.Thread(target=session_discovery.start, daemon=True).start()
     marshaler.snap_ready.emit(snapshotter.build_now())   # 首帧
 
+    # ── Bug 5 fix: force-refresh quota at startup so the first rendered snapshot
+    # carries real quota data (quota_engine.get() returns None on a fresh process
+    # until force_refresh() fetches it).  Also install a 60 s heartbeat so quota
+    # stays fresh for the lifetime of the process, mirroring __main__.py's usage
+    # heartbeat intent.  The timer is stored to prevent GC and cancelled on shutdown.
+    def _quota_refresh_once() -> None:
+        try:
+            quota_engine.force_refresh(provider_name="anthropic")
+        except Exception as exc:
+            print(f"[island] quota force_refresh error: {exc}", file=sys.stderr)
+        snapshotter.wake()
+
+    # Initial force-refresh on a daemon thread so startup is non-blocking.
+    threading.Thread(target=_quota_refresh_once, daemon=True, name="quota-init").start()
+
+    _quota_timer: list[threading.Timer] = []   # list so closure can mutate it
+
+    def _quota_heartbeat() -> None:
+        _quota_refresh_once()
+        # Re-arm unless app is shutting down (timer reference will be cleared
+        # on shutdown — the lambda check guards against a final spurious fire).
+        if _quota_timer:
+            t = threading.Timer(60.0, _quota_heartbeat)
+            t.daemon = True
+            _quota_timer[0] = t
+            t.start()
+
+    # Arm first heartbeat 60 s after startup.
+    _first_timer = threading.Timer(60.0, _quota_heartbeat)
+    _first_timer.daemon = True
+    _quota_timer.append(_first_timer)
+    _first_timer.start()
+
     code = app.exec()
     # Shutdown order mirrors __main__.py: stop snapshotter first so in-flight
     # wakes don't fire into a torn-down pipeline, then tear down the hook
     # subsystem before the registries it writes into.
+    # Cancel the quota heartbeat timer so it doesn't fire into a torn-down pipeline.
+    if _quota_timer:
+        _quota_timer[0].cancel()
+        _quota_timer.clear()
     snapshotter.stop()
     if hook_server is not None:
         hook_server.stop()

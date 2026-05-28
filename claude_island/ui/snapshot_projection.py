@@ -5,10 +5,43 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from claude_island.core.snapshot import WorldSnapshot, SessionView
 from claude_island.core.pending_decisions import PendingDecisionView
+
+
+def _fmt_model(raw: str | None) -> str | None:
+    """Convert a raw Anthropic model id to a short friendly label.
+
+    Examples:
+        "claude-opus-4-7"    → "opus-4.7"
+        "claude-sonnet-4-6"  → "sonnet-4.6"
+        "claude-haiku-3-5"   → "haiku-3.5"
+        "claude-haiku-3"     → "haiku-3"
+        "opus-4.7"           → "opus-4.7"   (already formatted, pass through)
+        None / ""            → None
+
+    The label intentionally stays short so it fits in the model chip without
+    truncation, avoiding the previous .substring(0,14) workaround.
+    """
+    if not raw:
+        return None
+    lower = raw.lower()
+    # Match family + major + minor separated by dashes, e.g. "opus-4-7" → "opus-4.7".
+    # The dash separator distinguishes raw ids from already-formatted labels.
+    m = re.search(r"(opus|sonnet|haiku)-(\d+)-(\d+)", lower)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}.{m.group(3)}"
+    # Match family + major only (dash separator + digit at end or before non-digit),
+    # but only when NOT followed by a dot (which would mean the label is already
+    # formatted as "family-major.minor" and should pass through untouched).
+    m2 = re.search(r"(opus|sonnet|haiku)-(\d+)(?!\.\d)", lower)
+    if m2:
+        return f"{m2.group(1)}-{m2.group(2)}"
+    # Fallback: first 14 chars (better than nothing for unknown shapes)
+    return raw[:14]
 
 
 def _session(v: SessionView) -> dict[str, Any]:
@@ -19,7 +52,9 @@ def _session(v: SessionView) -> dict[str, Any]:
         "cwd": str(v.project_path),
         "cost_usd": float(v.cost_usd),
         "is_high_cost": bool(v.is_high_cost),
-        "model": v.latest_model,
+        # Bug 4 fix: convert raw model id ("claude-opus-4-7") to a friendly
+        # label ("opus-4.7") so the model chip doesn't need .substring(0,14).
+        "model": _fmt_model(v.latest_model),
         "tokens_per_min": v.tokens_per_min,
         "current_tool_input": v.current_tool_input,
         "turn_count": int(v.turn_count or 0),

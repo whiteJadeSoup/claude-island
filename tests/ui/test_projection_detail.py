@@ -262,9 +262,23 @@ def test_spend_detail_per_model_fields():
         get_totals=lambda period: _fake_totals(),
         get_totals_by_model=lambda period: _fake_by_model(),
     )
+    # Bug 4 fix: per_model labels are now formatted by _fmt_model.
+    # "claude-sonnet-4-6" → "sonnet-4.6", "claude-haiku-3" → "haiku-3"
     by_m = {m["model"]: m["cost"] for m in vm.spendDetail()["per_model"]}
-    assert abs(by_m["claude-sonnet-4-6"] - 9.50) < 1e-9
-    assert abs(by_m["claude-haiku-3"] - 2.84) < 1e-9
+    assert abs(by_m["sonnet-4.6"] - 9.50) < 1e-9
+    assert abs(by_m["haiku-3"] - 2.84) < 1e-9
+
+
+def test_spend_detail_per_model_friendly_labels():
+    """spendDetail per_model uses friendly labels, not raw model ids."""
+    vm = WorldViewModel(
+        get_totals=lambda period: _fake_totals(),
+        get_totals_by_model=lambda period: _fake_by_model(),
+    )
+    labels = [m["model"] for m in vm.spendDetail()["per_model"]]
+    # Friendly labels must not contain the "claude-" prefix
+    for label in labels:
+        assert not label.startswith("claude-"), f"raw id leaked: {label!r}"
 
 
 def test_spend_detail_no_callbacks_returns_zeros():
