@@ -19,10 +19,12 @@ Window {
            (typeof isMac !== "undefined" && isMac ? 0 : Qt.Tool)
     color: "transparent"
 
-    // ── Page navigation: "home" | "spend" | "recents" ────────────────────
+    // ── Page navigation: "home" | "spend" | "recents" | "session" ───────
     property string page: "home"
     // SpendPage data — populated before switching page="spend"
     property var spendData: ({})
+    // SessionDetailPage data — populated before switching page="session"
+    property var detailData: ({})
 
     // ── Today card data — fetched from spendDetail() and kept fresh ───────
     property var today: ({})
@@ -757,7 +759,18 @@ Window {
                                                 anchors.fill: parent
                                                 cursorShape: Qt.PointingHandCursor
                                                 hoverEnabled: true
-                                                onClicked: root.vm.focusSession(modelData.id)
+                                                // Left-click: focus terminal; right-click: open detail page
+                                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                                onClicked: (mouse) => {
+                                                    if (mouse.button === Qt.RightButton) {
+                                                        root.detailData = root.vm
+                                                            ? root.vm.sessionDetail(modelData.id)
+                                                            : {}
+                                                        root.page = "session"
+                                                    } else {
+                                                        if (root.vm) root.vm.focusSession(modelData.id)
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -798,7 +811,18 @@ Window {
                                             MouseArea {
                                                 id: chipArea; anchors.fill: parent
                                                 cursorShape: Qt.PointingHandCursor; hoverEnabled: true
-                                                onClicked: root.vm.focusSession(modelData.id)
+                                                // Left-click: focus terminal; right-click: open detail page
+                                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                                onClicked: (mouse) => {
+                                                    if (mouse.button === Qt.RightButton) {
+                                                        root.detailData = root.vm
+                                                            ? root.vm.sessionDetail(modelData.id)
+                                                            : {}
+                                                        root.page = "session"
+                                                    } else {
+                                                        if (root.vm) root.vm.focusSession(modelData.id)
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -838,6 +862,23 @@ Window {
                                 recents: root.vm ? root.vm.recents : []
                                 vm:      root.vm
                                 onBack:  root.page = "home"
+                            }
+                        }
+                    }
+
+                    // ── SessionDetailPage drill-down ──────────────────────
+                    Loader {
+                        id: sessionLoader
+                        width: parent.width; height: parent.height
+                        x: root.page === "session" ? 0 : parent.width
+                        visible: x < parent.width
+                        Behavior on x { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                        active: root.page === "session"
+                        sourceComponent: Component {
+                            SessionDetailPage {
+                                detail: root.detailData
+                                vm:     root.vm
+                                onBack: root.page = "home"
                             }
                         }
                     }
