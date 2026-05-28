@@ -67,6 +67,12 @@ class WorldViewModel(QObject):
         q = self._d["quota"]
         return int(q["five_hour_pct"]) if q else 0
 
+    @Property("QVariant", notify=changed)
+    def quota(self):
+        """Full quota dict for SpendPage (five_hour_pct, weekly_pct, reset times).
+        Returns None when no quota data is available."""
+        return self._d.get("quota")
+
     @Property("QVariantList", notify=changed)
     def recents(self):
         return self._d.get("recents", [])
