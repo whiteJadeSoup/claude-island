@@ -154,6 +154,7 @@ on focusByID(sessionID, hostPID)
                         repeat with t in tabs of w
                             repeat with s in sessions of t
                                 if (id of s as text) is sessionID then
+                                    set winName to name of w
                                     -- All three mutators are guarded
                                     -- by ``is not`` checks so they
                                     -- only run when the target state
@@ -196,6 +197,16 @@ on focusByID(sessionID, hostPID)
                                     if index of w is not 1 then
                                         set index of w to 1
                                     end if
+                                    -- Cross-Space: see focusByTTY. AXRaise the
+                                    -- matched window so a session on another
+                                    -- macOS Space is surfaced. try-guarded.
+                                    tell application "System Events"
+                                        try
+                                            tell (first process whose unix id is (hostPID as integer))
+                                                perform action "AXRaise" of (first window whose name is winName)
+                                            end tell
+                                        end try
+                                    end tell
                                     return "ok"
                                 end if
                             end repeat
@@ -230,6 +241,7 @@ on focusByTTY(targetTTY, hostPID)
                         repeat with t in tabs of w
                             repeat with s in sessions of t
                                 if (tty of s) is targetTTY then
+                                    set winName to name of w
                                     -- Guarded mutators (see focusByID)
                                     -- to suppress redundant operations
                                     -- whose visible side effects read
@@ -244,6 +256,19 @@ on focusByTTY(targetTTY, hostPID)
                                     if index of w is not 1 then
                                         set index of w to 1
                                     end if
+                                    -- Cross-Space: select w only reorders
+                                    -- iTerm's internal window list; AXRaise
+                                    -- pulls the target window's macOS Space
+                                    -- to the front. try-guarded so a title
+                                    -- mismatch / AX error degrades to the
+                                    -- prior no-Space-switch behaviour.
+                                    tell application "System Events"
+                                        try
+                                            tell (first process whose unix id is (hostPID as integer))
+                                                perform action "AXRaise" of (first window whose name is winName)
+                                            end tell
+                                        end try
+                                    end tell
                                     return "ok"
                                 end if
                             end repeat
