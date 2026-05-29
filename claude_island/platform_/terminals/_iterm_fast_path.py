@@ -187,11 +187,13 @@ on focusByID(sessionID, hostPID)
                                     select w
                                     select t
                                     select s
-                                    -- I-5 cross-Space hint: only set
-                                    -- index when it would change
-                                    -- something. select w already
-                                    -- brings the window to iTerm idx
-                                    -- 1 in the common case; running
+                                    -- I-5: set index orders the window
+                                    -- inside iTerm but does NOT switch
+                                    -- macOS Spaces (AXRaise below does
+                                    -- that). Guard: only set when it
+                                    -- would change something -- select w
+                                    -- already brings the window to iTerm
+                                    -- idx 1 in the common case; running
                                     -- this unconditionally caused a
                                     -- visible reorder side effect.
                                     if index of w is not 1 then
