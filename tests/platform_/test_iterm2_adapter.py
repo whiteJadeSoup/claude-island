@@ -1154,3 +1154,41 @@ class TestWriteTextToITermSession:
         script = run.call_args[0][0][2]
         # Escaped: " → \", \ → \\
         assert r'a\"b\\c' in script
+
+
+class TestFocusScriptSwitchesSpace:
+    """Cross-Space regression: clicking a session whose iTerm window is
+    on another macOS Space did nothing — ``select w`` only reorders
+    iTerm's internal window list, it does NOT switch Spaces. The script
+    must AXRaise the target window (matched by its title in System
+    Events) to pull its Space to the foreground. ``try``-guarded so a
+    title mismatch / AX error degrades to the prior behaviour."""
+
+    def _assert_axraise(self, script: str, host_pid: int) -> None:
+        # Title captured from the iTerm window before any mutation.
+        assert "set winName to name of w" in script
+        # AXRaise targets the resolved host pid by unix id (multi-iTerm
+        # correctness) and matches the window by the captured title.
+        assert "unix id is {}".format(host_pid) in script
+        assert 'perform action "AXRaise" of (first window whose name is winName)' in script
+        # Ordering: title captured, window selected, THEN raised.
+        i_name = script.index("set winName to name of w")
+        i_select_w = script.index("select w")
+        i_raise = script.index('perform action "AXRaise"')
+        assert i_name < i_select_w < i_raise, (
+            "must capture title, select window, then AXRaise; "
+            "got name={} select_w={} raise={}".format(i_name, i_select_w, i_raise)
+        )
+        # Graceful degradation: AXRaise is inside a try block that
+        # closes before the success return.
+        i_end_try = script.index("end try", i_raise)
+        i_ok = script.index('return "ok"', i_raise)
+        assert i_end_try < i_ok, "AXRaise must be try-guarded before return ok"
+
+    def test_tty_template_axraises_after_select(self):
+        script = _FOCUS_SCRIPT_TEMPLATE.format(host_pid=42, tty="/dev/ttys004")
+        self._assert_axraise(script, 42)
+
+    def test_id_template_axraises_after_select(self):
+        script = _FOCUS_SCRIPT_BY_ID_TEMPLATE.format(host_pid=42, session_id="ABC-123")
+        self._assert_axraise(script, 42)
