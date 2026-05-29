@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
+import "."
 
 // Single decision card — approval swipe or question options.
 // Required properties: decision (dict from vmDecisions), vm (worldVm).
@@ -238,6 +239,7 @@ Rectangle {
             Repeater {
                 model: card.decision ? card.decision.options : []
                 delegate: Rectangle {
+                    id: optBox
                     required property var modelData
                     required property int index
 
@@ -264,21 +266,24 @@ Rectangle {
                         anchors.margins: 8
                         spacing: 8
 
-                        // Checkbox indicator (multi-select only)
+                        // Leading boxed number — the terminal-menu affordance.
+                        // For multi-select it doubles as the checked indicator
+                        // (shows ✓ + filled when selected), so the old separate
+                        // checkbox Rectangle was removed to avoid two indicators.
                         Rectangle {
-                            visible: parent.parent.isMulti
-                            Layout.preferredWidth: 14; Layout.preferredHeight: 14; radius: 3
-                            color: parent.parent.isChecked ? "#3a8040" : "#1a2010"
-                            border.color: parent.parent.isChecked ? "#5fd2a8" : "#2a3a20"
+                            Layout.preferredWidth: 22; Layout.preferredHeight: 22
+                            Layout.alignment: Qt.AlignTop
+                            radius: 6
+                            color: (optBox.isMulti && optBox.isChecked) ? "#1a3a28" : "transparent"
+                            border.color: (optBox.isMulti && optBox.isChecked) ? Theme.teal : "#4d4220"
                             border.width: 1
-
                             Text {
                                 anchors.centerIn: parent
-                                text: "✓"
-                                color: "#5fd2a8"
-                                font.pixelSize: 9
+                                text: (optBox.isMulti && optBox.isChecked) ? "✓" : (optBox.index + 1)
+                                color: Theme.amber
+                                font.family: "monospace"
+                                font.pixelSize: 11
                                 font.bold: true
-                                visible: parent.parent.parent.isChecked
                             }
                         }
 
@@ -305,7 +310,7 @@ Rectangle {
                                     var desc = card.decision && card.decision.option_descriptions
                                     return (desc && index < desc.length) ? desc[index] : ""
                                 }
-                                color: "#7e8a97"
+                                color: Theme.dim
                                 font.pixelSize: 11
                                 wrapMode: Text.Wrap
                             }
