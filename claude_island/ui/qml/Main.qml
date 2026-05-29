@@ -76,6 +76,30 @@ Window {
     function phaseColor(phase) {
         return phase === "thinking" ? "#f0b860" : "#5fd2a8"
     }
+
+    // Live "now", re-stamped every 30s, so relative quota-reset countdowns
+    // ("resets in 1h 38m") tick down on their own between snapshots.
+    property double nowMs: 0
+    Timer {
+        interval: 30000; repeat: true; running: true
+        onTriggered: root.nowMs = Date.now()
+    }
+    // "resets in 1h 38m" from an epoch-ms value (the projection emits
+    // *_reset_epoch). 0/missing → "resets in —"; elapsed → "resets now".
+    function fmtReset(epochMs) {
+        if (!epochMs) return "resets in —"
+        var rem = epochMs - root.nowMs
+        if (rem <= 0) return "resets now"
+        var mins = Math.floor(rem / 60000)
+        var h = Math.floor(mins / 60)
+        var m = mins % 60
+        if (h > 0) return "resets in " + h + "h " + m + "m"
+        if (m > 0) return "resets in " + m + "m"
+        return "resets in <1m"
+    }
+    function quotaResetEpoch() {
+        return (vmQuota && vmQuota["five_hour_reset_epoch"]) ? vmQuota["five_hour_reset_epoch"] : 0
+    }
     // Live tail prefix for the current_tool_input display
     function tailLine(s) {
         if (!s) return ""
@@ -102,6 +126,7 @@ Window {
 
     // Initial Today data fetch when the engine first connects worldVm
     Component.onCompleted: {
+        root.nowMs = Date.now()
         if (root.vm) root.today = root.vm.spendDetail()
     }
 
@@ -313,73 +338,106 @@ Window {
                         }
                         Item { Layout.fillWidth: true }
 
-                        // Today cost / quota — clickable → SpendPage
-                        Text {
-                            color: spendArea.containsMouse ? "#f0a860" : "#a0aab6"
-                            font.family: "monospace"; font.pixelSize: 12
-                            text: "Today " + root.vmTodayCost + " · " + root.vmQuotaPct + "%"
-                            MouseArea {
-                                id: spendArea; anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor; hoverEnabled: true
-                                onClicked: {
-                                    if (root.vm) root.spendData = root.vm.spendDetail()
-                                    root.page = "spend"
+                        // #5: the redundant "Today $X · NN%" readout was removed —
+                        // the TODAY card directly below already shows cost + quota.
+
+                        // #6: History as a proper pill button (rounded container +
+                        // hover fill + counterclockwise "history" glyph), instead of
+                        // the bare icon+text that read as unstyled.
+                        Rectangle {
+                            id: historyBtn
+                            implicitWidth: histInner.implicitWidth + 18
+                            implicitHeight: 26
+                            radius: 7
+                            color: histArea.containsMouse ? "#1b2530" : "transparent"
+                            border.color: histArea.containsMouse ? "#2a3744" : "transparent"
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 120 } }
+
+                            RowLayout {
+                                id: histInner
+                                anchors.centerIn: parent
+                                spacing: 5
+                                // "History" glyph: clock dial + a counter-clockwise
+                                // arrow sweeping back — the universal "rewind time"
+                                // / history mark, clearer than a plain clock.
+                                Canvas {
+                                    id: histGlyph
+                                    Layout.preferredWidth: 14; Layout.preferredHeight: 14
+                                    property color strokeColor: histArea.containsMouse ? "#c8d4de" : "#8a96a3"
+                                    onStrokeColorChanged: requestPaint()
+                                    onPaint: {
+                                        var ctx = getContext("2d")
+                                        ctx.clearRect(0, 0, width, height)
+                                        ctx.strokeStyle = strokeColor
+                                        ctx.lineWidth = 1.4
+                                        ctx.lineCap = "round"; ctx.lineJoin = "round"
+                                        // ¾ circle, open at top-left (counter-clockwise gap)
+                                        ctx.beginPath()
+                                        ctx.arc(7, 7.5, 5, Math.PI * 0.85, Math.PI * 2.55, false)
+                                        ctx.stroke()
+                                        // arrow head at the open (top-left) end, pointing back
+                                        ctx.beginPath()
+                                        ctx.moveTo(2.6, 4.0); ctx.lineTo(2.0, 7.4)
+                                        ctx.moveTo(2.0, 7.4); ctx.lineTo(5.0, 6.6)
+                                        ctx.stroke()
+                                        // clock hands
+                                        ctx.beginPath()
+                                        ctx.moveTo(7, 7.5); ctx.lineTo(7, 4.5)
+                                        ctx.moveTo(7, 7.5); ctx.lineTo(9.4, 8.6)
+                                        ctx.stroke()
+                                    }
+                                }
+                                Text {
+                                    text: "History"
+                                    color: histArea.containsMouse ? "#c8d4de" : "#8a96a3"
+                                    font.pixelSize: 12
                                 }
                             }
-                        }
-
-                        // History link → RecentsPage
-                        // Item wrapper so MouseArea can anchors.fill without
-                        // conflicting with Row positioning rules.
-                        Item {
-                            id: historyLink
-                            implicitWidth: clockCanvas.width + 4 + historyLabel.implicitWidth
-                            implicitHeight: 14
-
                             MouseArea {
-                                id: recentsArea
-                                anchors.fill: parent
+                                id: histArea; anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor; hoverEnabled: true
                                 onClicked: root.page = "recents"
                             }
-                            // Clock icon: circle + two hands drawn via Canvas (14×14)
+                        }
+
+                        Item { implicitWidth: 2 }
+
+                        // #4: explicit Quit. Qt.quit() returns from app.exec(),
+                        // after which qml_app.main() runs its shutdown (hook_server
+                        // .stop() unlinks port.txt) — so this also prevents the
+                        // stale-port / duplicate-instance confusion on exit.
+                        Rectangle {
+                            id: quitBtn
+                            implicitWidth: 26; implicitHeight: 26
+                            radius: 7
+                            color: quitArea.containsMouse ? "#2a1714" : "transparent"
+                            Behavior on color { ColorAnimation { duration: 120 } }
                             Canvas {
-                                id: clockCanvas
+                                anchors.centerIn: parent
                                 width: 14; height: 14
-                                anchors.left: parent.left
-                                anchors.verticalCenter: parent.verticalCenter
-                                property color strokeColor: recentsArea.containsMouse ? "#c8d4de" : "#7e8a97"
+                                property color strokeColor: quitArea.containsMouse ? "#e8743b" : "#566069"
                                 onStrokeColorChanged: requestPaint()
                                 onPaint: {
                                     var ctx = getContext("2d")
                                     ctx.clearRect(0, 0, width, height)
                                     ctx.strokeStyle = strokeColor
-                                    ctx.lineWidth = 1.4
+                                    ctx.lineWidth = 1.5
                                     ctx.lineCap = "round"
-                                    // Outer circle
+                                    // power ring with a gap at top
                                     ctx.beginPath()
-                                    ctx.arc(7, 7, 5.5, 0, Math.PI * 2)
+                                    ctx.arc(7, 8, 4.6, Math.PI * -0.30, Math.PI * 1.30, false)
                                     ctx.stroke()
-                                    // Minute hand (straight up — 12 o'clock)
+                                    // power stem
                                     ctx.beginPath()
-                                    ctx.moveTo(7, 7)
-                                    ctx.lineTo(7, 2.5)
-                                    ctx.stroke()
-                                    // Hour hand (~2-3 o'clock, short)
-                                    ctx.beginPath()
-                                    ctx.moveTo(7, 7)
-                                    ctx.lineTo(10, 8.5)
+                                    ctx.moveTo(7, 2.6); ctx.lineTo(7, 7.5)
                                     ctx.stroke()
                                 }
                             }
-                            Text {
-                                id: historyLabel
-                                text: "History"
-                                color: recentsArea.containsMouse ? "#c8d4de" : "#7e8a97"
-                                font.pixelSize: 12
-                                anchors.left: clockCanvas.right
-                                anchors.leftMargin: 4
-                                anchors.verticalCenter: parent.verticalCenter
+                            MouseArea {
+                                id: quitArea; anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor; hoverEnabled: true
+                                onClicked: Qt.quit()
                             }
                         }
 
@@ -611,7 +669,7 @@ Window {
                                             }
                                             Text {
                                                 visible: root.vmQuota !== null && root.vmQuota !== undefined
-                                                text: "· resets " + ((root.vmQuota && root.vmQuota["five_hour_reset"]) ? root.vmQuota["five_hour_reset"] : "—")
+                                                text: "· " + root.fmtReset(root.quotaResetEpoch())
                                                 color: "#566069"; font.pixelSize: 10
                                                 elide: Text.ElideRight
                                                 Layout.fillWidth: true
@@ -960,10 +1018,17 @@ Window {
     // Displayed at top of home content; full version when no decisions pending,
     // collapsed to a one-liner when decisions take priority.
     component TodayCard: Rectangle {
+        id: todayCard
         required property var todayData         // spendDetail() result dict
         required property int quotaPct          // vmQuotaPct
         required property var vmQuota           // vmQuota dict or null
         property bool collapsed: false
+
+        // Relative reset countdown delegates to root.fmtReset/root.nowMs so the
+        // ticker lives in exactly one place (DRY with the collapsed today strip).
+        function fmtReset() {
+            return root.fmtReset((vmQuota && vmQuota["five_hour_reset_epoch"]) ? vmQuota["five_hour_reset_epoch"] : 0)
+        }
 
         radius: 8
         color: "#0a0d12"
@@ -993,7 +1058,7 @@ Window {
                     }
                     Text {
                         visible: vmQuota !== null && vmQuota !== undefined
-                        text: "Anthropic · resets in " + ((vmQuota && vmQuota["five_hour_reset"]) ? vmQuota["five_hour_reset"] : "—")
+                        text: "Anthropic · " + todayCard.fmtReset()
                         color: "#3a4752"
                         font.pixelSize: 9
                     }
@@ -1068,6 +1133,18 @@ Window {
                 }
                 color: "#3a4752"; font.pixelSize: 9
                 elide: Text.ElideRight
+            }
+        }
+
+        // The TODAY card is now the entry to the spend breakdown (replacing
+        // the removed top-right "Today $X · NN%" link, #5). Last child so it
+        // sits atop the display-only content and receives the click.
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                if (root.vm) root.spendData = root.vm.spendDetail()
+                root.page = "spend"
             }
         }
     }

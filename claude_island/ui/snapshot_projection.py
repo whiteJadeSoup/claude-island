@@ -12,6 +12,20 @@ from claude_island.core.snapshot import WorldSnapshot, SessionView
 from claude_island.core.pending_decisions import PendingDecisionView
 
 
+def _epoch_ms(dt: Any) -> int:
+    """Epoch milliseconds for a tz-aware datetime, or 0 when unavailable.
+
+    QML uses this to compute a live relative countdown to a quota reset
+    (``epoch_ms - Date.now()``). 0 signals "unknown" so QML shows "—".
+    """
+    if dt is None:
+        return 0
+    try:
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return 0
+
+
 def _fmt_model(raw: str | None) -> str | None:
     """Convert a raw Anthropic model id to a short friendly label.
 
@@ -139,12 +153,18 @@ def project_snapshot(snap: WorldSnapshot) -> dict[str, Any]:
             **({
                 "weekly_pct": int(getattr(q, "seven_day_pct", 0)),
             } if hasattr(q, "seven_day_pct") else {}),
-            # Reset timestamps — keep as strings for QML compatibility
+            # Reset timestamps — keep the raw string (legacy) AND an epoch-ms
+            # number so QML can render a live relative countdown ("resets in
+            # 1h 38m") instead of an unfriendly absolute timestamp. QML
+            # computes remaining = epoch_ms - Date.now() and reformats on a
+            # timer; 0 means "unknown" (QML then shows "—").
             **({
                 "five_hour_reset": str(getattr(q, "five_hour_resets_at", "")),
+                "five_hour_reset_epoch": _epoch_ms(getattr(q, "five_hour_resets_at", None)),
             } if hasattr(q, "five_hour_resets_at") else {}),
             **({
                 "weekly_reset": str(getattr(q, "seven_day_resets_at", "")),
+                "weekly_reset_epoch": _epoch_ms(getattr(q, "seven_day_resets_at", None)),
             } if hasattr(q, "seven_day_resets_at") else {}),
         }
     # Dormant (offline) sessions — rendered by the Recents drawer.

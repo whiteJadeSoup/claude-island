@@ -3,7 +3,7 @@ from pathlib import Path
 from claude_island.core.snapshot import WorldSnapshot, SessionGroup, SessionView
 from claude_island.core.session_phase import SessionPhase
 from claude_island.core.models import Session
-from claude_island.ui.snapshot_projection import project_snapshot, _fmt_model
+from claude_island.ui.snapshot_projection import project_snapshot, _fmt_model, _epoch_ms
 
 
 def _view(name, phase, cost):
@@ -58,6 +58,40 @@ def test_fmt_model_haiku_3_5():
 
 def test_fmt_model_haiku_3_major_only():
     assert _fmt_model("claude-haiku-3") == "haiku-3"
+
+
+def test_epoch_ms_from_datetime():
+    dt = datetime(2026, 5, 29, 13, 30, 0, tzinfo=timezone.utc)
+    assert _epoch_ms(dt) == int(dt.timestamp() * 1000)
+
+
+def test_epoch_ms_none_returns_zero():
+    # 0 is the "unknown" sentinel QML reads as "resets in —".
+    assert _epoch_ms(None) == 0
+
+
+def test_epoch_ms_bad_input_returns_zero():
+    assert _epoch_ms("not-a-datetime") == 0
+
+
+def test_quota_projection_emits_reset_epoch():
+    # A real QuotaSnapshot's reset datetimes must surface as *_reset_epoch ms.
+    from claude_island.core.models import QuotaSnapshot
+    reset5h = datetime(2026, 5, 29, 13, 30, 0, tzinfo=timezone.utc)
+    reset7d = datetime(2026, 6, 2, 13, 30, 0, tzinfo=timezone.utc)
+    q = QuotaSnapshot(
+        provider="anthropic", five_hour_pct=56, seven_day_pct=21,
+        five_hour_resets_at=reset5h, seven_day_resets_at=reset7d,
+        fetched_at=datetime.now(timezone.utc), is_stale=False,
+    )
+    snap = WorldSnapshot(
+        today_cost_usd=1.0, quota=q, available_providers=("anthropic",),
+        selected_provider="anthropic", fetched_at=datetime.now(timezone.utc),
+        session_groups=(),
+    )
+    out = project_snapshot(snap)["quota"]
+    assert out["five_hour_reset_epoch"] == int(reset5h.timestamp() * 1000)
+    assert out["weekly_reset_epoch"] == int(reset7d.timestamp() * 1000)
 
 
 def test_fmt_model_none_returns_none():
