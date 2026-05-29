@@ -119,21 +119,56 @@ def _active_view(name, phase, cost, model="claude-opus-4-7", tpm=2600):
     )
 
 
-def _decision():
-    return PendingDecisionView(
-        id="dec-1",
-        kind=DecisionKind.ASK_QUESTION,
-        session_uuid="uuid-cc-learning",
-        session_name="cc-learning",
-        cwd_basename="cc",
-        expires_at=_NOW + timedelta(seconds=600),
-        risk_level=RiskLevel.MEDIUM,
-        tool_name="AskUserQuestion",
-        question_text="Which date library should we use for the new module?",
-        question_header="date lib",
-        question_options=("date-fns", "Day.js", "Luxon"),
-        question_option_descriptions=("lightweight", "2KB", "timezones"),
-        multi_select=False,
+def _decisions():
+    """Three pending decisions mixing kinds so the guard exercises the
+    DecisionAlbum stack: an interactive front card + 2 ghost edges +
+    "第 1 / N 张" counter + dots.
+
+    Index 0 (front) is the ASK_QUESTION card — its numbered-option menu is
+    the most binding-dense card, so keep it on the interactive front.
+    Indexes 1-2 are PRE_TOOL_USE approvals (the swipe-fling cards); one is
+    HIGH risk to exercise the high-risk badge binding too. Only the front
+    is rendered as a live DecisionCard, but all three flow through the
+    NEEDS-YOU counter, dots, and ghost-edge bindings.
+    """
+    return (
+        PendingDecisionView(
+            id="dec-1",
+            kind=DecisionKind.ASK_QUESTION,
+            session_uuid="uuid-cc-learning",
+            session_name="cc-learning",
+            cwd_basename="cc",
+            expires_at=_NOW + timedelta(seconds=600),
+            risk_level=RiskLevel.MEDIUM,
+            tool_name="AskUserQuestion",
+            question_text="Which date library should we use for the new module?",
+            question_header="date lib",
+            question_options=("date-fns", "Day.js", "Luxon"),
+            question_option_descriptions=("lightweight", "2KB", "timezones"),
+            multi_select=False,
+        ),
+        PendingDecisionView(
+            id="dec-2",
+            kind=DecisionKind.PRE_TOOL_USE,
+            session_uuid="uuid-agent-prompt",
+            session_name="agent-prompt",
+            cwd_basename="cc",
+            expires_at=_NOW + timedelta(seconds=600),
+            risk_level=RiskLevel.HIGH,
+            tool_name="Bash",
+            tool_input_preview="rm -rf build/ && npm run build",
+        ),
+        PendingDecisionView(
+            id="dec-3",
+            kind=DecisionKind.PRE_TOOL_USE,
+            session_uuid="uuid-build-mini",
+            session_name="build-mini",
+            cwd_basename="cc",
+            expires_at=_NOW + timedelta(seconds=600),
+            risk_level=RiskLevel.MEDIUM,
+            tool_name="Read",
+            tool_input_preview="src/index.ts",
+        ),
     )
 
 
@@ -181,7 +216,7 @@ def _full_snap(dormant_count: int = 1):
             ),
         ),
         dormant_sessions=dormants,
-        pending_decisions=(_decision(),),
+        pending_decisions=_decisions(),
     )
 
 

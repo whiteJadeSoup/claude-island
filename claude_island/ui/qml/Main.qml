@@ -572,50 +572,15 @@ Window {
                                 spacing: 0
 
                                 // ── Decision pending: decision on top, Today collapses ──
-                                // Section header: "Needs you · N"
-                                Text {
-                                    visible: root.vmDecisions.length > 0
-                                    text: "● Needs you · " + root.vmDecisions.length
-                                    color: "#e8884c"
-                                    font.pixelSize: 10; font.letterSpacing: 1.5
-                                    Layout.leftMargin: 16; Layout.topMargin: 11; Layout.bottomMargin: 6
-                                }
-
-                                // Primary decision card
-                                Loader {
+                                // FIFO album — interactive front card + ghost-edge peek
+                                // of the queue + "第 1 / N 张" counter. Replaces the old
+                                // header + single Loader + queued-preview Repeater.
+                                DecisionAlbum {
                                     Layout.fillWidth: true
-                                    Layout.leftMargin: 13; Layout.rightMargin: 13; Layout.bottomMargin: 4
-                                    active: root.vmDecisions.length > 0
-                                    visible: active
-                                    sourceComponent: Component {
-                                        DecisionCard {
-                                            decision: root.vmDecisions.length > 0 ? root.vmDecisions[0] : null
-                                            vm: root.vm
-                                        }
-                                    }
-                                }
-
-                                // Queued decisions preview (index ≥ 1)
-                                Repeater {
-                                    model: root.vmDecisions
-                                    delegate: RowLayout {
-                                        required property var modelData
-                                        required property int index
-                                        visible: index >= 1
-                                        Layout.fillWidth: true
-                                        Layout.leftMargin: 16; Layout.rightMargin: 16
-                                        Layout.preferredHeight: visible ? 24 : 0
-                                        spacing: 6
-                                        Rectangle {
-                                            width: 6; height: 6; radius: 3
-                                            color: root.riskColor(modelData.risk)
-                                        }
-                                        Text {
-                                            text: modelData.session_name + " · " + root.kindLabel(modelData.kind)
-                                            color: "#7e8a97"; font.pixelSize: 11
-                                            elide: Text.ElideRight; Layout.fillWidth: true
-                                        }
-                                    }
+                                    Layout.leftMargin: 13; Layout.rightMargin: 13; Layout.topMargin: 11; Layout.bottomMargin: 4
+                                    visible: root.vmDecisions.length > 0
+                                    decisions: root.vmDecisions
+                                    vm: root.vm
                                 }
 
                                 // ── TODAY card (collapsed one-liner when decision pending) ──
