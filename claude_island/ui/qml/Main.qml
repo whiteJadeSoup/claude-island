@@ -25,11 +25,14 @@ Window {
            (typeof isMac !== "undefined" && isMac ? 0 : Qt.Tool)
     color: "transparent"
 
-    // ── Page navigation: "home" | "spend" | "recents" | "session" ───────
-    property string page: "home"
-    // SpendPage data — populated before switching page="spend"
+    // ── Detail navigation: touch-to-grow morph (replaces the old `page`
+    // x-slide). A tapped source element (TODAY card / session card / History
+    // button) makes its detail page GROW from that element's position+size
+    // into a full overlay (detailHost below); detailHost.close() collapses it
+    // back. The home content stays the static base layer underneath. ───────
+    // SpendPage data — populated before detailHost.open("spend", …)
     property var spendData: ({})
-    // SessionDetailPage data — populated before switching page="session"
+    // SessionDetailPage data — populated before detailHost.open("session", …)
     property var detailData: ({})
 
     // ── Today card data — fetched from spendDetail() and kept fresh ───────
@@ -420,7 +423,8 @@ Window {
                             MouseArea {
                                 id: histArea; anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor; hoverEnabled: true
-                                onClicked: root.page = "recents"
+                                // Grow the recents overlay out of the History pill itself.
+                                onClicked: detailHost.open("recents", historyBtn)
                             }
                         }
 
@@ -482,14 +486,12 @@ Window {
                 Item {
                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true
 
-                    // ── Home content ──────────────────────────────────────
+                    // ── Home content (static base layer under detailHost) ──
+                    // No longer slides: the detail pages now GROW over the top
+                    // (detailHost, z:5) instead of x-sliding home off-screen.
                     Item {
                         id: homeContent
-                        width: parent.width; height: parent.height
-                        x: root.page === "home" ? 0 : -parent.width
-                        opacity: root.page === "home" ? 1.0 : 0.6
-                        Behavior on x       { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
-                        Behavior on opacity { NumberAnimation { duration: 200 } }
+                        anchors.fill: parent
 
                         // ── Empty state: no sessions and no decisions ─────
                         // Shown when there is nothing to display.
@@ -853,7 +855,8 @@ Window {
                                                         root.detailData = root.vm
                                                             ? root.vm.sessionDetail(modelData.id)
                                                             : {}
-                                                        root.page = "session"
+                                                        // Grow the session detail out of this card.
+                                                        detailHost.open("session", liveCard)
                                                     } else {
                                                         if (root.vm) root.vm.focusSession(modelData.id)
                                                     }
@@ -880,6 +883,7 @@ Window {
                                     Repeater {
                                         model: root.vmSessions
                                         delegate: Rectangle {
+                                            id: chipRect
                                             required property var modelData
                                             visible: !root.isActive(modelData.phase)
                                             width: visible ? (lbl.width + 22) : 0
@@ -905,7 +909,8 @@ Window {
                                                         root.detailData = root.vm
                                                             ? root.vm.sessionDetail(modelData.id)
                                                             : {}
-                                                        root.page = "session"
+                                                        // Grow the session detail out of this chip.
+                                                        detailHost.open("session", chipRect)
                                                     } else {
                                                         if (root.vm) root.vm.focusSession(modelData.id)
                                                     }
@@ -918,56 +923,67 @@ Window {
                         }
                     }
 
-                    // ── SpendPage drill-down ──────────────────────────────
-                    Loader {
-                        id: spendLoader
-                        width: parent.width; height: parent.height
-                        x: root.page === "spend" ? 0 : parent.width
-                        visible: x < parent.width
-                        Behavior on x { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
-                        active: root.page === "spend"
-                        sourceComponent: Component {
-                            SpendPage {
-                                spend:  root.spendData
-                                quota:  root.vmQuota
-                                vm:     root.vm
-                                onBack: root.page = "home"
-                            }
-                        }
-                    }
+                    // ── Detail morph host (touch-to-grow overlay) ──────────
+                    // Overlays homeContent (z:5). open(kind, srcItem) records
+                    // the source element's position+size (mapped into this
+                    // host's coords), then grows the loaded detail page from
+                    // that rect to full-fill; close() collapses it back.
+                    // Replaces the old per-page x-slide Loaders.
+                    Item {
+                        id: detailHost
+                        objectName: "detailHost"
+                        anchors.fill: parent
+                        z: 5
+                        visible: detailLoader.active
+                        property string detailKind: ""
+                        property real sx0: 0; property real sy0: 0; property real sw0: 0; property real sh0: 0
 
-                    // ── RecentsPage drill-down ────────────────────────────
-                    Loader {
-                        id: recentsLoader
-                        width: parent.width; height: parent.height
-                        x: root.page === "recents" ? 0 : parent.width
-                        visible: x < parent.width
-                        Behavior on x { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
-                        active: root.page === "recents"
-                        sourceComponent: Component {
-                            RecentsPage {
-                                recents: root.vm ? root.vm.recents : []
-                                vm:      root.vm
-                                onBack:  root.page = "home"
-                            }
+                        function open(kind, srcItem) {
+                            var p = srcItem.mapToItem(detailHost, 0, 0)
+                            sx0 = p.x; sy0 = p.y; sw0 = srcItem.width; sh0 = srcItem.height
+                            detailKind = kind
+                            detailLoader.active = true
+                            morphIn.restart()
                         }
-                    }
+                        function close() { morphOut.restart() }
 
-                    // ── SessionDetailPage drill-down ──────────────────────
-                    Loader {
-                        id: sessionLoader
-                        width: parent.width; height: parent.height
-                        x: root.page === "session" ? 0 : parent.width
-                        visible: x < parent.width
-                        Behavior on x { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
-                        active: root.page === "session"
-                        sourceComponent: Component {
-                            SessionDetailPage {
-                                detail: root.detailData
-                                vm:     root.vm
-                                onBack: root.page = "home"
-                            }
+                        Loader {
+                            id: detailLoader
+                            anchors.fill: parent
+                            active: false
+                            opacity: 0
+                            transform: [
+                                Scale { id: msc; origin.x: 0; origin.y: 0; xScale: 1; yScale: 1 },
+                                Translate { id: mtr; x: 0; y: 0 }
+                            ]
+                            sourceComponent: detailHost.detailKind === "spend" ? spendComp
+                                           : detailHost.detailKind === "session" ? sessionComp
+                                           : recentsComp
                         }
+
+                        ParallelAnimation {
+                            id: morphIn
+                            NumberAnimation { target: detailLoader; property: "opacity"; from: 0; to: 1; duration: 240 }
+                            NumberAnimation { target: msc; property: "xScale"; from: (detailHost.width  > 0 ? detailHost.sw0/detailHost.width  : 0.6); to: 1; duration: 440; easing.type: Easing.OutBack; easing.overshoot: 0.6 }
+                            NumberAnimation { target: msc; property: "yScale"; from: (detailHost.height > 0 ? detailHost.sh0/detailHost.height : 0.4); to: 1; duration: 440; easing.type: Easing.OutBack; easing.overshoot: 0.6 }
+                            NumberAnimation { target: mtr; property: "x"; from: detailHost.sx0; to: 0; duration: 420; easing.type: Easing.OutCubic }
+                            NumberAnimation { target: mtr; property: "y"; from: detailHost.sy0; to: 0; duration: 420; easing.type: Easing.OutCubic }
+                        }
+                        SequentialAnimation {
+                            id: morphOut
+                            ParallelAnimation {
+                                NumberAnimation { target: detailLoader; property: "opacity"; to: 0; duration: 220 }
+                                NumberAnimation { target: msc; property: "xScale"; to: (detailHost.width  > 0 ? detailHost.sw0/detailHost.width  : 0.6); duration: 300; easing.type: Easing.InCubic }
+                                NumberAnimation { target: msc; property: "yScale"; to: (detailHost.height > 0 ? detailHost.sh0/detailHost.height : 0.4); duration: 300; easing.type: Easing.InCubic }
+                                NumberAnimation { target: mtr; property: "x"; to: detailHost.sx0; duration: 300; easing.type: Easing.InCubic }
+                                NumberAnimation { target: mtr; property: "y"; to: detailHost.sy0; duration: 300; easing.type: Easing.InCubic }
+                            }
+                            ScriptAction { script: detailLoader.active = false }
+                        }
+
+                        Component { id: spendComp;   SpendPage         { spend: root.spendData; quota: root.vmQuota; vm: root.vm; onBack: detailHost.close() } }
+                        Component { id: sessionComp; SessionDetailPage { detail: root.detailData; vm: root.vm; onBack: detailHost.close() } }
+                        Component { id: recentsComp; RecentsPage       { recents: root.vm ? root.vm.recents : []; vm: root.vm; onBack: detailHost.close() } }
                     }
                 }
             }
@@ -1104,7 +1120,8 @@ Window {
             cursorShape: Qt.PointingHandCursor
             onClicked: {
                 if (root.vm) root.spendData = root.vm.spendDetail()
-                root.page = "spend"
+                // Grow the spend page out of the TODAY card itself.
+                detailHost.open("spend", todayCard)
             }
         }
     }

@@ -23,7 +23,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QTimer, qInstallMessageHandler, QtMsgType
+from PySide6.QtCore import (
+    Q_ARG,
+    QMetaObject,
+    QObject,
+    Qt,
+    QTimer,
+    QtMsgType,
+    qInstallMessageHandler,
+)
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -225,6 +233,38 @@ def _is_harmless(msg: str) -> bool:
     return any(h in msg for h in _KNOWN_HARMLESS)
 
 
+def _open_detail(root, kind: str) -> None:
+    """Drive the touch-to-grow morph nav from Python.
+
+    The old slide nav was triggered by `root.page = "<kind>"`; that property is
+    gone. Navigation now goes through detailHost.open(kind, srcItem), which
+    activates the detail Loader and morphs the page in. We pass detailHost
+    itself as the source item — its geometry only seeds the morph start frame,
+    which this test does not assert on; what matters is that the detail page
+    Loader activates and its bindings evaluate.
+    """
+    host = root.findChild(QObject, "detailHost")
+    assert host is not None, (
+        "Could not locate detailHost by objectName — check Main.qml sets "
+        "objectName: 'detailHost' on the morph host Item"
+    )
+    ok = QMetaObject.invokeMethod(
+        host,
+        "open",
+        Qt.DirectConnection,
+        Q_ARG("QVariant", kind),
+        Q_ARG("QVariant", host),
+    )
+    assert ok, f"detailHost.open({kind!r}, …) invocation failed"
+
+
+def _close_detail(root) -> None:
+    """Collapse the morph overlay back (detailHost.close())."""
+    host = root.findChild(QObject, "detailHost")
+    assert host is not None
+    QMetaObject.invokeMethod(host, "close", Qt.DirectConnection)
+
+
 def _ensure_basic_style() -> None:
     """Set the Basic QtQuick Controls 2 style if not already set.
 
@@ -275,10 +315,15 @@ def test_qml_loads_with_zero_runtime_warnings():
                 app.processEvents()
 
         spin()
-        # Drill-down views
+        # Drill-down views — exercise every detail page's bindings by morphing
+        # each one open (then closing) via the touch-to-grow nav (replaces the
+        # old `root.page = "<kind>"` slide). "home" is now the always-present
+        # base layer, so closing the overlay returns to it.
         root.setProperty("detailData", vm.sessionDetail("uuid-cc-learning"))
-        for page in ("spend", "recents", "session", "home"):
-            root.setProperty("page", page)
+        for kind in ("spend", "recents", "session"):
+            _open_detail(root, kind)
+            spin()
+            _close_detail(root)
             spin()
         # Pill morph states
         for state in ("collapsed", "decision", "expanded"):
@@ -355,12 +400,16 @@ def test_recents_history_rows_have_real_height():
             while loop_end.isActive():
                 app.processEvents()
 
-        # Navigate to the recents page so the Flickable and its Repeater are active
+        # Morph the recents page open so the Flickable and its Repeater are
+        # active (the RecentsPage is now loaded only while the detail overlay
+        # is open — detailHost.open("recents", …) activates its Loader). We
+        # leave it open (no close()) so the Flickable stays alive for the
+        # geometry read below.
         root.setProperty("islandState", "expanded")
-        root.setProperty("page", "recents")
+        _open_detail(root, "recents")
         spin()
-        # Re-push the snapshot so the RecentsPage re-evaluates its recents binding
-        # after the Loader has activated (active: root.page === "recents").
+        # Re-push the snapshot so the RecentsPage re-evaluates its recents
+        # binding after the Loader has activated.
         vm.update(snap_3)
         spin()
 
