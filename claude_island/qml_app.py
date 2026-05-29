@@ -157,7 +157,7 @@ def main() -> int:
     # any Text item is created so every surface inherits it. Trade-off: native
     # text doesn't animate scale as smoothly, but we never scale text.
     from PySide6.QtQuick import QQuickWindow
-    QQuickWindow.setTextRenderType(QQuickWindow.TextRenderType.NativeRendering)
+    QQuickWindow.setTextRenderType(QQuickWindow.TextRenderType.NativeTextRendering)
 
     app = QGuiApplication(sys.argv)
 
