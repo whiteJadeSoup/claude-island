@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
 import QtQuick.Controls
+import "."
 
 // The root Window resizes to match islandState so the OS window itself
 // shrinks to pill size when collapsed — no transparent screen-occupying
@@ -153,6 +154,17 @@ Window {
         border.color: "#1c2632"
         border.width: 1
         clip: true
+
+        // Ambient top glow — keeps the island from reading as flat black.
+        Rectangle {
+            z: -1
+            width: parent.width * 1.4; height: parent.height * 0.7
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top; anchors.topMargin: -parent.height * 0.35
+            radius: width / 2
+            color: Theme.teal
+            opacity: 0.06
+        }
 
         // ── LAYER 1: Pill (collapsed) ─────────────────────────────────────
         Item {
