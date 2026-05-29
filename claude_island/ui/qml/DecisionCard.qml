@@ -38,6 +38,14 @@ Rectangle {
     border.color: borderColor
     border.width: 1
 
+    // Drive the card's height from its content. The content ColumnLayout is
+    // anchored top/left/right (not bottom/fill), so without this the Rectangle's
+    // implicitHeight stays 0 — and the Loader that hosts this card in Main.qml's
+    // `bands` ColumnLayout then reserves zero vertical space, letting TODAY /
+    // Active / Idle overlap the card (Images #6/#7). +28 = the 14px top + 14px
+    // bottom anchors.margins around contentCol.
+    implicitHeight: contentCol.implicitHeight + 28
+
     // Left accent strip (orange) — visual design detail
     Rectangle {
         anchors.left: parent.left
@@ -122,6 +130,7 @@ Rectangle {
 
     // ── Main content column ───────────────────────────────────────────────
     ColumnLayout {
+        id: contentCol
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
