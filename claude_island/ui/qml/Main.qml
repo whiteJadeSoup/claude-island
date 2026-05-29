@@ -47,6 +47,7 @@ Window {
     readonly property var activePhases: ["thinking", "tool_use", "compacting", "waiting_approval"]
     function isActive(p) { return activePhases.indexOf(p) !== -1 }
     function fmtCost(n)  { return "$" + (n >= 100 ? n.toFixed(0) : n.toFixed(2)) }
+    function fmtElapsed(s){ s = s || 0; return s >= 60 ? (Math.floor(s/60) + "m " + (s%60) + "s") : (s + "s") }
 
     // Format token counts: ≥1M → "X.YM", ≥1K → "XK", else raw int
     function fmtNum(n) {
@@ -742,7 +743,7 @@ Window {
                                                 anchors.bottomMargin: parent.radius
                                                 width: 3
                                                 radius: 1
-                                                color: root.phaseColor(modelData.phase)
+                                                color: Theme.phaseColor(modelData.phase)
                                                 // Bug 2 fix: reference the local property directly;
                                                 // there is no id: glowAnim — glowOp lives on this Rectangle.
                                                 opacity: glowOp
@@ -751,8 +752,8 @@ Window {
                                                 SequentialAnimation on glowOp {
                                                     loops: Animation.Infinite
                                                     running: root.isActive(modelData.phase)
-                                                    NumberAnimation { to: 1.0; duration: 800; easing.type: Easing.InOutSine }
-                                                    NumberAnimation { to: 0.4; duration: 800; easing.type: Easing.InOutSine }
+                                                    NumberAnimation { to: 1.0; duration: 850; easing.type: Easing.InOutSine }
+                                                    NumberAnimation { to: 0.4; duration: 850; easing.type: Easing.InOutSine }
                                                 }
                                             }
 
@@ -766,154 +767,113 @@ Window {
                                                 anchors.rightMargin: 12
                                                 spacing: 6
 
-                                                // Top row: name + phase·elapsed + cost
+                                                // ── top: name · elapsed  ……  ↗  cost ──
                                                 RowLayout {
-                                                    Layout.fillWidth: true
-                                                    spacing: 6
-
-                                                    Text {
-                                                        text: modelData.name || ""
-                                                        color: "#e9edf2"
-                                                        font.pixelSize: 13; font.bold: true
-                                                        elide: Text.ElideRight
-                                                        Layout.fillWidth: true
-                                                    }
-                                                    Text {
-                                                        text: modelData.phase || ""
-                                                        color: root.phaseColor(modelData.phase)
-                                                        font.pixelSize: 10
-                                                        font.letterSpacing: 0.8
-                                                    }
-                                                    Text {
-                                                        text: root.fmtCost(modelData.cost_usd)
-                                                        color: "#f0a860"
-                                                        font.family: "monospace"
-                                                        font.pixelSize: 12; font.bold: true
-                                                    }
-                                                }
-
-                                                // Live tail line: current_tool_input or phase label
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    text: root.tailLine(modelData)
-                                                    color: "#566069"
-                                                    font.family: "monospace"
-                                                    font.pixelSize: 10
-                                                    elide: Text.ElideRight
-                                                    visible: text !== ""
-                                                }
-
-                                                // Activity waveform (#1): a glowing oscilloscope line,
-                                                // not bars. Amplitude at each point = that sample's token
-                                                // rate ÷ peak, so the more tokens Claude is producing, the
-                                                // taller the wave swings — idle ≈ flat, busy = loud. A
-                                                // continuously-animated `flow` phase scrolls the wave so it
-                                                // reads as alive/breathing even between rate updates. Newest
-                                                // sample is on the right (the live edge).
-                                                Item {
-                                                    id: waveItem
-                                                    Layout.fillWidth: true
-                                                    implicitHeight: 30
-
-                                                    property var series: modelData.rate_series || []
-                                                    property real peak: {
-                                                        var s = series
-                                                        var mx = 1
-                                                        for (var i = 0; i < s.length; i++)
-                                                            if (s[i] > mx) mx = s[i]
-                                                        return mx
-                                                    }
-                                                    // 0→1 looping phase that animates the wave's flow.
-                                                    property real flow: 0
-                                                    NumberAnimation on flow {
-                                                        from: 0; to: 1; duration: 1600
-                                                        loops: Animation.Infinite
-                                                        running: root.isActive(modelData.phase)
-                                                    }
-                                                    onFlowChanged: scope.requestPaint()
-                                                    onSeriesChanged: scope.requestPaint()
-
-                                                    Canvas {
-                                                        id: scope
-                                                        anchors.fill: parent
-                                                        property color strokeCol: root.phaseColor(modelData.phase)
-                                                        onStrokeColChanged: requestPaint()
-                                                        onWidthChanged: requestPaint()
-                                                        onPaint: {
-                                                            var ctx = getContext("2d")
-                                                            var w = width, h = height, mid = h * 0.52
-                                                            ctx.clearRect(0, 0, w, h)
-                                                            // faint baseline
-                                                            ctx.strokeStyle = "rgba(255,255,255,0.05)"
-                                                            ctx.lineWidth = 1
-                                                            ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke()
-
-                                                            var s = waveItem.series
-                                                            var n = s.length
-                                                            var N = 72            // render resolution
-                                                            ctx.lineWidth = 2
-                                                            ctx.lineJoin = "round"; ctx.lineCap = "round"
-                                                            ctx.strokeStyle = scope.strokeCol
-                                                            ctx.shadowColor = scope.strokeCol
-                                                            ctx.shadowBlur = 6
-                                                            ctx.beginPath()
-                                                            for (var i = 0; i < N; i++) {
-                                                                var frac = i / (N - 1)
-                                                                var x = frac * w
-                                                                // amplitude from the (right-aligned) rate series
-                                                                var amp = 0
-                                                                if (n > 0) {
-                                                                    var si = Math.floor(frac * (n - 1))
-                                                                    amp = s[si] / waveItem.peak   // 0..1
-                                                                }
-                                                                // oscillate around mid; flow scrolls the wave
-                                                                var wob = Math.sin(i * 0.45 + waveItem.flow * Math.PI * 2)
-                                                                var y = mid - amp * (h * 0.40) * wob
-                                                                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
-                                                            }
-                                                            ctx.stroke()
-                                                            ctx.shadowBlur = 0
-                                                        }
-                                                    }
-                                                }
-
-                                                // Bottom info: tokens/min + model chip
-                                                RowLayout {
-                                                    Layout.fillWidth: true
-                                                    spacing: 8
-
-                                                    Text {
-                                                        visible: modelData.tokens_per_min !== undefined && modelData.tokens_per_min !== null && modelData.tokens_per_min > 0
-                                                        text: (modelData.tokens_per_min || 0) + " tk/min · last 60s"
-                                                        color: "#566069"; font.pixelSize: 10
-                                                    }
+                                                    Layout.fillWidth: true; spacing: 8
+                                                    Text { text: modelData.name || ""; color: Theme.phos; font.pixelSize: Theme.tBody; font.bold: true; elide: Text.ElideRight }
+                                                    Text { text: "· " + root.fmtElapsed(modelData.elapsed_s); color: Theme.faint; font.family: "monospace"; font.pixelSize: Theme.tMeta; visible: (modelData.elapsed_s || 0) > 0 }
                                                     Item { Layout.fillWidth: true }
-                                                    // Model chip (#2): color-coded by family + brighter/bolder
-                                                    // so the model is obvious at a glance (was a dim 9px grey
-                                                    // chip that disappeared). null-safe string coercion for
-                                                    // visible; friendly short label from snapshot_projection.
-                                                    Rectangle {
-                                                        property string mc: root.modelColor(modelData.model)
-                                                        visible: (modelData.model || "") !== ""
-                                                        radius: 5
-                                                        // subtle tinted fill from the family colour (hex + alpha)
-                                                        color: Qt.rgba(0, 0, 0, 0.25)
-                                                        border.color: mc
-                                                        border.width: 1
-                                                        width: modelChipLabel.width + 14
-                                                        height: 20
-                                                        Text {
-                                                            id: modelChipLabel
-                                                            anchors.centerIn: parent
-                                                            text: modelData.model || ""
-                                                            color: parent.mc
-                                                            font.pixelSize: 11; font.bold: true
+                                                    Text { text: "↗"; color: Theme.faint; font.pixelSize: 13; opacity: liveArea.containsMouse ? 1 : 0; Behavior on opacity { NumberAnimation { duration: 120 } } }
+                                                    Text { text: root.fmtCost(modelData.cost_usd); color: Theme.gold; font.family: "monospace"; font.pixelSize: Theme.tBody; font.bold: true }
+                                                }
+                                                // ── hero: $ command  (blinking cursor) ──
+                                                RowLayout {
+                                                    Layout.fillWidth: true; spacing: 0
+                                                    visible: (modelData.command || "") !== ""
+                                                    Text { text: "$ "; color: Theme.phaseColor(modelData.phase); font.family: "monospace"; font.pixelSize: Theme.tHero; font.weight: Font.Medium }
+                                                    Text { Layout.fillWidth: true; text: modelData.command || ""; color: "#f3f6f9"; font.family: "monospace"; font.pixelSize: Theme.tHero; font.weight: Font.Medium; elide: Text.ElideRight }
+                                                    Rectangle { Layout.preferredWidth: 7; Layout.preferredHeight: 14; color: Theme.phaseColor(modelData.phase); Layout.alignment: Qt.AlignVCenter
+                                                        SequentialAnimation on opacity { loops: Animation.Infinite; running: root.isActive(modelData.phase)
+                                                            NumberAnimation { to: 0; duration: 530 } NumberAnimation { to: 1; duration: 530 } } }
+                                                }
+                                                // fallback phase label when no command
+                                                Text { visible: (modelData.command || "") === ""; text: modelData.phase || ""; color: Theme.phaseColor(modelData.phase); font.family: "monospace"; font.pixelSize: Theme.tMeta }
+                                                // ── footer: phase  [waveform]  rate  model ──
+                                                RowLayout {
+                                                    Layout.fillWidth: true; spacing: 9
+                                                    Text { text: modelData.phase || ""; color: Theme.phaseColor(modelData.phase); font.family: "monospace"; font.pixelSize: Theme.tMeta }
+
+                                                    // Activity waveform (#1): a glowing oscilloscope line,
+                                                    // not bars. Amplitude at each point = that sample's token
+                                                    // rate ÷ peak, so the more tokens Claude is producing, the
+                                                    // taller the wave swings — idle ≈ flat, busy = loud. A
+                                                    // continuously-animated `flow` phase scrolls the wave so it
+                                                    // reads as alive/breathing even between rate updates. Newest
+                                                    // sample is on the right (the live edge).
+                                                    Item {
+                                                        id: waveItem
+                                                        Layout.fillWidth: true; Layout.preferredHeight: 16
+
+                                                        property var series: modelData.rate_series || []
+                                                        property real peak: {
+                                                            var s = series
+                                                            var mx = 1
+                                                            for (var i = 0; i < s.length; i++)
+                                                                if (s[i] > mx) mx = s[i]
+                                                            return mx
+                                                        }
+                                                        // 0→1 looping phase that animates the wave's flow.
+                                                        property real flow: 0
+                                                        NumberAnimation on flow {
+                                                            from: 0; to: 1; duration: 1600
+                                                            loops: Animation.Infinite
+                                                            running: root.isActive(modelData.phase)
+                                                        }
+                                                        onFlowChanged: scope.requestPaint()
+                                                        onSeriesChanged: scope.requestPaint()
+
+                                                        Canvas {
+                                                            id: scope
+                                                            anchors.fill: parent
+                                                            property color strokeCol: Theme.phaseColor(modelData.phase)
+                                                            onStrokeColChanged: requestPaint()
+                                                            onWidthChanged: requestPaint()
+                                                            onPaint: {
+                                                                var ctx = getContext("2d")
+                                                                var w = width, h = height, mid = h * 0.52
+                                                                ctx.clearRect(0, 0, w, h)
+                                                                // faint baseline
+                                                                ctx.strokeStyle = "rgba(255,255,255,0.05)"
+                                                                ctx.lineWidth = 1
+                                                                ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke()
+
+                                                                var s = waveItem.series
+                                                                var n = s.length
+                                                                var N = 72            // render resolution
+                                                                ctx.lineWidth = 2
+                                                                ctx.lineJoin = "round"; ctx.lineCap = "round"
+                                                                ctx.strokeStyle = scope.strokeCol
+                                                                ctx.shadowColor = scope.strokeCol
+                                                                ctx.shadowBlur = 8
+                                                                ctx.beginPath()
+                                                                for (var i = 0; i < N; i++) {
+                                                                    var frac = i / (N - 1)
+                                                                    var x = frac * w
+                                                                    // amplitude from the (right-aligned) rate series
+                                                                    var amp = 0
+                                                                    if (n > 0) {
+                                                                        var si = Math.floor(frac * (n - 1))
+                                                                        amp = s[si] / waveItem.peak   // 0..1
+                                                                    }
+                                                                    // oscillate around mid; flow scrolls the wave
+                                                                    var wob = Math.sin(i * 0.45 + waveItem.flow * Math.PI * 2)
+                                                                    var y = mid - amp * (h * 0.40) * wob
+                                                                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+                                                                }
+                                                                ctx.stroke()
+                                                                ctx.shadowBlur = 0
+                                                            }
                                                         }
                                                     }
-                                                }
 
-                                                // Bottom spacer
-                                                Item { implicitHeight: 2 }
+                                                    Text { visible: (modelData.tokens_per_min || 0) > 0; text: (modelData.tokens_per_min || 0) + " tk/min"; color: Theme.faint; font.family: "monospace"; font.pixelSize: Theme.tMeta }
+                                                    Rectangle {
+                                                        visible: (modelData.model || "") !== ""
+                                                        radius: 5; color: Qt.rgba(0,0,0,0.25); border.color: Theme.modelColor(modelData.model); border.width: 1
+                                                        Layout.preferredWidth: mlbl.implicitWidth + 12; Layout.preferredHeight: 18
+                                                        Text { id: mlbl; anchors.centerIn: parent; text: modelData.model || ""; color: Theme.modelColor(modelData.model); font.family: "monospace"; font.pixelSize: 9; font.bold: true }
+                                                    }
+                                                }
                                             }
 
                                             MouseArea {
