@@ -77,6 +77,16 @@ Window {
         return phase === "thinking" ? "#f0b860" : "#5fd2a8"
     }
 
+    // Model-family accent so the model chip is identifiable at a glance and
+    // visually prominent (#2): opus=gold, sonnet=blue, haiku=green.
+    function modelColor(m) {
+        m = (m || "").toLowerCase()
+        if (m.indexOf("opus")   !== -1) return "#f0a860"
+        if (m.indexOf("sonnet") !== -1) return "#7aa2f7"
+        if (m.indexOf("haiku")  !== -1) return "#5fd2a8"
+        return "#8a96a3"
+    }
+
     // Live "now", re-stamped every 30s, so relative quota-reset countdowns
     // ("resets in 1h 38m") tick down on their own between snapshots.
     property double nowMs: 0
@@ -781,18 +791,18 @@ Window {
                                                     visible: text !== ""
                                                 }
 
-                                                // Activity waveform: fixed 40-bar grid, right-aligned.
-                                                // Always renders 40 thin bars regardless of sample count.
-                                                // With few samples, left bars show a 2px baseline and the
-                                                // real samples rise on the right — filling in over time.
-                                                // Each bar animates height changes via NumberAnimation so
-                                                // the waveform feels "alive" as the rolling rate buffer updates.
+                                                // Activity waveform (#1): a glowing oscilloscope line,
+                                                // not bars. Amplitude at each point = that sample's token
+                                                // rate ÷ peak, so the more tokens Claude is producing, the
+                                                // taller the wave swings — idle ≈ flat, busy = loud. A
+                                                // continuously-animated `flow` phase scrolls the wave so it
+                                                // reads as alive/breathing even between rate updates. Newest
+                                                // sample is on the right (the live edge).
                                                 Item {
                                                     id: waveItem
                                                     Layout.fillWidth: true
-                                                    implicitHeight: 28
+                                                    implicitHeight: 30
 
-                                                    // Access rate_series defensively
                                                     property var series: modelData.rate_series || []
                                                     property real peak: {
                                                         var s = series
@@ -801,44 +811,56 @@ Window {
                                                             if (s[i] > mx) mx = s[i]
                                                         return mx
                                                     }
+                                                    // 0→1 looping phase that animates the wave's flow.
+                                                    property real flow: 0
+                                                    NumberAnimation on flow {
+                                                        from: 0; to: 1; duration: 1600
+                                                        loops: Animation.Infinite
+                                                        running: root.isActive(modelData.phase)
+                                                    }
+                                                    onFlowChanged: scope.requestPaint()
+                                                    onSeriesChanged: scope.requestPaint()
 
-                                                    // Fixed bar count — always 40 thin bars fills the row
-                                                    property int barCount: 40
+                                                    Canvas {
+                                                        id: scope
+                                                        anchors.fill: parent
+                                                        property color strokeCol: root.phaseColor(modelData.phase)
+                                                        onStrokeColChanged: requestPaint()
+                                                        onWidthChanged: requestPaint()
+                                                        onPaint: {
+                                                            var ctx = getContext("2d")
+                                                            var w = width, h = height, mid = h * 0.52
+                                                            ctx.clearRect(0, 0, w, h)
+                                                            // faint baseline
+                                                            ctx.strokeStyle = "rgba(255,255,255,0.05)"
+                                                            ctx.lineWidth = 1
+                                                            ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke()
 
-                                                    Row {
-                                                        anchors.bottom: parent.bottom
-                                                        anchors.left: parent.left
-                                                        anchors.right: parent.right
-                                                        height: parent.height
-                                                        spacing: 1
-
-                                                        Repeater {
-                                                            // Always 40 bars — no huge blocks from tiny sample counts
-                                                            model: waveItem.barCount
-
-                                                            delegate: Rectangle {
-                                                                required property int index
-                                                                // Thin fixed width so 40 bars fill the row (spacing 1 each)
-                                                                width: Math.max(2, (waveItem.width - (waveItem.barCount - 1)) / waveItem.barCount)
-                                                                height: {
-                                                                    var s = waveItem.series
-                                                                    // Right-align: newest sample on the rightmost bar.
-                                                                    // Empty slots on the left when series has fewer than barCount samples.
-                                                                    var offset = waveItem.barCount - s.length
-                                                                    var si = index - offset
-                                                                    if (si < 0 || si >= s.length) return 2  // no data yet → tiny baseline
-                                                                    return Math.max(2, (s[si] / waveItem.peak) * 24)
+                                                            var s = waveItem.series
+                                                            var n = s.length
+                                                            var N = 72            // render resolution
+                                                            ctx.lineWidth = 2
+                                                            ctx.lineJoin = "round"; ctx.lineCap = "round"
+                                                            ctx.strokeStyle = scope.strokeCol
+                                                            ctx.shadowColor = scope.strokeCol
+                                                            ctx.shadowBlur = 6
+                                                            ctx.beginPath()
+                                                            for (var i = 0; i < N; i++) {
+                                                                var frac = i / (N - 1)
+                                                                var x = frac * w
+                                                                // amplitude from the (right-aligned) rate series
+                                                                var amp = 0
+                                                                if (n > 0) {
+                                                                    var si = Math.floor(frac * (n - 1))
+                                                                    amp = s[si] / waveItem.peak   // 0..1
                                                                 }
-                                                                anchors.bottom: parent.bottom
-                                                                radius: 1
-                                                                color: root.phaseColor(modelData.phase)
-                                                                // Older (left) bars dimmer; newest (right) bars fully opaque
-                                                                opacity: 0.35 + 0.55 * (index / (waveItem.barCount - 1))
-                                                                // Animate height so bars grow/shrink smoothly as buffer updates
-                                                                Behavior on height {
-                                                                    NumberAnimation { duration: 320; easing.type: Easing.OutCubic }
-                                                                }
+                                                                // oscillate around mid; flow scrolls the wave
+                                                                var wob = Math.sin(i * 0.45 + waveItem.flow * Math.PI * 2)
+                                                                var y = mid - amp * (h * 0.40) * wob
+                                                                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
                                                             }
+                                                            ctx.stroke()
+                                                            ctx.shadowBlur = 0
                                                         }
                                                     }
                                                 }
@@ -854,25 +876,26 @@ Window {
                                                         color: "#566069"; font.pixelSize: 10
                                                     }
                                                     Item { Layout.fillWidth: true }
-                                                    // Model chip
-                                                    // Bug 3 fix: when modelData.model is null/undefined the old
-                                                    // expression evaluated to null (not bool) → "Unable to assign
-                                                    // [undefined] to bool". Use explicit string coercion instead.
-                                                    // Bug 4 fix: friendly label from snapshot_projection is short
-                                                    // (e.g. "sonnet-4.6") — drop the .substring(0,14) truncation.
+                                                    // Model chip (#2): color-coded by family + brighter/bolder
+                                                    // so the model is obvious at a glance (was a dim 9px grey
+                                                    // chip that disappeared). null-safe string coercion for
+                                                    // visible; friendly short label from snapshot_projection.
                                                     Rectangle {
+                                                        property string mc: root.modelColor(modelData.model)
                                                         visible: (modelData.model || "") !== ""
-                                                        radius: 4
-                                                        color: "#0e141b"
-                                                        border.color: "#1c2632"
+                                                        radius: 5
+                                                        // subtle tinted fill from the family colour (hex + alpha)
+                                                        color: Qt.rgba(0, 0, 0, 0.25)
+                                                        border.color: mc
                                                         border.width: 1
-                                                        width: modelChipLabel.width + 10
-                                                        height: 18
+                                                        width: modelChipLabel.width + 14
+                                                        height: 20
                                                         Text {
                                                             id: modelChipLabel
                                                             anchors.centerIn: parent
                                                             text: modelData.model || ""
-                                                            color: "#566069"; font.pixelSize: 9
+                                                            color: parent.mc
+                                                            font.pixelSize: 11; font.bold: true
                                                         }
                                                     }
                                                 }
