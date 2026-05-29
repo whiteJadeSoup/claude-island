@@ -177,7 +177,7 @@ def test_recents_no_model_key_when_dormant_has_no_model():
 # WorldViewModel.spendDetail() tests
 # ---------------------------------------------------------------------------
 
-def _fake_totals(cost=12.34, reqs=99, inp=1000, out=500, cr=200):
+def _fake_totals(cost=12.34, reqs=99, inp=1000, out=500, cr=200, cw=50):
     """Return a real UsageTotals with deterministic values.
 
     UsageTotals.cost_usd is a @property = sum of the four *_cost fields,
@@ -187,7 +187,7 @@ def _fake_totals(cost=12.34, reqs=99, inp=1000, out=500, cr=200):
         period="today",
         input_tokens=inp,
         output_tokens=out,
-        cache_creation_tokens=50,
+        cache_creation_tokens=cw,
         cache_read_tokens=cr,
         # Set the sub-costs so cost_usd == cost exactly.
         input_cost=cost,
@@ -290,19 +290,39 @@ def test_spend_detail_no_callbacks_returns_zeros():
 
 
 def test_spend_detail_hit_rate():
-    """hit_rate = cache_read / (cache_read + input_tokens) = 84 / (84 + 16) = 0.84."""
+    """hit_rate = cache_read / (cache_read + cache_creation) = 84 / (84 + 16) = 0.84.
+
+    input_tokens is deliberately huge here (9999) to prove it does NOT enter
+    the denominator — the old formula cache_read/(cache_read+input) would have
+    yielded 84/10083 ≈ 0.008, not 0.84.
+    """
     vm = WorldViewModel(
-        get_totals=lambda period: _fake_totals(inp=16, cr=84),
+        get_totals=lambda period: _fake_totals(inp=9999, cr=84, cw=16),
         get_totals_by_model=lambda period: _fake_by_model(),
     )
     d = vm.spendDetail()
     assert abs(d["hit_rate"] - 0.84) < 1e-9
 
 
-def test_spend_detail_hit_rate_zero_when_no_tokens():
-    """Both buckets zero → hit_rate must be 0.0 (guard divide-by-zero)."""
+def test_spend_detail_hit_rate_not_pinned_at_100_by_large_cache_read():
+    """Regression: cache_read dwarfing input must NOT pin hit_rate at ~100%.
+
+    Real-world shape from the bug report: 70.5M cache_read, 10.4K input,
+    but a substantial cache_creation bucket. The correct rate reflects
+    reads vs creations, not reads vs input.
+    """
     vm = WorldViewModel(
-        get_totals=lambda period: _fake_totals(inp=0, cr=0),
+        get_totals=lambda period: _fake_totals(inp=10_400, cr=70_500_000, cw=70_500_000),
+        get_totals_by_model=lambda period: _fake_by_model(),
+    )
+    # 70.5M reads / (70.5M reads + 70.5M creations) = 0.5, not ~1.0.
+    assert abs(vm.spendDetail()["hit_rate"] - 0.5) < 1e-9
+
+
+def test_spend_detail_hit_rate_zero_when_no_cache_traffic():
+    """No cache traffic in either direction → hit_rate 0.0 (guard divide-by-zero)."""
+    vm = WorldViewModel(
+        get_totals=lambda period: _fake_totals(inp=0, cr=0, cw=0),
         get_totals_by_model=lambda period: _fake_by_model(),
     )
     assert vm.spendDetail()["hit_rate"] == 0.0

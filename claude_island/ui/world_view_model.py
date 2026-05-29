@@ -17,13 +17,19 @@ _EMPTY = {"today_cost_usd": 0.0, "quota": None, "sessions": [], "decisions": [],
 _RATE_HISTORY_MAX = 60
 
 
-def _compute_hit_rate(cache_read: int, input_tokens: int) -> float:
+def _compute_hit_rate(cache_read: int, cache_creation: int) -> float:
     """Cache hit rate as a 0..1 float.
 
-    Formula: cache_read / (cache_read + input_tokens).
-    Returns 0.0 when both are zero to guard divide-by-zero.
+    Formula: cache_read / (cache_read + cache_creation) — reads ÷
+    (reads + creations). This is the fraction of *cache traffic* that
+    was a hit (read) vs a miss (write/creation). The denominator must
+    NOT include plain ``input_tokens``: those tokens never went through
+    the cache at all, so folding them in is meaningless — and because
+    cache_read dwarfs input_tokens (e.g. 70M vs 10K), it pinned the
+    rate at ~100%. Mirrors expanded_window.py:4795 (the old app).
+    Returns 0.0 when there is no cache traffic in either direction.
     """
-    total = cache_read + input_tokens
+    total = cache_read + cache_creation
     return cache_read / total if total > 0 else 0.0
 
 
@@ -211,6 +217,7 @@ class WorldViewModel(QObject):
                 pass
 
         cache_read = int(g(totals, "cache_read_tokens", "cache_read"))
+        cache_creation = int(g(totals, "cache_creation_tokens", "cache_creation"))
         input_tok = int(g(totals, "input_tokens"))
         output_tok = int(g(totals, "output_tokens"))
 
@@ -226,11 +233,11 @@ class WorldViewModel(QObject):
             # cache_creation_tokens is the "cache write" bucket;
             # cache_read_tokens is the "cache read / hit" bucket.
             "cache_read": cache_read,
-            # hit_rate = cache_read / (cache_read + input_tokens).
+            # hit_rate = cache_read / (cache_read + cache_creation).
             # UsageTotals has no hit_rate field; derive it here so QML
             # SpendPage can display it without recomputing in JS.
-            # Guard divide-by-zero: return 0.0 when both buckets are zero.
-            "hit_rate": _compute_hit_rate(cache_read, input_tok),
+            # Guard divide-by-zero: return 0.0 when there is no cache traffic.
+            "hit_rate": _compute_hit_rate(cache_read, cache_creation),
             # Subagent / sidechain breakdown for the TODAY card sub-line.
             "subagent_reqs": subagent_reqs,
             "subagent_cost": subagent_cost,
