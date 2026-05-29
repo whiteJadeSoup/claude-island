@@ -175,6 +175,22 @@ repeat 2 times
                     repeat with s in sessions of t
                         if tty of s is "{tty}" then
                             set winName to name of w
+                            -- Cross-Space: raise the window's Space BEFORE the pane-select
+                            -- statements below. A multi-pane window's title tracks its active
+                            -- pane, so the pane-select changes the title; raising afterward
+                            -- would search System Events for a title the window no longer has
+                            -- and silently miss. winName here still matches what System Events
+                            -- currently shows. AXRaise pulls the window's macOS Space to the
+                            -- front (the pane-select only reorders iTerm's internal list, it
+                            -- never switches Spaces). try-guarded: any AX failure degrades to
+                            -- the prior no-Space-switch behaviour.
+                            tell application "System Events"
+                                try
+                                    tell (first process whose unix id is {host_pid})
+                                        perform action "AXRaise" of (first window whose name is winName)
+                                    end tell
+                                end try
+                            end tell
                             -- Guarded mutators: skip the no-op
                             -- ``set miniaturized of w to false`` and
                             -- ``set index of w to 1`` calls when the
@@ -194,20 +210,6 @@ repeat 2 times
                             if index of w is not 1 then
                                 set index of w to 1
                             end if
-                            -- Cross-Space: select w only reorders iTerm's
-                            -- internal window list; it does NOT switch the
-                            -- macOS Space. When the target window is on a
-                            -- different Space, raise it via the Accessibility
-                            -- API, which DOES pull its Space to the front.
-                            -- try-guarded: a title mismatch / AX error
-                            -- degrades to the prior no-switch behaviour.
-                            tell application "System Events"
-                                try
-                                    tell (first process whose unix id is {host_pid})
-                                        perform action "AXRaise" of (first window whose name is winName)
-                                    end tell
-                                end try
-                            end tell
                             return "ok"
                         end if
                     end repeat
@@ -248,6 +250,22 @@ repeat 2 times
                     repeat with s in sessions of t
                         if (id of s as text) is "{session_id}" then
                             set winName to name of w
+                            -- Cross-Space: raise the window's Space BEFORE the pane-select
+                            -- statements below. A multi-pane window's title tracks its active
+                            -- pane, so the pane-select changes the title; raising afterward
+                            -- would search System Events for a title the window no longer has
+                            -- and silently miss. winName here still matches what System Events
+                            -- currently shows. AXRaise pulls the window's macOS Space to the
+                            -- front (the pane-select only reorders iTerm's internal list, it
+                            -- never switches Spaces). try-guarded: any AX failure degrades to
+                            -- the prior no-Space-switch behaviour.
+                            tell application "System Events"
+                                try
+                                    tell (first process whose unix id is {host_pid})
+                                        perform action "AXRaise" of (first window whose name is winName)
+                                    end tell
+                                end try
+                            end tell
                             -- Guarded mutators: skip the no-op
                             -- ``set miniaturized of w to false`` and
                             -- ``set index of w to 1`` calls when the
@@ -267,17 +285,6 @@ repeat 2 times
                             if index of w is not 1 then
                                 set index of w to 1
                             end if
-                            -- Cross-Space: see _FOCUS_SCRIPT_TEMPLATE. AXRaise
-                            -- the matched window so a session on another macOS
-                            -- Space is actually surfaced. try-guarded so any
-                            -- failure degrades to the prior no-switch path.
-                            tell application "System Events"
-                                try
-                                    tell (first process whose unix id is {host_pid})
-                                        perform action "AXRaise" of (first window whose name is winName)
-                                    end tell
-                                end try
-                            end tell
                             return "ok"
                         end if
                     end repeat

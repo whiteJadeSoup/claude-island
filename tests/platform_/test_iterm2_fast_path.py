@@ -512,10 +512,11 @@ class TestFocusSourceSwitchesSpace:
         i_name = source.index("set winName to name of w")
         i_select_w = source.index("select w")
         i_raise = source.index('perform action "AXRaise"')
-        assert i_name < i_select_w < i_raise
+        # AXRaise before select: select changes a multi-pane window's
+        # title, so raising after select would miss the title match.
+        assert i_name < i_raise < i_select_w
         i_end_try = source.index("end try", i_raise)
-        i_ok = source.index('return "ok"', i_raise)
-        assert i_end_try < i_ok, "AXRaise must be try-guarded before return ok"
+        assert i_end_try < i_select_w, "AXRaise must be try-guarded, closing before select w"
 
     def test_tty_source_axraises_after_select(self):
         self._assert_axraise(_FOCUS_BY_TTY_SOURCE)

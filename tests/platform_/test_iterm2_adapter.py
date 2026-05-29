@@ -1171,19 +1171,21 @@ class TestFocusScriptSwitchesSpace:
         # correctness) and matches the window by the captured title.
         assert "unix id is {}".format(host_pid) in script
         assert 'perform action "AXRaise" of (first window whose name is winName)' in script
-        # Ordering: title captured, window selected, THEN raised.
+        # Ordering: title captured, AXRaise, THEN selects.
         i_name = script.index("set winName to name of w")
         i_select_w = script.index("select w")
         i_raise = script.index('perform action "AXRaise"')
-        assert i_name < i_select_w < i_raise, (
-            "must capture title, select window, then AXRaise; "
-            "got name={} select_w={} raise={}".format(i_name, i_select_w, i_raise)
+        # AXRaise must run BEFORE select w/t/s: on a multi-pane window
+        # the select changes the window title, so raising after select
+        # would search for a title the window no longer has and miss.
+        assert i_name < i_raise < i_select_w, (
+            "must capture title, AXRaise, THEN select; "
+            "got name={} raise={} select_w={}".format(i_name, i_raise, i_select_w)
         )
-        # Graceful degradation: AXRaise is inside a try block that
-        # closes before the success return.
+        # Graceful degradation: AXRaise is inside a try block that closes
+        # before the selects run.
         i_end_try = script.index("end try", i_raise)
-        i_ok = script.index('return "ok"', i_raise)
-        assert i_end_try < i_ok, "AXRaise must be try-guarded before return ok"
+        assert i_end_try < i_select_w, "AXRaise must be try-guarded, closing before select w"
 
     def test_tty_template_axraises_after_select(self):
         script = _FOCUS_SCRIPT_TEMPLATE.format(host_pid=42, tty="/dev/ttys004")
