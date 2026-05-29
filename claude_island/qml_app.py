@@ -238,7 +238,8 @@ def main() -> int:
     # Mirrors __main__.py construction: app_backend wraps the names store and
     # JSONL dir; os_backend + terminal adapters are platform-specific.
     # Constructed before Snapshotter so its group_sessions can be injected
-    # (not done here yet — group_fn is left as default for the QML path).
+    # (wired below at Snapshotter(group_sessions=_dispatcher.group_sessions);
+    # without it views carry no capabilities and FOCUS dispatch always fails).
     _claude_projects = _P.home() / ".claude" / "projects"
     _app_backend = LocalAppBackend(
         names_store=session_names_store,
@@ -566,6 +567,12 @@ def main() -> int:
         get_available_providers=lambda: ["anthropic"],
         get_selected_provider=lambda: "anthropic",
         publish=marshaler.snap_ready.emit,
+        # Route views through the adapter chain so each SessionView carries
+        # real capabilities (FOCUS/REVEAL_CWD/RESET_THINKING) + adapter_id +
+        # focus_granularity. Without this the default singleton grouping yields
+        # empty capabilities and dispatch(view, FOCUS) always returns False
+        # (the "terminal may not support FOCUS" symptom). Mirrors __main__.
+        group_sessions=_dispatcher.group_sessions,
         # Wire PendingDecisionRegistry so snapshots carry decisions.
         pending_decisions=pending_registry,
         # resume-offline sources (History drawer population).
