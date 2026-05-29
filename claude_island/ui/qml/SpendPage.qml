@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import "."
 
 // Spend detail page — shown when user taps the cost/quota text in the top bar.
 // Props:  spend  — the dict returned by vm.spendDetail()
@@ -10,12 +11,32 @@ Rectangle {
     id: spendPage
 
     required property var spend   // { cost, reqs, input_tokens, output_tokens, cache_read, hit_rate, per_model }
-    required property var quota   // { five_hour_pct, weekly_pct, five_hour_reset, weekly_reset } | null
+    required property var quota   // { five_hour_pct, weekly_pct, five_hour_reset, weekly_reset, five_hour_reset_epoch, weekly_reset_epoch } | null
     required property var vm
 
     signal back()
 
     color: "#0c0f14"
+
+    // Live "now" ticker — re-stamped every 30s so reset countdowns tick down
+    // without waiting for a new snapshot.
+    property double nowMs: 0
+    Component.onCompleted: nowMs = Date.now()
+    Timer { interval: 30000; repeat: true; running: true; onTriggered: spendPage.nowMs = Date.now() }
+
+    // Format a quota reset countdown from an epoch-ms value.
+    // Returns "—" for 0/missing, "now" for elapsed, "Xd Yh" / "Xh Ym" / "Xm" / "<1m".
+    function fmtReset(epochMs) {
+        if (!epochMs) return "—"
+        var rem = epochMs - spendPage.nowMs
+        if (rem <= 0) return "now"
+        var mins = Math.floor(rem / 60000)
+        var h = Math.floor(mins / 60), m = mins % 60, d = Math.floor(h / 24)
+        if (d > 0) return d + "d " + (h % 24) + "h"
+        if (h > 0) return h + "h " + m + "m"
+        if (m > 0) return m + "m"
+        return "<1m"
+    }
 
     // Guard helpers — access spend fields safely when spend may be empty
     function spendVal(key, def) {
@@ -239,7 +260,7 @@ Rectangle {
                     Layout.leftMargin: 16
                     Layout.rightMargin: 16
                     Layout.bottomMargin: 10
-                    height: 46
+                    height: 34
                     visible: quota !== null && quota !== undefined
 
                     RowLayout {
@@ -253,11 +274,19 @@ Rectangle {
                             font.pixelSize: 11
                             Layout.fillWidth: true
                         }
+                        // Reset countdown — muted, monospace, small
+                        Text {
+                            text: "resets " + spendPage.fmtReset(quota && quota["five_hour_reset_epoch"] ? quota["five_hour_reset_epoch"] : 0)
+                            color: Theme.faint
+                            font.family: "monospace"
+                            font.pixelSize: Theme.tMeta
+                        }
                         Text {
                             text: clamp100(quotaVal("five_hour_pct", 0)) + "%"
                             color: "#f0a860"
                             font.family: "monospace"
                             font.pixelSize: 11
+                            Layout.leftMargin: 6
                         }
                     }
                     Rectangle {
@@ -275,12 +304,6 @@ Rectangle {
                             color: quotaVal("five_hour_pct", 0) > 80 ? "#e8743b" : "#5fd2a8"
                         }
                     }
-                    Text {
-                        anchors.bottom: parent.bottom
-                        text: "Resets: " + (quotaVal("five_hour_reset", "") || "—")
-                        color: "#566069"
-                        font.pixelSize: 10
-                    }
                 }
 
                 // Weekly bar
@@ -289,7 +312,7 @@ Rectangle {
                     Layout.leftMargin: 16
                     Layout.rightMargin: 16
                     Layout.bottomMargin: 16
-                    height: 46
+                    height: 34
                     visible: quota !== null && quota !== undefined && quotaVal("weekly_pct", -1) >= 0
 
                     RowLayout {
@@ -303,11 +326,19 @@ Rectangle {
                             font.pixelSize: 11
                             Layout.fillWidth: true
                         }
+                        // Reset countdown — muted, monospace, small
+                        Text {
+                            text: "resets " + spendPage.fmtReset(quota && quota["weekly_reset_epoch"] ? quota["weekly_reset_epoch"] : 0)
+                            color: Theme.faint
+                            font.family: "monospace"
+                            font.pixelSize: Theme.tMeta
+                        }
                         Text {
                             text: clamp100(quotaVal("weekly_pct", 0)) + "%"
                             color: "#f0a860"
                             font.family: "monospace"
                             font.pixelSize: 11
+                            Layout.leftMargin: 6
                         }
                     }
                     Rectangle {
@@ -324,12 +355,6 @@ Rectangle {
                             width: parent.width * clamp100(quotaVal("weekly_pct", 0)) / 100
                             color: quotaVal("weekly_pct", 0) > 80 ? "#e8743b" : "#5fd2a8"
                         }
-                    }
-                    Text {
-                        anchors.bottom: parent.bottom
-                        text: "Resets: " + (quotaVal("weekly_reset", "") || "—")
-                        color: "#566069"
-                        font.pixelSize: 10
                     }
                 }
             }
