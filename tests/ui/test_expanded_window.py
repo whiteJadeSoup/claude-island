@@ -2704,6 +2704,30 @@ class TestModelHelpers:
         # Empty string → empty (defensive; no model id ⇒ no chip).
         assert _resolve_model_short_name("") == ""
 
+    def test_short_name_opus_4_8_explicit(self):
+        from claude_island.ui.expanded_window import _resolve_model_short_name
+        # A: claude-opus-4-8 was missing from the registry, so it used to
+        # degrade to the bare family fallback "opus". Now registered.
+        assert _resolve_model_short_name("claude-opus-4-8") == "opus-4.8"
+        assert _resolve_model_short_name("claude-opus-4-8-20260514") == "opus-4.8"
+
+    def test_short_name_unregistered_anthropic_version_auto_formats(self):
+        from claude_island.ui.expanded_window import _resolve_model_short_name
+        # B: a NEW claude-<family>-<major>-<minor> that nobody has added to
+        # the registry must still show its version (auto-formatted from the
+        # canonical id shape) rather than silently degrading to "opus".
+        assert _resolve_model_short_name("claude-opus-4-9") == "opus-4.9"
+        assert _resolve_model_short_name("claude-opus-5-0") == "opus-5.0"
+        assert _resolve_model_short_name("claude-sonnet-4-7") == "sonnet-4.7"
+        assert _resolve_model_short_name("claude-haiku-5-0-20270101") == "haiku-5.0"
+
+    def test_short_name_bare_anthropic_family_still_resolves(self):
+        from claude_island.ui.expanded_window import _resolve_model_short_name
+        # A version-less family token (no -major-minor) isn't a real API id
+        # but must not crash or vanish — it resolves to the family name.
+        assert _resolve_model_short_name("opus") == "opus"
+        assert _resolve_model_short_name("claude-sonnet") == "sonnet"
+
     def test_color_known_families(self):
         from claude_island.ui.expanded_window import (
             _resolve_model_color, _MODEL_COLOR_FALLBACK
