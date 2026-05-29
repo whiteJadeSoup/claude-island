@@ -205,7 +205,7 @@ Rectangle {
         }
 
         // Bottom margin spacer
-        Item { height: 6 }
+        Item { Layout.preferredHeight: 6 }
     }
 
     // ── Question body component ───────────────────────────────────────────
@@ -246,7 +246,11 @@ Rectangle {
                     property bool isChecked: parent.selectedIndices && (index in parent.selectedIndices)
 
                     Layout.fillWidth: true
-                    height: optCol.height + 14
+                    // Layout child: reserve height via Layout.preferredHeight,
+                    // NOT `height:` (which the ColumnLayout ignores → rows would
+                    // reserve 0 and overlap — the unreadable question card bug).
+                    // +16 = the RowLayout's 8px top + 8px bottom anchors.margins.
+                    Layout.preferredHeight: optCol.implicitHeight + 16
                     radius: 6
                     color: optArea.containsMouse ? "#231a10" : (isChecked ? "#1a2010" : "transparent")
                     border.color: optArea.containsMouse ? "#4a3320"
@@ -263,7 +267,7 @@ Rectangle {
                         // Checkbox indicator (multi-select only)
                         Rectangle {
                             visible: parent.parent.isMulti
-                            width: 14; height: 14; radius: 3
+                            Layout.preferredWidth: 14; Layout.preferredHeight: 14; radius: 3
                             color: parent.parent.isChecked ? "#3a8040" : "#1a2010"
                             border.color: parent.parent.isChecked ? "#5fd2a8" : "#2a3a20"
                             border.width: 1
@@ -340,7 +344,7 @@ Rectangle {
             // "Other…" toggle row — always visible for question cards
             Rectangle {
                 Layout.fillWidth: true
-                height: 34
+                Layout.preferredHeight: 34
                 radius: 6
                 color: otherToggleArea.containsMouse ? "#231a10" : "transparent"
                 border.color: "transparent"
@@ -401,7 +405,7 @@ Rectangle {
                 // Submit free-text button
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 28
+                    Layout.preferredHeight: 28
                     radius: 6
                     color: otherSubmitArea.containsMouse ? "#1a2a20" : "#0e1a14"
                     border.color: otherSubmitArea.containsMouse ? "#5fd2a8" : "#2a3a20"
@@ -431,7 +435,7 @@ Rectangle {
             // Multi-select Submit button — only shown when multi_select and ≥1 selected
             Rectangle {
                 Layout.fillWidth: true
-                height: 30
+                Layout.preferredHeight: 30
                 radius: 6
                 visible: card.decision && card.decision.multi_select &&
                          Object.keys(parent.selectedIndices).length > 0
@@ -471,7 +475,7 @@ Rectangle {
             // Jump to terminal row — wired to vm.focusSession via session_uuid
             Rectangle {
                 Layout.fillWidth: true
-                height: 34
+                Layout.preferredHeight: 34
                 radius: 6
                 color: termArea.containsMouse ? "#1a1410" : "transparent"
                 border.color: "transparent"
@@ -535,7 +539,7 @@ Rectangle {
 
                 // Allow once (primary)
                 Rectangle {
-                    height: 32
+                    Layout.preferredHeight: 32
                     radius: 7
                     color: allowOnce.containsMouse ? "#d06830" : "#e8743b"
                     Layout.fillWidth: true
@@ -557,7 +561,7 @@ Rectangle {
 
                 // Always allow (secondary)
                 Rectangle {
-                    height: 32
+                    Layout.preferredHeight: 32
                     radius: 7
                     color: "transparent"
                     border.color: "#4a3320"
@@ -580,12 +584,12 @@ Rectangle {
 
                 // Deny (secondary)
                 Rectangle {
-                    height: 32
+                    Layout.preferredHeight: 32
                     radius: 7
                     color: "transparent"
                     border.color: "#4a3320"
                     border.width: 1
-                    width: denyLabel.width + 24
+                    Layout.preferredWidth: denyLabel.implicitWidth + 24
                     Text {
                         id: denyLabel
                         anchors.centerIn: parent

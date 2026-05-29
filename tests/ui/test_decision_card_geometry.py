@@ -71,15 +71,26 @@ def test_decision_card_reserves_height_approval():
 
 
 def test_decision_card_reserves_height_question():
+    """A 4-option question with descriptions must reserve real height for every
+    row. Pre-fix the option rows used `height:` (ignored by the ColumnLayout) so
+    they reserved 0 and overlapped — the card stayed short (~question-text only).
+    Each option row is ~40px+; 4 options + toggle + jump must clear 150px.
+    """
     question = dict(_APPROVAL)
     question.update(
         kind="ask_question",
-        question_text="Which approach?",
-        options=["A", "B", "C"],
-        option_descriptions=["first", "second", "third"],
+        question_text="Which direction should the memory system take next?",
+        options=["真机端到端验证", "P3 可写", "P4 可久", "巩固已交付"],
+        option_descriptions=[
+            "跑 uv run mini-cc, 让真实 LLM 看到注入的 MEMORY.md 索引并存一条 memory。",
+            "写前去重 + 可选的子代理会话结束时把对话蒸馏成 memory。",
+            "读取侧时效治理:给注入的 memory 加 age/新鲜度提示。",
+            "不加新功能:code review 最近的 feat(memory) 提交并处理延后边界。",
+        ],
     )
     engine, comp, card = _make_card(question)
     ih = card.property("implicitHeight")
-    assert ih is not None and ih > 40, (
-        f"DecisionCard(question).implicitHeight={ih} — question card reserves no height."
+    assert ih is not None and ih > 150, (
+        f"DecisionCard(question).implicitHeight={ih} — option rows reserve no "
+        f"height, so they overlap (Image #8). Expected > 150 for 4 options."
     )
