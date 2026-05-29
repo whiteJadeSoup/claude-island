@@ -1,12 +1,13 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
+import "."
 
-// Recents (dormant sessions) — History redesign.
+// Recents (dormant sessions) — History redesign as a left-rail TIMELINE.
 // Props:  recents — QVariantList of {
-//             name, cwd, last_seen, last_activity_ts, cost_usd, session_uuid,
-//             turns (optional), model (optional)
-//         }
+//             name, cwd, last_activity_ts (epoch seconds, float),
+//             cost_usd, session_uuid, turns (optional), transcript_path
+//         }  — model info is intentionally NOT shown (path matters, model doesn't)
 //         vm      — worldVm (for resumeSession slot)
 // Signal: back()  — parent connects to `page = "home"`
 Rectangle {
@@ -17,7 +18,7 @@ Rectangle {
 
     signal back()
 
-    color: "#0c0f14"
+    color: Theme.bg
 
     // ── Sort mode: "recent" | "cost" ───────────────────────────────────────
     property string sortMode: "recent"
@@ -32,36 +33,28 @@ Rectangle {
     }
 
     // ── Helper: relative time from epoch seconds ───────────────────────────
-    // Returns "3h ago" / "1d ago" / "5d ago" / "just now" etc.
-    function fmtAgo(ts) {
-        if (!ts || ts <= 0) return ""
-        var now = Date.now() / 1000  // epoch seconds
-        var diff = Math.max(0, now - ts)
-        if (diff < 60)          return "just now"
-        if (diff < 3600)        return Math.floor(diff / 60) + "m ago"
-        if (diff < 86400)       return Math.floor(diff / 3600) + "h ago"
-        if (diff < 7 * 86400)   return Math.floor(diff / 86400) + "d ago"
+    // Coarse buckets: "Nm ago" / "Nh ago" / "Nd ago". (Task-specified shape.)
+    function fmtRelative(tsSec) {
+        if (!tsSec) return ""
+        var diff = Date.now() / 1000 - tsSec
+        if (diff < 3600)  return Math.max(1, Math.floor(diff / 60)) + "m ago"
+        if (diff < 86400) return Math.floor(diff / 3600) + "h ago"
         return Math.floor(diff / 86400) + "d ago"
     }
 
-    // ── Helper: compute group label from epoch seconds ─────────────────────
-    // Returns "Today" / "Yesterday" / "Earlier"
-    function groupOf(ts) {
-        if (!ts || ts <= 0) return "Earlier"
-        var now = new Date()
-        var d   = new Date(ts * 1000)
-        // Compare calendar dates in local time
-        var nowMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-        var dMidnight   = new Date(d.getFullYear(),   d.getMonth(),   d.getDate())
-        var diffDays = Math.round((nowMidnight - dMidnight) / 86400000)
-        if (diffDays === 0) return "Today"
-        if (diffDays === 1) return "Yesterday"
+    // ── Helper: recency group label from epoch seconds ─────────────────────
+    // Rolling-window buckets (Task-specified): "Today" / "Yesterday" / "Earlier".
+    function groupOf(tsSec) {
+        var diff = Date.now() / 1000 - tsSec
+        if (diff < 86400)  return "Today"
+        if (diff < 172800) return "Yesterday"
         return "Earlier"
     }
 
     // ── Helper: build the flat list fed to the Repeater ───────────────────
-    // Returns [{type:"header", label:""} | {type:"row", ...item...}]
-    // Applies search filter, sort, and group insertion.
+    // Returns [{type:"header", label} | {type:"row", item}].  Using a flat
+    // model (vs comparing prior index inside the delegate) keeps header
+    // insertion logic in one place and the delegate a pure painter.
     function buildFlatList() {
         var src = recents || []
 
@@ -107,23 +100,21 @@ Rectangle {
     // ── Reactive flat list — rebuilds when recents / search / sort changes ─
     property var flatList: []
 
-    // Recompute whenever any of the three inputs change
     onRecentsChanged:    flatList = buildFlatList()
     onSearchTextChanged: flatList = buildFlatList()
     onSortModeChanged:   flatList = buildFlatList()
 
     Component.onCompleted: flatList = buildFlatList()
 
-    // ── Build meta line from an item dict ─────────────────────────────────
+    // ── Meta line for a row: "📁 <cwd> · <turns> turns · <relative>" ──────
     function metaLine(item) {
         var parts = []
-        var ago = fmtAgo(item.last_activity_ts || 0)
+        if (item.cwd) parts.push("📁 " + item.cwd)
+        if (item.turns !== undefined && item.turns !== null)
+            parts.push(item.turns + " turns")
+        var ago = fmtRelative(item.last_activity_ts || 0)
         if (ago) parts.push(ago)
-        if (item.turns !== undefined && item.turns !== null) parts.push(item.turns + " turns")
-        if (item.model) parts.push(item.model)
-        // Append cwd as dimmer trailing element (separator from leading parts)
-        var line = parts.join(" · ")
-        return line
+        return parts.join(" · ")
     }
 
     ColumnLayout {
@@ -133,7 +124,7 @@ Rectangle {
         // ── Header ────────────────────────────────────────────────────────
         Rectangle {
             Layout.fillWidth: true
-            height: 44
+            Layout.preferredHeight: 44
             color: "transparent"
 
             RowLayout {
@@ -144,7 +135,7 @@ Rectangle {
 
                 Text {
                     text: "‹ Back"
-                    color: backArea.containsMouse ? "#c8d4de" : "#7e8a97"
+                    color: backArea.containsMouse ? Theme.ink2 : Theme.dim
                     font.pixelSize: 13
                     MouseArea {
                         id: backArea
@@ -159,14 +150,14 @@ Rectangle {
 
                 Text {
                     text: "History"
-                    color: "#e9edf2"
+                    color: Theme.ink
                     font.pixelSize: 13
                     font.bold: true
                 }
 
                 Item { Layout.fillWidth: true }
                 // Spacer to keep title centered (mirrors back arrow width)
-                Item { width: 42 }
+                Item { Layout.preferredWidth: 42 }
             }
         }
 
@@ -176,10 +167,10 @@ Rectangle {
             Layout.leftMargin: 13
             Layout.rightMargin: 13
             Layout.bottomMargin: 8
-            height: 34
-            color: "#080c11"
+            Layout.preferredHeight: 34
+            color: Theme.surface
             radius: 8
-            border.color: searchField.activeFocus ? "#2a3a50" : "#151b22"
+            border.color: searchField.activeFocus ? Theme.bd2 : Theme.bd
             border.width: 1
 
             RowLayout {
@@ -188,46 +179,42 @@ Rectangle {
                 anchors.rightMargin: 10
                 spacing: 6
 
-                // Search icon
                 Text {
                     text: "⌕"
-                    color: "#566069"
+                    color: Theme.faint
                     font.pixelSize: 14
                 }
 
-                // Search input + placeholder stack
                 Item {
                     Layout.fillWidth: true
-                    height: 20
+                    Layout.preferredHeight: 20
 
                     TextInput {
                         id: searchField
                         anchors.fill: parent
-                        color: "#c8d4de"
+                        color: Theme.ink2
                         font.pixelSize: 12
-                        selectionColor: "#2a3a50"
-                        selectedTextColor: "#e9edf2"
+                        selectionColor: Theme.bd2
+                        selectedTextColor: Theme.ink
                         clip: true
                         verticalAlignment: TextInput.AlignVCenter
                         onTextChanged: recentsPage.searchText = text
                     }
 
-                    // Placeholder shown when field is empty and not focused
                     Text {
                         anchors.fill: parent
                         text: "Search sessions…"
-                        color: "#3a4752"
+                        color: Theme.faint
                         font.pixelSize: 12
                         verticalAlignment: Text.AlignVCenter
                         visible: searchField.text === "" && !searchField.activeFocus
                     }
                 }
 
-                // Sort toggle
                 Text {
                     id: sortToggle
                     text: recentsPage.sortMode === "recent" ? "Recent ↓" : "Cost ↓"
-                    color: sortToggleArea.containsMouse ? "#5fd2a8" : "#566069"
+                    color: sortToggleArea.containsMouse ? Theme.teal : Theme.faint
                     font.pixelSize: 11
                     MouseArea {
                         id: sortToggleArea
@@ -250,7 +237,7 @@ Rectangle {
             Text {
                 anchors.centerIn: parent
                 text: "No history yet"
-                color: "#566069"
+                color: Theme.faint
                 font.pixelSize: 13
             }
         }
@@ -266,16 +253,16 @@ Rectangle {
             Text {
                 anchors.centerIn: parent
                 text: "No matching sessions"
-                color: "#566069"
+                color: Theme.faint
                 font.pixelSize: 13
             }
         }
 
-        // ── Session list ──────────────────────────────────────────────────
+        // ── Timeline list ─────────────────────────────────────────────────
         Flickable {
-            // objectName used by test_qml_no_warnings.py to locate this Flickable
-            // and assert that contentHeight > 0 (geometry regression guard for
-            // the Loader implicitHeight fix — rows must have real height).
+            // objectName used by test_qml_no_warnings.py to locate this
+            // Flickable and assert contentHeight > 50 (geometry regression
+            // guard — rows must have real height, never collapse to 0).
             objectName: "recentsListFlickable"
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -283,17 +270,31 @@ Rectangle {
             clip: true
             visible: recents && recents.length > 0 && recentsPage.flatList.length > 0
 
-            // Thin scrollbar
             ScrollBar.vertical: ScrollBar {
                 width: 5
                 policy: ScrollBar.AsNeeded
                 contentItem: Rectangle {
                     implicitWidth: 5
                     radius: 2
-                    color: "#26303c"
+                    color: Theme.bd2
                     opacity: parent.active ? 0.8 : 0.4
                 }
                 background: Item {}
+            }
+
+            // Left timeline rail — a thin vertical line spanning the full list
+            // height. It sits behind the rows; each row paints its own node dot
+            // aligned to this rail's x.  RAIL_X is the rail centre, in list
+            // coordinates; row delegates reuse it to place their node.
+            readonly property int railX: 22
+
+            Rectangle {
+                // The rail runs the height of the content, behind every row.
+                x: parent.railX - 1
+                y: 0
+                width: 2
+                height: listCol.height
+                color: "#181d24"
             }
 
             ColumnLayout {
@@ -303,44 +304,72 @@ Rectangle {
 
                 Repeater {
                     model: recentsPage.flatList
-                    // Inline delegate that switches between header and row layouts
-                    // based on modelData.type.  Using a single delegate with an
-                    // explicit Layout.preferredHeight avoids the Loader-height trap:
-                    // when a Loader is a ColumnLayout child, its item's height is
-                    // not automatically adopted, making every row collapse to 0 and
-                    // the History list appear empty.  A direct delegate with a
-                    // conditional Item has no such issue.
+                    // Inline delegate (NOT a Loader): a ColumnLayout child Loader
+                    // does not adopt its item's height, collapsing every row to
+                    // 0 and emptying the list. A direct Item with an explicit
+                    // Layout.preferredHeight measures correctly under Qt 6.
                     delegate: Item {
+                        id: rowRoot
                         required property var modelData
                         required property int index
 
                         readonly property bool isHeader: modelData.type === "header"
+                        // The dict for a row entry ({} for a header so bindings stay safe)
+                        readonly property var rowItem: isHeader ? ({}) : (modelData.item || {})
 
                         Layout.fillWidth: true
-                        // Preferred height drives ColumnLayout allocation.  Must be
-                        // explicit so Qt 6's layout engine measures correctly.
-                        Layout.preferredHeight: isHeader ? 28 : rowContentHolder.implicitHeight + 20
+                        Layout.preferredHeight: isHeader ? 30 : (rowContentHolder.implicitHeight + 22)
 
-                        // ── Header variant ────────────────────────────────────
+                        // ── Group header variant ──────────────────────────────
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 16
                             anchors.rightMargin: 16
-                            visible: parent.isHeader
+                            visible: rowRoot.isHeader
 
                             Text {
-                                text: parent.visible ? (parent.parent.modelData.label || "") : ""
-                                color: "#566069"
+                                text: rowRoot.isHeader ? (rowRoot.modelData.label || "") : ""
+                                color: Theme.faint
                                 font.pixelSize: 10
                                 font.letterSpacing: 1.5
                                 font.bold: true
                             }
                             Rectangle {
                                 Layout.fillWidth: true
-                                height: 1
-                                color: "#151b22"
+                                Layout.preferredHeight: 1
                                 Layout.alignment: Qt.AlignVCenter
                                 Layout.leftMargin: 8
+                                color: Theme.bd
+                            }
+                        }
+
+                        // ── Timeline node dot — aligned to the rail ───────────
+                        // 9px circle on the rail; teal + glow when the row is
+                        // hovered, otherwise a dim filled node with a ring.
+                        Rectangle {
+                            id: node
+                            visible: !rowRoot.isHeader
+                            width: 9
+                            height: 9
+                            radius: 4.5
+                            // Centre on the rail line, vertically near the title.
+                            x: 22 - width / 2
+                            y: 18
+                            color: rowHover.containsMouse ? Theme.teal : Theme.bg
+                            border.width: 2
+                            border.color: rowHover.containsMouse ? Theme.teal : "#2e3742"
+
+                            // Hover glow ring around the node
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 18
+                                height: 18
+                                radius: 9
+                                color: "transparent"
+                                border.width: 1
+                                border.color: Theme.teal
+                                opacity: rowHover.containsMouse ? 0.45 : 0.0
+                                Behavior on opacity { NumberAnimation { duration: 140 } }
                             }
                         }
 
@@ -349,89 +378,95 @@ Rectangle {
                             id: rowCard
                             anchors.left: parent.left
                             anchors.right: parent.right
-                            anchors.leftMargin: 13
+                            // Indent past the rail so content clears the node.
+                            anchors.leftMargin: 38
                             anchors.rightMargin: 13
                             anchors.top: parent.top
                             anchors.bottom: parent.bottom
                             anchors.bottomMargin: 6
-                            visible: !parent.isHeader
+                            visible: !rowRoot.isHeader
                             radius: 8
-                            color: rowHover.containsMouse ? "#0e141b" : "#0a1018"
-                            border.color: rowHover.containsMouse ? "#1c2632" : "#151b22"
+                            color: rowHover.containsMouse ? Theme.surface2 : "transparent"
+                            border.color: rowHover.containsMouse ? Theme.bd2 : "transparent"
                             border.width: 1
 
-                            // Alias for clarity: the item dict from the flat list
-                            readonly property var rowItem: parent.isHeader ? ({}) : (parent.modelData.item || {})
+                            // Card-wide hover/click area FIRST (behind content) so the
+                            // nested resume-pill MouseArea, which sits on top, receives
+                            // its own clicks. A plain card click resumes the session
+                            // (primary action for a dormant session); nested morph
+                            // detail is out of scope here.
+                            MouseArea {
+                                id: rowHover
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (recentsPage.vm && rowRoot.rowItem.session_uuid)
+                                        recentsPage.vm.resumeSession(rowRoot.rowItem.session_uuid)
+                                }
+                            }
 
                             ColumnLayout {
                                 id: rowContentHolder
                                 anchors.top: parent.top
                                 anchors.left: parent.left
                                 anchors.right: parent.right
-                                anchors.topMargin: 10
-                                anchors.leftMargin: 12
-                                anchors.rightMargin: 12
+                                anchors.topMargin: 9
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
                                 spacing: 3
 
+                                // First line: project name (phosphor) + cost
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: 8
                                     Text {
                                         Layout.fillWidth: true
-                                        text: rowCard.rowItem.name || "Unknown session"
-                                        color: "#e9edf2"
+                                        text: rowRoot.rowItem.name || "Unknown session"
+                                        color: Theme.phos
                                         font.pixelSize: 13
                                         font.bold: true
                                         elide: Text.ElideRight
                                     }
                                     Text {
-                                        text: recentsPage.fmtCost(rowCard.rowItem.cost_usd || 0)
-                                        color: "#f0a860"
+                                        text: recentsPage.fmtCost(rowRoot.rowItem.cost_usd || 0)
+                                        color: Theme.costColor(rowRoot.rowItem.cost_usd || 0)
                                         font.family: "monospace"
                                         font.pixelSize: 12
                                         font.bold: true
                                     }
                                 }
 
+                                // Second line: 📁 <cwd> · <turns> turns · <relative>
                                 Text {
                                     Layout.fillWidth: true
-                                    text: rowCard.rowItem.cwd || ""
-                                    color: "#3a4752"
+                                    text: recentsPage.metaLine(rowRoot.rowItem)
+                                    color: Theme.faint
                                     font.family: "monospace"
                                     font.pixelSize: 10
                                     elide: Text.ElideRight
                                     visible: text !== ""
                                 }
 
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: recentsPage.metaLine(rowCard.rowItem)
-                                    color: "#566069"
-                                    font.pixelSize: 10
-                                    elide: Text.ElideRight
-                                    visible: text !== ""
-                                }
-
-                                // Hover-revealed action row
+                                // Hover-revealed action row: ↻ resume pill
                                 RowLayout {
                                     Layout.fillWidth: true
                                     Layout.topMargin: 4
                                     spacing: 8
                                     visible: rowHover.containsMouse
 
-                                    // Resume button
                                     Rectangle {
-                                        width: resumeLabel.width + 16
-                                        height: 24
+                                        Layout.preferredWidth: resumeLabel.width + 16
+                                        Layout.preferredHeight: 24
                                         radius: 6
-                                        color: resumeArea.containsMouse ? "#1a2a20" : "transparent"
-                                        border.color: resumeArea.containsMouse ? "#5fd2a8" : "#2a3a30"
+                                        color: resumeArea.containsMouse ? "#16261f" : "transparent"
+                                        border.color: Theme.teal
                                         border.width: 1
                                         Text {
                                             id: resumeLabel
                                             anchors.centerIn: parent
-                                            text: "Resume"
-                                            color: resumeArea.containsMouse ? "#5fd2a8" : "#7e8a97"
+                                            text: "↻ resume"
+                                            color: Theme.teal
                                             font.pixelSize: 11
                                         }
                                         MouseArea {
@@ -440,37 +475,8 @@ Rectangle {
                                             cursorShape: Qt.PointingHandCursor
                                             hoverEnabled: true
                                             onClicked: {
-                                                if (recentsPage.vm && rowCard.rowItem.session_uuid)
-                                                    recentsPage.vm.resumeSession(rowCard.rowItem.session_uuid)
-                                            }
-                                        }
-                                    }
-
-                                    // Open transcript button
-                                    Rectangle {
-                                        width: transcriptLabel.width + 16
-                                        height: 24
-                                        radius: 6
-                                        visible: rowCard.rowItem.transcript_path !== undefined &&
-                                                 rowCard.rowItem.transcript_path !== ""
-                                        color: transcriptArea.containsMouse ? "#1a1a2a" : "transparent"
-                                        border.color: transcriptArea.containsMouse ? "#5fa8d2" : "#1c2030"
-                                        border.width: 1
-                                        Text {
-                                            id: transcriptLabel
-                                            anchors.centerIn: parent
-                                            text: "Transcript"
-                                            color: transcriptArea.containsMouse ? "#5fa8d2" : "#566069"
-                                            font.pixelSize: 11
-                                        }
-                                        MouseArea {
-                                            id: transcriptArea
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            hoverEnabled: true
-                                            onClicked: {
-                                                if (recentsPage.vm && rowCard.rowItem.transcript_path)
-                                                    recentsPage.vm.openTranscript(rowCard.rowItem.transcript_path)
+                                                if (recentsPage.vm && rowRoot.rowItem.session_uuid)
+                                                    recentsPage.vm.resumeSession(rowRoot.rowItem.session_uuid)
                                             }
                                         }
                                     }
@@ -478,21 +484,13 @@ Rectangle {
                                     Item { Layout.fillWidth: true }
                                 }
                             }
-
-                            // Hover area for the entire card
-                            MouseArea {
-                                id: rowHover
-                                anchors.fill: parent
-                                hoverEnabled: true
-                            }
                         }
                     }
                 }
 
                 // Bottom padding
-                Item { height: 12 }
+                Item { Layout.preferredHeight: 12 }
             }
         }
     }
-
 }
