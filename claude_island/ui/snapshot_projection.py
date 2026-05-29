@@ -72,6 +72,10 @@ def _session(v: SessionView) -> dict[str, Any]:
         "tokens_per_min": v.tokens_per_min,
         "current_tool_input": v.current_tool_input,
         "turn_count": int(v.turn_count or 0),
+        # Active-session card fields: the Bash/tool command being run and
+        # how long it has been running (floored to int seconds for QML).
+        "command": v.current_tool_input or "",
+        "elapsed_s": int(v.tool_elapsed_s or 0),
     }
 
 
