@@ -149,6 +149,16 @@ def main() -> int:
     from PySide6.QtQuickControls2 import QQuickStyle
     QQuickStyle.setStyle("Basic")
 
+    # Crisp small UI text on Windows. QML Text defaults to QtRendering
+    # (distance-field glyph atlas), which is built for smooth scaling/rotation
+    # but looks soft/blurry for static small-pixel UI labels at 1.0–1.5× DPI —
+    # the "字糊了" the detail page showed. NativeRendering uses the platform's
+    # hinted rasteriser, giving sharp text at our sizes. Set globally BEFORE
+    # any Text item is created so every surface inherits it. Trade-off: native
+    # text doesn't animate scale as smoothly, but we never scale text.
+    from PySide6.QtQuick import QQuickWindow
+    QQuickWindow.setTextRenderType(QQuickWindow.TextRenderType.NativeRendering)
+
     app = QGuiApplication(sys.argv)
 
     # macOS accessory policy (post-app-creation path): runtime call that
@@ -617,8 +627,6 @@ def main() -> int:
         rename_fn=session_names_store.set_session_name,
         open_folder_fn=open_folder_fn,
         reset_thinking_fn=reset_thinking_fn,
-        get_review=permission_cache.is_review,
-        set_review=permission_cache.set_review,
     )
     world.observable().subscribe(
         on_next=vm.update,

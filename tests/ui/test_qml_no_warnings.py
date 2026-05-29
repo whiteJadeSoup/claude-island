@@ -219,7 +219,6 @@ def test_qml_loads_with_zero_runtime_warnings():
                 _FakeModelTotals("claude-opus-4-7", 55.0),
                 _FakeModelTotals("claude-sonnet-4-6", 8.0),
             ),
-            get_review=lambda uuid: False,
         )
         # Two updates so rate_series accumulates (the waveform reads it).
         vm.update(_full_snap())
@@ -300,7 +299,6 @@ def test_recents_history_rows_have_real_height():
             get_totals_by_model=lambda period: (
                 _FakeModelTotals("claude-opus-4-7", 55.0),
             ),
-            get_review=lambda uuid: False,
         )
 
         # Use 3 dormant sessions to make collapsed-height bugs obvious

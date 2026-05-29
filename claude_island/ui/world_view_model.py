@@ -33,6 +33,40 @@ def _compute_hit_rate(cache_read: int, cache_creation: int) -> float:
     return cache_read / total if total > 0 else 0.0
 
 
+def _clean_per_model(rows) -> list[dict]:
+    """Filter Claude Code's ``<synthetic>`` placeholder + zero-usage rows,
+    aggregate by friendly label, sort by cost descending.
+
+    Mirrors expanded_window.py ``_aggregate_per_model_for_display``. The
+    ``<synthetic>`` bucket is what Claude Code attributes ``/compact``
+    summaries and other non-API messages to; it carries zero real usage,
+    so surfacing it as a model row is pure noise (user saw it leak into
+    the SessionDetail breakdown). Aggregating by friendly label also folds
+    two ``opus`` rows into one when the raw model id changed mid-session.
+
+    Each row is duck-typed (ModelTotals): ``.model``, ``.cost_usd`` and the
+    four token buckets. Returns ``[{"model", "cost"}]`` for QML.
+    """
+    buckets: dict[str, float] = {}
+    for mt in (rows or ()):
+        raw = str(getattr(mt, "model", "") or "")
+        cost = float(getattr(mt, "cost_usd", 0.0) or 0.0)
+        inp = int(getattr(mt, "input_tokens", 0) or 0)
+        out = int(getattr(mt, "output_tokens", 0) or 0)
+        cw = int(getattr(mt, "cache_creation_tokens", 0) or 0)
+        cr = int(getattr(mt, "cache_read_tokens", 0) or 0)
+        if "synthetic" in raw.lower():
+            continue
+        if cost == 0 and inp == 0 and out == 0 and cw == 0 and cr == 0:
+            continue
+        label = _fmt_model(raw) or raw
+        buckets[label] = buckets.get(label, 0.0) + cost
+    return [
+        {"model": label, "cost": cost}
+        for label, cost in sorted(buckets.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+
+
 class WorldViewModel(QObject):
     changed = Signal()
 
@@ -62,8 +96,6 @@ class WorldViewModel(QObject):
         rename_fn: Callable | None = None,
         open_folder_fn: Callable | None = None,
         reset_thinking_fn: Callable | None = None,
-        get_review: Callable | None = None,
-        set_review: Callable | None = None,
     ) -> None:
         super().__init__(parent)
         self._d = dict(_EMPTY)
@@ -83,10 +115,6 @@ class WorldViewModel(QObject):
         self._rename_fn: Callable = rename_fn or (lambda uuid, name: None)
         self._open_folder_fn: Callable = open_folder_fn or (lambda sid: None)
         self._reset_thinking_fn: Callable = reset_thinking_fn or (lambda uuid: None)
-        # Review-mode read/write — default to always-False / no-op so the
-        # toggle renders as "off" when no permission cache is wired.
-        self._get_review: Callable = get_review or (lambda uuid: False)
-        self._set_review: Callable = set_review or (lambda uuid, enabled: None)
 
         # Rolling token-rate history: session_id → list of up-to-60 int samples.
         # One sample (tokens_per_min or 0) appended per update() call.
@@ -189,20 +217,13 @@ class WorldViewModel(QObject):
                     return getattr(o, n)
             return default
 
-        per_model = []
-        if by_model:
-            # get_totals_by_model returns tuple[ModelTotals, ...].
-            # ModelTotals has .model (str) and .cost_usd (float).
-            # Apply _fmt_model so SpendPage shows "opus-4.7" not "claude-opus-4-7".
-            try:
-                for mt in by_model:
-                    raw_model = str(getattr(mt, "model", ""))
-                    per_model.append({
-                        "model": _fmt_model(raw_model) or raw_model,
-                        "cost": float(g(mt, "cost_usd", "cost")),
-                    })
-            except Exception:
-                per_model = []
+        # get_totals_by_model returns tuple[ModelTotals, ...]. _clean_per_model
+        # applies the friendly label, drops the <synthetic> placeholder and
+        # zero-usage rows, and aggregates by label (see its docstring).
+        try:
+            per_model = _clean_per_model(by_model)
+        except Exception:
+            per_model = []
 
         # Subagent (sidechain) aggregation for the "↳ incl. N subagent reqs" line.
         # get_sidechain_totals returns (count: int, cost: float) for the period.
@@ -321,16 +342,10 @@ class WorldViewModel(QObject):
                     return getattr(obj, n)
             return default
 
-        per_model = []
+        # Drop <synthetic> + zero rows and aggregate by friendly label so the
+        # SessionDetail breakdown never shows the "synthetic" noise row.
         try:
-            for mt in (_g(details, "per_model") or ()):
-                raw = str(_g(mt, "model", default=""))
-                per_model.append({
-                    # Apply friendly label ("opus-4.7") so SessionDetailPage
-                    # doesn't display the raw internal id ("claude-opus-4-7").
-                    "model": _fmt_model(raw) or raw,
-                    "cost": float(_g(mt, "cost_usd", "cost", default=0.0)),
-                })
+            per_model = _clean_per_model(_g(details, "per_model"))
         except Exception:
             per_model = []
 
@@ -448,20 +463,3 @@ class WorldViewModel(QObject):
         except Exception as exc:
             import sys
             print(f"[island] resetThinking error: {exc}", file=sys.stderr)
-
-    @Slot(str, bool)
-    def setReviewMode(self, uuid: str, on: bool) -> None:
-        """Set or clear the per-session "Review prompts" toggle."""
-        try:
-            self._set_review(uuid, bool(on))
-        except Exception as exc:
-            import sys
-            print(f"[island] setReviewMode error: {exc}", file=sys.stderr)
-
-    @Slot(str, result=bool)
-    def reviewMode(self, uuid: str) -> bool:
-        """Return the current review-mode state for the session."""
-        try:
-            return bool(self._get_review(uuid))
-        except Exception:
-            return False

@@ -565,66 +565,6 @@ Rectangle {
                     }
                 }
 
-                // ── Review mode toggle (visual only) ──────────────────────
-                Item {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    Layout.topMargin: 14
-                    Layout.bottomMargin: 14
-                    implicitHeight: reviewRow.height
-
-                    RowLayout {
-                        id: reviewRow
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-
-                        Text {
-                            text: "Review mode"
-                            color: "#7e8a97"
-                            font.pixelSize: 12
-                            Layout.fillWidth: true
-                        }
-
-                        // Toggle pill — wired to vm.reviewMode / vm.setReviewMode
-                        Rectangle {
-                            id: toggleTrack
-                            width: 40; height: 22; radius: 11
-
-                            // Read current review mode from VM each time detail updates.
-                            // Compute once and cache; avoids calling the slot on every paint.
-                            property bool toggleOn: detailPage.vm && dv("uuid") !== ""
-                                                    ? detailPage.vm.reviewMode(dv("uuid"))
-                                                    : false
-
-                            color: toggleOn ? "#1a3a28" : "#151b22"
-                            border.color: toggleOn ? "#5fd2a8" : "#26303c"
-                            border.width: 1
-
-                            Behavior on color { ColorAnimation { duration: 150 } }
-
-                            Rectangle {
-                                width: 16; height: 16; radius: 8
-                                anchors.verticalCenter: parent.verticalCenter
-                                x: toggleTrack.toggleOn ? (parent.width - width - 3) : 3
-                                color: toggleTrack.toggleOn ? "#5fd2a8" : "#3a4752"
-                                Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    if (detailPage.vm && dv("uuid") !== "") {
-                                        var newVal = !toggleTrack.toggleOn
-                                        detailPage.vm.setReviewMode(dv("uuid"), newVal)
-                                        toggleTrack.toggleOn = newVal
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
     }

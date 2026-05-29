@@ -1,9 +1,8 @@
 """R7 Tests: WorldViewModel action slots (rename, copy-id, open-folder,
-open-transcript, reset-thinking, review-mode).
+open-transcript, reset-thinking).
 
 The VM is constructed with fake callbacks injected for each action; tests
-assert that the slots forward correctly and that reviewMode / setReviewMode
-read/write the injected get_review / set_review functions.
+assert that the slots forward correctly.
 
 For copyId and openTranscript, the test asserts that the slots don't raise
 when a QGuiApplication (or QCoreApplication) is present; clipboard is
@@ -84,41 +83,6 @@ def test_reset_thinking_no_callback_is_noop():
 
 
 # ---------------------------------------------------------------------------
-# setReviewMode / reviewMode — read/write via injected get_review / set_review
-# ---------------------------------------------------------------------------
-
-def test_set_review_mode_calls_set_review():
-    calls = []
-    vm = _vm(set_review=lambda uuid, on: calls.append((uuid, on)))
-    vm.setReviewMode("uuid-4", True)
-    assert calls == [("uuid-4", True)]
-
-
-def test_set_review_mode_false():
-    calls = []
-    vm = _vm(set_review=lambda uuid, on: calls.append((uuid, on)))
-    vm.setReviewMode("uuid-4", False)
-    assert calls == [("uuid-4", False)]
-
-
-def test_review_mode_reads_get_review():
-    store: dict[str, bool] = {"uuid-5": True}
-    vm = _vm(get_review=lambda uuid: store.get(uuid, False))
-    assert vm.reviewMode("uuid-5") is True
-    assert vm.reviewMode("uuid-unknown") is False
-
-
-def test_review_mode_defaults_to_false_without_callback():
-    vm = _vm()
-    assert vm.reviewMode("any") is False
-
-
-def test_set_review_mode_no_callback_is_noop():
-    vm = _vm()
-    vm.setReviewMode("uuid-4", True)  # must not raise
-
-
-# ---------------------------------------------------------------------------
 # copyId — doesn't raise; clipboard call is guarded inside the slot
 # ---------------------------------------------------------------------------
 
@@ -181,12 +145,3 @@ def test_open_transcript_no_raise_on_arbitrary_path():
     # Patch to avoid side effects in the test environment
     with patch("PySide6.QtGui.QDesktopServices.openUrl"):
         vm.openTranscript("C:/Users/user/.claude/projects/hash/uuid.jsonl")
-
-
-# ---------------------------------------------------------------------------
-# reviewMode exception safety — get_review raising must return False not crash
-# ---------------------------------------------------------------------------
-
-def test_review_mode_returns_false_when_get_review_raises():
-    vm = _vm(get_review=lambda uuid: (_ for _ in ()).throw(RuntimeError("oops")))
-    assert vm.reviewMode("any") is False
