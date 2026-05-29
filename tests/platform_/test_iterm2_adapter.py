@@ -1156,6 +1156,15 @@ class TestWriteTextToITermSession:
         assert r'a\"b\\c' in script
 
 
+def _code_only(script: str) -> str:
+    """Strip AppleScript comments so ordering ``.index()`` checks anchor
+    on real statements, not comment text that happens to contain the same
+    keyword (e.g. a comment that mentions ``select w``). Cuts each line at
+    its first ``--``; safe here because no real statement or string
+    literal in these scripts contains ``--``."""
+    return "\n".join(line.split("--", 1)[0] for line in script.splitlines())
+
+
 class TestFocusScriptSwitchesSpace:
     """Cross-Space regression: clicking a session whose iTerm window is
     on another macOS Space did nothing — ``select w`` only reorders
@@ -1165,16 +1174,17 @@ class TestFocusScriptSwitchesSpace:
     title mismatch / AX error degrades to the prior behaviour."""
 
     def _assert_axraise(self, script: str, host_pid: int) -> None:
+        code = _code_only(script)
         # Title captured from the iTerm window before any mutation.
-        assert "set winName to name of w" in script
+        assert "set winName to name of w" in code
         # AXRaise targets the resolved host pid by unix id (multi-iTerm
         # correctness) and matches the window by the captured title.
-        assert "unix id is {}".format(host_pid) in script
-        assert 'perform action "AXRaise" of (first window whose name is winName)' in script
+        assert "unix id is {}".format(host_pid) in code
+        assert 'perform action "AXRaise" of (first window whose name is winName)' in code
         # Ordering: title captured, AXRaise, THEN selects.
-        i_name = script.index("set winName to name of w")
-        i_select_w = script.index("select w")
-        i_raise = script.index('perform action "AXRaise"')
+        i_name = code.index("set winName to name of w")
+        i_select_w = code.index("select w")
+        i_raise = code.index('perform action "AXRaise"')
         # AXRaise must run BEFORE select w/t/s: on a multi-pane window
         # the select changes the window title, so raising after select
         # would search for a title the window no longer has and miss.
@@ -1184,7 +1194,7 @@ class TestFocusScriptSwitchesSpace:
         )
         # Graceful degradation: AXRaise is inside a try block that closes
         # before the selects run.
-        i_end_try = script.index("end try", i_raise)
+        i_end_try = code.index("end try", i_raise)
         assert i_end_try < i_select_w, "AXRaise must be try-guarded, closing before select w"
 
     def test_tty_template_axraises_after_select(self):

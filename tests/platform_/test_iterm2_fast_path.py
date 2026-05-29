@@ -506,16 +506,19 @@ class TestFocusSourceSwitchesSpace:
     graceful degradation (mirrors the subprocess templates in iterm2.py)."""
 
     def _assert_axraise(self, source: str) -> None:
-        assert "set winName to name of w" in source
-        assert "unix id is (hostPID as integer)" in source
-        assert 'perform action "AXRaise" of (first window whose name is winName)' in source
-        i_name = source.index("set winName to name of w")
-        i_select_w = source.index("select w")
-        i_raise = source.index('perform action "AXRaise"')
+        # Strip AppleScript comments so the ordering checks anchor on real
+        # statements — these sources have comments that mention "select w".
+        code = "\n".join(line.split("--", 1)[0] for line in source.splitlines())
+        assert "set winName to name of w" in code
+        assert "unix id is (hostPID as integer)" in code
+        assert 'perform action "AXRaise" of (first window whose name is winName)' in code
+        i_name = code.index("set winName to name of w")
+        i_select_w = code.index("select w")
+        i_raise = code.index('perform action "AXRaise"')
         # AXRaise before select: select changes a multi-pane window's
         # title, so raising after select would miss the title match.
         assert i_name < i_raise < i_select_w
-        i_end_try = source.index("end try", i_raise)
+        i_end_try = code.index("end try", i_raise)
         assert i_end_try < i_select_w, "AXRaise must be try-guarded, closing before select w"
 
     def test_tty_source_axraises_after_select(self):
