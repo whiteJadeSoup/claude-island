@@ -700,25 +700,41 @@ def main() -> int:
     threading.Thread(target=session_discovery.start, daemon=True).start()
     marshaler.snap_ready.emit(snapshotter.build_now())   # 首帧
 
-    # ── Bug 5 fix: force-refresh quota at startup so the first rendered snapshot
-    # carries real quota data (quota_engine.get() returns None on a fresh process
-    # until force_refresh() fetches it).  Also install a 60 s heartbeat so quota
-    # stays fresh for the lifetime of the process, mirroring __main__.py's usage
-    # heartbeat intent.  The timer is stored to prevent GC and cancelled on shutdown.
-    def _quota_refresh_once() -> None:
+    # ── Quota startup + heartbeat ─────────────────────────────────────────
+    # ONE-TIME startup force_refresh seeds a cold in-memory cache so the first
+    # rendered snapshot carries real quota (get() alone returns None until the
+    # disk/HTTP path runs once). After that, the recurring heartbeat must NOT
+    # force_refresh.
+    #
+    # Why (regression fix — quota was disappearing): ProviderEngine.force_refresh
+    # EVICTS the in-memory cache when a fetch fails (its documented "invalidate
+    # on failure" contract — see providers/__init__.py). The Anthropic usage
+    # endpoint 429s readily under repeated polling, so a 60 s heartbeat that
+    # force_refreshed would, on every 429, wipe the good cached quota → the next
+    # get() re-fetched, hit the same 429, returned None → the whole QUOTA card
+    # blanked. Verified in tests/platform_/test_provider_engine_cache.py.
+    #
+    # master's __main__.py made the same call deliberately: its heartbeat is a
+    # bare snapshotter.wake() and the snapshot reads quota via get() (90 s mem
+    # + 5 min disk cache). force_refresh is reserved for the manual ↻ button.
+    # We mirror that: heartbeat = wake() only.
+    def _quota_seed_once() -> None:
         try:
             quota_engine.force_refresh(provider_name="anthropic")
         except Exception as exc:
-            print(f"[island] quota force_refresh error: {exc}", file=sys.stderr)
+            print(f"[island] quota seed error: {exc}", file=sys.stderr)
         snapshotter.wake()
 
-    # Initial force-refresh on a daemon thread so startup is non-blocking.
-    threading.Thread(target=_quota_refresh_once, daemon=True, name="quota-init").start()
+    # Initial seed on a daemon thread so startup is non-blocking.
+    threading.Thread(target=_quota_seed_once, daemon=True, name="quota-init").start()
 
     _quota_timer: list[threading.Timer] = []   # list so closure can mutate it
 
     def _quota_heartbeat() -> None:
-        _quota_refresh_once()
+        # Just wake the pipeline — the snapshot's get_quota reads the cache
+        # (refetching only when it has gone cold), so a transient 429 never
+        # blanks a good cached value. This is the regression fix.
+        snapshotter.wake()
         # Re-arm unless app is shutting down (timer reference will be cleared
         # on shutdown — the lambda check guards against a final spurious fire).
         if _quota_timer:
