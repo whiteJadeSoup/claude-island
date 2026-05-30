@@ -612,14 +612,15 @@ Rectangle {
                 }
             }
 
-            // Persistent swipe hint — matches the prototype's centered
-            // "← 拖拽拒绝 · 允许拖拽 →" line. Tells the user both gesture
-            // directions at rest, complementing the edge labels that
-            // fade in (with directional colour) during the actual drag.
+            // Persistent swipe hint, language-neutral so it renders identically
+            // cross-platform (the bundled latin fonts have no CJK glyphs; a
+            // Chinese hint would fall back to a per-OS CJK system font). Mirrors
+            // the prototype's centered rest-state line; the edge labels still
+            // fade in with directional colour during the actual drag.
             Text {
                 Layout.fillWidth: true
                 Layout.topMargin: 2
-                text: "← 拖拽拒绝 · 允许拖拽 →"
+                text: "← swipe to deny · swipe to allow →"
                 color: "#7d5838"
                 font.pixelSize: 10
                 horizontalAlignment: Text.AlignHCenter

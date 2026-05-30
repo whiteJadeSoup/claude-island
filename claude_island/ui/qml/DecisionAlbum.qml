@@ -63,7 +63,11 @@ Item {
         RowLayout {
             Layout.fillWidth: true; spacing: 8; visible: album.decisions.length > 1
             Item { Layout.fillWidth: true }
-            Text { text: "第 1 / " + album.decisions.length + " 张 · 处理完自动下一张"
+            // Language-neutral counter ("1 / N · next after you decide") so it
+            // renders identically cross-platform — the bundled latin fonts have
+            // no CJK glyphs, and the old "第 1 / N 张" fell back to a per-OS
+            // CJK system font (Microsoft YaHei on Windows, PingFang on macOS).
+            Text { text: "1 / " + album.decisions.length + " · next after you decide"
                    color: Theme.faint; font.family: Theme.fontMono; font.pixelSize: 11 }
             Row { spacing: 5
                 Repeater { model: album.decisions.length
