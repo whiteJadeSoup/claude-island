@@ -646,7 +646,7 @@ Window {
                                             Text {
                                                 text: root.vmTodayCost
                                                 color: "#7e8a97"; font.pixelSize: 10
-                                                font.family: "monospace"
+                                                font.family: Theme.fontMono
                                             }
                                             Text {
                                                 visible: (root.today && root.today["total_tokens"]) ? root.today["total_tokens"] > 0 : false
@@ -738,27 +738,27 @@ Window {
                                                 RowLayout {
                                                     Layout.fillWidth: true; spacing: 8
                                                     Text { text: modelData.name || ""; color: Theme.phos; font.pixelSize: Theme.tBody; font.bold: true; elide: Text.ElideRight }
-                                                    Text { text: "· " + root.fmtElapsed(modelData.elapsed_s); color: Theme.faint; font.family: "monospace"; font.pixelSize: Theme.tMeta; visible: (modelData.elapsed_s || 0) > 0 }
+                                                    Text { text: "· " + root.fmtElapsed(modelData.elapsed_s); color: Theme.faint; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta; visible: (modelData.elapsed_s || 0) > 0 }
                                                     Item { Layout.fillWidth: true }
                                                     Text { text: "↗"; color: Theme.faint; font.pixelSize: 13; opacity: liveArea.containsMouse ? 1 : 0; Behavior on opacity { NumberAnimation { duration: 120 } } }
-                                                    Text { text: root.fmtCost(modelData.cost_usd); color: Theme.gold; font.family: "monospace"; font.pixelSize: Theme.tBody; font.bold: true }
+                                                    Text { text: root.fmtCost(modelData.cost_usd); color: Theme.gold; font.family: Theme.fontMono; font.pixelSize: Theme.tBody; font.bold: true }
                                                 }
                                                 // ── hero: $ command  (blinking cursor) ──
                                                 RowLayout {
                                                     Layout.fillWidth: true; spacing: 0
                                                     visible: (modelData.command || "") !== ""
-                                                    Text { text: "$ "; color: Theme.phaseColor(modelData.phase); font.family: "monospace"; font.pixelSize: Theme.tHero; font.weight: Font.Medium }
-                                                    Text { Layout.fillWidth: true; text: modelData.command || ""; color: "#f3f6f9"; font.family: "monospace"; font.pixelSize: Theme.tHero; font.weight: Font.Medium; elide: Text.ElideRight }
+                                                    Text { text: "$ "; color: Theme.phaseColor(modelData.phase); font.family: Theme.fontMono; font.pixelSize: Theme.tHero; font.weight: Font.Medium }
+                                                    Text { Layout.fillWidth: true; text: modelData.command || ""; color: "#f3f6f9"; font.family: Theme.fontMono; font.pixelSize: Theme.tHero; font.weight: Font.Medium; elide: Text.ElideRight }
                                                     Rectangle { Layout.preferredWidth: 7; Layout.preferredHeight: 14; color: Theme.phaseColor(modelData.phase); Layout.alignment: Qt.AlignVCenter
                                                         SequentialAnimation on opacity { loops: Animation.Infinite; running: root.isActive(modelData.phase)
                                                             NumberAnimation { to: 0; duration: 530 } NumberAnimation { to: 1; duration: 530 } } }
                                                 }
                                                 // fallback phase label when no command
-                                                Text { visible: (modelData.command || "") === ""; text: modelData.phase || ""; color: Theme.phaseColor(modelData.phase); font.family: "monospace"; font.pixelSize: Theme.tMeta }
+                                                Text { visible: (modelData.command || "") === ""; text: modelData.phase || ""; color: Theme.phaseColor(modelData.phase); font.family: Theme.fontMono; font.pixelSize: Theme.tMeta }
                                                 // ── footer: phase  [waveform]  rate  model ──
                                                 RowLayout {
                                                     Layout.fillWidth: true; spacing: 9
-                                                    Text { text: modelData.phase || ""; color: Theme.phaseColor(modelData.phase); font.family: "monospace"; font.pixelSize: Theme.tMeta }
+                                                    Text { text: modelData.phase || ""; color: Theme.phaseColor(modelData.phase); font.family: Theme.fontMono; font.pixelSize: Theme.tMeta }
 
                                                     // Activity waveform (#1): a glowing oscilloscope line,
                                                     // not bars. Amplitude at each point = that sample's token
@@ -833,12 +833,12 @@ Window {
                                                         }
                                                     }
 
-                                                    Text { visible: (modelData.tokens_per_min || 0) > 0; text: (modelData.tokens_per_min || 0) + " tk/min"; color: Theme.faint; font.family: "monospace"; font.pixelSize: Theme.tMeta }
+                                                    Text { visible: (modelData.tokens_per_min || 0) > 0; text: (modelData.tokens_per_min || 0) + " tk/min"; color: Theme.faint; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta }
                                                     Rectangle {
                                                         visible: (modelData.model || "") !== ""
                                                         radius: 5; color: Qt.rgba(0,0,0,0.25); border.color: Theme.modelColor(modelData.model); border.width: 1
                                                         Layout.preferredWidth: mlbl.implicitWidth + 12; Layout.preferredHeight: 18
-                                                        Text { id: mlbl; anchors.centerIn: parent; text: modelData.model || ""; color: Theme.modelColor(modelData.model); font.family: "monospace"; font.pixelSize: 9; font.bold: true }
+                                                        Text { id: mlbl; anchors.centerIn: parent; text: modelData.model || ""; color: Theme.modelColor(modelData.model); font.family: Theme.fontMono; font.pixelSize: 9; font.bold: true }
                                                     }
                                                 }
                                             }
@@ -866,53 +866,116 @@ Window {
                                     }
                                 }
 
-                                // ── IDLE band: compact chips ───────────────
-                                // Section header visible only when there are idle sessions
-                                Text {
-                                    visible: root.quietCount() > 0
-                                    text: "○ Idle · " + root.quietCount()
-                                    color: "#566069"
-                                    font.pixelSize: 10; font.letterSpacing: 1.5
-                                    Layout.leftMargin: 16; Layout.topMargin: 13; Layout.bottomMargin: 6
-                                }
-                                Flow {
+                                // ── IDLE band: compact list ────────────────
+                                // Section header row: "IDLE" left, count right.
+                                RowLayout {
                                     visible: root.quietCount() > 0
                                     Layout.fillWidth: true
-                                    Layout.leftMargin: 16; Layout.rightMargin: 16; Layout.bottomMargin: 16
-                                    spacing: 8
-                                    Repeater {
-                                        model: root.vmSessions
-                                        delegate: Rectangle {
-                                            id: chipRect
-                                            required property var modelData
-                                            visible: !root.isActive(modelData.phase)
-                                            width: visible ? (lbl.width + 22) : 0
-                                            height: visible ? 26 : 0
-                                            radius: 8
-                                            color: chipArea.containsMouse ? "#0e141b" : "#0a1018"
-                                            border.color: chipArea.containsMouse ? "#1c2632" : "#151b22"
-                                            border.width: 1
+                                    Layout.leftMargin: 16; Layout.rightMargin: 16
+                                    Layout.topMargin: 13; Layout.bottomMargin: 6
+                                    Text {
+                                        text: "IDLE"
+                                        color: Theme.faint
+                                        font.pixelSize: Theme.tMicro
+                                        font.letterSpacing: 1.6
+                                        font.bold: true
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Text {
+                                        text: root.quietCount()
+                                        color: Theme.faint
+                                        font.pixelSize: Theme.tMicro
+                                    }
+                                }
 
-                                            Text {
-                                                id: lbl; anchors.centerIn: parent
-                                                text: modelData.name + " · " + root.fmtCost(modelData.cost_usd)
-                                                color: chipArea.containsMouse ? "#a0aab6" : "#828d99"
-                                                font.pixelSize: 12
-                                            }
-                                            MouseArea {
-                                                id: chipArea; anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor; hoverEnabled: true
-                                                // Left-click: focus terminal; right-click: open detail page
-                                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                                onClicked: (mouse) => {
-                                                    if (mouse.button === Qt.RightButton) {
-                                                        root.detailData = root.vm
-                                                            ? root.vm.sessionDetail(modelData.id)
-                                                            : {}
-                                                        // Grow the session detail out of this chip.
-                                                        detailHost.open("session", chipRect)
-                                                    } else {
-                                                        if (root.vm) root.vm.focusSession(modelData.id)
+                                // Compact list container — one row per idle session,
+                                // a 1px top divider between rows (not on the first).
+                                Rectangle {
+                                    visible: root.quietCount() > 0
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 13; Layout.rightMargin: 13; Layout.bottomMargin: 16
+                                    radius: 13
+                                    color: Theme.surface
+                                    border.color: Theme.bd
+                                    border.width: 1
+                                    clip: true
+                                    implicitHeight: idleCol.implicitHeight
+
+                                    ColumnLayout {
+                                        id: idleCol
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        spacing: 0
+
+                                        Repeater {
+                                            model: root.vmSessions
+                                            delegate: Item {
+                                                id: idleRow
+                                                required property var modelData
+                                                required property int index
+                                                visible: !root.isActive(modelData.phase)
+                                                Layout.fillWidth: true
+                                                implicitHeight: visible ? (Theme.tBody + 20) : 0
+
+                                                // 1px top divider — skipped on the
+                                                // first visible row so the list edge stays clean.
+                                                Rectangle {
+                                                    anchors.left: parent.left
+                                                    anchors.right: parent.right
+                                                    anchors.top: parent.top
+                                                    height: 1
+                                                    color: Theme.bd
+                                                    visible: idleRow.index > 0
+                                                }
+
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.leftMargin: 14; anchors.rightMargin: 14
+                                                    spacing: 9
+
+                                                    // Dim idle dot
+                                                    Rectangle {
+                                                        Layout.preferredWidth: 5
+                                                        Layout.preferredHeight: 5
+                                                        radius: 2.5
+                                                        color: "#39414b"
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                    }
+                                                    Text {
+                                                        text: modelData.name || ""
+                                                        color: Theme.ink2
+                                                        font.pixelSize: Theme.tBody
+                                                        elide: Text.ElideRight
+                                                        Layout.fillWidth: true
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                    }
+                                                    Text {
+                                                        // Prototype shows whole-dollar idle cost ("$X").
+                                                        text: "$" + ((modelData.cost_usd || 0)).toFixed(0)
+                                                        color: Theme.faint
+                                                        font.family: Theme.fontMono
+                                                        font.bold: true
+                                                        font.pixelSize: Theme.tBody
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                    }
+                                                }
+
+                                                MouseArea {
+                                                    id: idleArea; anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor; hoverEnabled: true
+                                                    // Left-click: focus terminal; right-click: open detail page
+                                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                                    onClicked: (mouse) => {
+                                                        if (mouse.button === Qt.RightButton) {
+                                                            root.detailData = root.vm
+                                                                ? root.vm.sessionDetail(modelData.id)
+                                                                : {}
+                                                            // Grow the session detail out of this row.
+                                                            detailHost.open("session", idleRow)
+                                                        } else {
+                                                            if (root.vm) root.vm.focusSession(modelData.id)
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1006,38 +1069,60 @@ Window {
             return root.fmtReset((vmQuota && vmQuota["five_hour_reset_epoch"]) ? vmQuota["five_hour_reset_epoch"] : 0)
         }
 
-        radius: 8
-        color: "#0a0d12"
-        border.color: "#151b22"
+        // Just the duration ("1h 38m" / "38m" / "<1m" / "—") with no "resets in "
+        // prefix — the prototype renders "resets <dur>" (no "in"), so the prefix
+        // is composed at the call site below. Mirrors root.fmtReset's math.
+        function fmtDur(epochMs) {
+            if (!epochMs) return "—"
+            var rem = epochMs - root.nowMs
+            if (rem <= 0) return "<1m"
+            var mins = Math.floor(rem / 60000)
+            var h = Math.floor(mins / 60)
+            var m = mins % 60
+            if (h > 0) return h + "h " + m + "m"
+            if (m > 0) return m + "m"
+            return "<1m"
+        }
+
+        radius: 15
+        color: Theme.surface
+        border.color: Theme.bd
         border.width: 1
-        implicitHeight: todayCol.implicitHeight + 20
+        implicitHeight: todayCol.implicitHeight + 30
+        clip: true
+
+        // Faint top-teal wash so the card doesn't read as flat surface.
+        Rectangle {
+            anchors.fill: parent
+            radius: parent.radius
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: Qt.rgba(0.37, 0.82, 0.66, 0.05) }
+                GradientStop { position: 0.4; color: "transparent" }
+            }
+        }
 
         ColumnLayout {
             id: todayCol
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
-            anchors.margins: 12
-            spacing: 6
+            anchors.topMargin: 15
+            anchors.leftMargin: 16
+            anchors.rightMargin: 16
+            spacing: 0
 
-            // Header row: "TODAY · resets in X" left, big cost right
+            // 1. Header row: "TODAY · ANTHROPIC" left, big "$cost" right
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
 
-                ColumnLayout {
-                    spacing: 2
-                    Text {
-                        text: "TODAY"
-                        color: "#566069"
-                        font.pixelSize: 9; font.letterSpacing: 2; font.bold: true
-                    }
-                    Text {
-                        visible: vmQuota !== null && vmQuota !== undefined
-                        text: "Anthropic · " + todayCard.fmtReset()
-                        color: "#3a4752"
-                        font.pixelSize: 9
-                    }
+                Text {
+                    text: "TODAY · ANTHROPIC"
+                    color: Theme.faint
+                    font.pixelSize: Theme.tMicro
+                    font.letterSpacing: 1.8
+                    font.bold: true
+                    Layout.alignment: Qt.AlignVCenter
                 }
                 Item { Layout.fillWidth: true }
                 Text {
@@ -1045,69 +1130,79 @@ Window {
                         var c = (todayData && todayData["cost"]) ? todayData["cost"] : 0
                         return "$" + (c >= 100 ? c.toFixed(0) : c.toFixed(2))
                     }
-                    color: "#f0a860"
-                    font.pixelSize: 22; font.bold: true; font.family: "monospace"
+                    color: Theme.gold
+                    font.bold: true
+                    font.pixelSize: Theme.tDisplay
+                    font.family: Theme.fontMono
+                    Layout.alignment: Qt.AlignVCenter
                 }
             }
 
-            // 5h progress bar
+            // 2. 5h progress bar — full-width track + teal fill with a soft glow
             Item {
                 Layout.fillWidth: true
-                implicitHeight: 18
+                Layout.topMargin: 12
+                implicitHeight: 5
 
                 Rectangle {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    height: 5
-                    radius: 2
-                    color: "#151b22"
+                    anchors.fill: parent
+                    radius: 3
+                    color: "#0b0f15"
 
                     Rectangle {
                         height: parent.height
                         radius: parent.radius
                         width: parent.width * Math.max(0, Math.min(100, quotaPct)) / 100
-                        color: quotaPct > 80 ? "#e8743b" : "#5fd2a8"
+                        color: Theme.teal
+                        // Soft teal glow — a faint teal border bleeds the fill
+                        // outward so it reads as "live" without an FBO layer.
+                        border.color: Qt.rgba(0.37, 0.82, 0.66, 0.5)
+                        border.width: 1
                         Behavior on width { NumberAnimation { duration: 400 } }
                     }
                 }
+            }
+
+            // 3. Quota row: "<pct>% of 5h" left, "resets <dur>" right
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: 9
+                spacing: 8
+
                 Text {
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
                     text: quotaPct + "% of 5h"
-                    color: "#5fd2a8"; font.pixelSize: 9
+                    color: Theme.teal
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.tMeta
+                }
+                Item { Layout.fillWidth: true }
+                Text {
+                    visible: vmQuota !== null && vmQuota !== undefined
+                    text: "resets " + todayCard.fmtDur((vmQuota && vmQuota["five_hour_reset_epoch"]) ? vmQuota["five_hour_reset_epoch"] : 0)
+                    color: Theme.faint
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.tMeta
                 }
             }
 
-            // Meta line: reqs · tokens · cache · hit%
+            // 4. Meta line: reqs · tok · cache · hit% · ↳ subagent
             Text {
                 Layout.fillWidth: true
+                Layout.topMargin: 6
                 text: {
-                    var reqs  = (todayData && todayData["reqs"])         ? todayData["reqs"] : 0
+                    var reqs  = (todayData && todayData["reqs"])          ? todayData["reqs"] : 0
                     var toks  = (todayData && todayData["total_tokens"])  ? todayData["total_tokens"] : 0
                     var cache = (todayData && todayData["cache_read"])    ? todayData["cache_read"] : 0
                     var hr    = (todayData && todayData["hit_rate"])      ? todayData["hit_rate"] : 0
-                    var parts = []
-                    if (reqs > 0) parts.push(reqs + " reqs")
-                    if (toks > 0) parts.push(fmtNum(toks) + " tokens")
-                    if (cache > 0) parts.push(fmtNum(cache) + " cache")
-                    if (hr > 0) parts.push((hr * 100).toFixed(0) + "% hit")
-                    return parts.length > 0 ? parts.join(" · ") : "no usage today"
+                    var sub   = (todayData && todayData["subagent_reqs"]) ? todayData["subagent_reqs"] : 0
+                    var s = reqs + " reqs · " + root.fmtNum(toks) + " tok · "
+                          + root.fmtNum(cache) + " cache · " + Math.round(hr * 100) + "% hit"
+                    if (sub > 0) s += " · ↳ " + sub + " subagent"
+                    return s
                 }
-                color: "#566069"; font.pixelSize: 10
-                elide: Text.ElideRight
-            }
-
-            // Subagent sub-line: "↳ incl. N subagent reqs · $X"
-            Text {
-                Layout.fillWidth: true
-                visible: (todayData && todayData["subagent_reqs"]) ? todayData["subagent_reqs"] > 0 : false
-                text: {
-                    var sr = (todayData && todayData["subagent_reqs"]) ? todayData["subagent_reqs"] : 0
-                    var sc = (todayData && todayData["subagent_cost"]) ? todayData["subagent_cost"] : 0.0
-                    return "↳ incl. " + sr + " subagent reqs · $" + sc.toFixed(2)
-                }
-                color: "#3a4752"; font.pixelSize: 9
+                color: Theme.faint
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.tMeta
                 elide: Text.ElideRight
             }
         }
