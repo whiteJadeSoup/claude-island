@@ -223,6 +223,10 @@ class UsageRegistry:
         # never need to move/remove entries — purely additive.
         self._by_uuid: dict[str, list[UsageRecord]] = {}
         self._lock = threading.Lock()
+        # Monotonically increasing counter bumped on each record_many that
+        # adds at least one record. Used by Snapshotter to
+        # skip recomposition of SessionViews whose usage data is unchanged.
+        self.record_version: int = 0
 
     # ------------------------------------------------------------------
     # Write path
@@ -279,6 +283,7 @@ class UsageRegistry:
             if not kept:
                 return
             self._records.extend(kept)
+            self.record_version += 1
         self.totals_changed.on_next(None)
 
     def record(self, record: UsageRecord) -> None:

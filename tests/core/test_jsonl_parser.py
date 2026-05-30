@@ -167,6 +167,79 @@ def test_session_metadata_unknown_session_returns_empty(env):
     assert parser.get_session_metadata("nope") == {}
 
 
+# --------------------------------------------------------------------------
+# meta_version — incremental-cache invalidation signal
+# --------------------------------------------------------------------------
+
+
+def test_meta_version_bumps_when_untimestamped_meta_row_changes_title(env):
+    """Regression: an incremental parse that reads ONLY untimestamped meta
+    rows (a lone ``ai-title`` flush) must bump ``meta_version`` so the
+    Snapshotter invalidates its cached ``SessionView.name``.
+
+    Real Claude Code ai-title / last-prompt / permission-mode rows carry
+    no ``timestamp`` field. The original bump condition keyed only on
+    ``latest_ts``, so a lone title flush left ``meta_version`` unchanged —
+    the per-uuid cache stayed fresh and the UI kept rendering the old
+    title."""
+    reg, parser, jsonl = env
+    # Baseline: a timestamped assistant turn.
+    jsonl.write_bytes(_line("2025-01-01T00:00:00Z", 1, 1))
+    parser.parse_file(jsonl)
+    v1 = parser.meta_version
+    assert v1 > 0
+
+    # Append ONLY an untimestamped ai-title row (real-world shape).
+    with jsonl.open("ab") as f:
+        f.write(
+            b'{"type":"ai-title","aiTitle":"New title",'
+            b'"sessionId":"session-uuid"}\n'
+        )
+    parser.parse_file(jsonl)
+
+    assert parser.get_session_metadata("session-uuid")["ai_title"] == "New title"
+    assert parser.meta_version > v1, (
+        "meta_version must bump when ai_title changes even without a timestamp"
+    )
+
+
+def test_meta_version_stable_when_reparse_has_no_new_rows(env):
+    """A reparse that reads no new bytes must NOT bump ``meta_version`` —
+    otherwise the incremental cache would needlessly recompose every build
+    even when nothing changed."""
+    reg, parser, jsonl = env
+    jsonl.write_bytes(_line("2025-01-01T00:00:00Z", 1, 1))
+    parser.parse_file(jsonl)
+    v1 = parser.meta_version
+
+    parser.parse_file(jsonl)  # no new bytes appended
+    assert parser.meta_version == v1
+
+
+def test_meta_version_stable_when_meta_row_repeats_identical_value(env):
+    """An ai-title row repeating the SAME title (Claude Code re-flushes the
+    unchanged title periodically) must NOT bump ``meta_version`` — the
+    SessionView inputs are identical, so the cache is still valid."""
+    reg, parser, jsonl = env
+    jsonl.write_bytes(_line("2025-01-01T00:00:00Z", 1, 1))
+    with jsonl.open("ab") as f:
+        f.write(
+            b'{"type":"ai-title","aiTitle":"Same title",'
+            b'"sessionId":"session-uuid"}\n'
+        )
+    parser.parse_file(jsonl)
+    v1 = parser.meta_version
+
+    # Re-flush the identical title — value unchanged.
+    with jsonl.open("ab") as f:
+        f.write(
+            b'{"type":"ai-title","aiTitle":"Same title",'
+            b'"sessionId":"session-uuid"}\n'
+        )
+    parser.parse_file(jsonl)
+    assert parser.meta_version == v1
+
+
 def test_chunk_ending_exactly_on_newline_advances_to_eof(env):
     """Sanity: if the chunk ends on \\n, offset advances normally."""
     reg, parser, jsonl = env

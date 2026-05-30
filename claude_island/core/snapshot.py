@@ -39,7 +39,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, NamedTuple, Protocol
 
 import reactivex.operators as ops
 from reactivex import Observable, abc
@@ -1011,6 +1011,19 @@ def _normalize_project_path(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+class _CachedView(NamedTuple):
+    """Cache entry for one composed SessionView with its dependency versions.
+
+    The ``versions`` tuple captures the source version numbers at compose
+    time. On a subsequent build, if all versions still match, the view is
+    still fresh — no need to call compose_session_view again.
+    """
+    view: SessionView
+    meta_version: int
+    record_version: int
+    state_version: int
+
+
 class Snapshotter:
     """Builds a fresh ``WorldSnapshot`` on every wake; runs the build on
     a single dedicated worker thread; pushes the result via an injected
@@ -1073,6 +1086,14 @@ class Snapshotter:
         notify_queue: "_NotifyQueueProto | None" = None,
         debounce_window_s: float = 0.1,
         throttle_first_window_s: float = 0.2,
+        # Incremental cache: callable returning the state machine's
+        # version counter. Default returns -1 (sentinel meaning
+        # "state version tracking unavailable") so existing code
+        # that doesn't wire a state machine falls through to the
+        # legacy always-recompute path.  When wired to a real
+        # SessionStateMachine, returns monotonically increasing
+        # integers from its state_version counter.
+        get_state_version: Callable[[], int] = (lambda: -1),
     ) -> None:
         # ``publish`` is required and keyword-only — it must NEVER
         # default to ``world.push``. WorldMarshaler exists to ensure
@@ -1108,6 +1129,7 @@ class Snapshotter:
         self._notify_queue = notify_queue
         self._debounce_window_s = debounce_window_s
         self._throttle_first_window_s = throttle_first_window_s
+        self._get_state_version = get_state_version
 
         self._wake_signal: Subject[None] = Subject()
         self._scheduler: EventLoopScheduler | None = None
@@ -1121,6 +1143,24 @@ class Snapshotter:
         # added to the build path.
         import threading
         self._build_lock = threading.Lock()
+
+        # ── Incremental cache (2026-05-26) ────────────────────────────────
+        # Per-identity cache of composed SessionViews, keyed by
+        # (session_uuid, pid, project_path).  Each entry records the
+        # source versions at compose time so the next build can skip
+        # recomposition when nothing changed for that identity.
+        self._view_cache: dict[tuple, "_CachedView"] = {}
+        # Versions snapshot from the last build — used to detect whether
+        # source data changed since the cached views were composed.
+        self._last_sessions_fp: object = None
+        self._last_meta_version: int = -1
+        self._last_record_version: int = -1
+        self._last_state_version: int = -1
+        # Cached results of downstream pipeline stages (dedup + filter
+        # + group are pure functions of the view list; if the view list
+        # hasn't changed, these are valid too).
+        self._cached_views: list[SessionView] | None = None
+        self._cached_groups: list[SessionGroup] | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1242,62 +1282,62 @@ class Snapshotter:
     def _build_snapshot(self) -> WorldSnapshot:
         sessions_raw = self._safe_list_sessions()
 
-        views: list[SessionView] = []
-        for s in sessions_raw:
+        # ── Incremental compose ────────────────────────────────────────
+        # Build a lightweight fingerprint of the session list and read
+        # current source versions. If nothing changed since last build,
+        # reuse the cached views, dedup, filter, and groups wholesale.
+        sessions_fp = tuple(
+            (s.pid, s.session_uuid, s.last_activity)
+            for s in sessions_raw
+        )
+        meta_ver = getattr(self._metadata_provider, "meta_version", 0)
+        record_ver = getattr(self._usage_registry, "record_version", 0)
+        state_ver = self._get_state_version()
+
+        # Sentinel check: if any version is -1, that source's version
+        # tracking is unavailable — fall through to the rebuild path.
+        _sentinel = -1
+        if (
+            meta_ver != _sentinel
+            and record_ver != _sentinel
+            and state_ver != _sentinel
+            and sessions_fp == self._last_sessions_fp
+            and meta_ver == self._last_meta_version
+            and record_ver == self._last_record_version
+            and state_ver == self._last_state_version
+            and self._cached_views is not None
+        ):
+            # Full cache hit — all source data unchanged.
+            views = self._cached_views
+            groups = self._cached_groups  # type: ignore[assignment]
+        else:
+            # Partial or full miss — compose views incrementally.
+            views = self._compose_views_incremental(
+                sessions_raw, meta_ver, record_ver, state_ver,
+            )
+            # Dedup and filter are pure functions of the view list.
+            views = _dedup_views_by_session_uuid(views)
+            views = _filter_stale_views(views)
+            # Grouping depends only on the filtered view list.
             try:
-                views.append(
-                    compose_session_view(
-                        s,
-                        state_reader=self._state_reader,
-                        metadata_provider=self._metadata_provider,
-                        usage_registry=self._usage_registry,
-                        names_store=self._names_store,
-                        live_state_reader=self._live_state_reader,
-                    )
-                )
+                groups = list(self._group_sessions(views))
             except Exception:
                 log.exception(
-                    "compose_session_view raised for pid=%s; using degraded view",
-                    s.pid,
+                    "group_sessions raised; using singleton fallback grouping"
                 )
-                views.append(_degraded_view(s))
+                groups = _default_group_sessions(views)
 
-        # Two pids attached to the same `claude --resume <uuid>` would
-        # otherwise render as two identical-looking rows. Keep one row
-        # per session_uuid (the most recently active pid).
-        views = _dedup_views_by_session_uuid(views)
+            # Update cache for next build.
+            self._last_sessions_fp = sessions_fp
+            self._last_meta_version = meta_ver
+            self._last_record_version = record_ver
+            self._last_state_version = state_ver
+            self._cached_views = views
+            self._cached_groups = groups
 
-        # Staleness filter (2026-05-16): drop views the user reports as
-        # "this terminal has no claude session" out of the LIVE list.
-        # A session counts as live iff EITHER (a) it has a hook-derived
-        # live state with a non-IDLE/non-ENDED phase, OR (b) its JSONL
-        # activity timestamp is fresh.
-        #
-        # Why: SessionRegistry can hold entries the OS still reports
-        # as live (claude.exe sitting idle for days in a forgotten WT
-        # tab) or stale hook-bridge placeholders that no scanner tick
-        # has been able to tombstone yet (e.g. user disabled scanner,
-        # cwd shared between live + dead sessions). Without a freshness
-        # gate those entries pollute the "CLAUDE SESSIONS" list with
-        # rows whose click takes the user to an empty terminal.
-        #
-        # The filter is upstream of grouping so adapters never see the
-        # stale view (no wasted UIA queries on a dead conhost). The
-        # dormant_sessions list is unaffected — it's populated from
-        # JsonlParser directly, not from this views collection.
-        views = _filter_stale_views(views)
-
-        # Adapter-driven grouping (dispatcher → chain → sessions bucketed
-        # into SessionGroups). If the grouper raises (bug in an adapter),
-        # fall back to singleton grouping — every session is its own
-        # group — so session_groups is always structurally valid.
-        try:
-            groups = list(self._group_sessions(views))
-        except Exception:
-            log.exception(
-                "group_sessions raised; using singleton fallback grouping"
-            )
-            groups = _default_group_sessions(views)
+        # Staleness filter and grouping are already applied in the
+        # incremental compose block above — views and groups are
+        # either cached or freshly computed.
 
         try:
             today_totals = self._usage_registry.get_totals("today")
@@ -1400,3 +1440,78 @@ class Snapshotter:
                 "session_source.sessions raised; treating as no sessions"
             )
             return []
+
+    def _compose_views_incremental(
+        self,
+        sessions: list[Session],
+        meta_ver: int,
+        record_ver: int,
+        state_ver: int,
+    ) -> list[SessionView]:
+        """Compose SessionViews with per-identity caching.
+
+        For each session, compute a stable identity key and check whether
+        the cached view is still fresh (same source versions). Fresh views
+        are reused; stale ones are recomposed and re-cached.
+        """
+        # Sentinel: if any version tracking is unavailable, skip the
+        # per-uuid cache and always recompose (legacy behaviour).
+        _sentinel = -1
+        _cache_enabled = (
+            meta_ver != _sentinel
+            and record_ver != _sentinel
+            and state_ver != _sentinel
+        )
+
+        views: list[SessionView] = []
+        for s in sessions:
+            key = (s.session_uuid, s.pid, str(s.project_path))
+            cached = self._view_cache.get(key)
+            if (
+                _cache_enabled
+                and cached is not None
+                and cached.meta_version == meta_ver
+                and cached.record_version == record_ver
+                and cached.state_version == state_ver
+            ):
+                # All source versions unchanged — reuse cached view.
+                views.append(cached.view)
+                continue
+
+            # Cache miss or stale — compose a fresh view.
+            try:
+                view = compose_session_view(
+                    s,
+                    state_reader=self._state_reader,
+                    metadata_provider=self._metadata_provider,
+                    usage_registry=self._usage_registry,
+                    names_store=self._names_store,
+                    live_state_reader=self._live_state_reader,
+                )
+            except Exception:
+                log.exception(
+                    "compose_session_view raised for pid=%s; using degraded view",
+                    s.pid,
+                )
+                view = _degraded_view(s)
+
+            views.append(view)
+            self._view_cache[key] = _CachedView(
+                view=view,
+                meta_version=meta_ver,
+                record_version=record_ver,
+                state_version=state_ver,
+            )
+
+        # Evict entries for identities no longer present this build (dead
+        # pids, uuids resumed in a different terminal). Without this the
+        # per-identity cache grows unbounded over a long-running process,
+        # since each new (uuid, pid, project) is purely additive. Bounded
+        # by the live session count, so the O(cache) sweep is cheap.
+        live_keys = {
+            (s.session_uuid, s.pid, str(s.project_path)) for s in sessions
+        }
+        for dead in [k for k in self._view_cache if k not in live_keys]:
+            del self._view_cache[dead]
+
+        return views

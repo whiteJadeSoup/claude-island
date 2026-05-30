@@ -601,6 +601,12 @@ def main() -> int:
         names_store=session_names_store,
         # Real-time phase from HookServer (falls back to pid.json if None).
         live_state_reader=state_machine.read,
+        # Incremental SessionView cache: expose the state machine's version
+        # counter so Snapshotter skips recomposing sessions whose hook-derived
+        # state is unchanged since the last build. Without this the cache
+        # falls back to its -1 sentinel (always-recompute). state_machine is
+        # unconditionally constructed above, so this never NameErrors.
+        get_state_version=lambda: state_machine.state_version,
         # OLD-uuid recovery so UsageRegistry lookups hit the right key after
         # --resume; mirrors __main__.py's identical injection.
         resume_uuid_reader=_resume_uuid_reader,

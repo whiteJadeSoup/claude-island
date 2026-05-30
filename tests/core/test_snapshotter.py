@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -744,11 +745,19 @@ def _make_snapshotter(
     state_reader: "FakeStateReader | None" = None,
     metadata_provider: "FakeMetadataProvider | None" = None,
     usage_registry: "FakeUsageRegistry | None" = None,
+    get_state_version=None,
 ) -> tuple[Snapshotter, list[WorldSnapshot]]:
     """Build a Snapshotter wired with fakes; return (snapshotter,
     received_snapshots_list). The publish callback appends to the
-    list so tests assert on what got published."""
+    list so tests assert on what got published.
+
+    ``get_state_version`` defaults to None → the Snapshotter's own
+    default (-1 sentinel) is used, disabling the incremental cache.
+    Pass a callable returning a real version to exercise caching."""
     received: list[WorldSnapshot] = []
+    kwargs = {}
+    if get_state_version is not None:
+        kwargs["get_state_version"] = get_state_version
     snap = Snapshotter(
         session_source=FakeSessionSource(sessions or []),
         state_reader=state_reader or FakeStateReader(),
@@ -761,6 +770,7 @@ def _make_snapshotter(
         publish=publish or received.append,
         debounce_window_s=debounce_window_s,
         throttle_first_window_s=throttle_first_window_s,
+        **kwargs,
     )
     return snap, received
 
@@ -1413,3 +1423,129 @@ class TestSnapshotterReconcile:
         result = snap.build_now()
         assert result.dormant_sessions == ()
         assert result.launching_sessions == ()
+
+
+# ---------------------------------------------------------------------------
+# Incremental SessionView cache (2026-05-26)
+# ---------------------------------------------------------------------------
+
+class TestSnapshotterIncrementalCache:
+    """The per-uuid + whole-list SessionView cache: a build that sees
+    identical source data (same session fingerprint + unchanged
+    meta/record/state versions) must reuse cached views instead of
+    recomposing. A bump in ANY source version invalidates the cache.
+
+    compose_session_view is the expensive step; we spy on its call count
+    to distinguish a cache hit (no recompose) from a miss (recompose)."""
+
+    def _spy_compose(self):
+        import claude_island.core.snapshot as snapshot_mod
+        return mock.patch.object(
+            snapshot_mod,
+            "compose_session_view",
+            wraps=snapshot_mod.compose_session_view,
+        )
+
+    def _cached_snapshotter(self, *, state_version: int = 0):
+        """A Snapshotter with one session and all source-version tracking
+        wired (so the cache is enabled). Returns the snapshotter plus the
+        mutable version sources so a test can bump them."""
+        s = _session(pid=1, cwd="/a")
+        md = FakeMetadataProvider()
+        md.meta_version = 0  # read via getattr in _build_snapshot
+        ur = FakeUsageRegistry()
+        ur.record_version = 0
+        holder = {"state": state_version}
+        snap, _ = _make_snapshotter(
+            sessions=[s],
+            metadata_provider=md,
+            usage_registry=ur,
+            get_state_version=lambda: holder["state"],
+        )
+        return snap, md, ur, holder
+
+    def test_second_build_reuses_cache_when_nothing_changed(self):
+        snap, md, ur, holder = self._cached_snapshotter()
+        with self._spy_compose() as spy:
+            snap.build_now()
+            n1 = spy.call_count
+            assert n1 == 1  # first build composes the single session once
+            snap.build_now()
+            assert spy.call_count == n1, "cache hit must skip recompose"
+
+    def test_meta_version_bump_invalidates_cache(self):
+        snap, md, ur, holder = self._cached_snapshotter()
+        with self._spy_compose() as spy:
+            snap.build_now()
+            n1 = spy.call_count
+            md.meta_version += 1
+            snap.build_now()
+            assert spy.call_count > n1, "meta_version bump must recompose"
+
+    def test_record_version_bump_invalidates_cache(self):
+        snap, md, ur, holder = self._cached_snapshotter()
+        with self._spy_compose() as spy:
+            snap.build_now()
+            n1 = spy.call_count
+            ur.record_version += 1
+            snap.build_now()
+            assert spy.call_count > n1, "record_version bump must recompose"
+
+    def test_state_version_bump_invalidates_cache(self):
+        snap, md, ur, holder = self._cached_snapshotter()
+        with self._spy_compose() as spy:
+            snap.build_now()
+            n1 = spy.call_count
+            holder["state"] += 1
+            snap.build_now()
+            assert spy.call_count > n1, "state_version bump must recompose"
+
+    def test_sentinel_state_version_disables_cache(self):
+        """When get_state_version returns -1 (state tracking unavailable),
+        the cache is bypassed entirely — every build recomposes. This
+        preserves legacy always-recompute behaviour for callers that
+        never wire a state machine."""
+        s = _session(pid=1, cwd="/a")
+        snap, _ = _make_snapshotter(sessions=[s], get_state_version=lambda: -1)
+        with self._spy_compose() as spy:
+            snap.build_now()
+            n1 = spy.call_count
+            assert n1 == 1
+            snap.build_now()
+            assert spy.call_count == 2 * n1, "sentinel must disable caching"
+
+    def test_dead_session_evicted_from_view_cache(self):
+        """A pid that disappears between builds must have its cache entry
+        evicted — the per-identity cache must not grow unbounded over a
+        long-running process."""
+        s1 = _session(pid=1, cwd="/a")
+        s2 = _session(pid=2, cwd="/b")
+        source = FakeSessionSource([s1, s2])
+        md = FakeMetadataProvider()
+        md.meta_version = 0
+        ur = FakeUsageRegistry()
+        ur.record_version = 0
+        snap = Snapshotter(
+            session_source=source,
+            state_reader=FakeStateReader(),
+            metadata_provider=md,
+            usage_registry=ur,
+            names_store=FakeNamesStore(),
+            get_quota=lambda: None,
+            get_available_providers=lambda: [],
+            get_selected_provider=lambda: None,
+            publish=lambda _s: None,
+            debounce_window_s=0.05,
+            throttle_first_window_s=0.0,
+            get_state_version=lambda: 0,
+        )
+        snap.build_now()
+        assert len(snap._view_cache) == 2
+
+        # pid=2 vanishes; a version bump forces the miss path (which is
+        # where eviction runs).
+        source._sessions = [s1]
+        md.meta_version = 1
+        snap.build_now()
+        assert len(snap._view_cache) == 1
+        assert all(k[1] == 1 for k in snap._view_cache)  # only pid=1 remains

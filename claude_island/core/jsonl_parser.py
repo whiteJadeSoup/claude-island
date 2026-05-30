@@ -133,6 +133,10 @@ class JsonlParser:
         self._offsets: dict[str, int] = {}
         self._session_meta: dict[str, dict] = {}
         self._stop_event = threading.Event()
+        # Monotonically increasing counter bumped after every parse that
+        # modifies session_meta. Used by Snapshotter to decide
+        # whether per-uuid SessionView caches are still fresh.
+        self.meta_version: int = 0
 
     def get_session_metadata(self, session_uuid: str) -> dict:
         """Snapshot of per-session metadata extracted from the JSONL.
@@ -350,6 +354,19 @@ class JsonlParser:
         earliest_ts: datetime | None = None
         latest_ts: datetime | None = None
 
+        # Snapshot the persistent meta BEFORE the parse loop so we can
+        # detect whether THIS parse changed any SessionView-visible field
+        # (ai_title / permission_mode / git_branch / cwd / last_activity),
+        # not just timestamps. Untimestamped ai-title / last-prompt /
+        # permission-mode rows carry no `timestamp`, so a lone flush of one
+        # leaves latest_ts None — keying meta_version on timestamps alone
+        # would let the Snapshotter's per-uuid cache go stale
+        # (UI keeps the old title). Subagents write to a throwaway `meta`
+        # (their fields never reach the parent SessionView), so for them
+        # only the parent last_activity bump below counts.
+        meta_before = None if is_subagent else dict(meta)
+        parent_bumped = False
+
         for raw_line in complete_lines:
             raw_line = raw_line.strip()
             if not raw_line:
@@ -476,6 +493,7 @@ class JsonlParser:
             existing = parent_meta.get("last_activity")
             if existing is None or latest_ts > existing:
                 parent_meta["last_activity"] = latest_ts
+                parent_bumped = True
 
         # Advance offset and emit records. Order is important: advance
         # offset BEFORE the registry call so a watchdog event firing
@@ -484,6 +502,15 @@ class JsonlParser:
         # itself synchronously fan out to subscribers (the UI bridge),
         # which we don't want to do twice.
         self._offsets[path_str] = new_offset - tail_len
+        # Bump version AFTER all meta mutations so the Snapshotter
+        # can detect that this session's SessionView inputs may have changed.
+        # Compare the full meta dict (not just timestamps) so untimestamped
+        # ai-title / last-prompt / permission-mode rows invalidate the cache
+        # too. An identical re-flush (same title) leaves meta == meta_before
+        # and correctly does NOT bump. Subagents bump only when they actually
+        # advanced the parent's last_activity (parent_bumped).
+        if (meta_before is not None and meta != meta_before) or parent_bumped:
+            self.meta_version += 1
         self._usage.record_many(batch)
 
         _metrics.observe(

@@ -129,6 +129,7 @@ def pipeline(tmp_path: Path):
         # Tight debounce/throttle so tests don't have to wait
         debounce_window_s=0.02,
         throttle_first_window_s=0.0,
+        get_state_version=lambda: state_machine.state_version,
     )
     snapshotter.start()
 

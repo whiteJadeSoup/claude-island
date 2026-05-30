@@ -80,6 +80,10 @@ class SessionStateMachine:
         # Always a set (possibly empty isn't emitted — emit only on real
         # change so distinct_until_changed downstream isn't confused).
         self.live_state_changed: Subject[set[str]] = Subject()
+        # Monotonically increasing counter bumped on each apply() or
+        # tombstone() that actually changes state. Used by
+        # Snapshotter to detect stale per-uuid caches.
+        self.state_version: int = 0
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -138,6 +142,7 @@ class SessionStateMachine:
 
             self._states[uuid] = new
             changed = {uuid}
+            self.state_version += 1
 
         # Emit OUTSIDE the lock so a subscriber's on_next callback
         # can re-enter read() without deadlocking.
@@ -183,6 +188,7 @@ class SessionStateMachine:
             )
             self._states[uuid] = new
             changed = {uuid}
+            self.state_version += 1
         self.live_state_changed.on_next(changed)
         return True
 
