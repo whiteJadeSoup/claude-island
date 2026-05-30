@@ -1,4 +1,4 @@
-import ".";
+import "."
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
@@ -594,7 +594,7 @@ Rectangle {
             Text {
                 text: value
                 color: "#c8d4de"
-                font.family: monospace ? "monospace" : ""
+                font.family: monospace ? Theme.fontMono : ""
                 font.pixelSize: 11
                 elide: Text.ElideLeft
                 Layout.fillWidth: true
@@ -639,7 +639,7 @@ Rectangle {
                 text: value
                 // Highlight the value on hover to indicate clickability
                 color: rowClickArea.containsMouse ? "#5fa8d2" : "#c8d4de"
-                font.family: monospace ? "monospace" : ""
+                font.family: monospace ? Theme.fontMono : ""
                 font.pixelSize: 11
                 elide: Text.ElideLeft
                 Layout.fillWidth: true
