@@ -171,13 +171,26 @@ Rectangle {
                         }
                     }
 
-                    // ⧉ copy session id to clipboard; shows "✓" for 1s after copy
-                    Text {
-                        text: detailPage.copiedFlash ? "✓" : "⧉"
-                        color: detailPage.copiedFlash
-                               ? "#5fd2a8"
-                               : (copyArea.containsMouse ? "#a0aab6" : "#566069")
-                        font.pixelSize: 14
+                    // Copy session id — self-drawn copy icon (cross-platform;
+                    // "⧉" isn't in the bundled fonts, would tofu on macOS).
+                    // A "✓" flash for 1s after copy stays as text (✓ is in
+                    // every system font; the brief confirm is low-risk).
+                    Item {
+                        width: 16; height: 16
+                        Layout.alignment: Qt.AlignVCenter
+                        Icon {
+                            anchors.centerIn: parent
+                            name: "copy"; size: 14
+                            visible: !detailPage.copiedFlash
+                            color: copyArea.containsMouse ? "#a0aab6" : "#566069"
+                        }
+                        Text {
+                            anchors.centerIn: parent
+                            text: "✓"
+                            visible: detailPage.copiedFlash
+                            color: "#5fd2a8"
+                            font.pixelSize: 14
+                        }
                         MouseArea {
                             id: copyArea
                             anchors.fill: parent
@@ -210,13 +223,27 @@ Rectangle {
                         }
                     }
 
-                    // ⟲ reset thinking — two-step confirm (arm → confirm within 3s)
-                    Text {
-                        text: detailPage.resetArmed ? "Confirm?" : "⟲"
-                        color: detailPage.resetArmed
-                               ? "#ef4444"
-                               : (resetArea.containsMouse ? "#e8743b" : "#4a2222")
-                        font.pixelSize: detailPage.resetArmed ? 11 : 14
+                    // Reset thinking — self-drawn rewind/undo icon (cross-platform;
+                    // "⟲" isn't in the bundled fonts). Two-step confirm: first tap
+                    // arms (shows "Confirm?" text), second tap within 3s fires.
+                    Item {
+                        width: detailPage.resetArmed ? confirmLbl.implicitWidth : 16
+                        height: 16
+                        Layout.alignment: Qt.AlignVCenter
+                        Icon {
+                            anchors.centerIn: parent
+                            name: "reset"; size: 14
+                            visible: !detailPage.resetArmed
+                            color: resetArea.containsMouse ? "#e8743b" : "#4a2222"
+                        }
+                        Text {
+                            id: confirmLbl
+                            anchors.centerIn: parent
+                            text: "Confirm?"
+                            visible: detailPage.resetArmed
+                            color: "#ef4444"
+                            font.pixelSize: 11
+                        }
                         MouseArea {
                             id: resetArea
                             anchors.fill: parent

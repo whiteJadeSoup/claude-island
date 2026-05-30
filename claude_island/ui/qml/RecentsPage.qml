@@ -81,10 +81,13 @@ Rectangle {
 
     Component.onCompleted: flatList = buildFlatList()
 
-    // ── Meta line for a row: "📁 <cwd> · <turns> turns · <relative>" ──────
+    // ── Meta line for a row: "<cwd> · <turns> turns · <relative>" ──────────
+    // No folder glyph in the string — it's drawn as a self-drawn Icon at the
+    // row's leading edge (the "📁" emoji renders colour on macOS vs mono on
+    // Windows; self-draw keeps it consistent cross-platform).
     function metaLine(item) {
         var parts = []
-        if (item.cwd) parts.push("📁 " + item.cwd)
+        if (item.cwd) parts.push(item.cwd)
         if (item.turns !== undefined && item.turns !== null)
             parts.push(item.turns + " turns")
         var ago = fmtRelative(item.last_activity_ts || 0)
@@ -336,15 +339,27 @@ Rectangle {
                                     }
                                 }
 
-                                // Second line: 📁 <cwd> · <turns> turns · <relative>
-                                Text {
+                                // Second line: [folder icon] <cwd> · <turns> · <relative>
+                                RowLayout {
                                     Layout.fillWidth: true
-                                    text: recentsPage.metaLine(rowRoot.rowItem)
-                                    color: Theme.faint
-                                    font.family: Theme.fontMono
-                                    font.pixelSize: 10
-                                    elide: Text.ElideRight
-                                    visible: text !== ""
+                                    spacing: 5
+                                    visible: metaText.text !== ""
+                                    Icon {
+                                        name: "folder"
+                                        size: 11
+                                        color: Theme.faint
+                                        Layout.alignment: Qt.AlignVCenter
+                                        visible: (rowRoot.rowItem.cwd || "") !== ""
+                                    }
+                                    Text {
+                                        id: metaText
+                                        Layout.fillWidth: true
+                                        text: recentsPage.metaLine(rowRoot.rowItem)
+                                        color: Theme.faint
+                                        font.family: Theme.fontMono
+                                        font.pixelSize: 10
+                                        elide: Text.ElideRight
+                                    }
                                 }
 
                                 // Hover-revealed action row: ↻ resume pill

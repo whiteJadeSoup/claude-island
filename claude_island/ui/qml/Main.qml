@@ -468,11 +468,18 @@ Window {
                             }
                         }
 
-                        // Collapse affordance
-                        Text {
-                            text: "  ⌄"
-                            color: collapseArea.containsMouse ? "#c8d4de" : "#566069"
-                            font.pixelSize: 16
+                        // Collapse affordance — self-drawn chevron (the "⌄"
+                        // glyph isn't in the bundled fonts; self-draw keeps it
+                        // identical on macOS/Windows beside the canvas power +
+                        // history icons already in this bar).
+                        Item {
+                            implicitWidth: 22; implicitHeight: 22
+                            Layout.leftMargin: 4
+                            Icon {
+                                anchors.centerIn: parent
+                                name: "chevron-down"; size: 14
+                                color: collapseArea.containsMouse ? "#c8d4de" : "#566069"
+                            }
                             MouseArea {
                                 id: collapseArea; anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor; hoverEnabled: true
