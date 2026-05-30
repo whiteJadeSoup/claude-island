@@ -247,6 +247,9 @@ def _transition(
                 current_tool_input=None,
                 tool_started_at=None,
                 compact_started_at=None,
+                # Compact is a context boundary — drop the prior command.
+                last_command=None,
+                last_command_at=None,
                 pending_permission_tool=None,
                 jump_target=new_jt,
             )
@@ -285,6 +288,11 @@ def _transition(
             current_tool=None,
             current_tool_input=None,
             tool_started_at=None,
+            # Command-hero: a brand-new user prompt starts a fresh turn, so
+            # the previous turn's command no longer describes "what this
+            # session is doing". Reset it; the next ToolStarted re-stamps.
+            last_command=None,
+            last_command_at=None,
             pending_permission_tool=None,
         )
 
@@ -303,6 +311,15 @@ def _transition(
             # v4c Phase 3a: stamp the tool-start moment so the snapshot
             # can compute elapsed for "Bash · 1.2s" inline display.
             tool_started_at=event.at,
+            # Command-hero (prototype): persist the command + its start time
+            # so the active card keeps showing "$ <cmd>" while the model
+            # thinks between tool calls. Falls back to the tool name when the
+            # extractor couldn't produce a renderable preview, so the hero
+            # line is never blank for an active tool. Unlike current_tool_input
+            # these are NOT cleared on ToolFinished/THINKING — only a new
+            # prompt (below) resets them.
+            last_command=event.tool_input_preview or event.tool_name,
+            last_command_at=event.at,
             # If a permission was pending, the tool starting means it was
             # resolved (Claude got allow). Clear it.
             pending_permission_tool=None,

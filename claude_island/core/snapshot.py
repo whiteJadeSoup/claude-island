@@ -204,6 +204,15 @@ class SessionView:
     # UI can hide the rate label cleanly instead of showing "0 tk/min"
     # next to a stalled session.
     tokens_per_min: int | None = None
+    # ── Command-hero (active card "$ <cmd>" line) ───────────────────────
+    # The most recent command this session ran, PERSISTED across phases
+    # (unlike current_tool_input, which is gated to TOOL_USE). Lets the
+    # active card keep its hero line while the model thinks between tool
+    # calls — matching the prototype where a "thinking" card still shows
+    # "$ writing …". None until the session runs its first tool, or after
+    # a new prompt resets the turn. No phase invariant binds these.
+    last_command: str | None = None
+    last_command_elapsed_s: float | None = None
 
     def __post_init__(self) -> None:
         # Self-consistency invariant — guards against the UI and the
@@ -736,6 +745,20 @@ def compose_session_view(
             except Exception:
                 compact_elapsed_s = None
 
+    # Command-hero elapsed — seconds since the most recent command STARTED,
+    # carried across phases (so a "thinking" card still shows "· 12m 03s").
+    # NOT phase-gated, unlike tool_elapsed_s above. None when there's no
+    # recorded command or the timestamp is missing/invalid.
+    last_command = live.last_command if live is not None else None
+    last_command_elapsed_s: float | None = None
+    if live is not None and getattr(live, "last_command_at", None) is not None:
+        try:
+            last_command_elapsed_s = (now_utc - live.last_command_at).total_seconds()
+            if last_command_elapsed_s < 0:   # clock skew — clamp
+                last_command_elapsed_s = 0.0
+        except Exception:
+            last_command_elapsed_s = None
+
     # v4c Phase 3b: rolling token-rate over the last 60s.  Cheap
     # in-memory aggregation via the per-uuid inverted index.  Wrapped
     # in a lambda + getattr so older / test-stub UsageRegistry impls
@@ -769,6 +792,8 @@ def compose_session_view(
         tool_elapsed_s=tool_elapsed_s,
         compact_elapsed_s=compact_elapsed_s,
         tokens_per_min=tokens_per_min,
+        last_command=last_command,
+        last_command_elapsed_s=last_command_elapsed_s,
     )
 
 

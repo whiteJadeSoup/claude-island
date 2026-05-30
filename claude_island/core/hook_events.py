@@ -299,6 +299,16 @@ class SessionLiveState:
     # falls back to None when tool_input has no renderable single
     # string (rare but possible for novel MCP tools).
     current_tool_input: str | None = None
+    # ── "Last command" — the prototype's command-hero row ───────────────
+    # Unlike current_tool_input (which is cleared the moment we leave
+    # TOOL_USE to satisfy the "non-None ⇒ TOOL_USE" invariant), these two
+    # PERSIST across phases. The active-card design surfaces "what this
+    # session most recently ran" as the hero line even while the model is
+    # thinking between tool calls — so we stamp the command on ToolStarted
+    # and keep it until a new user prompt resets the turn. NO invariant
+    # binds these to any phase: they may be set in THINKING / IDLE too.
+    last_command: str | None = None
+    last_command_at: datetime | None = None
 
     def __post_init__(self) -> None:
         # ENDED clears overlays checked FIRST because the next two iff
