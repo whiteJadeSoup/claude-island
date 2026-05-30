@@ -157,7 +157,13 @@ def main() -> int:
     # any Text item is created so every surface inherits it. Trade-off: native
     # text doesn't animate scale as smoothly, but we never scale text.
     from PySide6.QtQuick import QQuickWindow
-    QQuickWindow.setTextRenderType(QQuickWindow.TextRenderType.NativeTextRendering)
+    # Cross-platform, DPI-stable text. QtTextRendering is Qt's OWN distance-field
+    # rasteriser: it renders identically on Windows/macOS/Linux and at any DPI
+    # scale. NativeTextRendering (the previous setting) delegates to each OS's
+    # text engine — so it looked over-hinted / "weird" for the small mono UI text
+    # on the user's display and would differ machine-to-machine. With the bundled
+    # Inter + JetBrains Mono, QtTextRendering gives consistent type everywhere.
+    QQuickWindow.setTextRenderType(QQuickWindow.TextRenderType.QtTextRendering)
 
     app = QGuiApplication(sys.argv)
 
