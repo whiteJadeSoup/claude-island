@@ -331,97 +331,89 @@ class TestComposeSessionView:
         assert view.is_high_cost is False
 
 
-class TestComposeResumeUuidOverride:
-    """``claude --resume <UUID>`` bug (2026-05-17): claude.exe assigns a
-    NEW in-memory session uuid (written to pid.json and forwarded on every
-    hook ``session_id``) but keeps writing transcripts to the OLD JSONL.
-    UsageRegistry indexes records under OLD; the WT tab title sentinel
-    was locked at launch with OLD too. Without recovering OLD from
-    cmdline, ``get_latest_model(NEW)`` returns None (no model chip) and
-    ``sentinel_title(NEW)`` never matches the tab (click → wrong tab)."""
+class TestComposeUuidResolution:
+    """Session uuid resolution priority: pid.json's ``sessionId`` is
+    authoritative (claude.exe rewrites it on every status transition,
+    including after ``/clear`` and ``/resume <other>``); the bridge-
+    populated ``session.session_uuid`` is the fallback for the brief
+    window before pid.json is written. There is no cmdline path —
+    cmdline ``--resume`` is frozen at process launch and goes stale
+    immediately on any session change (user bug 2026-05-25)."""
 
-    def test_resume_uuid_overrides_pid_json_session_id(self):
-        """Mirrors the live build-mini-cc situation: pid.json reports
-        f56fb0ca (NEW) but cmdline says --resume 413eda01 (OLD). The
-        composed view must surface OLD so the UsageRegistry lookup
-        returns the model recorded against 413eda01."""
+    def test_pid_json_session_id_is_used(self):
+        """Happy path: pid.json has a sessionId → that's the view's uuid,
+        and downstream lookups (cost / latest_model) key off it."""
         s = _session(pid=97372, uuid="")
-        old = "413eda01-6271-43cb-934b-035b236c0154"
         new = "f56fb0ca-649d-4708-8c24-76a18857a0c6"
         view = compose_session_view(
             s,
             state_reader=FakeStateReader({97372: {"sessionId": new, "status": "idle"}}),
             metadata_provider=FakeMetadataProvider(),
             usage_registry=FakeUsageRegistry(
-                summaries={old: (12.34, 5, 1)},
-                latest_models={old: "claude-opus-4-7"},
+                summaries={new: (12.34, 5, 1)},
+                latest_models={new: "claude-opus-4-7"},
             ),
             names_store=FakeNamesStore(),
-            resume_uuid_reader=lambda pid: old if pid == 97372 else None,
         )
-        assert view.session_uuid == old
+        assert view.session_uuid == new
         assert view.cost_usd == 12.34
         assert view.latest_model == "claude-opus-4-7"
 
-    def test_no_resume_uuid_falls_back_to_pid_json(self):
-        """Fresh session / name-resume: resume_uuid_reader returns None.
-        Composed view uses pid.json's sessionId — preserves legacy
-        behaviour for sessions that don't have the UUID divergence."""
-        s = _session(pid=1, uuid="")
+    def test_pid_json_session_id_overrides_session_session_uuid(self):
+        """``/clear`` divergence: bridge had upserted OLD into the registry
+        before claude rewrote pid.json to NEW. compose must trust pid.json
+        and produce a view keyed on NEW, not the registry's OLD."""
+        old = "413eda01-6271-43cb-934b-035b236c0154"  # stale registry uuid
+        new = "f56fb0ca-649d-4708-8c24-76a18857a0c6"  # pid.json after /clear
+        s = _session(pid=97372, uuid=old)
         view = compose_session_view(
             s,
-            state_reader=FakeStateReader({1: {"sessionId": "fresh-uuid"}}),
+            state_reader=FakeStateReader({97372: {"sessionId": new, "status": "idle"}}),
             metadata_provider=FakeMetadataProvider(),
             usage_registry=FakeUsageRegistry(
-                summaries={"fresh-uuid": (1.0, 1, 0)},
-                latest_models={"fresh-uuid": "claude-sonnet-4-6"},
+                summaries={new: (5.0, 3, 1)},
+                latest_models={new: "claude-opus-4-7"},
             ),
             names_store=FakeNamesStore(),
-            resume_uuid_reader=lambda _: None,
         )
-        assert view.session_uuid == "fresh-uuid"
-        assert view.latest_model == "claude-sonnet-4-6"
+        assert view.session_uuid == new, (
+            f"expected pid.json NEW to win over registry OLD, got {view.session_uuid!r}"
+        )
+        assert view.latest_model == "claude-opus-4-7"
 
-    def test_resume_uuid_used_when_pid_json_missing(self):
-        """pid.json read failed (file vanished, permission denied)
-        but cmdline still has --resume <UUID>: prefer it so lookups
-        still hit the right uuid instead of going empty."""
-        s = _session(pid=1, uuid="")
-        old = "11111111-1111-1111-1111-111111111111"
+    def test_falls_back_to_session_session_uuid_when_pid_json_missing(self):
+        """pid.json absent (read race / fresh process / permission denied):
+        the bridge-populated ``session.session_uuid`` (from SessionStart
+        hook payload) is the fallback so lookups still hit the right key."""
+        bridge_uuid = "11111111-1111-1111-1111-111111111111"
+        s = _session(pid=1, uuid=bridge_uuid)
         view = compose_session_view(
             s,
             state_reader=FakeStateReader(),  # pid.json missing
             metadata_provider=FakeMetadataProvider(),
             usage_registry=FakeUsageRegistry(
-                latest_models={old: "claude-opus-4-7"},
+                latest_models={bridge_uuid: "claude-opus-4-7"},
             ),
             names_store=FakeNamesStore(),
-            resume_uuid_reader=lambda _: old,
         )
-        assert view.session_uuid == old
+        assert view.session_uuid == bridge_uuid
         assert view.latest_model == "claude-opus-4-7"
 
-    def test_resume_uuid_reader_exception_does_not_fail_compose(self):
-        """Per-source exception isolation also applies to the new reader.
-        psutil race / access denied must not blow up the whole snapshot."""
+    def test_empty_when_no_source_has_uuid(self):
+        """Pre-island session that hasn't fired a hook AND has no pid.json
+        (unusual but possible on slow startup): all sources empty → view's
+        session_uuid is empty string; downstream lookups degrade gracefully."""
         s = _session(pid=1, uuid="")
-
-        def explode(_pid):
-            raise RuntimeError("psutil race")
-
         view = compose_session_view(
             s,
-            state_reader=FakeStateReader({1: {"sessionId": "pid-json-uuid"}}),
+            state_reader=FakeStateReader(),
             metadata_provider=FakeMetadataProvider(),
-            usage_registry=FakeUsageRegistry(
-                latest_models={"pid-json-uuid": "claude-sonnet-4-6"},
-            ),
+            usage_registry=FakeUsageRegistry(),
             names_store=FakeNamesStore(),
-            resume_uuid_reader=explode,
         )
-        # Falls through to pid.json's sessionId — view still constructs.
-        assert view.session_uuid == "pid-json-uuid"
-        assert view.latest_model == "claude-sonnet-4-6"
+        assert view.session_uuid == ""
+        assert view.cost_usd == 0.0
+        assert view.latest_model is None
 
 
 class TestHookLivePhaseIdleOverride:

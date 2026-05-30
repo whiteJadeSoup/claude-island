@@ -114,13 +114,13 @@ FocusTerminalCallback = Callable[[str], None]
 # `.decision` rule.  Token references go through lab_palette so a tint
 # tweak in the prototype's :root block propagates here in lockstep.
 _QSS = f"""
-/* v4c banner: flat, no rounded chrome, only a bottom hairline.
-   Mirrors prototype-v4c-github.html's `.decision` rule — dark
-   orange-tinted bg + bottom border, nothing else. */
+/* v4c (Mocha): banner is flat, peach-tinted warm dark.  Matches the
+   waiting_approval row tint so question banner + waiting row read
+   as one visual family ("needs your attention"). */
 QFrame#questionCard {{
-    background-color: #1f1106;
+    background-color: #2e1d28;
     border: none;
-    border-bottom: 1px solid rgba(219, 109, 40, 0.40);
+    border-bottom: 1px solid rgba(250, 179, 135, 0.40);
     border-radius: 0;
 }}
 QFrame#questionCardTopBar {{ background-color: transparent; }}
@@ -269,7 +269,7 @@ QPushButton#questionSubmit {{
     font-weight: 600;
     border: 1px solid {_C.accent};
 }}
-QPushButton#questionSubmit:hover {{ filter: brightness(1.05); }}
+QPushButton#questionSubmit:hover {{ background-color: #a4c1ff; }}
 QPushButton#questionSubmit:disabled {{
     background-color: {_C.surface};
     border-color: {_C.rule};

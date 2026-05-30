@@ -66,70 +66,6 @@ class TestGetSessionName:
 
 
 # --------------------------------------------------------------------------
-# get_uuid_by_name — reverse lookup for ``claude --resume <name>`` recovery
-# --------------------------------------------------------------------------
-
-class TestGetUuidByName:
-    def test_returns_none_when_file_missing(self, tmp_path_patched):
-        assert session_names.get_uuid_by_name("anything") is None
-
-    def test_returns_none_when_name_empty_or_whitespace(self, tmp_path_patched):
-        tmp_path_patched.write_text(
-            json.dumps({"abc": ""}), encoding="utf-8",
-        )
-        assert session_names.get_uuid_by_name("") is None
-        assert session_names.get_uuid_by_name("   ") is None
-
-    def test_returns_uuid_when_name_matches(self, tmp_path_patched):
-        tmp_path_patched.write_text(
-            json.dumps({
-                "5d0e7a27-267f-46de-89c2-41a0c2664321": "cc-learning",
-                "abc-123": "frontend refactor",
-            }),
-            encoding="utf-8",
-        )
-        assert (
-            session_names.get_uuid_by_name("cc-learning")
-            == "5d0e7a27-267f-46de-89c2-41a0c2664321"
-        )
-        assert session_names.get_uuid_by_name("frontend refactor") == "abc-123"
-
-    def test_returns_none_when_name_unknown(self, tmp_path_patched):
-        tmp_path_patched.write_text(
-            json.dumps({"abc": "stored"}), encoding="utf-8",
-        )
-        assert session_names.get_uuid_by_name("not-in-store") is None
-
-    def test_strips_whitespace_before_compare(self, tmp_path_patched):
-        """User may have typed ``--resume cc-learning `` with a trailing
-        space (or our caller may have done so before passing). Match on
-        stripped value."""
-        tmp_path_patched.write_text(
-            json.dumps({"abc": "cc-learning"}), encoding="utf-8",
-        )
-        assert session_names.get_uuid_by_name("  cc-learning  ") == "abc"
-
-    def test_first_match_wins_on_duplicate_names(self, tmp_path_patched):
-        """Rare but possible (user reused a name across sessions before
-        dedup kicked in): return either one — first match in dict-iter
-        order. Asserts the function doesn't crash or return junk."""
-        tmp_path_patched.write_text(
-            json.dumps({"uuid-a": "dup", "uuid-b": "dup"}),
-            encoding="utf-8",
-        )
-        result = session_names.get_uuid_by_name("dup")
-        assert result in ("uuid-a", "uuid-b")
-
-    def test_skips_non_string_values(self, tmp_path_patched):
-        """Same defensive pattern as get_session_name: don't match
-        against numeric / null values in a hand-edited file."""
-        tmp_path_patched.write_text(
-            json.dumps({"a": "ok", "b": 42}), encoding="utf-8",
-        )
-        assert session_names.get_uuid_by_name("ok") == "a"
-
-
-# --------------------------------------------------------------------------
 # set_session_name — write path
 # --------------------------------------------------------------------------
 
@@ -277,22 +213,32 @@ class TestConcurrentWrites:
 class TestReadFailureLogging:
     """Read-time failures (corrupt JSON, wrong shape) used to silently
     return {}, hiding renames from the user with no diagnostic. These
-    tests verify warnings now reach stderr."""
+    tests verify warnings are emitted via the module logger (was
+    stderr-print before commit ``c-2``; the swap-to-logging fix lets
+    callers route the warnings to a log file via standard logging
+    config rather than scraping stderr)."""
 
-    def test_malformed_json_logs_warning(self, tmp_path_patched, capsys):
-        tmp_path_patched.write_text("not json {[", encoding="utf-8")
-        result = session_names.get_session_name("any")
+    def test_malformed_json_logs_warning(self, tmp_path_patched, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING,
+                              logger="claude_island.platform_.session_names"):
+            tmp_path_patched.write_text("not json {[", encoding="utf-8")
+            result = session_names.get_session_name("any")
         assert result is None
-        err = capsys.readouterr().err
-        assert "malformed" in err.lower()
+        assert any("malformed" in r.message.lower() for r in caplog.records)
 
-    def test_wrong_shape_logs_warning(self, tmp_path_patched, capsys):
-        # Top-level array instead of object — JSON-valid but wrong.
-        tmp_path_patched.write_text('["not", "an", "object"]', encoding="utf-8")
-        result = session_names.get_session_name("any")
+    def test_wrong_shape_logs_warning(self, tmp_path_patched, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING,
+                              logger="claude_island.platform_.session_names"):
+            # Top-level array instead of object — JSON-valid but wrong.
+            tmp_path_patched.write_text('["not", "an", "object"]', encoding="utf-8")
+            result = session_names.get_session_name("any")
         assert result is None
-        err = capsys.readouterr().err
-        assert "object" in err.lower() or "ignoring" in err.lower()
+        assert any(
+            "object" in r.message.lower() or "ignoring" in r.message.lower()
+            for r in caplog.records
+        )
 
     def test_missing_file_does_NOT_log(self, tmp_path_patched, capsys):
         # First-time-user case (file never created) — must stay silent

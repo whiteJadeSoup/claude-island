@@ -32,6 +32,7 @@ def _record(
     cache_read_tokens: int = 0,
     project_path: str = "proj",
     session_uuid: str = "sess",
+    message_id: str | None = None,
 ) -> UsageRecord:
     return UsageRecord(
         timestamp=when or datetime.now(timezone.utc),
@@ -42,6 +43,7 @@ def _record(
         output_tokens=output_tokens,
         cache_creation_tokens=cache_creation_tokens,
         cache_read_tokens=cache_read_tokens,
+        message_id=message_id,
     )
 
 
@@ -310,6 +312,61 @@ def test_get_totals_5h_window_excludes_older_records(registry):
     ])
     t = registry.get_totals("5h")
     assert t.input_tokens == 42
+
+
+# --------------------------------------------------------------------------
+# Sidechain breakdown — TODAY card surfaces "incl. N subagent reqs · $X"
+# below the main stat strip so users can see the subagent contribution
+# inside the headline cost (which is main + sidechain combined, matching
+# what Anthropic actually bills).
+# --------------------------------------------------------------------------
+
+def test_get_totals_splits_sidechain_request_count_and_cost(registry):
+    """Mix of main + sidechain records: the headline aggregates include
+    everything (request_count, tokens, cost_usd), AND two new fields
+    surface the sidechain-only subset (sidechain_request_count,
+    sidechain_cost_usd). Both totals add up to the headline."""
+    # 2 main + 1 sidechain, all opus, all distinct message_ids so dedup
+    # doesn't drop anything.
+    registry.record_many([
+        UsageRecord(**{**_record(model="claude-opus-4-7",
+                                  input_tokens=1, output_tokens=100).__dict__,
+                       "message_id": "main-1", "is_sidechain": False}),
+        UsageRecord(**{**_record(model="claude-opus-4-7",
+                                  input_tokens=2, output_tokens=200).__dict__,
+                       "message_id": "main-2", "is_sidechain": False}),
+        UsageRecord(**{**_record(model="claude-opus-4-7",
+                                  input_tokens=3, output_tokens=300).__dict__,
+                       "message_id": "sub-1", "is_sidechain": True}),
+    ])
+    t = registry.get_totals("today")
+    # Headline: 3 reqs total, all-records cost.
+    assert t.request_count == 3
+    expected_total = (
+        (1 + 2 + 3) / 1e6 * 5         # input  (opus = $5/Mtok)
+        + (100 + 200 + 300) / 1e6 * 25  # output (opus = $25/Mtok)
+    )
+    assert abs(t.cost_usd - expected_total) < 1e-6
+    # Sidechain subset: 1 req, sub-1's cost only.
+    assert t.sidechain_request_count == 1
+    expected_sub = 3 / 1e6 * 5 + 300 / 1e6 * 25
+    assert abs(t.sidechain_cost_usd - expected_sub) < 1e-6
+
+
+def test_get_totals_sidechain_fields_zero_when_no_sidechain_records(registry):
+    """Cold-start / pure-main use case: both sidechain fields are 0.
+    Backward-compat guarantee — a UI consumer that didn't know about
+    these fields before keeps seeing the same numbers it always saw."""
+    registry.record_many([
+        _record(model="claude-opus-4-7",
+                input_tokens=10, output_tokens=100, message_id="m-1"),
+        _record(model="claude-opus-4-7",
+                input_tokens=20, output_tokens=200, message_id="m-2"),
+    ])
+    t = registry.get_totals("today")
+    assert t.request_count == 2
+    assert t.sidechain_request_count == 0
+    assert t.sidechain_cost_usd == 0.0
 
 
 # --------------------------------------------------------------------------
@@ -667,3 +724,59 @@ def test_session_window_explicit_bounds_anchor_to_endpoint(registry):
     assert su.end_time == end_time
     assert len(su.by_model) == 1
     assert su.by_model[0].input_tokens == 7
+
+
+# ── _seen_message_ids cap (P1-a) ───────────────────────────────────────
+
+
+def test_seen_message_ids_evicts_oldest_when_cap_exceeded(monkeypatch):
+    """When _seen_message_ids reaches the cap, the FIFO-oldest entry
+    falls off and ``usage.dedup.evict`` increments. Verified at a
+    deliberately tiny cap so the test stays fast.
+
+    The eviction property protects long-running island instances from
+    unbounded growth — observed 27K msg ids after 5 months of use; without
+    the cap a multi-year instance would reach hundreds of MB of dedup
+    state. See SEEN_MESSAGE_IDS_CAP rationale in usage_registry.py.
+    """
+    from claude_island.core import metrics, usage_registry
+
+    monkeypatch.setattr(usage_registry, "SEEN_MESSAGE_IDS_CAP", 3)
+    reg = usage_registry.UsageRegistry()
+
+    # Insert 5 unique msg ids into a 3-slot cap. msg-0 and msg-1 should
+    # fall off; msg-2, msg-3, msg-4 should remain.
+    reg.record_many([_record(message_id=f"msg-{i}") for i in range(5)])
+
+    assert len(reg._seen_message_ids) == 3
+    assert "msg-0" not in reg._seen_message_ids
+    assert "msg-1" not in reg._seen_message_ids
+    assert "msg-4" in reg._seen_message_ids
+
+    # 2 evictions reported through the metrics primitive.
+    assert metrics.metrics.snapshot().counters.get("usage.dedup.evict") == 2
+
+
+def test_seen_message_ids_no_eviction_below_cap(monkeypatch):
+    """Inserting fewer ids than the cap must never trigger an
+    eviction (counter stays absent — lazy creation = no entry until
+    something happens)."""
+    from claude_island.core import metrics, usage_registry
+    monkeypatch.setattr(usage_registry, "SEEN_MESSAGE_IDS_CAP", 100)
+    reg = usage_registry.UsageRegistry()
+    reg.record_many([_record(message_id=f"msg-{i}") for i in range(50)])
+    assert "usage.dedup.evict" not in metrics.metrics.snapshot().counters
+
+
+def test_seen_message_ids_dedup_still_works_post_eviction(monkeypatch):
+    """The classic dedup contract (one msg id never double-counts) must
+    survive the cap. As long as the duplicate arrives BEFORE the
+    original gets evicted, dedup catches it — this is the in-window
+    case the cap is sized to handle."""
+    from claude_island.core import usage_registry
+    monkeypatch.setattr(usage_registry, "SEEN_MESSAGE_IDS_CAP", 100)
+    reg = usage_registry.UsageRegistry()
+    reg.record_many([_record(message_id="msg-A")])
+    # Duplicate arrives — cap is far from full, so dedup catches it.
+    reg.record_many([_record(message_id="msg-A")])
+    assert len(reg._records) == 1

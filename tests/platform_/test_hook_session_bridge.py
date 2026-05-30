@@ -278,6 +278,53 @@ def test_placeholder_survives_when_scanner_sees_other_session_same_cwd():
     assert sm.read("hookless-twin").phase != SessionPhase.ENDED
 
 
+def test_orphan_tombstones_when_scanner_resolves_different_uuid_same_cwd():
+    """Regression (2026-05-26): orphan placeholder in cwd X must
+    tombstone when scanner sees a same-cwd process with a *different*
+    resolved uuid. The cwd-match resilience clause only applies when
+    scanner can't yet name the session it sees (uuid==''); a resolved
+    uuid is proof of a *different* session and must not shield an
+    unrelated orphan.
+
+    Reproduction:
+      1. Session A starts via hook → state_machine[A]=THINKING,
+         registry has placeholder(pid=-1, uuid=A, cwd=X).
+      2. Session A crashes without firing SessionEnded (kill -9 /
+         hook chain drop) → state_machine still says THINKING.
+      3. Independent session B starts in same cwd X with resolved
+         uuid=B (via pid.json/host_pid). Scanner now reports
+         Session(pid=42, uuid=B, cwd=X) each tick.
+      4. Two consecutive ticks pass: orphan A must tombstone.
+
+    Pre-fix: orphan A survived forever because seen_cwds contained X
+    (from B's scanner entry) → miss_count for A never advanced →
+    phantom row in the island showing whatever phase A was last in.
+    """
+    reg, sm, bridge = _make_pair()
+    # Session A: hook-only orphan in cwd X.
+    sm.apply(SessionStarted("orphan-A", _CWD, _NOW, "startup", None, _NOW))
+    assert any(s.session_uuid == "orphan-A" for s in reg.sessions)
+
+    # Session B: scanner sees it in same cwd with a RESOLVED uuid.
+    # This is what happens once the registry merge has grafted B's
+    # uuid onto the (cwd, pid) entry (via prior bridge upsert or
+    # hook-driven host_pid path).
+    reg.update([Session(
+        pid=42, project_path=_CWD,
+        session_uuid="real-B", last_activity=_NOW,
+    )])
+    reg.update([Session(
+        pid=42, project_path=_CWD,
+        session_uuid="real-B", last_activity=_NOW,
+    )])
+
+    # Orphan A must be tombstoned — scanner naming B is not proof
+    # that A is alive.
+    assert sm.read("orphan-A").phase == SessionPhase.ENDED
+    # And the orphan placeholder must be gone from the registry.
+    assert all(s.session_uuid != "orphan-A" for s in reg.sessions)
+
+
 # ---------------------------------------------------------------------------
 # Placeholder visible in registry before scanner ticks
 # ---------------------------------------------------------------------------

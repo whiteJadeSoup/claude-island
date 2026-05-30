@@ -21,6 +21,7 @@ which only registers on win32) so the suite runs cross-platform.
 """
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -1108,7 +1109,10 @@ class TestActivateWindowsReconcile:
         }
 
         from unittest.mock import MagicMock
-        import uiautomation as auto
+        # uiautomation is a Windows-only pkg (ships only on win32). Skip
+        # the smart-guess UIA tests on other platforms — the module is
+        # unimportable, so there's nothing to mock against.
+        auto = pytest.importorskip("uiautomation")
 
         # smart_guess UIA mock: single lone candidate (a 'Windows
         # PowerShell' tab) so it succeeds.
@@ -1171,7 +1175,10 @@ class TestActivateWindowsReconcile:
         # 3 TabItems: 2 are known sentinels (excluded), 1 is the
         # candidate (a 'Windows PowerShell' tab with suppressed sentinel).
         from unittest.mock import MagicMock
-        import uiautomation as auto
+        # uiautomation is a Windows-only pkg (ships only on win32). Skip
+        # the smart-guess UIA tests on other platforms — the module is
+        # unimportable, so there's nothing to mock against.
+        auto = pytest.importorskip("uiautomation")
 
         # Build mock TabItem objects
         def make_tab(name, selected=False):
@@ -1234,7 +1241,10 @@ class TestActivateWindowsReconcile:
         }
 
         from unittest.mock import MagicMock
-        import uiautomation as auto
+        # uiautomation is a Windows-only pkg (ships only on win32). Skip
+        # the smart-guess UIA tests on other platforms — the module is
+        # unimportable, so there's nothing to mock against.
+        auto = pytest.importorskip("uiautomation")
 
         def make_tab(name):
             t = MagicMock()
@@ -1459,6 +1469,11 @@ class TestWindowsTerminalLaunch:
         from claude_island.core.capabilities import Capability
         assert Capability.LAUNCH in WindowsTerminalAdapter.capabilities
 
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="asserts exact Windows path separators in argv (str(Path) is "
+               "OS-dependent); other launch tests cover the rest cross-platform",
+    )
     def test_launch_calls_wt_exe_with_correct_argv(self):
         from claude_island.core.capabilities import SpawnResult
         adapter = WindowsTerminalAdapter()

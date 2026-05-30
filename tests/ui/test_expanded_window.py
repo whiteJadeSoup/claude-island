@@ -889,8 +889,10 @@ def test_row_meta_shows_cost_when_details_available(qtbot):
     btn = panel._rows[1]
     assert btn.findChild(_QL, "name_label").text() == "cc-learning"
     assert btn.findChild(_QL, "meta_label").text() == "$2.67"
-    # The hover tooltip is now intentionally empty — replaced by
-    # right-click popup. Avoids two competing surfaces for the same info.
+    # Short name + short cwd both fit — _sync_name_tooltip leaves the
+    # row tooltip empty so hover doesn't echo already-visible text.
+    # The "long content triggers tooltip" path is covered by
+    # TestNameElisionTooltip below.
     assert btn.toolTip() == ""
 
 
@@ -904,10 +906,10 @@ def test_row_meta_renders_dash_when_no_details(qtbot):
 
 
 class TestNameElisionTooltip:
-    """User feedback 2026-05-23: long session names get visually
-    elided ("Optimize code review prompt caching s…") and hover
-    should reveal the full text. Short names stay tooltip-free so
-    hover doesn't echo already-visible content."""
+    """User feedback 2026-05-23/05-25: long session names and long
+    cwd paths get visually elided in the row; hover should reveal
+    both. Short names + short cwds stay tooltip-free so hover
+    doesn't echo already-visible content."""
 
     def test_long_name_elided_shows_full_in_tooltip(self, qtbot):
         from PySide6.QtWidgets import QLabel as _QL
@@ -920,7 +922,9 @@ class TestNameElisionTooltip:
         # Force elision: shrink the label below its sizeHint width.
         name_label.resize(80, name_label.height())
         btn._sync_name_tooltip()
-        assert btn.toolTip() == long_name
+        # Tooltip carries full name + full cwd (cwd "/proj/foo" fits
+        # but the tooltip composes both when either label is elided).
+        assert btn.toolTip() == f"{long_name}\n/proj/foo"
 
     def test_short_name_fits_no_tooltip(self, qtbot):
         from PySide6.QtWidgets import QLabel as _QL
@@ -997,10 +1001,11 @@ class TestNameElisionTooltip:
         assert name_label.width() >= 100, (
             f"name_label.width()={name_label.width()}, expected ≥100"
         )
-        # Tooltip carries the full name iff the visible form was elided.
+        # Tooltip carries the full name + cwd iff the visible form
+        # was elided. Smart-merge content: "{name}\n{cwd}".
         assert name_label.text() == "cc-learning"
         if _QL.text(name_label) != "cc-learning":
-            assert btn.toolTip() == "cc-learning"
+            assert btn.toolTip() == "cc-learning\n/proj/foo"
 
     def test_resize_event_resyncs_tooltip(self, qtbot):
         """Re-evaluating on resizeEvent is what keeps the tooltip
@@ -1016,11 +1021,11 @@ class TestNameElisionTooltip:
         name_label = btn.findChild(_QL, "name_label")
         long_name = "Optimize code review prompt caching strategy"
         name_label.setText(long_name)
-        # Step 1: narrow → elided → tooltip set
+        # Step 1: narrow → elided → tooltip carries name + cwd
         name_label.resize(80, name_label.height())
         ev = QResizeEvent(btn.size(), btn.size())
         btn.resizeEvent(ev)
-        assert btn.toolTip() == long_name
+        assert btn.toolTip() == f"{long_name}\n/proj/foo"
         # Step 2: widen → not elided → tooltip cleared
         name_label.resize(800, name_label.height())
         btn.resizeEvent(ev)
@@ -2976,6 +2981,70 @@ class TestSummaryCard:
             f"got {len(calls)} calls"
         )
 
+    def test_summary_sidechain_line_renders_when_subagents_used(self, qtbot):
+        """When today's totals include any sidechain (subagent) records,
+        the TODAY card shows a small annotation line below the 4-stat
+        strip — "↳ incl. {N} subagent reqs · ${C}" — reconciling the
+        island headline (main + subagent, matches Anthropic's bill)
+        with ccusage-style tools (main only). Without this line, users
+        comparing the two tools see a ~7-15% cost gap and have no way
+        to explain it."""
+        from claude_island.core.models import UsageTotals
+        capsule = QWidget(); capsule.show()
+        p = ExpandedWindow(
+            capsule=capsule, controller=IslandController(),
+            get_usage_totals=lambda period: UsageTotals(
+                period=period,
+                input_tokens=300, output_tokens=210_000,
+                cache_creation_tokens=630_000, cache_read_tokens=128_000_000,
+                input_cost=5.0, output_cost=1.0,
+                sidechain_request_count=314,
+                sidechain_cost_usd=14.18,
+            ),
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        text = p._summary_sidechain.text()
+        assert "314" in text, f"missing subagent count: {text!r}"
+        assert "$14" in text, f"missing subagent cost: {text!r}"
+        assert "subagent reqs" in text, f"missing label: {text!r}"
+        assert p._summary_sidechain.isVisibleTo(p), \
+            "sidechain line must be visible when subagent records exist"
+
+    def test_summary_sidechain_line_hidden_when_no_subagents(self, qtbot):
+        """No sidechain records today → no annotation. The TODAY card
+        keeps its compact look for the common single-session case
+        instead of forever advertising "0 subagent reqs"."""
+        from claude_island.core.models import UsageTotals
+        capsule = QWidget(); capsule.show()
+        p = ExpandedWindow(
+            capsule=capsule, controller=IslandController(),
+            get_usage_totals=lambda period: UsageTotals(
+                period=period,
+                input_tokens=300, output_tokens=210_000,
+                input_cost=5.0, output_cost=1.0,
+                sidechain_request_count=0,
+                sidechain_cost_usd=0.0,
+            ),
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        assert not p._summary_sidechain.isVisibleTo(p), \
+            "sidechain line must be hidden when no subagent activity"
+
+    def test_summary_sidechain_line_hidden_when_totals_fail(self, qtbot):
+        """get_usage_totals raising must hide the sidechain line (same
+        degradation as the rest of the stats strip going blank — keeps
+        the card from advertising stale data)."""
+        capsule = QWidget(); capsule.show()
+        p = ExpandedWindow(
+            capsule=capsule, controller=IslandController(),
+            get_usage_totals=lambda _p: (_ for _ in ()).throw(RuntimeError("x")),
+        )
+        qtbot.addWidget(p); qtbot.addWidget(capsule)
+        p._refresh_summary_card()
+        assert not p._summary_sidechain.isVisibleTo(p)
+
     def test_summary_stats_blank_when_totals_fail(self, qtbot):
         """If get_usage_totals raises, the stats label should be empty
         rather than carry stale data — same defensive pattern as the
@@ -3099,13 +3168,15 @@ class TestHighCostRowAlert:
         meta = btn.findChild(QLabel, "meta_label")
         assert meta is not None
         css = meta.styleSheet()
-        # v4c: high-cost tint moved from yellow #facc15 → orange (red_warm).
-        from claude_island.ui.lab_palette import Color as _Lab
-        expected_tint = _Lab.red_warm.lstrip("#").lower()
-        assert expected_tint in css.lower()
+        # v4c Mocha (2026-05-22 re-tier): cost $50–$200 paints yellow
+        # (#f9e2af).  The test uses cost_usd=132 which falls in this
+        # band — "worth noticing" but not the red ≥$200 alarm tier.
+        assert "f9e2af" in css.lower()
         assert "600" in css  # font-weight bold-ish
-        # No row-level tooltip — verify so a refactor that adds one
-        # back has to update this assertion, prompting reconsideration.
+        # Short name ("x") + short cwd ("/a") both fit — no elision,
+        # no tooltip. _sync_name_tooltip only fires when something is
+        # actually hidden. The elided-content tooltip path is covered
+        # by TestNameElisionTooltip.
         assert btn.toolTip() == ""
 
     def test_running_high_cost_independent_signals(self, qtbot):
@@ -3164,14 +3235,10 @@ class TestHighCostRowAlert:
         assert btn._status_glyph.state() == _RowStatusGlyph.STATE_RUNNING
         assert btn._running is True
         meta = btn.findChild(QLabel, "meta_label")
-        # v4c: high-cost cost label tints to orange (red_warm) — was
-        # yellow #facc15 in v3.  Token is lab_palette.Color.red_warm.
-        from claude_island.ui.lab_palette import Color as _Lab
-        # red_warm hex starts with "#db6d28" (orange-500) in v4c; the
-        # test asserts on the resolved tint rather than a literal so a
-        # future palette tweak doesn't have to land in this file.
-        expected_tint = _Lab.red_warm.lstrip("#").lower()
-        assert expected_tint in meta.styleSheet().lower()
+        # v4c Mocha (2026-05-22 re-tier): cost $50–$200 = yellow tier
+        # (#f9e2af).  Test cost_usd is $132 (above the $50 yellow
+        # floor, below the $200 red ceiling).
+        assert "f9e2af" in meta.styleSheet().lower()
         # v3: equalizer bar tint follows view.phase (THINKING → amber)
         # via lab_palette.Color.for_phase.  The high-cost signal still
         # rides on the cost label colour — the two channels remain
@@ -3208,6 +3275,9 @@ class TestHighCostRowAlert:
         btn = p._rows[1]
         meta = btn.findChild(QLabel, "meta_label")
         assert meta.styleSheet() == _STYLE_COST_DEFAULT
+        # Short name + short cwd both fit — _sync_name_tooltip leaves
+        # the tooltip empty (see TestNameElisionTooltip for the
+        # elided-content path).
         assert btn.toolTip() == ""
 
     def test_low_cost_dot_keeps_default_glyph(self, qtbot):

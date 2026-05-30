@@ -125,6 +125,16 @@ def _make_qt_message_filter():
 
 
 def main() -> int:
+    # Crash logger MUST be installed before anything else that could fault:
+    # sys.excepthook + threading.excepthook + faulthandler, all routing to
+    # ~/.claude-island/crash.log. Without this, unhandled exceptions on
+    # worker threads (Snapshotter, hook listener, focus workers) disappear
+    # silently and macOS .app bundles swallow stderr. Ported here from the
+    # old __main__.py when that became a thin delegate to qml_app.main().
+    # See claude_island/core/crash_log.py for the rationale.
+    from claude_island.core import crash_log as _crash_log
+    _crash_log.install()
+
     # ── Pre-Qt setup (must run BEFORE QGuiApplication is created) ──────────
     # stderr noise filter: catches C-level FD 2 writes from Qt + pyobjc
     # before they reach the terminal. No-op on non-darwin platforms.

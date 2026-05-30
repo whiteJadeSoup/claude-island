@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace as _replace
 
 from reactivex.subject import Subject
 
@@ -170,32 +171,69 @@ class SessionRegistry:
         produce the merged list per the rules in update()'s docstring.
 
         Must be called with self._lock held.
+
+        Two source of "extra info" we preserve across the scanner's
+        empty-uuid output:
+
+        1. Placeholders (``pid == PLACEHOLDER_PID``) — hook arrived
+           before scanner; we hold the uuid waiting for the real pid.
+           Indexed by cwd.
+        2. Real-pid entries with a uuid — the bridge upserted via
+           ``jt.host_pid`` (macOS always sets this to the claude pid),
+           OR a prior merge grafted a uuid here. The scanner output
+           always carries ``session_uuid=""`` (process_scanner doesn't
+           read transcripts), so without this preservation every scanner
+           tick would wipe the uuid from real-pid entries. Indexed by
+           (cwd, pid).
+
+        After /clear, only (2) keeps NEW_UUID attached to the (cwd, pid)
+        entry between bridge upsert and the next compose pass. Without
+        it, ``compose_session_view`` has to recover the uuid via
+        ``pid.json`` every tick — fragile when pid.json hasn't yet been
+        rewritten to reflect the new in-memory uuid.
         """
         # Index existing placeholders by cwd. Two placeholders for the
         # same cwd is unusual (two hooks fired for the same project
         # without scanner ever seeing them); keep the most recently
         # added one (overwriting in the dict).
         placeholders_by_cwd: dict = {}
+        # Real-pid entries indexed by (cwd, pid) so we can preserve
+        # their uuid when the scanner re-emits the same (cwd, pid)
+        # with an empty uuid.
+        real_uuids_by_cwd_pid: dict = {}
         for s in self._sessions:
             if s.pid == PLACEHOLDER_PID and s.session_uuid:
                 placeholders_by_cwd[s.project_path] = s
+            elif s.pid > 0 and s.session_uuid:
+                real_uuids_by_cwd_pid[(s.project_path, s.pid)] = s.session_uuid
 
         merged: list[Session] = []
         consumed_placeholders: set = set()
 
         for new in incoming:
+            # Priority for grafting onto an empty-uuid scanner entry:
+            #   1. Placeholder for the same cwd (hook-then-scanner race).
+            #   2. Real-pid entry for the same (cwd, pid) (preserve uuid
+            #      across scanner ticks).
+            # When both apply (rare: placeholder + a sibling real entry
+            # in the same cwd), the placeholder wins so its pending
+            # graft completes — matches the prior behavior.
             placeholder = placeholders_by_cwd.get(new.project_path)
             if (
                 placeholder is not None
                 and not new.session_uuid
                 and new.pid > 0
             ):
-                # Graft placeholder's uuid onto the real scanner entry.
-                from dataclasses import replace as _replace
                 merged.append(_replace(new, session_uuid=placeholder.session_uuid))
                 consumed_placeholders.add(placeholder.session_uuid)
-            else:
-                merged.append(new)
+                continue
+
+            preserved_uuid = real_uuids_by_cwd_pid.get((new.project_path, new.pid))
+            if preserved_uuid and not new.session_uuid and new.pid > 0:
+                merged.append(_replace(new, session_uuid=preserved_uuid))
+                continue
+
+            merged.append(new)
 
         # Keep any placeholder the scanner didn't pick up. (Scanner might
         # not yet see a freshly-spawned claude.exe; placeholder bridges

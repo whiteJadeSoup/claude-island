@@ -628,3 +628,65 @@ def test_state_eq_catches_real_change():
         started_at=_NOW, last_hook_at=_NOW,
     )
     assert _state_eq(a, b) is False
+
+
+# ── gc_ended (P1-a) ─────────────────────────────────────────────────────
+
+
+def test_gc_ended_removes_stale_ended_entries():
+    """ENDED entries whose last_hook_at is older than retain_seconds
+    are removed. Active states (THINKING / IDLE / etc.) are never
+    touched regardless of age."""
+    from claude_island.core.hook_events import SessionStarted, SessionEnded
+    sm = SessionStateMachine()
+    long_ago = _NOW - timedelta(hours=2)
+
+    # u-old: ENDED, last_hook_at far in past → should GC
+    sm.apply(SessionStarted("u-old", _CWD, long_ago, "startup", None, long_ago))
+    sm.apply(SessionEnded("u-old", long_ago))
+
+    # u-recent: ENDED but JUST ended → should NOT GC (within retain window)
+    sm.apply(SessionStarted("u-recent", _CWD, _NOW, "startup", None, _NOW))
+    sm.apply(SessionEnded("u-recent", _NOW))
+
+    # u-active: still THINKING, ancient — never GC regardless of age
+    sm.apply(SessionStarted("u-active", _CWD, long_ago, "startup", None, long_ago))
+
+    removed = sm.gc_ended(retain_seconds=3600.0, now=_NOW)
+    assert removed == 1
+    assert sm.read("u-old") is None             # GC'd
+    assert sm.read("u-recent") is not None      # too fresh
+    assert sm.read("u-active") is not None      # never GC'd (not ENDED)
+
+
+def test_gc_ended_increments_sm_ended_gc_metric():
+    from claude_island.core.hook_events import SessionStarted, SessionEnded
+    from claude_island.core.metrics import metrics
+    sm = SessionStateMachine()
+    long_ago = _NOW - timedelta(hours=2)
+    sm.apply(SessionStarted("u1", _CWD, long_ago, "startup", None, long_ago))
+    sm.apply(SessionEnded("u1", long_ago))
+    sm.apply(SessionStarted("u2", _CWD, long_ago, "startup", None, long_ago))
+    sm.apply(SessionEnded("u2", long_ago))
+
+    sm.gc_ended(retain_seconds=3600.0, now=_NOW)
+    assert metrics.snapshot().counters.get("sm.ended.gc") == 2
+
+
+def test_gc_ended_returns_zero_when_nothing_to_drop():
+    sm = SessionStateMachine()
+    # Empty state machine — GC must be a clean no-op (no exceptions, count = 0).
+    assert sm.gc_ended(retain_seconds=3600.0, now=_NOW) == 0
+
+
+def test_gc_ended_with_custom_retain_window():
+    """Caller can pick the retention horizon to suit the deployment.
+    A short window (1s) GC's a freshly-ended state from 5s ago."""
+    from claude_island.core.hook_events import SessionStarted, SessionEnded
+    sm = SessionStateMachine()
+    five_s_ago = _NOW - timedelta(seconds=5)
+    sm.apply(SessionStarted("u", _CWD, five_s_ago, "startup", None, five_s_ago))
+    sm.apply(SessionEnded("u", five_s_ago))
+
+    assert sm.gc_ended(retain_seconds=1.0, now=_NOW) == 1
+    assert sm.read("u") is None

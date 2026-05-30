@@ -12,6 +12,7 @@ Adding a new provider (e.g. Kimi, GLM):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -23,6 +24,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+log = logging.getLogger(__name__)
 
 from claude_island.core.models import QuotaSnapshot
 from claude_island.core.safe_stderr import safe_stderr_write
@@ -348,7 +351,7 @@ def write_provider_config(config: dict, path: Path | None = None) -> None:
         tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as e:
-        print(f"[claude-island] providers.json write failed: {e}", file=sys.stderr)
+        log.warning("providers.json write failed: %s", e)
 
 
 def get_provider_setting(provider_name: str, key: str) -> str | None:
@@ -554,7 +557,7 @@ def write_cache(cache_path: Path, payload: dict) -> None:
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, cache_path)
     except OSError as e:
-        print(f"[claude-island] cache write failed: {e}", file=sys.stderr)
+        log.warning("cache write failed: %s", e)
 
 
 def _parse_iso(s: str) -> datetime | None:
@@ -909,9 +912,13 @@ def log_fetch_failure(
     ``prior.last_attempt_at`` as the prior-attempt timestamp, which a
     bumped state would have already overwritten with ``now``.
 
-    Output format::
+    Output format (failures 1–4 of the doubling ladder)::
 
-        [2026-05-16 14:23:45] [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 5m ago — last success 47m ago
+        [2026-05-16 14:23:45] [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 5m ago — last success 47m ago — next retry in 10m
+
+    Output format (failure that opens the circuit breaker)::
+
+        [2026-05-16 14:23:45] [claude-island] anthropic quota fetch: HTTP 401 Unauthorized — last attempt 80m ago — last success 122m ago — auto-refresh paused, manual ↻ only
 
     The leading bracket is the LOCAL wall-clock timestamp of the
     failure (``now`` converted to the host's local timezone). Stderr
@@ -924,6 +931,9 @@ def log_fetch_failure(
       * No prior attempt → "first attempt"
       * No prior success (token never worked) → "no prior success"
       * Both missing (cold cache) → "first attempt — no prior success"
+      * Circuit open (``consecutive_failures + 1 >=
+        AUTO_REFRESH_FAILURE_THRESHOLD``) → trailing clause becomes
+        ``auto-refresh paused, manual ↻ only`` instead of a retry window
     """
     # now arrives tz-aware in UTC from callers; astimezone() with no
     # arg converts to the host's local zone, matching what the user
@@ -940,6 +950,34 @@ def log_fetch_failure(
         if prior.fetched_at is not None
         else "no prior success"
     )
+
+    # Project the post-failure counter so the hint reflects the state
+    # the cache will hold immediately after this call. with_failed_attempt
+    # is a pure transition (no IO); the caller writes the same projected
+    # state to disk right after we return.
+    projected = prior.with_failed_attempt(now=now)
+    if projected.consecutive_failures >= AUTO_REFRESH_FAILURE_THRESHOLD:
+        # Circuit just opened (or is already open in a defensive edge
+        # case). is_fetch_due will gate auto-fetch off permanently until
+        # a manual ⟳ success resets the counter — surface that here so
+        # the user doesn't wait for a 10/20/40/80m window that will
+        # never come.
+        #
+        # Symbol choice: ↻ (U+21BB), NOT ⟳ (U+27F3). The phrase tells
+        # the user to click a specific button — the panel's refresh
+        # button is labelled ↻ — so the stderr message must reference
+        # the same glyph the user will scan for. Sibling stderr lines
+        # that describe an *action* (e.g. anthropic.py's "manual ⟳
+        # failed") keep ⟳ unchanged; those describe what happened, not
+        # where to click.
+        parts.append("auto-refresh paused, manual ↻ only")
+    else:
+        next_window_sec = projected._backoff_window_seconds()
+        # POLL_TTL and POLL_TTL_MAX are both multiples of 60, so integer
+        # minutes lose no precision and match the existing _fmt_ago
+        # buckets the user is reading on the same line.
+        parts.append(f"next retry in {int(next_window_sec // 60)}m")
+
     safe_stderr_write(" — ".join(parts))
 
 

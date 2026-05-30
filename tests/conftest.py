@@ -35,3 +35,15 @@ def _reset_world_between_tests():
     yield
     from claude_island.core.snapshot import world
     world.reset_for_testing()
+
+
+@pytest.fixture(autouse=True)
+def _reset_metrics_between_tests():
+    """Same isolation rule as the world singleton: reset the global
+    metrics registry after each test so counter / timing values from
+    one test never appear in another test's snapshot. Same one-liner
+    pattern; same justification (module-level singleton + autouse =
+    safe under test-order randomisation)."""
+    yield
+    from claude_island.core.metrics import metrics
+    metrics.reset_for_testing()

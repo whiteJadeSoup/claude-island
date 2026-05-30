@@ -742,10 +742,17 @@ class WindowsTerminalAdapter(_CapabilityProvider):
         if title:
             argv += ["--title", title, "--suppressApplicationTitle"]
         argv += ["--", "cmd.exe", "/k", *command]
+        # ``subprocess.DETACHED_PROCESS`` is Windows-only. Resolve via
+        # ``getattr`` with a 0 fallback so the *attribute lookup* doesn't
+        # AttributeError on non-Windows platforms — important for tests
+        # that exercise the launch argv with subprocess.Popen mocked.
+        # In production the surrounding ``shutil.which("wt.exe")`` guard
+        # already prevents this branch from running on non-Windows, so
+        # the fallback value is never actually applied to a real spawn.
         try:
             proc = subprocess.Popen(
                 argv,
-                creationflags=subprocess.DETACHED_PROCESS,
+                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
                 close_fds=True,
             )
         except (OSError, FileNotFoundError) as e:
@@ -813,10 +820,9 @@ def _activate_windows(
         import win32gui
         import win32process
     except ImportError:
-        print(
-            "[claude-island] pywin32 not installed; cannot activate windows. "
+        log.warning(
+            "pywin32 not installed; cannot activate windows. "
             "Run: pip install pywin32",
-            file=sys.stderr,
         )
         return False
 
@@ -1105,23 +1111,22 @@ def _emit_suppress_title_diagnostic(target_uuid: str) -> None:
     # our control. Phrase it accordingly so the user doesn't think
     # something crashed.
     if suppressed_profiles:
-        print(
-            f"[claude-island] note: tab auto-switch unavailable — your WT "
-            f"profile(s) {suppressed_profiles} have `suppressApplicationTitle: "
-            f"true`, which prevents external tab identification. To enable "
-            f"click-to-tab, set that option to false in WT settings.json. "
-            f"Sessions started via the Resume drawer (claude-island spawns "
-            f"the WT tab) are unaffected and navigate cleanly.",
-            file=sys.stderr,
+        log.info(
+            "note: tab auto-switch unavailable — your WT profile(s) %s "
+            "have `suppressApplicationTitle: true`, which prevents external "
+            "tab identification. To enable click-to-tab, set that option to "
+            "false in WT settings.json. Sessions started via the Resume "
+            "drawer (claude-island spawns the WT tab) are unaffected and "
+            "navigate cleanly.",
+            suppressed_profiles,
         )
     else:
-        print(
-            f"[claude-island] note: tab auto-switch unavailable for this "
-            f"session — Claude's terminal title overrides our sentinel before "
-            f"WT mirrors it. WT window is in foreground; click the tab once "
-            f"manually. Future sessions started via the Resume drawer skip "
-            f"this limitation.",
-            file=sys.stderr,
+        log.info(
+            "note: tab auto-switch unavailable for this session — Claude's "
+            "terminal title overrides our sentinel before WT mirrors it. "
+            "WT window is in foreground; click the tab once manually. "
+            "Future sessions started via the Resume drawer skip this "
+            "limitation.",
         )
 
 

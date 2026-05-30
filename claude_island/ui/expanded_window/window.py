@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+log = logging.getLogger(__name__)
 
 from claude_island.ui.fonts import MONO_FONT_STACK, UI_FONT_STACK
 from claude_island.ui.lab_palette import Color as _LabColor, FontStack
@@ -49,7 +52,7 @@ from claude_island.core.models import (
 )
 from claude_island.core.capabilities import Capability
 from claude_island.core.snapshot import SessionView, WorldSnapshot
-from .controller import IslandController
+from ..controller import IslandController
 
 
 class _CopyableIdLabel(QFrame):
@@ -648,34 +651,49 @@ class HoverRow(QPushButton):
         self._sync_name_tooltip()
 
     def _sync_name_tooltip(self) -> None:
-        """Show the full session name as a row tooltip iff the
-        name_label is currently being elided. No tooltip when the
-        name fits the allocated width — avoids redundant echo of
+        """Show ``"{full_name}\\n{full_cwd}"`` as the row tooltip iff
+        either the name_label or the cwd_label is currently being
+        elided. No tooltip when both fit — avoids redundant echo of
         already-visible text.
 
         Skipped entirely when ``_owns_name_tooltip`` is False — that's
         the path _update_row uses for the FOCUS-unavailable diagnostic
-        tooltip, which must take priority over name reveal.
+        tooltip, which must take priority over the elision reveal.
 
         Relies on _ElidingLabel: ``text()`` returns the full string
         (not the elided form), ``sizeHint().width()`` returns the
         QFontMetrics width of the full string. If sizeHint exceeds
         the actually-allocated width, the label is visually eliding.
+        Labels with ``width() <= 0`` have not yet been laid out — skip
+        their elision check this pass; resizeEvent will re-run.
         """
         if not self._owns_name_tooltip:
             return
         name_label = self.findChild(QLabel, "name_label")
-        if name_label is None:
+        cwd_label = self.findChild(QLabel, "cwd_label")
+        # Pre-first-show: layout hasn't run yet — bail and wait for
+        # the resizeEvent that follows first layout.
+        if name_label is None or name_label.width() <= 0:
             return
-        actual_w = name_label.width()
-        # actual_w == 0 means layout hasn't assigned a width yet
-        # (pre-first-show). Skip — resizeEvent will re-run once Qt
-        # finishes the first layout pass.
-        if actual_w <= 0:
-            return
-        hint_w = name_label.sizeHint().width()
-        full = name_label.text()
-        desired = full if (hint_w > actual_w and full) else ""
+        name_full = name_label.text() or ""
+        name_elided = (
+            bool(name_full)
+            and name_label.sizeHint().width() > name_label.width()
+        )
+        cwd_full = ""
+        cwd_elided = False
+        if cwd_label is not None and cwd_label.width() > 0:
+            cwd_full = cwd_label.text() or ""
+            cwd_elided = (
+                bool(cwd_full)
+                and cwd_label.sizeHint().width() > cwd_label.width()
+            )
+        if name_elided or cwd_elided:
+            desired = (
+                f"{name_full}\n{cwd_full}" if cwd_full else name_full
+            )
+        else:
+            desired = ""
         if self.toolTip() != desired:
             self.setToolTip(desired)
 
@@ -1324,15 +1342,16 @@ _STYLE_SINGLE_ROW = f"""
     }}
     QPushButton:hover {{ background: {_LabColor.surface_hi}; }}
     QPushButton:pressed {{ background: {_LabColor.surface}; }}
-    /* v4c: waiting_approval rows paint a full-row orange tint to
-       mirror the prototype's row-waiting CSS class — the row itself
-       carries the "needs attention" signal, not just a left rail. */
+    /* v4c (Mocha): waiting_approval rows paint a peach-tinted warm
+       dark — softer than the burnt-amber #1f1106 we used pre-Mocha.
+       Tints with Mocha peach (#fab387) at low alpha so the row sits
+       naturally on the new base #1e1e2e. */
     QPushButton[phase_tint="waiting"] {{
-        background: #1f1106;
-        border-bottom: 1px solid rgba(219, 109, 40, 0.40);
+        background: #2e1d28;
+        border-bottom: 1px solid rgba(250, 179, 135, 0.40);
     }}
     QPushButton[phase_tint="waiting"]:hover {{
-        background: #2a1809;
+        background: #3a2832;
     }}
 """
 # Group card (multiple sessions sharing a cwd) keeps its rounded
@@ -1385,18 +1404,25 @@ _STYLE_COST_DEFAULT = f"color: {_LabColor.paper}; font-size: 11px; font-weight: 
 # the visual cue band — distinct from HIGH_COST_USD_THRESHOLD which
 # is the core's invariant for is_high_cost.
 _STYLE_COST_MID = (
-    f"color: #d29922; font-size: 11px; font-weight: 600;"
+    # Catppuccin Mocha "yellow" #f9e2af — warm sunlight tone, draws
+    # the eye without the urgency of the old #d29922.
+    f"color: #f9e2af; font-size: 11px; font-weight: 600;"
 )
 _STYLE_COST_HIGH = (
-    f"color: {_LabColor.red_warm}; font-size: 11px; font-weight: 600;"
+    # True red — see lab_palette.danger (#ef4444); user explicitly
+    # asked for "红色预警", not the Mocha pink-red maroon.
+    f"color: {_LabColor.danger}; font-size: 11px; font-weight: 600;"
 )
-# Visual cost-color tiers (in USD).  Sourced from prototype-v4c-github.html's
-# tier examples ($3.42 white, $5.18 yellow, $11.07 red).  Kept separate
-# from core's HIGH_COST_USD_THRESHOLD = 50.0 because the latter is the
-# data invariant ("is this cost officially high?") while these are the
-# visual mapping ("how loudly should the row's cost paint?").
-_COST_MID_USD = 5.0
-_COST_HIGH_USD_VISUAL = 10.0
+# Visual cost-color tiers (in USD).  Re-pitched 2026-05-22 per user
+# feedback: low tier extended (most rows shouldn't trigger any
+# warning colour), and high tier only at genuinely high spend.
+#   < $50         calm subtext1 (no alarm)
+#   $50  – $200   yellow (warm, "worth noticing")
+#   ≥ $200        true red (real "this is a lot" signal)
+# Distinct from core's HIGH_COST_USD_THRESHOLD = 50.0 — that's the
+# data flag for is_high_cost; these are the visual mapping.
+_COST_MID_USD = 50.0
+_COST_HIGH_USD_VISUAL = 200.0
 # Small coloured pill label used in the row's status line. Background
 # is the model's hue at 18 % alpha so the chip reads as "tinted" against
 # the row bg without overpowering the name typography. Border shares
@@ -4358,9 +4384,7 @@ class ExpandedWindow(QWidget):
             try:
                 self._refresh_quota_footer()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] quota footer refresh failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("quota footer refresh failed: %s", exc)
         self.adjustSize()
         self._position()
 
@@ -4378,9 +4402,7 @@ class ExpandedWindow(QWidget):
             except Exception as exc:
                 # Manual refresh must never crash the UI; the worst
                 # case is "you press it and nothing changes".
-                import sys as _sys
-                print(f"[claude-island] manual refresh failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("manual refresh failed: %s", exc)
         self._render_cards()
 
     # ------------------------------------------------------------------
@@ -4668,6 +4690,25 @@ class ExpandedWindow(QWidget):
         )
         layout.addWidget(self._summary_stats)
 
+        # Sidechain (subagent) annotation: a quieter, smaller line
+        # below the 4-stat strip — "↳ incl. {N} subagent reqs · ${C}"
+        # — reconciling the headline cost (which includes subagent
+        # requests, matching Anthropic's actual bill) with ccusage-style
+        # tools (which show main-chain only). Hidden by default; the
+        # refresher shows it only when sidechain_request_count > 0 so
+        # users who don't dispatch subagents never see "0 subagent
+        # reqs" advertised forever.
+        self._summary_sidechain = _ElasticRichLabel("")
+        self._summary_sidechain.setStyleSheet(
+            f"color: {_LabColor.paper_faint}; font-size: 10px; "
+            f"font-family: {FontStack.mono_stack};"
+        )
+        self._summary_sidechain.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+        self._summary_sidechain.setVisible(False)
+        layout.addWidget(self._summary_sidechain)
+
         return card
 
     def _refresh_summary_card(self) -> None:
@@ -4687,9 +4728,7 @@ class ExpandedWindow(QWidget):
                 today_totals = self._get_usage_totals("today")
                 self._summary_amount.setText(_fmt_money(today_totals.cost_usd))
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] summary today fetch failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("summary today fetch failed: %s", exc)
                 self._summary_amount.setText("—")
                 today_totals = None
         else:
@@ -4705,9 +4744,7 @@ class ExpandedWindow(QWidget):
             try:
                 snap = self._get_quota_snapshot()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] summary quota fetch failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("summary quota fetch failed: %s", exc)
 
         provider_label = (self.selected_provider_name() or "anthropic").title()
         if snap is None:
@@ -4783,6 +4820,7 @@ class ExpandedWindow(QWidget):
         provider engine feeds the bar)."""
         if today is None:
             self._summary_stats.setText("")
+            self._summary_sidechain.setVisible(False)
             return
         try:
             total_tok = today.input_tokens + today.output_tokens
@@ -4817,10 +4855,32 @@ class ExpandedWindow(QWidget):
             sep = f" <span style='color:{col_sep}'>·</span> "
             self._summary_stats.setText(sep.join(parts))
         except Exception as exc:
-            import sys as _sys
-            print(f"[claude-island] summary stats render failed: {exc}",
-                  file=_sys.stderr)
+            log.warning("summary stats render failed: %s", exc)
             self._summary_stats.setText("")
+            self._summary_sidechain.setVisible(False)
+            return
+
+        # Sidechain annotation — shown only when subagent activity exists.
+        # The headline cost above already includes subagent requests (matches
+        # Anthropic's bill); this line tells the user "of that, $X came
+        # from N subagent reqs" so they can reconcile with ccusage-style
+        # tools that report main-chain only. Note: this counts sidechain
+        # API requests (one per subagent assistant message), NOT the number
+        # of subagent dispatches — a single dispatched subagent runs many
+        # turns and so contributes many reqs here.
+        sub_n = getattr(today, "sidechain_request_count", 0)
+        sub_c = getattr(today, "sidechain_cost_usd", 0.0)
+        if sub_n > 0:
+            self._summary_sidechain.setText(
+                f"<span style='color:{col_sep}'>↳</span> "
+                f"<span style='color:{col_label}'>incl.</span> "
+                f"<span style='color:{col_num}'><b>{_fmt_tokens(sub_n)}</b></span> "
+                f"<span style='color:{col_label}'>subagent reqs ·</span> "
+                f"<span style='color:{col_num}'><b>{_fmt_money(sub_c)}</b></span>"
+            )
+            self._summary_sidechain.setVisible(True)
+        else:
+            self._summary_sidechain.setVisible(False)
 
     def _build_spend_card(self) -> QFrame:
         """Single SPEND card driven by a window dropdown (5h / Today /
@@ -5038,8 +5098,7 @@ class ExpandedWindow(QWidget):
             try:
                 rows = self._get_totals_by_model(self._period)
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] totals_by_model failed: {exc}", file=_sys.stderr)
+                log.warning("totals_by_model failed: %s", exc)
                 rows = ()
             self._populate_spend_bars(rows, t.cost_usd)
             self._spend_bar_container.show()
@@ -5337,9 +5396,7 @@ class ExpandedWindow(QWidget):
             try:
                 self._on_refresh_clicked()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] quota footer refresh failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("quota footer refresh failed: %s", exc)
 
     def _refresh_quota_footer(self) -> None:
         """Repopulate the footer from the current quota snapshot.
@@ -5355,9 +5412,7 @@ class ExpandedWindow(QWidget):
             try:
                 snap = self._get_quota_snapshot()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] quota footer fetch failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("quota footer fetch failed: %s", exc)
 
         if snap is None:
             self._quota_footer_5h.setText(
@@ -5534,8 +5589,7 @@ class ExpandedWindow(QWidget):
             try:
                 snap = self._get_quota_snapshot()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] quota fetch failed: {exc}", file=_sys.stderr)
+                log.warning("quota fetch failed: %s", exc)
 
         if snap is None:
             self._quota_dot.setStyleSheet(_STYLE_DOT.format(color=_DOT_GRAY))
@@ -5706,9 +5760,7 @@ class ExpandedWindow(QWidget):
             except Exception as exc:
                 # Persistence failure must never crash the UI; the
                 # in-process selection still works for this session.
-                import sys as _sys
-                print(f"[claude-island] provider-select callback failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("provider-select callback failed: %s", exc)
         self._render_cards()
 
     # ------------------------------------------------------------------
@@ -5867,9 +5919,7 @@ class ExpandedWindow(QWidget):
             try:
                 self._on_provider_config_changed()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] provider-config-changed callback failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("provider-config-changed callback failed: %s", exc)
 
     def _show_provider_context_menu(
         self, name: str, anchor: QPushButton, pos: object
@@ -5904,9 +5954,7 @@ class ExpandedWindow(QWidget):
             try:
                 self._on_provider_config_changed()
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] provider-config-changed callback failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("provider-config-changed callback failed: %s", exc)
 
     def set_available_providers(
         self, providers: list[str], selected: str | None = None
@@ -6232,9 +6280,7 @@ class ExpandedWindow(QWidget):
             except Exception as exc:
                 # Detail composition is enrichment, not load-bearing —
                 # never let a composer hiccup take down the row update.
-                import sys as _sys
-                print(f"[claude-island] session details failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("session details failed: %s", exc)
         title = (
             (details.name if details and details.name else None)
             or (details.ai_title if details and details.ai_title else None)
@@ -6454,16 +6500,22 @@ class ExpandedWindow(QWidget):
         if meta_label is not None and meta_label.text() != meta_text:
             meta_label.setText(meta_text)
 
-        # Cost label colour — three visual tiers per prototype-v4c-
-        # github.html: $0–$5 white (default), $5–$10 yellow (mid),
-        # $10+ red (high).  Raw cost_usd drives the band; ``high_cost``
-        # alone wouldn't be expressive enough (it's a single bool at
-        # the $50 threshold).
+        # Cost label colour — three visual tiers (2026-05-22):
+        #   < $50         calm subtext (default)
+        #   $50 – $200    yellow (warm "worth noticing")
+        #   ≥ $200        true red (real "this is a lot")
+        # Source of truth = max(view.cost_usd, details.cost_usd) so
+        # both the snapshot-pipeline path (view.cost_usd) and the
+        # legacy `_render_sessions` path (details.cost_usd only) tier
+        # correctly.  `high_cost` flag (≥$50) is NOT short-circuited
+        # into red because $50 is the start of the YELLOW band now.
         if meta_label is not None:
-            raw_cost = getattr(view, "cost_usd", 0.0) or 0.0
-            if raw_cost >= _COST_HIGH_USD_VISUAL or high_cost:
+            view_cost = getattr(view, "cost_usd", 0.0) or 0.0
+            details_cost = (details.cost_usd if details is not None else 0.0) or 0.0
+            tier_cost = max(view_cost, details_cost)
+            if tier_cost >= _COST_HIGH_USD_VISUAL:
                 target_cost_style = _STYLE_COST_HIGH
-            elif raw_cost >= _COST_MID_USD:
+            elif tier_cost >= _COST_MID_USD:
                 target_cost_style = _STYLE_COST_MID
             else:
                 target_cost_style = _STYLE_COST_DEFAULT
@@ -6483,14 +6535,11 @@ class ExpandedWindow(QWidget):
         focus_supported = Capability.FOCUS in view.capabilities
         if focus_supported:
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            # User feedback 2026-05-23: drop the prompt/response hover
-            # tooltip but keep a hover-reveal for the full session
-            # name when it's being visually elided (long names
-            # truncated by the row's width). HoverRow._sync_name_tooltip
-            # decides whether to surface the tooltip based on
-            # name_label.sizeHint vs name_label.width — driven by
-            # resizeEvent and called explicitly below so a text-only
-            # update (no width change) still re-evaluates.
+            # Hover tooltip surfaces what the inline labels truncate:
+            # full title and/or full cwd. _sync_name_tooltip checks
+            # both labels on every resize and on each row update; when
+            # neither is elided the tooltip stays empty so hover
+            # doesn't redundantly echo already-visible text.
             btn._owns_name_tooltip = True
             btn._sync_name_tooltip()
         else:
@@ -6805,9 +6854,7 @@ class ExpandedWindow(QWidget):
             try:
                 details = self._get_session_details(view.session)
             except Exception as exc:
-                import sys as _sys
-                print(f"[claude-island] detail popup composer failed: {exc}",
-                      file=_sys.stderr)
+                log.warning("detail popup composer failed: %s", exc)
         # All capability actions flow through the injected dispatch.
         # Each callback closes over `view` so the popup itself never
         # holds capability/scope knowledge — it just calls the closure.

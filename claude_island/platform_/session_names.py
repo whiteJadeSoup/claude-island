@@ -32,9 +32,11 @@ as the same family of helpers.
 from __future__ import annotations
 
 import json
+import logging
 import os
-import sys
 import threading
+
+log = logging.getLogger(__name__)
 from pathlib import Path
 
 # Resolved at call time (not module-load time) so tests can monkeypatch
@@ -68,21 +70,17 @@ def _read(path: Path | None = None) -> dict[str, str]:
     except FileNotFoundError:
         return {}
     except OSError as e:
-        print(f"[claude-island] session_names.json read failed: {e}", file=sys.stderr)
+        log.warning("session_names.json read failed: %s", e)
         return {}
     try:
         data = json.loads(text)
     except ValueError as e:
-        print(
-            f"[claude-island] session_names.json malformed (renames hidden until fixed): {e}",
-            file=sys.stderr,
+        log.warning(
+            "session_names.json malformed (renames hidden until fixed): %s", e,
         )
         return {}
     if not isinstance(data, dict):
-        print(
-            "[claude-island] session_names.json is not a JSON object — ignoring",
-            file=sys.stderr,
-        )
+        log.warning("session_names.json is not a JSON object — ignoring")
         return {}
     return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
@@ -103,7 +101,7 @@ def _write(names: dict[str, str], path: Path | None = None) -> None:
         tmp.write_text(json.dumps(names, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as e:
-        print(f"[claude-island] session_names.json write failed: {e}", file=sys.stderr)
+        log.warning("session_names.json write failed: %s", e)
 
 
 def get_session_name(uuid: str) -> str | None:
@@ -124,34 +122,6 @@ def get_session_name(uuid: str) -> str | None:
         return None
     name = _read().get(uuid)
     return name if name else None
-
-
-def get_uuid_by_name(name: str) -> str | None:
-    """Reverse lookup: a user-given session name → its uuid.
-
-    Used by ``resume_uuid_for_pid`` to recover the canonical OLD uuid
-    after ``claude --resume <name>``: claude.exe stamps a new in-memory
-    uuid into pid.json but keeps writing transcripts to the renamed
-    session's original JSONL. The cmdline ``<name>`` arg is the only
-    bridge between the two.
-
-    Returns None when the name isn't in the store (user never renamed
-    that session — caller falls back to pid.json's sessionId). When
-    multiple uuids share the same name (rare; only happens if the user
-    reused a name across sessions before our dedup kicks in), returns
-    one of them — first match wins. Same lock-free read as
-    ``get_session_name``: a stale read can at worst miss the latest
-    rename for one tick.
-    """
-    if not name:
-        return None
-    target = name.strip()
-    if not target:
-        return None
-    for uuid, n in _read().items():
-        if n == target:
-            return uuid
-    return None
 
 
 def set_session_name(uuid: str, name: str) -> None:
