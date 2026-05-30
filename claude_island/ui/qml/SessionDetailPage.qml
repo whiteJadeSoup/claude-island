@@ -268,9 +268,13 @@ Rectangle {
             }
         }
 
-        // ── dpttl: phase badge · model · cost (right) ─────────────────────
-        // Mirrors the prototype's ".dpttl" row: a coloured phase pill, the
-        // model id in mono, and the session cost pushed to the right in gold.
+        // ── dpttl: phase badge · model (status line) ──────────────────────
+        // A coloured phase pill + the model id in mono. The session COST is
+        // deliberately NOT shown here — it lives once below in the "$X · N
+        // turns" spend line (the prototype shows cost exactly once, in
+        // pv-spend). Showing it both here and below was the duplication the
+        // detail page exhibited (cost in top-right AND again above the model
+        // breakdown).
         RowLayout {
             Layout.fillWidth: true
             Layout.leftMargin: 16
@@ -307,14 +311,6 @@ Rectangle {
                 elide: Text.ElideRight
             }
             Item { Layout.fillWidth: true }
-            // Cost — gold, bold, mono, right-aligned.
-            Text {
-                text: fmtCost(dvNum("cost"))
-                color: "#f0a860"
-                font.family: Theme.fontMono
-                font.pixelSize: 14
-                font.bold: true
-            }
         }
 
         // ── Scrollable body ───────────────────────────────────────────────
