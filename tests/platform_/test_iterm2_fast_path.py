@@ -13,6 +13,10 @@ from unittest import mock
 import pytest
 
 from claude_island.platform_.terminals import _iterm_fast_path as fp
+from claude_island.platform_.terminals._iterm_fast_path import (
+    _FOCUS_BY_ID_SOURCE,
+    _FOCUS_BY_TTY_SOURCE,
+)
 
 
 # ── Fakes ─────────────────────────────────────────────────────────────
@@ -491,3 +495,34 @@ class TestSubmitFailure:
             ok = fp.try_fast_path(host_pid=99999, session_id="x", tty=None)
         assert ok is False
         assert any("PaneSelectTask not scheduled" in r.message for r in caplog.records)
+
+
+class TestFocusSourceSwitchesSpace:
+    """The compiled fast-path subroutines must AXRaise the matched
+    window so a session on another macOS Space is actually surfaced.
+    select w alone only reorders iTerm's internal window list. The
+    subroutines resolve the iTerm host via the ``hostPID`` argument, so
+    AXRaise targets ``unix id is (hostPID as integer)``. try-guarded for
+    graceful degradation (mirrors the subprocess templates in iterm2.py)."""
+
+    def _assert_axraise(self, source: str) -> None:
+        # Strip AppleScript comments so the ordering checks anchor on real
+        # statements — these sources have comments that mention "select w".
+        code = "\n".join(line.split("--", 1)[0] for line in source.splitlines())
+        assert "set winName to name of w" in code
+        assert "unix id is (hostPID as integer)" in code
+        assert 'perform action "AXRaise" of (first window whose name is winName)' in code
+        i_name = code.index("set winName to name of w")
+        i_select_w = code.index("select w")
+        i_raise = code.index('perform action "AXRaise"')
+        # AXRaise before select: select changes a multi-pane window's
+        # title, so raising after select would miss the title match.
+        assert i_name < i_raise < i_select_w
+        i_end_try = code.index("end try", i_raise)
+        assert i_end_try < i_select_w, "AXRaise must be try-guarded, closing before select w"
+
+    def test_tty_source_axraises_after_select(self):
+        self._assert_axraise(_FOCUS_BY_TTY_SOURCE)
+
+    def test_id_source_axraises_after_select(self):
+        self._assert_axraise(_FOCUS_BY_ID_SOURCE)

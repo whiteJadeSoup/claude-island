@@ -169,19 +169,50 @@ def resolve_model_color(model: str) -> str:
     return DEFAULT_MODEL_COLOR
 
 
+# Canonical Anthropic model id shape: claude-<family>-<major>[-<minor>]
+# optionally followed by a -<datestamp> suffix. Matching this lets the
+# resolver auto-format a NOT-yet-registered version — e.g. a fresh
+# ``claude-opus-4-8`` release becomes ``opus-4.8`` — instead of silently
+# degrading to the bare family name "opus" because the explicit table in
+# providers/anthropic.py hasn't caught up yet. This is the future-proof
+# net behind the explicit per-version entries; first-party ``claude-``
+# ids are unambiguous enough to special-case here in core.
+#
+# The minor group is optional and bounded to 1-2 digits NOT followed by
+# another digit. This is what distinguishes a real minor version from a
+# trailing datestamp: ``claude-sonnet-4-5-20250929`` → minor "5" (4.5),
+# but ``claude-sonnet-4-20250514`` → no minor (4), because the 8-digit
+# "20250514" can't be a 1-2 digit minor and is read as the datestamp.
+_ANTHROPIC_ID_RE = re.compile(r"claude-(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?")
+_ANTHROPIC_FAMILIES = ("opus", "sonnet", "haiku")
+
+
 def resolve_model_short_name(model: str) -> str:
     """Map an API model id to its registered short display name.
 
-    Falls back to the first 12 characters of the raw id when the model
-    has no registered short name — gives the user something recognisable
-    rather than a blank chip. Empty model id ⇒ empty string (defensive;
-    no model means no chip at all)."""
+    Resolution order:
+      1. Explicit registry, longest key first (per-version Anthropic
+         entries, other providers' custom names).
+      2. Canonical Anthropic id ``claude-<family>-<maj>-<min>`` →
+         ``<family>-<maj>.<min>`` (auto-formats unregistered versions).
+      3. Anthropic family token alone (version-less ids) → the family.
+      4. First 12 chars of the raw id — something recognisable rather
+         than a blank chip.
+
+    Empty model id ⇒ empty string (defensive; no model means no chip)."""
     if not model:
         return ""
     lower = model.lower()
     for key in sorted(MODEL_SHORT_NAMES.keys(), key=len, reverse=True):
         if key.lower() in lower:
             return MODEL_SHORT_NAMES[key]
+    m = _ANTHROPIC_ID_RE.search(lower)
+    if m:
+        family, major, minor = m.group(1), m.group(2), m.group(3)
+        return f"{family}-{major}.{minor}" if minor else f"{family}-{major}"
+    for family in _ANTHROPIC_FAMILIES:
+        if family in lower:
+            return family
     return model[:12]
 
 

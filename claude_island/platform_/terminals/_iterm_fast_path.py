@@ -154,6 +154,23 @@ on focusByID(sessionID, hostPID)
                         repeat with t in tabs of w
                             repeat with s in sessions of t
                                 if (id of s as text) is sessionID then
+                                    set winName to name of w
+                                    -- Cross-Space: raise the window's Space BEFORE the pane-select
+                                    -- statements below. A multi-pane window's title tracks its active
+                                    -- pane, so the pane-select changes the title; raising afterward
+                                    -- would search System Events for a title the window no longer has
+                                    -- and silently miss. winName here still matches what System Events
+                                    -- currently shows. AXRaise pulls the window's macOS Space to the
+                                    -- front (the pane-select only reorders iTerm's internal list, it
+                                    -- never switches Spaces). try-guarded: any AX failure degrades to
+                                    -- the prior no-Space-switch behaviour.
+                                    tell application "System Events"
+                                        try
+                                            tell (first process whose unix id is (hostPID as integer))
+                                                perform action "AXRaise" of (first window whose name is winName)
+                                            end tell
+                                        end try
+                                    end tell
                                     -- All three mutators are guarded
                                     -- by ``is not`` checks so they
                                     -- only run when the target state
@@ -186,11 +203,13 @@ on focusByID(sessionID, hostPID)
                                     select w
                                     select t
                                     select s
-                                    -- I-5 cross-Space hint: only set
-                                    -- index when it would change
-                                    -- something. select w already
-                                    -- brings the window to iTerm idx
-                                    -- 1 in the common case; running
+                                    -- I-5: set index orders the window
+                                    -- inside iTerm but does NOT switch
+                                    -- macOS Spaces (AXRaise above does
+                                    -- that). Guard: only set when it
+                                    -- would change something -- select w
+                                    -- already brings the window to iTerm
+                                    -- idx 1 in the common case; running
                                     -- this unconditionally caused a
                                     -- visible reorder side effect.
                                     if index of w is not 1 then
@@ -230,6 +249,23 @@ on focusByTTY(targetTTY, hostPID)
                         repeat with t in tabs of w
                             repeat with s in sessions of t
                                 if (tty of s) is targetTTY then
+                                    set winName to name of w
+                                    -- Cross-Space: raise the window's Space BEFORE the pane-select
+                                    -- statements below. A multi-pane window's title tracks its active
+                                    -- pane, so the pane-select changes the title; raising afterward
+                                    -- would search System Events for a title the window no longer has
+                                    -- and silently miss. winName here still matches what System Events
+                                    -- currently shows. AXRaise pulls the window's macOS Space to the
+                                    -- front (the pane-select only reorders iTerm's internal list, it
+                                    -- never switches Spaces). try-guarded: any AX failure degrades to
+                                    -- the prior no-Space-switch behaviour.
+                                    tell application "System Events"
+                                        try
+                                            tell (first process whose unix id is (hostPID as integer))
+                                                perform action "AXRaise" of (first window whose name is winName)
+                                            end tell
+                                        end try
+                                    end tell
                                     -- Guarded mutators (see focusByID)
                                     -- to suppress redundant operations
                                     -- whose visible side effects read

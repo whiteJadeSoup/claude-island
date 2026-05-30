@@ -50,25 +50,31 @@ register_model_colors({
 })
 register_model_short_names({
     # v4c: surface the full model version on the row chip so users can
-    # tell "claude-opus-4-7" apart from "claude-opus-4-5" at a glance.
+    # tell "claude-opus-4-7" apart from "claude-opus-4-8" at a glance.
     # Mirrors prototype-v4c-github.html's `opus-4.7` / `sonnet-4.6` /
     # `haiku-4.5` chip labels.  Longer keys are matched first by the
     # resolver, so a specific version (e.g. claude-opus-4-7) wins over
-    # the generic family fallback ("opus") when both could match.
+    # the generic family fallback when both could match.
+    "claude-opus-4-8":   "opus-4.8",
     "claude-opus-4-7":   "opus-4.7",
     "claude-opus-4-6":   "opus-4.6",
     "claude-opus-4-5":   "opus-4.5",
     "claude-sonnet-4-6": "sonnet-4.6",
     "claude-sonnet-4-5": "sonnet-4.5",
-    "claude-sonnet-4":   "sonnet-4",
     "claude-haiku-4-5":  "haiku-4.5",
-    "claude-haiku-4":    "haiku-4",
-    # Family fallbacks — kept lowercase to match the v4c style ("opus"
-    # not "Opus") so a future model version we haven't registered yet
-    # still reads consistently in the row chip.
-    "opus":   "opus",
-    "sonnet": "sonnet",
-    "haiku":  "haiku",
+    # No version-less keys ("claude-sonnet-4", "claude-haiku-4") and no
+    # family fallbacks ("opus"/"sonnet"/"haiku") here on purpose: such a
+    # broad key substring-matches every NEWER minor (e.g. "claude-sonnet-4"
+    # is inside "claude-sonnet-4-7") and would pre-empt
+    # resolve_model_short_name's auto-format step, degrading the next
+    # release to "sonnet-4" / "opus" instead of "sonnet-4.7" / "opus-4.9".
+    # The resolver now auto-formats the canonical claude-<family>-<maj>-<min>
+    # shape (and "claude-sonnet-4-<datestamp>" → "sonnet-4"), then falls
+    # back to the family token, so this table only needs explicit entries
+    # where the label deviates from that shape — which, for Anthropic, it
+    # never does. The entries kept above are documentation of the
+    # currently-shipping versions; the resolver would format them
+    # identically if they were absent.
 })
 
 
