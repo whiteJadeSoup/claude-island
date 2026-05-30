@@ -20,12 +20,6 @@ Rectangle {
 
     color: Theme.bg
 
-    // ── Sort mode: "recent" | "cost" ───────────────────────────────────────
-    property string sortMode: "recent"
-
-    // ── Search text ────────────────────────────────────────────────────────
-    property string searchText: ""
-
     // ── Helper: format cost ────────────────────────────────────────────────
     function fmtCost(n) {
         n = n || 0
@@ -56,37 +50,20 @@ Rectangle {
     // model (vs comparing prior index inside the delegate) keeps header
     // insertion logic in one place and the delegate a pure painter.
     function buildFlatList() {
-        var src = recents || []
+        // Copy before sort: recents may be a live model reference; sorting in
+        // place would mutate the source and is undefined for QVariantList.
+        var sorted = (recents || []).slice()
 
-        // 1. Search filter (name + cwd, case-insensitive)
-        var q = searchText.trim().toLowerCase()
-        var filtered = []
-        for (var i = 0; i < src.length; i++) {
-            var item = src[i]
-            if (q === "") {
-                filtered.push(item)
-            } else {
-                var name = (item.name || "").toLowerCase()
-                var cwd  = (item.cwd  || "").toLowerCase()
-                if (name.indexOf(q) !== -1 || cwd.indexOf(q) !== -1)
-                    filtered.push(item)
-            }
-        }
-
-        // 2. Sort
-        filtered.sort(function(a, b) {
-            if (sortMode === "cost") {
-                return (b.cost_usd || 0) - (a.cost_usd || 0)
-            }
-            // default: most-recent first
+        // Fixed newest-first order by last_activity_ts (no sort control).
+        sorted.sort(function(a, b) {
             return (b.last_activity_ts || 0) - (a.last_activity_ts || 0)
         })
 
-        // 3. Group — insert header entries before the first item of each group
+        // Group — insert header entries before the first item of each group.
         var flat = []
         var lastGroup = ""
-        for (var j = 0; j < filtered.length; j++) {
-            var it  = filtered[j]
+        for (var j = 0; j < sorted.length; j++) {
+            var it  = sorted[j]
             var grp = groupOf(it.last_activity_ts || 0)
             if (grp !== lastGroup) {
                 flat.push({ type: "header", label: grp })
@@ -97,12 +74,10 @@ Rectangle {
         return flat
     }
 
-    // ── Reactive flat list — rebuilds when recents / search / sort changes ─
+    // ── Reactive flat list — rebuilds when recents changes ────────────────
     property var flatList: []
 
-    onRecentsChanged:    flatList = buildFlatList()
-    onSearchTextChanged: flatList = buildFlatList()
-    onSortModeChanged:   flatList = buildFlatList()
+    onRecentsChanged: flatList = buildFlatList()
 
     Component.onCompleted: flatList = buildFlatList()
 
@@ -121,7 +96,7 @@ Rectangle {
         anchors.fill: parent
         spacing: 0
 
-        // ── Header ────────────────────────────────────────────────────────
+        // ── Header — ‹ back · History · {N} sessions ─────────────────────
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 44
@@ -133,10 +108,12 @@ Rectangle {
                 anchors.rightMargin: 14
                 spacing: 8
 
+                // Back: icon-only ‹ glyph (matches SpendPage header pattern)
                 Text {
-                    text: "‹ Back"
-                    color: backArea.containsMouse ? Theme.ink2 : Theme.dim
-                    font.pixelSize: 13
+                    text: "‹"
+                    color: backArea.containsMouse ? Theme.ink : Theme.dim
+                    font.pixelSize: 20
+                    Layout.alignment: Qt.AlignVCenter
                     MouseArea {
                         id: backArea
                         anchors.fill: parent
@@ -146,84 +123,22 @@ Rectangle {
                     }
                 }
 
-                Item { Layout.fillWidth: true }
-
                 Text {
                     text: "History"
                     color: Theme.ink
-                    font.pixelSize: 13
+                    font.pixelSize: Theme.tTitle
                     font.bold: true
                 }
 
                 Item { Layout.fillWidth: true }
-                // Spacer to keep title centered (mirrors back arrow width)
-                Item { Layout.preferredWidth: 42 }
-            }
-        }
 
-        // ── Search + Sort bar ─────────────────────────────────────────────
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.leftMargin: 13
-            Layout.rightMargin: 13
-            Layout.bottomMargin: 8
-            Layout.preferredHeight: 34
-            color: Theme.surface
-            radius: 8
-            border.color: searchField.activeFocus ? Theme.bd2 : Theme.bd
-            border.width: 1
-
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: 10
-                anchors.rightMargin: 10
-                spacing: 6
-
+                // Session count, right-aligned, faint mono.
                 Text {
-                    text: "⌕"
+                    text: (recentsPage.recents ? recentsPage.recents.length : 0) + " sessions"
                     color: Theme.faint
-                    font.pixelSize: 14
-                }
-
-                Item {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 20
-
-                    TextInput {
-                        id: searchField
-                        anchors.fill: parent
-                        color: Theme.ink2
-                        font.pixelSize: 12
-                        selectionColor: Theme.bd2
-                        selectedTextColor: Theme.ink
-                        clip: true
-                        verticalAlignment: TextInput.AlignVCenter
-                        onTextChanged: recentsPage.searchText = text
-                    }
-
-                    Text {
-                        anchors.fill: parent
-                        text: "Search sessions…"
-                        color: Theme.faint
-                        font.pixelSize: 12
-                        verticalAlignment: Text.AlignVCenter
-                        visible: searchField.text === "" && !searchField.activeFocus
-                    }
-                }
-
-                Text {
-                    id: sortToggle
-                    text: recentsPage.sortMode === "recent" ? "Recent ↓" : "Cost ↓"
-                    color: sortToggleArea.containsMouse ? Theme.teal : Theme.faint
-                    font.pixelSize: 11
-                    MouseArea {
-                        id: sortToggleArea
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        hoverEnabled: true
-                        onClicked: recentsPage.sortMode =
-                            recentsPage.sortMode === "recent" ? "cost" : "recent"
-                    }
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.tMicro
+                    Layout.alignment: Qt.AlignVCenter
                 }
             }
         }
@@ -242,22 +157,6 @@ Rectangle {
             }
         }
 
-        // ── Filtered-empty state ──────────────────────────────────────────
-        Item {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            visible: recents && recents.length > 0 &&
-                     recentsPage.searchText.trim() !== "" &&
-                     recentsPage.flatList.length === 0
-
-            Text {
-                anchors.centerIn: parent
-                text: "No matching sessions"
-                color: Theme.faint
-                font.pixelSize: 13
-            }
-        }
-
         // ── Timeline list ─────────────────────────────────────────────────
         Flickable {
             // objectName used by test_qml_no_warnings.py to locate this
@@ -268,7 +167,7 @@ Rectangle {
             Layout.fillHeight: true
             contentHeight: listCol.height
             clip: true
-            visible: recents && recents.length > 0 && recentsPage.flatList.length > 0
+            visible: recents && recents.length > 0
 
             ScrollBar.vertical: ScrollBar {
                 width: 5
@@ -431,7 +330,7 @@ Rectangle {
                                     Text {
                                         text: recentsPage.fmtCost(rowRoot.rowItem.cost_usd || 0)
                                         color: Theme.costColor(rowRoot.rowItem.cost_usd || 0)
-                                        font.family: "monospace"
+                                        font.family: Theme.fontMono
                                         font.pixelSize: 12
                                         font.bold: true
                                     }
@@ -442,7 +341,7 @@ Rectangle {
                                     Layout.fillWidth: true
                                     text: recentsPage.metaLine(rowRoot.rowItem)
                                     color: Theme.faint
-                                    font.family: "monospace"
+                                    font.family: Theme.fontMono
                                     font.pixelSize: 10
                                     elide: Text.ElideRight
                                     visible: text !== ""
