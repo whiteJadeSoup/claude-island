@@ -574,7 +574,7 @@ Rectangle {
                     Layout.fillWidth: true
                     Text {
                         anchors.centerIn: parent
-                        text: "Always allow"
+                        text: "Always"
                         color: allowAlways.containsMouse ? "#f4efe9" : "#e9c9b3"
                         font.pixelSize: 12
                     }
@@ -610,6 +610,19 @@ Rectangle {
                         onClicked: { if (card.decision) card.vm.deny(card.decision.id) }
                     }
                 }
+            }
+
+            // Persistent swipe hint — matches the prototype's centered
+            // "← 拖拽拒绝 · 允许拖拽 →" line. Tells the user both gesture
+            // directions at rest, complementing the edge labels that
+            // fade in (with directional colour) during the actual drag.
+            Text {
+                Layout.fillWidth: true
+                Layout.topMargin: 2
+                text: "← 拖拽拒绝 · 允许拖拽 →"
+                color: "#7d5838"
+                font.pixelSize: 10
+                horizontalAlignment: Text.AlignHCenter
             }
         }
     }
