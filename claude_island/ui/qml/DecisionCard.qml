@@ -281,7 +281,7 @@ Rectangle {
                                 anchors.centerIn: parent
                                 text: (optBox.isMulti && optBox.isChecked) ? "✓" : (optBox.index + 1)
                                 color: Theme.amber
-                                font.family: "monospace"
+                                font.family: Theme.fontMono
                                 font.pixelSize: 11
                                 font.bold: true
                             }
@@ -531,7 +531,7 @@ Rectangle {
                 text: card.displayText
                 color: "#ecdfd3"
                 font.pixelSize: 12
-                font.family: "monospace"
+                font.family: Theme.fontMono
                 wrapMode: Text.Wrap
                 maximumLineCount: 4
                 elide: Text.ElideRight

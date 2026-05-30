@@ -1,3 +1,4 @@
+import ".";
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
@@ -430,7 +431,7 @@ Rectangle {
                             color: "#f0a860"
                             font.pixelSize: 18
                             font.bold: true
-                            font.family: "monospace"
+                            font.family: Theme.fontMono
                         }
                         Text {
                             text: "·"
@@ -496,7 +497,7 @@ Rectangle {
                             Text {
                                 text: fmtCost(modelData.cost || 0)
                                 color: "#f0a860"
-                                font.family: "monospace"
+                                font.family: Theme.fontMono
                                 font.pixelSize: 11
                             }
                         }
@@ -558,7 +559,7 @@ Rectangle {
                                 text: dv("latest_prompt")
                                 color: "#566069"
                                 font.pixelSize: 11
-                                font.family: "monospace"
+                                font.family: Theme.fontMono
                                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                             }
                         }

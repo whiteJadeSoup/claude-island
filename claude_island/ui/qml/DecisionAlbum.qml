@@ -27,7 +27,7 @@ Item {
             }
             Text { text: "NEEDS YOU"; color: Theme.coral; font.pixelSize: Theme.tMicro; font.bold: true }
             Item { Layout.fillWidth: true }
-            Text { text: "" + album.decisions.length; color: Theme.coral; font.family: "monospace"; font.pixelSize: Theme.tMicro }
+            Text { text: "" + album.decisions.length; color: Theme.coral; font.family: Theme.fontMono; font.pixelSize: Theme.tMicro }
         }
 
         // ── stack: ghosts behind + interactive front ──
@@ -64,7 +64,7 @@ Item {
             Layout.fillWidth: true; spacing: 8; visible: album.decisions.length > 1
             Item { Layout.fillWidth: true }
             Text { text: "第 1 / " + album.decisions.length + " 张 · 处理完自动下一张"
-                   color: Theme.faint; font.family: "monospace"; font.pixelSize: 11 }
+                   color: Theme.faint; font.family: Theme.fontMono; font.pixelSize: 11 }
             Row { spacing: 5
                 Repeater { model: album.decisions.length
                     delegate: Rectangle { width: 6; height: 6; radius: 3
