@@ -753,20 +753,18 @@ Window {
                                                         SequentialAnimation on opacity { loops: Animation.Infinite; running: root.isActive(modelData.phase)
                                                             NumberAnimation { to: 0; duration: 530 } NumberAnimation { to: 1; duration: 530 } } }
                                                 }
-                                                // fallback phase label when no command
-                                                Text { visible: (modelData.command || "") === ""; text: modelData.phase || ""; color: Theme.phaseColor(modelData.phase); font.family: Theme.fontMono; font.pixelSize: Theme.tMeta }
                                                 // ── footer: phase  [waveform]  rate  model ──
                                                 RowLayout {
                                                     Layout.fillWidth: true; spacing: 9
                                                     Text { text: modelData.phase || ""; color: Theme.phaseColor(modelData.phase); font.family: Theme.fontMono; font.pixelSize: Theme.tMeta }
 
                                                     // Activity waveform (#1): a glowing oscilloscope line,
-                                                    // not bars. Amplitude at each point = that sample's token
-                                                    // rate ÷ peak, so the more tokens Claude is producing, the
-                                                    // taller the wave swings — idle ≈ flat, busy = loud. A
-                                                    // continuously-animated `flow` phase scrolls the wave so it
-                                                    // reads as alive/breathing even between rate updates. Newest
-                                                    // sample is on the right (the live edge).
+                                                    // not bars. Amplitude is driven by PHASE (tool_use loudest,
+                                                    // thinking moderate) so an active session ALWAYS shows a
+                                                    // gently flowing wave — never a flat line when the token rate
+                                                    // is 0. The rate only nudges the amplitude slightly upward.
+                                                    // A continuously-animated `flow` phase scrolls the wave so it
+                                                    // reads as alive/breathing between rate updates.
                                                     Item {
                                                         id: waveItem
                                                         Layout.fillWidth: true; Layout.preferredHeight: 16
@@ -798,37 +796,25 @@ Window {
                                                             onPaint: {
                                                                 var ctx = getContext("2d")
                                                                 var w = width, h = height, mid = h * 0.52
-                                                                ctx.clearRect(0, 0, w, h)
-                                                                // faint baseline
-                                                                ctx.strokeStyle = "rgba(255,255,255,0.05)"
-                                                                ctx.lineWidth = 1
-                                                                ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke()
-
+                                                                var col = Theme.phaseColor(modelData.phase)
+                                                                // phase baseline amplitude (0..1): tool_use loudest, thinking moderate
+                                                                var base = (modelData.phase === "tool_use") ? 0.9 : 0.5
+                                                                // gentle rate nudge (kept small so the wave is never flat)
                                                                 var s = waveItem.series
-                                                                var n = s.length
-                                                                var N = 72            // render resolution
-                                                                ctx.lineWidth = 2
-                                                                ctx.lineJoin = "round"; ctx.lineCap = "round"
-                                                                ctx.strokeStyle = scope.strokeCol
-                                                                ctx.shadowColor = scope.strokeCol
-                                                                ctx.shadowBlur = 8
+                                                                var peak = waveItem.peak > 0 ? waveItem.peak : 1
+                                                                var last = (s && s.length) ? s[s.length - 1] : 0
+                                                                var amp = Math.min(1.0, base + 0.25 * (last / peak))   // always >= base
+                                                                ctx.clearRect(0, 0, w, h)
+                                                                ctx.lineWidth = 1.7; ctx.lineCap = "round"; ctx.lineJoin = "round"
+                                                                ctx.strokeStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 8
                                                                 ctx.beginPath()
+                                                                var N = 72
                                                                 for (var i = 0; i < N; i++) {
-                                                                    var frac = i / (N - 1)
-                                                                    var x = frac * w
-                                                                    // amplitude from the (right-aligned) rate series
-                                                                    var amp = 0
-                                                                    if (n > 0) {
-                                                                        var si = Math.floor(frac * (n - 1))
-                                                                        amp = s[si] / waveItem.peak   // 0..1
-                                                                    }
-                                                                    // oscillate around mid; flow scrolls the wave
-                                                                    var wob = Math.sin(i * 0.45 + waveItem.flow * Math.PI * 2)
-                                                                    var y = mid - amp * (h * 0.40) * wob
+                                                                    var x = i / (N - 1) * w
+                                                                    var y = mid - amp * (h * 0.40) * Math.sin(i * 0.5 + waveItem.flow * Math.PI * 2)
                                                                     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
                                                                 }
-                                                                ctx.stroke()
-                                                                ctx.shadowBlur = 0
+                                                                ctx.stroke(); ctx.shadowBlur = 0
                                                             }
                                                         }
                                                     }
