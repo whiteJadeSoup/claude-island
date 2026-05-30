@@ -161,6 +161,21 @@ def main() -> int:
 
     app = QGuiApplication(sys.argv)
 
+    # Bundle the exact prototype fonts (Inter for UI, JetBrains Mono for
+    # numbers/commands/paths) so the island renders identically to the design
+    # regardless of which fonts the machine has installed. Registers each
+    # weight file; 400+700 land under the base families "Inter" / "JetBrains
+    # Mono" so font.weight selects them in QML. App-wide default = Inter; mono
+    # Text overrides to Theme.fontMono.
+    from PySide6.QtGui import QFontDatabase, QFont
+    _fonts_dir = Path(__file__).parent / "ui" / "qml" / "fonts"
+    try:
+        for _ttf in sorted(_fonts_dir.glob("*.ttf")):
+            QFontDatabase.addApplicationFont(str(_ttf))
+    except Exception as _fe:
+        print(f"[island] font load skipped: {_fe}", file=sys.stderr)
+    app.setFont(QFont("Inter"))
+
     # macOS accessory policy (post-app-creation path): runtime call that
     # overrides any cached launcher state that ignored our infoDict seed.
     # No-op on Windows / Linux.
