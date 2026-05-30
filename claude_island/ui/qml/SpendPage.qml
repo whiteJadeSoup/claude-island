@@ -11,12 +11,12 @@ Rectangle {
     id: spendPage
 
     required property var spend   // { cost, reqs, input_tokens, output_tokens, cache_read, hit_rate, per_model }
-    required property var quota   // { five_hour_pct, weekly_pct, five_hour_reset, weekly_reset, five_hour_reset_epoch, weekly_reset_epoch } | null
+    required property var quota   // { five_hour_pct, weekly_pct, five_hour_reset_epoch, weekly_reset_epoch } | null
     required property var vm
 
     signal back()
 
-    color: "#0c0f14"
+    color: Theme.bg
 
     // Live "now" ticker — re-stamped every 30s so reset countdowns tick down
     // without waiting for a new snapshot.
@@ -38,77 +38,73 @@ Rectangle {
         return "<1m"
     }
 
-    // Guard helpers — access spend fields safely when spend may be empty
+    // Guard helpers — access spend/quota fields safely when they may be empty/null.
     function spendVal(key, def) {
         return (spend && spend[key] !== undefined) ? spend[key] : def
     }
     function quotaVal(key, def) {
         return (quota && quota[key] !== undefined) ? quota[key] : def
     }
-    // Format a token count with K/M suffix
-    function fmtTok(n) {
+    // Format a numeric count: ≥1e6 → "X.XM", ≥1e3 → "X.XK", else the bare number.
+    function fmtNum(n) {
         n = n || 0
         if (n >= 1000000) return (n / 1000000).toFixed(1) + "M"
         if (n >= 1000)    return (n / 1000).toFixed(1) + "K"
-        return String(n)
+        return "" + n
     }
     // Clamp a pct to [0,100]
     function clamp100(v) { return Math.max(0, Math.min(100, v || 0)) }
+
+    // ── Shared icon button (matches SessionDetailPage) ──────────────────────
+    // Small square icon-only button: muted glyph, subtle hover background.
+    component IconButton: Rectangle {
+        id: iconBtn
+        required property string glyph
+        signal tapped()
+        Layout.preferredWidth: 30
+        Layout.preferredHeight: 30
+        radius: 7
+        color: ma.containsMouse ? "#191d23" : "transparent"
+        Text {
+            anchors.centerIn: parent
+            text: iconBtn.glyph
+            color: "#6b7480"
+            font.pixelSize: 18
+        }
+        MouseArea {
+            id: ma
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: iconBtn.tapped()
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
         // ── Header ────────────────────────────────────────────────────────
-        Rectangle {
+        RowLayout {
             Layout.fillWidth: true
-            height: 44
-            color: "transparent"
+            Layout.preferredHeight: 44
+            Layout.leftMargin: 12
+            Layout.rightMargin: 12
+            spacing: 8
 
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: 14
-                anchors.rightMargin: 14
-                spacing: 8
+            IconButton { glyph: "‹"; onTapped: spendPage.back() }
 
-                // Back arrow
-                Text {
-                    text: "‹ Back"
-                    color: backArea.containsMouse ? "#c8d4de" : "#7e8a97"
-                    font.pixelSize: 13
-                    MouseArea {
-                        id: backArea
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        hoverEnabled: true
-                        onClicked: spendPage.back()
-                    }
-                }
+            Text {
+                text: "Today's usage"
+                color: Theme.ink
+                font.pixelSize: Theme.tTitle
+                font.bold: true
+                Layout.fillWidth: true
+            }
 
-                Item { Layout.fillWidth: true }
-
-                Text {
-                    text: "Today's usage"
-                    color: "#e9edf2"
-                    font.pixelSize: 13
-                    font.bold: true
-                }
-
-                Item { Layout.fillWidth: true }
-
-                // Refresh quota button
-                Text {
-                    text: "↻ Refresh quota"
-                    color: refreshArea.containsMouse ? "#5fd2a8" : "#7e8a97"
-                    font.pixelSize: 12
-                    MouseArea {
-                        id: refreshArea
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        hoverEnabled: true
-                        onClicked: { if (spendPage.vm) spendPage.vm.refreshQuota() }
-                    }
-                }
+            IconButton {
+                glyph: "↻"
+                onTapped: { if (spendPage.vm) spendPage.vm.refreshQuota() }
             }
         }
 
@@ -124,55 +120,36 @@ Rectangle {
                 width: parent.width
                 spacing: 0
 
-                // ── Cost headline ─────────────────────────────────────────
+                // ── Big cost headline ─────────────────────────────────────
                 Text {
                     Layout.leftMargin: 16
                     Layout.topMargin: 4
-                    Layout.bottomMargin: 12
+                    Layout.bottomMargin: 14
                     text: {
                         var c = spendVal("cost", 0)
                         return "$" + (c >= 100 ? c.toFixed(0) : c.toFixed(2))
                     }
-                    color: "#f0a860"
-                    font.pixelSize: 28
+                    color: Theme.gold
+                    font.pixelSize: 33
                     font.bold: true
-                    font.family: "monospace"
+                    font.family: Theme.fontMono
+                    font.letterSpacing: -0.5
                 }
 
-                // ── Stat rows ─────────────────────────────────────────────
-                // Section label
-                Text {
-                    Layout.leftMargin: 16
-                    Layout.bottomMargin: 4
-                    text: "USAGE DETAIL"
-                    color: "#566069"
-                    font.pixelSize: 10
-                    font.letterSpacing: 1.5
-                }
-
-                // Each stat row is a small horizontal layout
-                // reqs
-                SpendRow { label: "Requests"; value: String(spendVal("reqs", 0)) }
-                SpendRow { label: "Input tokens";  value: fmtTok(spendVal("input_tokens",  0)) }
-                SpendRow { label: "Output tokens";  value: fmtTok(spendVal("output_tokens", 0)) }
-                SpendRow { label: "Cache tokens";  value: fmtTok(spendVal("cache_read",    0)) }
-                SpendRow {
+                // ── Stat rows (no section header) ─────────────────────────
+                StatRow { label: "Requests";      value: "" + spendVal("reqs", 0) }
+                StatRow { label: "Input tokens";  value: fmtNum(spendVal("input_tokens",  0)) }
+                StatRow { label: "Output tokens"; value: fmtNum(spendVal("output_tokens", 0)) }
+                StatRow { label: "Cache tokens";  value: fmtNum(spendVal("cache_read",    0)) }
+                StatRow {
                     label: "Hit rate"
-                    value: {
-                        var r = spendVal("hit_rate", 0)
-                        return (r * 100).toFixed(1) + "%"
-                    }
+                    value: (spendVal("hit_rate", 0) * 100).toFixed(1) + "%"
                 }
 
-                // ── Per-model bars ────────────────────────────────────────
-                Text {
-                    Layout.leftMargin: 16
-                    Layout.topMargin: 16
-                    Layout.bottomMargin: 4
+                // ── MODEL BREAKDOWN band ──────────────────────────────────
+                BandLabel {
                     text: "MODEL BREAKDOWN"
-                    color: "#566069"
-                    font.pixelSize: 10
-                    font.letterSpacing: 1.5
+                    Layout.topMargin: 18
                     visible: {
                         var pm = spendVal("per_model", [])
                         return pm && pm.length > 0
@@ -186,10 +163,10 @@ Rectangle {
                         Layout.fillWidth: true
                         Layout.leftMargin: 16
                         Layout.rightMargin: 16
-                        Layout.bottomMargin: 6
-                        height: 34
+                        Layout.bottomMargin: 8
+                        Layout.preferredHeight: 30
 
-                        // Compute max cost among all models for proportional bars
+                        // Largest cost among all models — drives proportional bar width.
                         property real maxCost: {
                             var pm = spendVal("per_model", [])
                             var mx = 0.01
@@ -200,7 +177,7 @@ Rectangle {
                         }
                         property real barFrac: Math.max(0, Math.min(1, modelData.cost / maxCost))
 
-                        // Label row
+                        // Label row: model name (fills) ... cost
                         RowLayout {
                             anchors.top: parent.top
                             anchors.left: parent.left
@@ -210,163 +187,77 @@ Rectangle {
                             Text {
                                 Layout.fillWidth: true
                                 text: modelData.model
-                                color: "#c8d4de"
-                                font.pixelSize: 11
+                                color: Theme.ink
+                                font.pixelSize: Theme.tBody
                                 elide: Text.ElideRight
                             }
                             Text {
                                 text: "$" + (modelData.cost >= 100 ? modelData.cost.toFixed(0) : modelData.cost.toFixed(2))
-                                color: "#f0a860"
-                                font.family: "monospace"
-                                font.pixelSize: 11
+                                color: Theme.gold
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.tBody
                             }
                         }
 
-                        // Bar
+                        // 7px track + teal-gradient fill ∝ cost/maxCost
                         Rectangle {
                             anchors.bottom: parent.bottom
                             anchors.left: parent.left
-                            height: 6
-                            radius: 3
-                            // Full-width track
-                            width: parent.width
-                            color: "#151b22"
+                            anchors.right: parent.right
+                            height: 7
+                            radius: 4
+                            color: "#0b0f15"
 
                             Rectangle {
                                 height: parent.height
                                 radius: parent.radius
                                 width: parent.width * barFrac
-                                color: "#5fd2a8"
+                                gradient: Gradient {
+                                    orientation: Gradient.Horizontal
+                                    GradientStop { position: 0.0; color: "#3fae87" }
+                                    GradientStop { position: 1.0; color: "#5fd2a8" }
+                                }
                             }
                         }
                     }
                 }
 
-                // ── Quota section ─────────────────────────────────────────
-                Text {
-                    Layout.leftMargin: 16
-                    Layout.topMargin: 16
-                    Layout.bottomMargin: 4
-                    text: "QUOTA USAGE"
-                    color: "#566069"
-                    font.pixelSize: 10
-                    font.letterSpacing: 1.5
+                // ── QUOTA band ────────────────────────────────────────────
+                BandLabel {
+                    text: "QUOTA"
+                    Layout.topMargin: 18
                     visible: quota !== null && quota !== undefined
                 }
 
-                // 5-hour bar
-                Item {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
-                    Layout.bottomMargin: 10
-                    height: 34
+                // 5-hour window bar
+                QuotaBar {
+                    name: "5-hour window"
+                    resetText: "resets " + spendPage.fmtReset(quotaVal("five_hour_reset_epoch", 0))
+                    pct: clamp100(quotaVal("five_hour_pct", 0))
                     visible: quota !== null && quota !== undefined
-
-                    RowLayout {
-                        anchors.top: parent.top
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        height: 20
-                        Text {
-                            text: "5-hour window"
-                            color: "#a0aab6"
-                            font.pixelSize: 11
-                            Layout.fillWidth: true
-                        }
-                        // Reset countdown — muted, monospace, small
-                        Text {
-                            text: "resets " + spendPage.fmtReset(quota && quota["five_hour_reset_epoch"] ? quota["five_hour_reset_epoch"] : 0)
-                            color: Theme.faint
-                            font.family: "monospace"
-                            font.pixelSize: Theme.tMeta
-                        }
-                        Text {
-                            text: clamp100(quotaVal("five_hour_pct", 0)) + "%"
-                            color: "#f0a860"
-                            font.family: "monospace"
-                            font.pixelSize: 11
-                            Layout.leftMargin: 6
-                        }
-                    }
-                    Rectangle {
-                        anchors.top: parent.top
-                        anchors.topMargin: 22
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        height: 8
-                        radius: 4
-                        color: "#151b22"
-                        Rectangle {
-                            height: parent.height
-                            radius: parent.radius
-                            width: parent.width * clamp100(quotaVal("five_hour_pct", 0)) / 100
-                            color: quotaVal("five_hour_pct", 0) > 80 ? "#e8743b" : "#5fd2a8"
-                        }
-                    }
                 }
 
-                // Weekly bar
-                Item {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 16
-                    Layout.rightMargin: 16
+                // Weekly window bar
+                QuotaBar {
+                    name: "weekly"
+                    resetText: "resets " + spendPage.fmtReset(quotaVal("weekly_reset_epoch", 0))
+                    pct: clamp100(quotaVal("weekly_pct", 0))
                     Layout.bottomMargin: 16
-                    height: 34
                     visible: quota !== null && quota !== undefined && quotaVal("weekly_pct", -1) >= 0
-
-                    RowLayout {
-                        anchors.top: parent.top
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        height: 20
-                        Text {
-                            text: "7-day window"
-                            color: "#a0aab6"
-                            font.pixelSize: 11
-                            Layout.fillWidth: true
-                        }
-                        // Reset countdown — muted, monospace, small
-                        Text {
-                            text: "resets " + spendPage.fmtReset(quota && quota["weekly_reset_epoch"] ? quota["weekly_reset_epoch"] : 0)
-                            color: Theme.faint
-                            font.family: "monospace"
-                            font.pixelSize: Theme.tMeta
-                        }
-                        Text {
-                            text: clamp100(quotaVal("weekly_pct", 0)) + "%"
-                            color: "#f0a860"
-                            font.family: "monospace"
-                            font.pixelSize: 11
-                            Layout.leftMargin: 6
-                        }
-                    }
-                    Rectangle {
-                        anchors.top: parent.top
-                        anchors.topMargin: 22
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        height: 8
-                        radius: 4
-                        color: "#151b22"
-                        Rectangle {
-                            height: parent.height
-                            radius: parent.radius
-                            width: parent.width * clamp100(quotaVal("weekly_pct", 0)) / 100
-                            color: quotaVal("weekly_pct", 0) > 80 ? "#e8743b" : "#5fd2a8"
-                        }
-                    }
                 }
             }
         }
     }
 
-    // Inline sub-component for stat rows (avoids a separate file for tiny widgets)
-    component SpendRow: Rectangle {
+    // ── Inline sub-components ───────────────────────────────────────────────
+
+    // A stat row: label (faint) ... spacer ... value (mono), 1px bottom border.
+    component StatRow: Rectangle {
+        id: statRow
         required property string label
         required property string value
         Layout.fillWidth: true
-        height: 32
+        Layout.preferredHeight: 34
         color: "transparent"
 
         RowLayout {
@@ -374,26 +265,117 @@ Rectangle {
             anchors.leftMargin: 16
             anchors.rightMargin: 16
             Text {
-                text: label
-                color: "#7e8a97"
-                font.pixelSize: 12
+                text: statRow.label
+                color: Theme.faint
+                font.pixelSize: Theme.tBody
                 Layout.fillWidth: true
             }
             Text {
-                text: value
-                color: "#e9edf2"
-                font.family: "monospace"
-                font.pixelSize: 12
+                text: statRow.value
+                color: Theme.ink2
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.tBody
             }
         }
-        // Separator line
+        // Hairline separator
         Rectangle {
             anchors.bottom: parent.bottom
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.leftMargin: 16
             height: 1
-            color: "#151b22"
+            color: "#ffffff"
+            opacity: 0.045
+        }
+    }
+
+    // A band header: 6px teal dot (glow) + uppercase micro label.
+    component BandLabel: RowLayout {
+        property alias text: bandText.text
+        Layout.fillWidth: true
+        Layout.leftMargin: 16
+        Layout.rightMargin: 16
+        Layout.bottomMargin: 8
+        spacing: 8
+
+        Rectangle {
+            Layout.preferredWidth: 6
+            Layout.preferredHeight: 6
+            radius: 3
+            color: Theme.teal
+            // Soft glow ring around the dot.
+            Rectangle {
+                anchors.centerIn: parent
+                width: 12; height: 12
+                radius: 6
+                color: Theme.teal
+                opacity: 0.25
+                z: -1
+            }
+        }
+        Text {
+            id: bandText
+            color: Theme.teal
+            font.pixelSize: Theme.tMicro
+            font.bold: true
+            font.letterSpacing: 1.6
+        }
+    }
+
+    // A quota bar block: name ... resets <countdown> ... <pct>%, then 7px track.
+    component QuotaBar: Item {
+        id: quotaBar
+        required property string name
+        required property string resetText
+        required property real pct
+        Layout.fillWidth: true
+        Layout.leftMargin: 16
+        Layout.rightMargin: 16
+        Layout.bottomMargin: 10
+        Layout.preferredHeight: 34
+
+        RowLayout {
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 20
+            spacing: 8
+            Text {
+                text: quotaBar.name
+                color: Theme.ink2
+                font.pixelSize: Theme.tBody
+                Layout.fillWidth: true
+            }
+            Text {
+                text: quotaBar.resetText
+                color: Theme.faint
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.tMeta
+            }
+            Text {
+                text: quotaBar.pct + "%"
+                color: Theme.gold
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.tBody
+            }
+        }
+        Rectangle {
+            anchors.top: parent.top
+            anchors.topMargin: 23
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 7
+            radius: 4
+            color: "#0b0f15"
+            Rectangle {
+                height: parent.height
+                radius: parent.radius
+                width: parent.width * quotaBar.pct / 100
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: "#3fae87" }
+                    GradientStop { position: 1.0; color: "#5fd2a8" }
+                }
+            }
         }
     }
 }
