@@ -997,8 +997,22 @@ Window {
                     Item {
                         id: detailHost
                         objectName: "detailHost"
+                        // Reparented to panelLayer so the detail overlay covers the
+                        // WHOLE panel — including the "Claude Island" top bar — to
+                        // match the prototype's full-layer replacement (each layer
+                        // owns its OWN header). Filling only the Page container left
+                        // the global top bar + the page's own back row stacked as a
+                        // double header, and pushed the session name into a subtitle.
+                        //
+                        // Reparent ONCE imperatively (not `parent: panelLayer` as a
+                        // binding) — a parent *binding* on a lexically-nested item makes
+                        // Qt re-evaluate it against the original parent, tripping a
+                        // "Binding loop for property parent". onCompleted assigns it
+                        // exactly once; anchors.fill: parent then re-resolves to the
+                        // new parent automatically.
                         anchors.fill: parent
-                        z: 5
+                        Component.onCompleted: parent = panelLayer
+                        z: 10
                         visible: detailLoader.active
                         property string detailKind: ""
                         property real sx0: 0; property real sy0: 0; property real sw0: 0; property real sh0: 0
@@ -1014,6 +1028,7 @@ Window {
 
                         Loader {
                             id: detailLoader
+                            objectName: "detailLoader"
                             anchors.fill: parent
                             active: false
                             opacity: 0

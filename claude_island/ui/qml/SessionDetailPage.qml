@@ -81,11 +81,14 @@ Rectangle {
                 anchors.rightMargin: 14
                 spacing: 8
 
-                // Back arrow
+                // Back arrow — icon-only "‹" (matches the prototype header,
+                // which drops the "Claude Island" chrome and leads with ‹ + name).
                 Text {
-                    text: "‹ Back"
+                    text: "‹"
                     color: backArea.containsMouse ? "#c8d4de" : "#7e8a97"
-                    font.pixelSize: 13
+                    font.family: Theme.fontUI
+                    font.pixelSize: 22
+                    Layout.preferredWidth: 16
                     MouseArea {
                         id: backArea
                         anchors.fill: parent
@@ -109,19 +112,21 @@ Rectangle {
                     component nameLabelComp: Text {
                         text: dv("name", "Session")
                         color: "#e9edf2"
-                        font.pixelSize: 13
+                        font.family: Theme.fontUI
+                        font.pixelSize: 15
                         font.bold: true
                         elide: Text.ElideRight
-                        horizontalAlignment: Text.AlignHCenter
+                        horizontalAlignment: Text.AlignLeft
                     }
 
                     component renameFieldComp: TextField {
                         id: renameField
                         text: dv("name", "")
                         color: "#e9edf2"
-                        font.pixelSize: 13
+                        font.family: Theme.fontUI
+                        font.pixelSize: 15
                         font.bold: true
-                        horizontalAlignment: Text.AlignHCenter
+                        horizontalAlignment: Text.AlignLeft
                         background: Rectangle {
                             radius: 4
                             color: "#0e141b"
@@ -236,55 +241,52 @@ Rectangle {
             }
         }
 
-        // ── Subtitle: status · model · ai_title ──────────────────────────
+        // ── dpttl: phase badge · model · cost (right) ─────────────────────
+        // Mirrors the prototype's ".dpttl" row: a coloured phase pill, the
+        // model id in mono, and the session cost pushed to the right in gold.
         RowLayout {
             Layout.fillWidth: true
             Layout.leftMargin: 16
             Layout.rightMargin: 16
-            Layout.bottomMargin: 8
-            spacing: 6
+            Layout.topMargin: 2
+            Layout.bottomMargin: 10
+            spacing: 8
 
-            // Show real phase from the detail dict instead of hardcoded "active".
-            // Hide when phase is absent/empty (e.g. detail not yet loaded).
-            Text {
-                text: dv("phase")
-                // Colour mirrors phaseColor() in Main.qml: amber for thinking,
-                // teal for tool_use / other active phases, grey for idle.
-                color: dv("phase") === "thinking" ? "#f0b860"
-                     : dv("phase") === "idle"     ? "#566069"
-                     : "#5fd2a8"
-                font.pixelSize: 10
-                visible: dv("phase") !== "" && dv("model") !== ""
+            // Phase badge — coloured pill (amber=thinking, teal=active, grey=idle).
+            Rectangle {
+                visible: dv("phase") !== ""
+                radius: 5
+                color: Qt.rgba(Theme.phaseColor(dv("phase")).r,
+                               Theme.phaseColor(dv("phase")).g,
+                               Theme.phaseColor(dv("phase")).b, 0.12)
+                Layout.preferredWidth: phaseLbl.implicitWidth + 14
+                Layout.preferredHeight: 20
+                Text {
+                    id: phaseLbl
+                    anchors.centerIn: parent
+                    text: dv("phase")
+                    color: dv("phase") === "idle" ? "#8a96a3" : Theme.phaseColor(dv("phase"))
+                    font.family: Theme.fontMono
+                    font.pixelSize: 11
+                }
             }
-            Text {
-                text: "·"
-                color: "#3a4752"
-                font.pixelSize: 10
-                visible: dv("phase") !== "" && dv("model") !== ""
-            }
+            // Model id — mono, model-tinted.
             Text {
                 text: dv("model")
-                color: "#566069"
-                font.pixelSize: 10
+                color: Theme.modelColor(dv("model"))
+                font.family: Theme.fontMono
+                font.pixelSize: 12
                 visible: dv("model") !== ""
                 elide: Text.ElideRight
-                Layout.fillWidth: !aiTitleText.visible
             }
+            Item { Layout.fillWidth: true }
+            // Cost — gold, bold, mono, right-aligned.
             Text {
-                text: "·"
-                color: "#3a4752"
-                font.pixelSize: 10
-                visible: dv("model") !== "" && dv("ai_title") !== ""
-            }
-            Text {
-                id: aiTitleText
-                text: dv("ai_title")
-                color: "#7e8a97"
-                font.pixelSize: 10
-                font.italic: true
-                visible: dv("ai_title") !== ""
-                elide: Text.ElideRight
-                Layout.fillWidth: true
+                text: fmtCost(dvNum("cost"))
+                color: "#f0a860"
+                font.family: Theme.fontMono
+                font.pixelSize: 14
+                font.bold: true
             }
         }
 
@@ -587,6 +589,7 @@ Rectangle {
             Text {
                 text: label
                 color: "#7e8a97"
+                font.family: Theme.fontUI
                 font.pixelSize: 12
                 Layout.preferredWidth: 80
                 Layout.minimumWidth: 80
@@ -594,8 +597,11 @@ Rectangle {
             Text {
                 text: value
                 color: "#c8d4de"
-                font.family: monospace ? Theme.fontMono : ""
-                font.pixelSize: 11
+                // Explicit family on BOTH branches — an empty "" string here
+                // left Qt to pick an arbitrary fallback (the garbled-font bug);
+                // the bundled Inter / JetBrains Mono are the only two we ship.
+                font.family: monospace ? Theme.fontMono : Theme.fontUI
+                font.pixelSize: 12
                 elide: Text.ElideLeft
                 Layout.fillWidth: true
             }
@@ -631,6 +637,7 @@ Rectangle {
             Text {
                 text: label
                 color: "#7e8a97"
+                font.family: Theme.fontUI
                 font.pixelSize: 12
                 Layout.preferredWidth: 80
                 Layout.minimumWidth: 80
@@ -639,8 +646,9 @@ Rectangle {
                 text: value
                 // Highlight the value on hover to indicate clickability
                 color: rowClickArea.containsMouse ? "#5fa8d2" : "#c8d4de"
-                font.family: monospace ? Theme.fontMono : ""
-                font.pixelSize: 11
+                // Explicit family on both branches (see DetailRow note).
+                font.family: monospace ? Theme.fontMono : Theme.fontUI
+                font.pixelSize: 12
                 elide: Text.ElideLeft
                 Layout.fillWidth: true
             }

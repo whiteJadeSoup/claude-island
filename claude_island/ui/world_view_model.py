@@ -369,6 +369,17 @@ class WorldViewModel(QObject):
         raw_model = str(_g(details, "latest_model") or view.latest_model or "")
         friendly_model = _fmt_model(raw_model) or raw_model
 
+        # Friendly "Created" — str(datetime) yields "2026-05-29 13:25:58.221000
+        # +00:00" (raw microseconds + tz offset), which the detail page showed
+        # verbatim and looked broken. Format to "YYYY-MM-DD HH:MM" — minute
+        # precision is plenty for "when did this session start". Falls back to
+        # the raw string for any non-datetime value.
+        created_raw = _g(details, "started_at")
+        if hasattr(created_raw, "strftime"):
+            created_str = created_raw.strftime("%Y-%m-%d %H:%M")
+        else:
+            created_str = str(created_raw or "")
+
         return {
             "name":            str(_g(details, "name") or ""),
             "model":           friendly_model,
@@ -378,7 +389,7 @@ class WorldViewModel(QObject):
             "output_tokens":   0,   # same — per_model breakdown covers token detail
             "cwd":             str(view.project_path),
             "branch":          str(_g(details, "git_branch") or ""),
-            "created":         str(_g(details, "started_at") or ""),
+            "created":         created_str,
             "ai_title":        str(_g(details, "ai_title") or ""),
             "transcript_path": transcript_path,
             "latest_prompt":   str(_g(details, "last_prompt") or ""),

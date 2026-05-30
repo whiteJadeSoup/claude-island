@@ -552,3 +552,51 @@ def test_session_detail_contains_cwd():
     detail = vm.sessionDetail(uuid)
     # cwd should contain "myproject"
     assert "myproject" in detail["cwd"]
+
+
+def _details_with_started(started_at):
+    """get_session_details stub that lets the test set started_at."""
+    def _fn(session: Session) -> SessionDetails:
+        return SessionDetails(
+            session=session,
+            name="my-session",
+            original_name=None,
+            ai_title=None,
+            git_branch="main",
+            last_prompt=None,
+            started_at=started_at,
+            status="idle",
+            cc_version="2.1.0",
+            cost_usd=1.0,
+            turn_count=1,
+            sidechain_count=0,
+            per_model=(),
+            latest_model="claude-sonnet-4-6",
+            effective_uuid="uuid-detail-1",
+        )
+    return _fn
+
+
+def test_session_detail_created_minute_precision_no_micros_or_tz():
+    """`created` must format to "YYYY-MM-DD HH:MM" — NOT the raw str(datetime)
+    which leaks microseconds + tz offset (the broken-looking
+    "2026-05-29 13:25:58.221000+00:00" the detail page showed)."""
+    uuid = "uuid-detail-1"
+    view = _make_live_view(uuid)
+    started = datetime(2026, 5, 21, 10, 30, 58, 221000, tzinfo=timezone.utc)
+    vm = WorldViewModel(get_session_details=_details_with_started(started))
+    vm.update(_snap_with_live_view(view))
+    d = vm.sessionDetail(uuid)
+    assert d["created"] == "2026-05-21 10:30"
+    assert "+00:00" not in d["created"]
+    assert "." not in d["created"]
+
+
+def test_session_detail_created_non_datetime_falls_back():
+    """A non-datetime started_at (legacy string) survives as a plain string."""
+    uuid = "uuid-detail-1"
+    view = _make_live_view(uuid)
+    vm = WorldViewModel(get_session_details=_details_with_started("2026-05-21"))
+    vm.update(_snap_with_live_view(view))
+    d = vm.sessionDetail(uuid)
+    assert d["created"] == "2026-05-21"
