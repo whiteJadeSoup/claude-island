@@ -1202,22 +1202,49 @@ Window {
                 }
             }
 
-            // 4. Meta line: reqs · tok · cache · hit% · ↳ subagent
+            // 4. Stat strip: bold bright numbers + dim units (StyledText so the
+            //    figures stand out while the unit words recede — matches the
+            //    prototype where 331 / 467K / 69.9M / 85.4% read as the data and
+            //    "reqs / tokens / cache / hit" read as labels).
             Text {
                 Layout.fillWidth: true
                 Layout.topMargin: 6
+                textFormat: Text.StyledText
                 text: {
+                    // Wrap a value in a brighter bold span; the surrounding
+                    // Text.color (Theme.dim) renders the unit words.
+                    function b(x) { return '<font color="' + Theme.ink2 + '"><b>' + x + '</b></font>' }
                     var reqs  = (todayData && todayData["reqs"])          ? todayData["reqs"] : 0
                     var toks  = (todayData && todayData["total_tokens"])  ? todayData["total_tokens"] : 0
                     var cache = (todayData && todayData["cache_read"])    ? todayData["cache_read"] : 0
                     var hr    = (todayData && todayData["hit_rate"])      ? todayData["hit_rate"] : 0
-                    var sub   = (todayData && todayData["subagent_reqs"]) ? todayData["subagent_reqs"] : 0
-                    var s = reqs + " reqs · " + root.fmtNum(toks) + " tok · "
-                          + root.fmtNum(cache) + " cache · " + Math.round(hr * 100) + "% hit"
-                    if (sub > 0) s += " · ↳ " + sub + " subagent"
-                    return s
+                    return b(reqs) + " reqs · " + b(root.fmtNum(toks)) + " tokens · "
+                         + b(root.fmtNum(cache)) + " cache · " + b((hr * 100).toFixed(1) + "%") + " hit"
                 }
-                color: Theme.faint
+                color: Theme.dim
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.tMeta
+                elide: Text.ElideRight
+            }
+
+            // 5. Subagent breakdown — its OWN line below the stat strip, only
+            //    when there were subagent (sidechain) requests today. Mirrors
+            //    the prototype: "↳ incl. 197 subagent reqs · $17" with the
+            //    figures bold. Hidden entirely when sub == 0 so the card stays
+            //    compact for sessions that never spawned subagents.
+            Text {
+                Layout.fillWidth: true
+                Layout.topMargin: 3
+                visible: (todayData && todayData["subagent_reqs"] || 0) > 0
+                textFormat: Text.StyledText
+                text: {
+                    function b(x) { return '<font color="' + Theme.ink2 + '"><b>' + x + '</b></font>' }
+                    var sub  = (todayData && todayData["subagent_reqs"]) ? todayData["subagent_reqs"] : 0
+                    var cost = (todayData && todayData["subagent_cost"]) ? todayData["subagent_cost"] : 0
+                    var costStr = "$" + (cost >= 10 ? Math.round(cost) : cost.toFixed(2))
+                    return "↳ incl. " + b(sub) + " subagent reqs · " + b(costStr)
+                }
+                color: Theme.dim
                 font.family: Theme.fontMono
                 font.pixelSize: Theme.tMeta
                 elide: Text.ElideRight
