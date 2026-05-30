@@ -669,13 +669,29 @@ Window {
                                 }
 
                                 // ── ACTIVE band: "Live Console" cards ─────────
-                                // Section header visible only when there are active sessions
-                                Text {
+                                // Section header — mirrors the IDLE band (dot + UPPERCASE
+                                // label + right-aligned count) to match the prototype.
+                                RowLayout {
                                     visible: root.workingCount() > 0
-                                    text: "◉ Active · " + root.workingCount()
-                                    color: "#5fd2a8"
-                                    font.pixelSize: 10; font.letterSpacing: 1.5
-                                    Layout.leftMargin: 16; Layout.topMargin: 13; Layout.bottomMargin: 6
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 16; Layout.rightMargin: 16
+                                    Layout.topMargin: 13; Layout.bottomMargin: 6
+                                    spacing: 8
+                                    Rectangle {
+                                        Layout.preferredWidth: 6; Layout.preferredHeight: 6; radius: 3
+                                        color: Theme.teal
+                                        // soft glow to match the prototype's teal status dot
+                                        border.color: Qt.rgba(0.37, 0.84, 0.67, 0.5); border.width: 1
+                                    }
+                                    Text {
+                                        text: "ACTIVE"; color: Theme.teal
+                                        font.pixelSize: Theme.tMicro; font.letterSpacing: 1.6; font.bold: true
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Text {
+                                        text: root.workingCount(); color: Theme.faint
+                                        font.pixelSize: Theme.tMicro
+                                    }
                                 }
 
                                 Repeater {
@@ -696,9 +712,9 @@ Window {
                                             anchors.right: parent.right
                                             anchors.top: parent.top
                                             implicitHeight: cardCol.implicitHeight + 16
-                                            radius: 8
-                                            color: liveArea.containsMouse ? "#0e141b" : "#0a1018"
-                                            border.color: liveArea.containsMouse ? "#1c2632" : "#151b22"
+                                            radius: 14
+                                            color: liveArea.containsMouse ? Theme.surface2 : Theme.surface
+                                            border.color: liveArea.containsMouse ? Theme.bd2 : Theme.bd
                                             border.width: 1
 
                                             // Left breathing glow accent — color by phase
