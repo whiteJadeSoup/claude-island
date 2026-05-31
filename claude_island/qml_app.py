@@ -210,7 +210,7 @@ def main() -> int:
     from claude_island.core.notify import NotifyEventQueue
     from claude_island.platform_ import session_state as session_state_reader
     from claude_island.platform_ import session_names as session_names_store
-    from claude_island.platform_.process_scanner import ProcessScanner, resume_uuid_for_pid
+    from claude_island.platform_.process_scanner import ProcessScanner
     from claude_island.core.session_state_machine import SessionStateMachine
     from claude_island.platform_ import hook_installer
     from claude_island.platform_.hook_server import HookServer, HookServerStartError
@@ -331,14 +331,11 @@ def main() -> int:
             if isinstance(state.get("sessionId"), str)
             else None
         )
-        try:
-            cmdline_resume_uuid = resume_uuid_for_pid(
-                session.pid,
-                names_lookup=session_names_store.get_uuid_by_name,
-            )
-        except Exception:
-            cmdline_resume_uuid = None
-        sess_uuid = cmdline_resume_uuid or pid_json_uuid or session.session_uuid
+        # Trust pid.json (and the hook-bridge-populated session.session_uuid)
+        # for the canonical uuid. Cmdline --resume parsing was dropped as dead
+        # infrastructure in c5ebb94; this is the same simplification, applied
+        # to the QML entry that the original cleanup missed.
+        sess_uuid = pid_json_uuid or session.session_uuid
         meta = jsonl_parser.get_session_metadata(sess_uuid) or {}
         cost, turns, sides = usage_registry.get_session_summary(sess_uuid)
         per_model = usage_registry.get_session_per_model(sess_uuid)
@@ -498,16 +495,6 @@ def main() -> int:
         except Exception as exc:
             print(f"[island] resume_fn error: {exc}", file=sys.stderr)
 
-    # ── _resume_uuid_reader ───────────────────────────────────────────────────
-    # Mirrors __main__.py: wraps resume_uuid_for_pid so HookServer, Snapshotter,
-    # and compose_session_view all share one consistent uuid-recovery path.
-    # Two-step resolution: cmdline --resume <UUID> → direct; --resume <name>
-    # → reverse-lookup via session_names_store.
-    def _resume_uuid_reader(pid: int) -> str | None:
-        return resume_uuid_for_pid(
-            pid, names_lookup=session_names_store.get_uuid_by_name,
-        )
-
     # ── Hook subsystem ────────────────────────────────────────────────────────
     # Mirrors __main__.py's hook block (lines 707–845).
     # On failure we degrade gracefully: state_machine still exists (pure
@@ -565,7 +552,6 @@ def main() -> int:
             pending_registry=pending_registry,
             permission_cache=permission_cache,
             notify_queue=notify_queue,
-            resume_uuid_reader=_resume_uuid_reader,
         )
         try:
             bound_port = hook_server.start()
@@ -607,9 +593,6 @@ def main() -> int:
         # falls back to its -1 sentinel (always-recompute). state_machine is
         # unconditionally constructed above, so this never NameErrors.
         get_state_version=lambda: state_machine.state_version,
-        # OLD-uuid recovery so UsageRegistry lookups hit the right key after
-        # --resume; mirrors __main__.py's identical injection.
-        resume_uuid_reader=_resume_uuid_reader,
         get_quota=lambda: quota_engine.get(provider_name="anthropic"),
         get_available_providers=lambda: ["anthropic"],
         get_selected_provider=lambda: "anthropic",
