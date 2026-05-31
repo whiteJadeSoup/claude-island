@@ -157,6 +157,13 @@ def project_snapshot(snap: WorldSnapshot) -> dict[str, Any]:
         q = snap.quota
         quota = {
             "five_hour_pct": int(getattr(q, "five_hour_pct", 0)),
+            # Degradation signals so the UI can surface "data stale / auto-
+            # refresh paused / N consecutive failures" instead of silently
+            # rendering a stale percentage when the usage endpoint is failing
+            # (bridge-003). getattr-guarded for older QuotaSnapshot shapes.
+            "is_stale": bool(getattr(q, "is_stale", False)),
+            "consecutive_failures": int(getattr(q, "consecutive_failures", 0)),
+            "is_auto_refresh_paused": bool(getattr(q, "is_auto_refresh_paused", False)),
             # seven-day window — may be missing on old QuotaSnapshot shapes
             **({
                 "weekly_pct": int(getattr(q, "seven_day_pct", 0)),
