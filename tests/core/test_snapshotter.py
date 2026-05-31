@@ -1580,3 +1580,30 @@ class TestSnapshotterIncrementalCache:
         r2 = snap.build_now()
         name2 = [v for g in r2.session_groups for v in g.views][0].name
         assert name2 == "new", "rename must invalidate the SessionView cache"
+
+    def test_volatile_time_field_view_bypasses_cache(self):
+        """A view carrying a now()-derived field (token rate / elapsed timer)
+        must recompose every build so its clock stays live — even when all
+        version counters and the fingerprint are unchanged.
+
+        cache-002: otherwise a thinking card's "· 12m 03s" elapsed freezes
+        and an idle session's token rate never decays. Static views (no live
+        timer/rate) still cache; only volatile ones bypass."""
+        s = _session(pid=1, cwd="/a", uuid="u1")
+        md = FakeMetadataProvider(); md.meta_version = 0
+        ur = FakeUsageRegistry(); ur.record_version = 0
+        # Make compose emit a non-None tokens_per_min → the view is volatile.
+        ur.get_session_token_rate = lambda uuid: 5000
+        snap, _ = _make_snapshotter(
+            sessions=[s], metadata_provider=md, usage_registry=ur,
+            get_state_version=lambda: 0,
+        )
+        with self._spy_compose() as spy:
+            snap.build_now()
+            n1 = spy.call_count
+            assert n1 == 1
+            # Versions unchanged, but the view is volatile → must recompose.
+            snap.build_now()
+            assert spy.call_count > n1, (
+                "volatile view must recompose despite an otherwise-valid cache"
+            )

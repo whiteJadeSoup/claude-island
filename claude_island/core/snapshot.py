@@ -1025,6 +1025,24 @@ class _CachedView(NamedTuple):
     names_version: int
 
 
+def _has_volatile_time_field(v: SessionView) -> bool:
+    """True when a view carries a ``now()``-derived field — phase-elapsed
+    timers or the rolling 60s token rate. These are pure functions of the
+    wall clock, NOT of any version counter, so serving such a view from
+    cache would freeze it: a thinking card's "· 12m 03s" would stall, and
+    an idle session's token rate would never decay to None. The Snapshotter
+    recomposes these views every build instead of caching them (cache-002).
+    Static views (no live timer / rate) still cache normally — they're the
+    common case, so the incremental cache keeps most of its benefit.
+    """
+    return (
+        v.tool_elapsed_s is not None
+        or v.compact_elapsed_s is not None
+        or v.last_command_elapsed_s is not None
+        or v.tokens_per_min is not None
+    )
+
+
 class Snapshotter:
     """Builds a fresh ``WorldSnapshot`` on every wake; runs the build on
     a single dedicated worker thread; pushes the result via an injected
@@ -1163,6 +1181,10 @@ class Snapshotter:
         # hasn't changed, these are valid too).
         self._cached_views: list[SessionView] | None = None
         self._cached_groups: list[SessionGroup] | None = None
+        # True when the last cached view set contained any volatile
+        # (now()-derived) field. Forces the next build off the whole-list
+        # fast path so live timers / token rates stay fresh (cache-002).
+        self._cached_has_volatile: bool = False
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1312,6 +1334,7 @@ class Snapshotter:
             and state_ver == self._last_state_version
             and names_ver == self._last_names_version
             and self._cached_views is not None
+            and not self._cached_has_volatile
         ):
             # Full cache hit — all source data unchanged.
             views = self._cached_views
@@ -1341,6 +1364,9 @@ class Snapshotter:
             self._last_names_version = names_ver
             self._cached_views = views
             self._cached_groups = groups
+            self._cached_has_volatile = any(
+                _has_volatile_time_field(v) for v in views
+            )
 
         # Staleness filter and grouping are already applied in the
         # incremental compose block above — views and groups are
@@ -1482,6 +1508,7 @@ class Snapshotter:
                 and cached.record_version == record_ver
                 and cached.state_version == state_ver
                 and cached.names_version == names_ver
+                and not _has_volatile_time_field(cached.view)
             ):
                 # All source versions unchanged — reuse cached view.
                 views.append(cached.view)
