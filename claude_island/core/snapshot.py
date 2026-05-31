@@ -1022,6 +1022,7 @@ class _CachedView(NamedTuple):
     meta_version: int
     record_version: int
     state_version: int
+    names_version: int
 
 
 class Snapshotter:
@@ -1156,6 +1157,7 @@ class Snapshotter:
         self._last_meta_version: int = -1
         self._last_record_version: int = -1
         self._last_state_version: int = -1
+        self._last_names_version: int = -1
         # Cached results of downstream pipeline stages (dedup + filter
         # + group are pure functions of the view list; if the view list
         # hasn't changed, these are valid too).
@@ -1293,6 +1295,9 @@ class Snapshotter:
         meta_ver = getattr(self._metadata_provider, "meta_version", 0)
         record_ver = getattr(self._usage_registry, "record_version", 0)
         state_ver = self._get_state_version()
+        # names_store is a fourth compose input (custom session names).
+        # Default-0 so fakes without the attribute never invalidate here.
+        names_ver = getattr(self._names_store, "names_version", 0)
 
         # Sentinel check: if any version is -1, that source's version
         # tracking is unavailable — fall through to the rebuild path.
@@ -1305,6 +1310,7 @@ class Snapshotter:
             and meta_ver == self._last_meta_version
             and record_ver == self._last_record_version
             and state_ver == self._last_state_version
+            and names_ver == self._last_names_version
             and self._cached_views is not None
         ):
             # Full cache hit — all source data unchanged.
@@ -1313,7 +1319,7 @@ class Snapshotter:
         else:
             # Partial or full miss — compose views incrementally.
             views = self._compose_views_incremental(
-                sessions_raw, meta_ver, record_ver, state_ver,
+                sessions_raw, meta_ver, record_ver, state_ver, names_ver,
             )
             # Dedup and filter are pure functions of the view list.
             views = _dedup_views_by_session_uuid(views)
@@ -1332,6 +1338,7 @@ class Snapshotter:
             self._last_meta_version = meta_ver
             self._last_record_version = record_ver
             self._last_state_version = state_ver
+            self._last_names_version = names_ver
             self._cached_views = views
             self._cached_groups = groups
 
@@ -1447,6 +1454,7 @@ class Snapshotter:
         meta_ver: int,
         record_ver: int,
         state_ver: int,
+        names_ver: int,
     ) -> list[SessionView]:
         """Compose SessionViews with per-identity caching.
 
@@ -1473,6 +1481,7 @@ class Snapshotter:
                 and cached.meta_version == meta_ver
                 and cached.record_version == record_ver
                 and cached.state_version == state_ver
+                and cached.names_version == names_ver
             ):
                 # All source versions unchanged — reuse cached view.
                 views.append(cached.view)
@@ -1501,6 +1510,7 @@ class Snapshotter:
                 meta_version=meta_ver,
                 record_version=record_ver,
                 state_version=state_ver,
+                names_version=names_ver,
             )
 
         # Evict entries for identities no longer present this build (dead

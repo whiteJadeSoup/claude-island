@@ -52,6 +52,16 @@ SESSION_NAMES_PATH = Path.home() / ".claude-island" / "session_names.json"
 # module, and we're a single-process desktop app.
 _lock = threading.Lock()
 
+# Monotonic counter bumped on every successful persist (rename / delete /
+# gc). The Snapshotter reads it via ``getattr(names_store, "names_version",
+# 0)`` to invalidate cached SessionViews whose custom name changed.
+# names_store is a compose_session_view input NOT covered by the
+# meta/record/state version counters — without this, a rename hits the
+# whole-list cache and the UI keeps rendering the old name (regression
+# cache-001). Default-0 read means fakes lacking the attribute simply
+# never invalidate on this axis, which is correct for them.
+names_version = 0
+
 
 def _read(path: Path | None = None) -> dict[str, str]:
     """Parse session_names.json into a {uuid: name} dict.
@@ -93,6 +103,7 @@ def _write(names: dict[str, str], path: Path | None = None) -> None:
     annoying but not a crash worth bubbling up. The in-process state
     is unaffected.
     """
+    global names_version
     if path is None:
         path = SESSION_NAMES_PATH
     try:
@@ -100,6 +111,10 @@ def _write(names: dict[str, str], path: Path | None = None) -> None:
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(names, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
+        # Bump only AFTER a successful persist so a failed write (OSError
+        # below) doesn't falsely invalidate the cache for a name that
+        # never changed on disk.
+        names_version += 1
     except OSError as e:
         log.warning("session_names.json write failed: %s", e)
 

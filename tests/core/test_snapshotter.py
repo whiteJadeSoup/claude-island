@@ -745,6 +745,7 @@ def _make_snapshotter(
     state_reader: "FakeStateReader | None" = None,
     metadata_provider: "FakeMetadataProvider | None" = None,
     usage_registry: "FakeUsageRegistry | None" = None,
+    names_store: "FakeNamesStore | None" = None,
     get_state_version=None,
 ) -> tuple[Snapshotter, list[WorldSnapshot]]:
     """Build a Snapshotter wired with fakes; return (snapshotter,
@@ -763,7 +764,7 @@ def _make_snapshotter(
         state_reader=state_reader or FakeStateReader(),
         metadata_provider=metadata_provider or FakeMetadataProvider(),
         usage_registry=usage_registry or FakeUsageRegistry(today_cost=today_cost),
-        names_store=FakeNamesStore(),
+        names_store=names_store or FakeNamesStore(),
         get_quota=lambda: None,
         get_available_providers=lambda: [],
         get_selected_provider=lambda: None,
@@ -1549,3 +1550,33 @@ class TestSnapshotterIncrementalCache:
         snap.build_now()
         assert len(snap._view_cache) == 1
         assert all(k[1] == 1 for k in snap._view_cache)  # only pid=1 remains
+
+    def test_rename_invalidates_cache(self):
+        """Renaming a session via names_store changes view.name; the cache
+        must invalidate even though meta/record/state versions and the
+        session fingerprint are unchanged.
+
+        Regression (cache-001): names_store is a FOURTH compose input not
+        covered by any version counter. Before the fix, a rename hit the
+        whole-list cache and the UI kept rendering the OLD name. Production
+        rename (set_session_name) bumps names_store.names_version; this test
+        mirrors that and asserts the new name surfaces."""
+        s = _session(pid=1, cwd="/a", uuid="u1")
+        md = FakeMetadataProvider(); md.meta_version = 0
+        ur = FakeUsageRegistry(); ur.record_version = 0
+        names = FakeNamesStore({"u1": "old"})
+        names.names_version = 0
+        snap, _ = _make_snapshotter(
+            sessions=[s], metadata_provider=md, usage_registry=ur,
+            names_store=names, get_state_version=lambda: 0,
+        )
+        r1 = snap.build_now()
+        name1 = [v for g in r1.session_groups for v in g.views][0].name
+        assert name1 == "old"
+
+        # Rename: change the store + bump its version (mirrors production).
+        names.names["u1"] = "new"
+        names.names_version += 1
+        r2 = snap.build_now()
+        name2 = [v for g in r2.session_groups for v in g.views][0].name
+        assert name2 == "new", "rename must invalidate the SessionView cache"
