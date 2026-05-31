@@ -102,14 +102,14 @@ Rectangle {
                 // Bug fix: inline component declarations inside a Loader are not visible
                 // to the Loader's own sourceComponent binding (evaluated in the parent
                 // scope).  Give the Loader an id and reference its components via
-                // nameLoader.nameLabelComp / nameLoader.renameFieldComp so QML can
+                // nameLoader.NameLabelComp / nameLoader.RenameFieldComp so QML can
                 // resolve them correctly at runtime.
                 Loader {
                     id: nameLoader
                     Layout.fillWidth: true
-                    sourceComponent: detailPage.isRenaming ? nameLoader.renameFieldComp : nameLoader.nameLabelComp
+                    sourceComponent: detailPage.isRenaming ? nameLoader.RenameFieldComp : nameLoader.NameLabelComp
 
-                    component nameLabelComp: Text {
+                    component NameLabelComp: Text {
                         text: dv("name", "Session")
                         color: "#e9edf2"
                         font.family: Theme.fontUI
@@ -119,7 +119,7 @@ Rectangle {
                         horizontalAlignment: Text.AlignLeft
                     }
 
-                    component renameFieldComp: TextField {
+                    component RenameFieldComp: TextField {
                         id: renameField
                         text: dv("name", "")
                         color: "#e9edf2"
