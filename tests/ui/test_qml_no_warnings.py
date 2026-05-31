@@ -86,6 +86,12 @@ _KNOWN_HARMLESS = (
     # Common offscreen driver messages — not related to our QML
     "libEGL",
     "libGL",
+    # Font-alias population cost + "missing font family" notice when the
+    # bundled brand font (JetBrains Mono) isn't installed in a headless/dev
+    # environment. Benign: production ships/uses the font and the QML
+    # correctly requests it — not a code bug, just environment noise.
+    "Populating font family aliases",
+    "missing font family",
 )
 
 
@@ -352,6 +358,20 @@ def test_qml_loads_with_zero_runtime_warnings():
         assert not style_warnings, (
             "QML style-customization warnings detected (Basic style not set?):\n"
             + "\n".join(style_warnings)
+        )
+
+        # ── Check 3: whitelist guard — the catch-all Check 1/2 missed ──────
+        # Check 1/2 are blacklists: they only fail on warnings matching a
+        # hardcoded marker list. Whole categories — "Type name must be upper
+        # case", "Overwriting binding", "Binding loop" — match no marker and
+        # slipped through silently (that's why the SessionDetailPage Type-name
+        # warning went undetected). This whitelist guard fails on ANY captured
+        # warning that isn't explicitly known-harmless, forcing it to be fixed
+        # or consciously added to _KNOWN_HARMLESS.
+        unexpected = [m for m in captured if not _is_harmless(m)]
+        assert not unexpected, (
+            "Unexpected QML warnings (fix them, or add to _KNOWN_HARMLESS if "
+            "genuinely benign platform noise):\n" + "\n".join(unexpected)
         )
 
     finally:

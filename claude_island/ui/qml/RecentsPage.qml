@@ -75,11 +75,12 @@ Rectangle {
     }
 
     // ── Reactive flat list — rebuilds when recents changes ────────────────
-    property var flatList: []
-
-    onRecentsChanged: flatList = buildFlatList()
-
-    Component.onCompleted: flatList = buildFlatList()
+    // Declarative binding: buildFlatList() reads `recents`, so QML re-evaluates
+    // flatList automatically whenever recents changes. The earlier imperative
+    // `flatList = buildFlatList()` in onRecentsChanged/onCompleted overwrote
+    // the initial `: []` binding, emitting "Overwriting binding" warnings on
+    // every recents update (caught by qml-001 once the test became whitelist).
+    property var flatList: buildFlatList()
 
     // ── Meta line for a row: "<cwd> · <turns> turns · <relative>" ──────────
     // No folder glyph in the string — it's drawn as a self-drawn Icon at the
