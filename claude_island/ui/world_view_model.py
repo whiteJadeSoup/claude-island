@@ -12,8 +12,11 @@ from claude_island.ui.snapshot_projection import project_snapshot, _fmt_model
 _EMPTY = {"today_cost_usd": 0.0, "quota": None, "sessions": [], "decisions": [], "recents": []}
 
 # Maximum samples kept in the rolling token-rate buffer per session.
-# One sample is appended per update() call; at ~1 update/s the buffer
-# covers ~60 seconds — enough for the waveform to show meaningful shape.
+# One sample is appended per update() call — i.e. per snapshot push, whose
+# cadence is UNEVEN (multi-source: file/hook/totals changes coalesced by
+# throttle_first ~0.2s when active, the 60s quota heartbeat when idle). So
+# this is the last N samples, NOT a fixed time window — the waveform reads
+# it for SHAPE only, never as a time axis.
 _RATE_HISTORY_MAX = 60
 
 

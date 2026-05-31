@@ -163,6 +163,7 @@ Rectangle {
 
         // ── Timeline list ─────────────────────────────────────────────────
         Flickable {
+            id: recentsFlick
             // objectName used by test_qml_no_warnings.py to locate this
             // Flickable and assert contentHeight > 50 (geometry regression
             // guard — rows must have real height, never collapse to 0).
@@ -256,7 +257,9 @@ Rectangle {
                             height: 9
                             radius: 4.5
                             // Centre on the rail line, vertically near the title.
-                            x: 22 - width / 2
+                            // Reference recentsFlick.railX (single source) so the
+                            // node tracks the rail if railX ever changes.
+                            x: recentsFlick.railX - width / 2
                             y: 18
                             color: rowHover.containsMouse ? Theme.teal : Theme.bg
                             border.width: 2

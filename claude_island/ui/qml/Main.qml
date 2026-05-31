@@ -819,7 +819,9 @@ Window {
                                                             onPaint: {
                                                                 var ctx = getContext("2d")
                                                                 var w = width, h = height, mid = h * 0.52
-                                                                var col = Theme.phaseColor(modelData.phase)
+                                                                // Reuse the strokeCol property (which also drives repaint via
+                                                                // onStrokeColChanged) instead of recomputing the phase colour.
+                                                                var col = strokeCol
                                                                 // phase baseline amplitude (0..1): tool_use loudest, thinking moderate
                                                                 var base = (modelData.phase === "tool_use") ? 0.9 : 0.5
                                                                 // gentle rate nudge (kept small so the wave is never flat)
