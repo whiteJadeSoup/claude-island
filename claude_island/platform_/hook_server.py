@@ -674,14 +674,31 @@ class HookServer:
                 log.exception("evict_session_pending raised; ignored")
 
     def _handle_session_end(self, payload: dict) -> None:
-        """Evict the SessionPermissionCache entries for the ending session.
-        Cap is 4 h TTL otherwise; this is the precise eviction signal."""
-        if self._perm is None:
-            return
+        """Evict per-session state for the ending session: the
+        SessionPermissionCache (4 h TTL otherwise; this is the precise
+        eviction signal) AND any still-pending decisions.
+
+        Pending eviction mirrors ``_handle_stop``: a session can end while
+        a decision is still blocked in ``_handle_permission_request`` —
+        e.g. a CC-spawned worker asks AskUserQuestion, the user declines in
+        the terminal (a declined question emits no PostToolUse, so
+        ``_maybe_mark_resolved_by_post`` never matches), then the worker
+        exits. Every other cleanup path keys on ``session_id``, so events
+        from the surviving parent session never touch this orphan; SessionEnd
+        is the last signal that can clear it before the 598 s wait timeout.
+
+        Both writes are best-effort and independent — a None ``_perm`` must
+        not skip the pending sweep, and vice versa."""
         uuid = _safe_str(payload.get("session_id"))
         if not uuid:
             return
-        self._perm.evict_session(uuid)
+        if self._perm is not None:
+            self._perm.evict_session(uuid)
+        if self._pending is not None:
+            try:
+                self._pending.evict_session_pending(uuid)
+            except Exception:
+                log.exception("evict_session_pending raised; ignored")
 
     # ── helpers ─────────────────────────────────────────────────────────
 

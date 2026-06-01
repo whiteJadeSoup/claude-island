@@ -976,3 +976,69 @@ class TestSessionEnd:
         assert body == {}
         assert perm_cache.check("u-end", "Bash") is False
         assert perm_cache.is_review("u-end") is False
+
+    def test_session_end_evicts_orphan_pending(
+        self, server, registry: PendingDecisionRegistry,
+    ):
+        """A session that ends while a decision is still pending must have
+        that decision evicted — otherwise the UI card sits stale until the
+        598 s wait timeout.
+
+        Concrete trigger: a CC-spawned worker session asks AskUserQuestion,
+        the user declines in the terminal (declined questions emit no
+        PostToolUse, so the post-evict path never matches), then the worker
+        ends via SessionEnd. Cleanup events from any OTHER session key on a
+        different session_id, so SessionEnd is the only signal left to clear
+        this session's orphan. _handle_stop already does this; SessionEnd
+        must too."""
+        srv, port = server
+        responses: dict = {}
+
+        def _send():
+            try:
+                _, body = _post(port, {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "u-ended",
+                    "tool_name": "AskUserQuestion",
+                    "tool_input": {
+                        "questions": [{
+                            "question": "merge to which branch?",
+                            "header": "Merge",
+                            "options": [
+                                {"label": "master", "description": "into master"},
+                                {"label": "feature", "description": "into feature"},
+                            ],
+                        }],
+                    },
+                    "tool_use_id": "tu_ended_1",
+                    "cwd": "/tmp/proj",
+                }, timeout=15.0)
+                responses["body"] = body
+            except Exception as e:
+                responses["error"] = repr(e)
+
+        perm_thread = threading.Thread(target=_send, daemon=True)
+        perm_thread.start()
+
+        # Wait for the entry to land.
+        for _ in range(60):
+            if registry.snapshot():
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("PermissionRequest never registered pending")
+
+        # Session ends (no Stop, no PostToolUse — the declined question left
+        # no tool result, and the worker simply exited).
+        status, body = _post(port, {
+            "hook_event_name": "SessionEnd",
+            "session_id": "u-ended",
+            "cwd": "/tmp/proj",
+        })
+        assert status == 200
+        assert body == {}
+
+        # Blocked thread unwinds quickly (not after 598 s) and the card is gone.
+        perm_thread.join(timeout=3.0)
+        assert not perm_thread.is_alive(), "PermissionRequest still blocking after SessionEnd"
+        assert registry.snapshot() == ()
