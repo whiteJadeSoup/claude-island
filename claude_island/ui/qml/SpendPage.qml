@@ -10,7 +10,7 @@ import "."
 Rectangle {
     id: spendPage
 
-    required property var spend   // { cost, reqs, input_tokens, output_tokens, cache_read, hit_rate, per_model }
+    required property var spend   // { cost, reqs, input_tokens, output_tokens, cache_creation, cache_read, hit_rate, per_model }
     required property var quota   // { five_hour_pct, weekly_pct, five_hour_reset_epoch, weekly_reset_epoch } | null
     required property var vm
 
@@ -140,7 +140,8 @@ Rectangle {
                 StatRow { label: "Requests";      value: "" + spendVal("reqs", 0) }
                 StatRow { label: "Input tokens";  value: fmtNum(spendVal("input_tokens",  0)) }
                 StatRow { label: "Output tokens"; value: fmtNum(spendVal("output_tokens", 0)) }
-                StatRow { label: "Cache tokens";  value: fmtNum(spendVal("cache_read",    0)) }
+                StatRow { label: "Cache create";  value: fmtNum(spendVal("cache_creation", 0)) }
+                StatRow { label: "Cache read";    value: fmtNum(spendVal("cache_read",     0)) }
                 StatRow {
                     label: "Hit rate"
                     value: (spendVal("hit_rate", 0) * 100).toFixed(1) + "%"
