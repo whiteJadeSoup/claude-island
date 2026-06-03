@@ -61,6 +61,13 @@ def test_parse_litellm_rejects_bool_costs():
     assert out == {}
 
 
+def test_parse_litellm_handles_none_and_empty():
+    # `(data or {})` guard — a None body (fetch returned nothing) or an empty
+    # dict must yield {} rather than raise, so callers can pass it through.
+    assert ps.parse_litellm(None) == {}
+    assert ps.parse_litellm({}) == {}
+
+
 # ── load_and_register: live / cache-fresh / cache-stale / none ───────────────
 
 def _fake_litellm(name: str) -> dict:

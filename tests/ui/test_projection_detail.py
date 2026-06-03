@@ -240,13 +240,16 @@ def test_spend_detail_reqs():
 
 def test_spend_detail_tokens():
     vm = WorldViewModel(
-        get_totals=lambda period: _fake_totals(inp=1000, out=500, cr=200),
+        get_totals=lambda period: _fake_totals(inp=1000, out=500, cr=200, cw=50),
         get_totals_by_model=lambda period: _fake_by_model(),
     )
     d = vm.spendDetail()
     assert d["input_tokens"] == 1000
     assert d["output_tokens"] == 500
     assert d["cache_read"] == 200
+    # cache_creation is consumed by the TODAY card + spend detail "Cache
+    # create" row; assert it so dropping/renaming the key can't ship silently.
+    assert d["cache_creation"] == 50
 
 
 def test_spend_detail_per_model_length():

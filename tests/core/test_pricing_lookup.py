@@ -52,6 +52,16 @@ def test_resolve_pricing_falls_back_to_default_for_unknown():
     assert _resolve_pricing("totally-unknown-model-zzz-1111") is DEFAULT_PRICING
 
 
+def test_dotted_and_dashed_keys_resolve_to_same_entry():
+    """`_norm_key` folds '.'→'-', so a live LiteLLM key with dots and the
+    canonical dashed id collide on the SAME normalised key. That collision is
+    the intentional "live overrides hardcoded" mechanism (last-write-wins),
+    not a bug — pin it so a future "fix" to the normalisation is caught."""
+    register_pricing({"zzcollide-1.0": PricingTable(7.0, 8.0)})
+    assert lookup_pricing("zzcollide-1.0").input_per_mtok == 7.0
+    assert lookup_pricing("zzcollide-1-0").input_per_mtok == 7.0
+
+
 def test_resolve_pricing_memo_invalidates_on_reregister():
     """_resolve_pricing memoises, but a later register_pricing (e.g. the live
     LiteLLM fetch) bumps PRICING_EPOCH and must override the cached value."""

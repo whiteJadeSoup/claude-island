@@ -165,9 +165,15 @@ def lookup_pricing(model: str) -> PricingTable | None:
         exact = _PRICING_BY_NORM.get(nm)
         if exact is not None:
             return exact
-        items = list(PRICING.items())
-    for key, pricing in sorted(items, key=lambda kv: -len(kv[0])):
-        if _norm_key(key) in nm:
+        # Snapshot the pre-normalised index so the substring scan ranks by
+        # NORMALISED key length (true specificity) and skips re-normalising
+        # per key. Sorting by RAW key length would be wrong with the live
+        # LiteLLM table: a provider-prefixed key with a long path but short
+        # model name ("openrouter/anthropic/claude" → "claude") could
+        # outrank a more specific shorter-raw key ("gpt-4o" → "gpt-4o").
+        norm_items = list(_PRICING_BY_NORM.items())
+    for norm_key, pricing in sorted(norm_items, key=lambda kv: -len(kv[0])):
+        if norm_key in nm:
             return pricing
     return None
 

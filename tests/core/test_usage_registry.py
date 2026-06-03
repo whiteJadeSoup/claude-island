@@ -175,6 +175,42 @@ def test_dedup_replaces_with_higher_total_across_batches(registry):
     cost, turns, _sides = registry.get_session_summary("s")
     assert turns == 1
     assert cost == pytest.approx(10 / 1_000_000 * 5 + 500 / 1_000_000 * 25)
+    # Replacement updates _records[ri] and _by_uuid[uuid][ui] in place; the
+    # count invariant must still hold (only values changed, not counts).
+    _assert_index_invariant(registry)
+
+
+def test_dedup_does_not_replace_on_equal_total(registry):
+    """Identical replayed lines (same token total) are dropped, NOT replaced —
+    guards the strict '>' tiebreak and the no-op-on-pure-duplicate emit rule."""
+    base = dict(model="claude-opus-4-7", input_tokens=10,
+                cache_creation_tokens=0, cache_read_tokens=0,
+                session_uuid="s", message_id="msg_eq")
+    seen: list[None] = []
+    registry.totals_changed.subscribe(lambda _: seen.append(None))
+    registry.record_many([_record(**base, output_tokens=500)])
+    registry.record_many([_record(**base, output_tokens=500)])  # identical replay
+    t = registry.get_totals("today")
+    assert t.request_count == 1
+    assert t.output_tokens == 500
+    assert len(registry._records) == 1
+    # First batch added → 1 emit; second batch is 100% duplicate → no emit.
+    assert len(seen) == 1
+
+
+def test_dedup_emits_totals_changed_on_replacement_only_batch(registry):
+    """A later higher-total line that only REPLACES (adds no new record) must
+    still fire totals_changed so the UI redraws with the corrected count —
+    the user-visible point of this fix. Guards the `or replaced` emit clause."""
+    base = dict(model="claude-opus-4-7", input_tokens=10,
+                cache_creation_tokens=0, cache_read_tokens=0,
+                session_uuid="s", message_id="msg_repl")
+    registry.record_many([_record(**base, output_tokens=1)])  # seed
+    seen: list[None] = []
+    registry.totals_changed.subscribe(lambda _: seen.append(None))
+    registry.record_many([_record(**base, output_tokens=500)])  # replacement only
+    assert len(seen) == 1
+    assert registry.get_totals("today").output_tokens == 500
 
 
 def test_dedup_does_not_downgrade_to_lower_total(registry):
