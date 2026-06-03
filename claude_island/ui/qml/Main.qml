@@ -1223,12 +1223,16 @@ Window {
                     // Wrap a value in a brighter bold span; the surrounding
                     // Text.color (Theme.dim) renders the unit words.
                     function b(x) { return '<font color="' + Theme.ink2 + '"><b>' + x + '</b></font>' }
-                    var reqs  = (todayData && todayData["reqs"])          ? todayData["reqs"] : 0
-                    var toks  = (todayData && todayData["total_tokens"])  ? todayData["total_tokens"] : 0
-                    var cache = (todayData && todayData["cache_read"])    ? todayData["cache_read"] : 0
-                    var hr    = (todayData && todayData["hit_rate"])      ? todayData["hit_rate"] : 0
+                    var reqs  = (todayData && todayData["reqs"])             ? todayData["reqs"] : 0
+                    var toks  = (todayData && todayData["total_tokens"])     ? todayData["total_tokens"] : 0
+                    var cw    = (todayData && todayData["cache_creation"])   ? todayData["cache_creation"] : 0
+                    var cr    = (todayData && todayData["cache_read"])       ? todayData["cache_read"] : 0
+                    var hr    = (todayData && todayData["hit_rate"])         ? todayData["hit_rate"] : 0
+                    // cw = cache create (write), cr = cache read — shown
+                    // separately to match ccusage's Cache Create / Cache Read.
                     return b(reqs) + " reqs · " + b(root.fmtNum(toks)) + " tokens · "
-                         + b(root.fmtNum(cache)) + " cache · " + b((hr * 100).toFixed(1) + "%") + " hit"
+                         + b(root.fmtNum(cw)) + " cw · " + b(root.fmtNum(cr)) + " cr · "
+                         + b((hr * 100).toFixed(1) + "%") + " hit"
                 }
                 color: Theme.dim
                 font.family: Theme.fontMono

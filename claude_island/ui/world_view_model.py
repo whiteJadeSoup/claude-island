@@ -255,7 +255,10 @@ class WorldViewModel(QObject):
             # total_tokens = input + output (cache excluded — not "generated now").
             "total_tokens": input_tok + output_tok,
             # cache_creation_tokens is the "cache write" bucket;
-            # cache_read_tokens is the "cache read / hit" bucket.
+            # cache_read_tokens is the "cache read / hit" bucket. Both are
+            # surfaced so the TODAY card and the spend detail page can show
+            # them separately (mirrors ccusage's Cache Create / Cache Read).
+            "cache_creation": cache_creation,
             "cache_read": cache_read,
             # hit_rate = cache_read / (cache_read + cache_creation).
             # UsageTotals has no hit_rate field; derive it here so QML

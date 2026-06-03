@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -103,14 +104,78 @@ class PricingTable:
 PRICING: dict[str, PricingTable] = {}
 DEFAULT_PRICING = PricingTable(input_per_mtok=3.0, output_per_mtok=15.0)
 
+# Concurrency: the hardcoded provider tables register at import (one
+# thread), but the live LiteLLM fetch (platform_/pricing_source.py)
+# registers from a background thread while the UI thread is resolving
+# prices. Guard mutation + snapshot reads with one lock, and bump
+# PRICING_EPOCH on every change so resolvers can invalidate their memo.
+_PRICING_LOCK = threading.RLock()
+PRICING_EPOCH: int = 0
+
+# Normalised-key index for O(1) exact lookups. Key = _norm_key(model id):
+# provider prefix stripped, lowercased, '.'/'@' → '-'. Mirrors ccusage's
+# key normalisation so a dirty id ("moonshot/kimi-k2.6", "aws.claude-…")
+# resolves to the same entry as its canonical form.
+_PRICING_BY_NORM: dict[str, PricingTable] = {}
+
+
+def _norm_key(name: str) -> str:
+    """Normalise a model id / pricing key for matching: drop any provider
+    prefix ("moonshot/…"), lowercase, and fold '.'/'@' to '-' so
+    "kimi-k2.6" == "moonshot/kimi-k2.6" and "aws.claude-haiku-4.5"
+    contains "claude-haiku-4-5". Matches LiteLLM / ccusage key shapes."""
+    return name.rsplit("/", 1)[-1].lower().replace(".", "-").replace("@", "-")
+
 
 def register_pricing(table: dict[str, PricingTable]) -> None:
     """Merge per-model pricing entries into the global registry.
 
-    Provider modules call this at import time to install their rates.
-    Idempotent — re-registering an existing key overwrites it.
+    Provider modules call this at import time to install their hardcoded
+    rates; the live LiteLLM fetch calls it at startup to override / extend
+    them (last write wins, like ccusage's builtin-then-live layering).
+    Idempotent. Thread-safe, and bumps :data:`PRICING_EPOCH` so memoising
+    resolvers drop stale entries.
     """
-    PRICING.update(table)
+    global PRICING_EPOCH
+    with _PRICING_LOCK:
+        PRICING.update(table)
+        for key, pricing in table.items():
+            _PRICING_BY_NORM[_norm_key(key)] = pricing
+        PRICING_EPOCH += 1
+
+
+def lookup_pricing(model: str) -> PricingTable | None:
+    """Resolve a raw API model id to its PricingTable, or ``None`` when no
+    entry matches (the caller decides the fallback).
+
+    Two-stage match, mirroring ccusage:
+    1. Exact on the normalised id — precise, O(1); catches canonical ids
+       ("claude-opus-4-7") and prefix/dotted variants ("moonshot/kimi-k2.6",
+       "MiniMax-M2.7-highspeed").
+    2. Longest normalised key that is a substring of the normalised id —
+       handles dirty ids with no exact row ("aws.claude-haiku-4.5-nova15"
+       → "claude-haiku-4-5"). Longest-first so the most specific key wins
+       (the "MiniMax-M2.7 not MiniMax-M2" rule).
+
+    The snapshot is taken under the registry lock so a concurrent
+    live-pricing registration can't corrupt the iteration.
+    """
+    nm = _norm_key(model)
+    with _PRICING_LOCK:
+        exact = _PRICING_BY_NORM.get(nm)
+        if exact is not None:
+            return exact
+        # Snapshot the pre-normalised index so the substring scan ranks by
+        # NORMALISED key length (true specificity) and skips re-normalising
+        # per key. Sorting by RAW key length would be wrong with the live
+        # LiteLLM table: a provider-prefixed key with a long path but short
+        # model name ("openrouter/anthropic/claude" → "claude") could
+        # outrank a more specific shorter-raw key ("gpt-4o" → "gpt-4o").
+        norm_items = list(_PRICING_BY_NORM.items())
+    for norm_key, pricing in sorted(norm_items, key=lambda kv: -len(kv[0])):
+        if norm_key in nm:
+            return pricing
+    return None
 
 
 # Per-model display registry. Same shape as PRICING — provider modules

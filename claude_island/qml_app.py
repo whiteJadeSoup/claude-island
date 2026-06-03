@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 from PySide6.QtGui import QGuiApplication
@@ -242,6 +243,20 @@ def main() -> int:
     usage_registry = UsageRegistry()
     jsonl_parser = JsonlParser(usage_registry=usage_registry, claude_projects_dir=claude_projects)
     jsonl_parser.start_backfill_pool()
+
+    # ── Live model pricing (LiteLLM, like ccusage) ───────────────────────────
+    # Fetch real per-model rates online so non-Anthropic / new models price
+    # correctly instead of falling back to Sonnet. Runs on a daemon thread:
+    # the fetch must not block the UI, and costs are recomputed on read so a
+    # late registration applies to the next query. Falls back to the disk
+    # cache, then to the hardcoded baseline, on failure.
+    from claude_island.platform_ import pricing_source
+    threading.Thread(
+        target=pricing_source.install,
+        args=(_P(user_data_dir("ClaudeIsland", appauthor=False)),),
+        daemon=True,
+        name="pricing-init",
+    ).start()
     process_scanner = ProcessScanner()
     file_watcher = FileWatcher()
     session_discovery = SessionDiscovery(scanner=process_scanner, registry=session_registry)
@@ -695,7 +710,6 @@ def main() -> int:
 
     snapshotter.start()
     file_watcher.start()
-    import threading
     threading.Thread(target=session_discovery.start, daemon=True).start()
     marshaler.snap_ready.emit(snapshotter.build_now())   # 首帧
 

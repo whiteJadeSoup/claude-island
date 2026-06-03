@@ -47,8 +47,8 @@ from reactivex.subject import Subject
 # can watch that metric to decide whether to raise the cap.
 SEEN_MESSAGE_IDS_CAP = 50_000
 
+from . import models as _models
 from .models import (
-    PRICING,
     DEFAULT_PRICING,
     ModelTotals,
     PricingTable,
@@ -112,30 +112,64 @@ def _period_cutoff(period: str) -> datetime:
     return datetime.now(timezone.utc) - delta
 
 
+# Memoise model-id → PricingTable. _resolve_pricing runs per sidechain
+# record in get_totals (hundreds per query) and the live LiteLLM table can
+# hold thousands of keys, so the underlying lookup_pricing scan must not run
+# per call. Keyed by model id; dropped whenever models.PRICING_EPOCH changes
+# (i.e. the live fetch registered) so a price refresh applies on the next
+# query. Values are deterministic, so concurrent fills are harmless — no lock.
+_resolve_cache: dict[str, PricingTable] = {}
+_resolve_cache_epoch: int = -1
+
+
 def _resolve_pricing(model: str) -> PricingTable:
     """Map an API model id to its pricing entry.
 
-    Length-descending substring match so the most-specific key wins:
-    "MiniMax-M2.7-highspeed" matches its own entry before the shorter
-    "MiniMax-M2.7", which matches before the family token "sonnet" /
-    "opus" / "haiku" (which appear in dirty Anthropic ids like
-    ``claude-3-5-sonnet-20241022``).
-
-    Comparison is case-insensitive on both sides so the table can keep
-    readable mixed-case keys ("MiniMax-M2.7") while still matching
-    lowercased model ids.
-
-    Unknown / empty model → DEFAULT_PRICING (Sonnet rates). Preferable
-    to crashing — an unknown future family gets priced as Sonnet until
-    the table is updated. The cost will be visibly off for non-Sonnet
-    families (MiniMax under-priced ~10×, etc), so add new entries
-    promptly when a new family appears.
+    Delegates to :func:`models.lookup_pricing` (exact-normalised match then
+    longest-substring, ccusage-style — the most-specific key wins, e.g.
+    "MiniMax-M2.7-highspeed" before "MiniMax-M2.7" before the family token
+    "sonnet"/"opus"/"haiku"). Falls back to ``DEFAULT_PRICING`` (Sonnet
+    rates) for ids the table can't resolve — preferable to crashing or
+    showing $0 for an as-yet-unknown family. With the live LiteLLM table
+    loaded, the fallback is rarely hit. Memoised; invalidated when the
+    pricing table changes.
     """
-    lower = model.lower()
-    for key, pricing in sorted(PRICING.items(), key=lambda kv: -len(kv[0])):
-        if key.lower() in lower:
-            return pricing
-    return DEFAULT_PRICING
+    global _resolve_cache_epoch
+    epoch = _models.PRICING_EPOCH
+    if epoch != _resolve_cache_epoch:
+        _resolve_cache.clear()
+        _resolve_cache_epoch = epoch
+    hit = _resolve_cache.get(model)
+    if hit is not None:
+        return hit
+    resolved = _models.lookup_pricing(model)
+    if resolved is None:
+        resolved = DEFAULT_PRICING
+    _resolve_cache[model] = resolved
+    return resolved
+
+
+# Sentinel distinguishing "message id never seen" from "seen but its
+# storage location is unknown" (value None — e.g. restored from the
+# on-disk cache, which persists keys only). ``dict.get(mid)`` alone
+# can't tell these apart because a present-but-None value also returns
+# None.
+_MISSING = object()
+
+
+def _token_total(r: UsageRecord) -> int:
+    """Total billable tokens on a record — the dedup tiebreak key.
+
+    Matches ccusage's ``daily_usage_token_total``: a streamed assistant
+    message is written across several JSONL lines whose ``output_tokens``
+    grows to the final total (input/cache are prompt-fixed), so the line
+    with the largest total is the complete one. Keeping it (not the first
+    partial line) is what makes island's output count agree with ccusage.
+    """
+    return (
+        r.input_tokens + r.output_tokens
+        + r.cache_creation_tokens + r.cache_read_tokens
+    )
 
 
 def _aggregate_by_model(
@@ -198,14 +232,21 @@ class UsageRegistry:
         # ``usage`` payload. Without this dedup a 5-block response is
         # counted 5×. Records whose message_id is None bypass dedup.
         #
-        # Backed by an OrderedDict (used as a FIFO set) so we can cap
+        # Backed by an OrderedDict (used as a FIFO map) so we can cap
         # the size at ``SEEN_MESSAGE_IDS_CAP`` and drop the oldest
         # entry when the cap is exceeded. Prevents unbounded growth on
         # a long-running island instance — observed 27K msg ids after
         # ~5 months of use, would compound past 100 MB over multi-year
-        # uptime without a cap. The dict values are always None; only
-        # the keys carry meaning. Insert order = arrival order.
-        self._seen_message_ids: OrderedDict[str, None] = OrderedDict()
+        # uptime without a cap. Insert order = arrival order.
+        #
+        # Value = the kept record's location ``(records_idx, by_uuid_idx)``
+        # so a later, higher-total line of the same streamed message can
+        # REPLACE the stored one in place (see record_many). ``None`` means
+        # "seen but location unknown" — apply_cache restores keys only, so
+        # restored ids fall back to first-wins. The on-disk cache and the
+        # cap tests only ever read the KEYS, so the value type is private
+        # to this module.
+        self._seen_message_ids: OrderedDict[str, tuple[int, int] | None] = OrderedDict()
         # Per-uuid inverted index. Built incrementally inside
         # ``record_many`` (post-dedup) so per-session queries
         # (``get_session_summary`` / ``get_session_per_model`` /
@@ -233,18 +274,24 @@ class UsageRegistry:
     # ------------------------------------------------------------------
 
     def record_many(self, records: Iterable[UsageRecord]) -> None:
-        """Append a batch of UsageRecords, dropping duplicates of any
-        ``message.id`` we have already accepted. Emits
-        ``totals_changed`` once at the end (and only if at least one
-        record actually made it past dedup, so a batch that's 100 %
-        duplicates is a no-op for the UI).
+        """Append a batch of UsageRecords, collapsing duplicates of any
+        ``message.id`` to a single record — the one with the **highest
+        token total**. Claude Code writes one streamed response across
+        several JSONL lines whose ``output_tokens`` grows to the final
+        total (input/cache are fixed at prompt time); keeping the largest
+        line (not the first, partial one) matches ccusage and avoids
+        undercounting output. Emits ``totals_changed`` once at the end,
+        and only when the batch actually moved the totals (added a new
+        record OR replaced a stored line with a higher-total one) — a
+        batch of purely redundant duplicates is a no-op for the UI.
 
         Records with message_id=None bypass dedup — these come from
         legacy transcript rows that don't expose the API id; better to
         risk a rare over-count than drop them.
 
-        Records ``usage.record.added`` (kept) and
-        ``usage.record.deduped`` (dropped) so future-us can see the
+        Records ``usage.record.added`` (new ids), ``usage.record.deduped``
+        (redundant lines dropped) and ``usage.record.replaced`` (a stored
+        line upgraded to a higher-total one) so future-us can see the
         actual dedup-hit rate without re-instrumenting.
         """
         from claude_island.core.metrics import metrics as _metrics
@@ -252,37 +299,74 @@ class UsageRegistry:
         if not batch_in:
             return
         evicted = 0
+        added = 0
+        deduped = 0
+        replaced = 0
         with self._lock:
-            kept: list[UsageRecord] = []
             for r in batch_in:
                 mid = r.message_id
                 if mid is None:
-                    kept.append(r)
+                    # Legacy rows without an API id bypass dedup.
+                    self._records.append(r)
                     self._by_uuid.setdefault(r.session_uuid, []).append(r)
+                    added += 1
                     continue
-                if mid in self._seen_message_ids:
+                loc = self._seen_message_ids.get(mid, _MISSING)
+                if loc is _MISSING:
+                    # First line for this message id. Remember WHERE it
+                    # landed — (records_idx, by_uuid_idx) — so a later,
+                    # higher-total line of the same streamed message can
+                    # replace it in place. Both stores are append-only and
+                    # we only ever replace (never delete/insert), so these
+                    # indices stay valid for the life of the process.
+                    ri = len(self._records)
+                    self._records.append(r)
+                    ulist = self._by_uuid.setdefault(r.session_uuid, [])
+                    ui = len(ulist)
+                    ulist.append(r)
+                    self._seen_message_ids[mid] = (ri, ui)
+                    # Bounded-FIFO eviction. The cap protects against
+                    # multi-year unbounded growth (see SEEN_MESSAGE_IDS_CAP
+                    # rationale); in normal operation popitem never fires.
+                    if len(self._seen_message_ids) > SEEN_MESSAGE_IDS_CAP:
+                        self._seen_message_ids.popitem(last=False)
+                        evicted += 1
+                    added += 1
                     continue
-                # Insert + bounded-FIFO eviction. The cap protects
-                # against multi-year unbounded growth (see
-                # SEEN_MESSAGE_IDS_CAP rationale); in normal operation
-                # ``popitem(last=False)`` never fires.
-                self._seen_message_ids[mid] = None
-                if len(self._seen_message_ids) > SEEN_MESSAGE_IDS_CAP:
-                    self._seen_message_ids.popitem(last=False)
-                    evicted += 1
-                kept.append(r)
-                # Index AFTER dedup decision so duplicates don't double-
-                # count in per-session queries either. Critical: this
-                # line and the kept.append above must stay paired —
-                # whatever lands in _records MUST also land in _by_uuid.
-                self._by_uuid.setdefault(r.session_uuid, []).append(r)
-            _metrics.incr("usage.record.added", n=len(kept))
-            _metrics.incr("usage.record.deduped", n=len(batch_in) - len(kept))
+                if loc is None:
+                    # Restored from the on-disk cache (keys only, value
+                    # None): location unknown → fall back to first-wins.
+                    # Safe — a cached message's final line was already
+                    # persisted, so no higher-total dup is expected.
+                    deduped += 1
+                    continue
+                # Duplicate of a message already stored this run. Keep the
+                # higher token total: the streamed message's later lines
+                # carry the grown output_tokens, and the final line is the
+                # complete one. Mirrors ccusage's should_replace_deduped.
+                ri, ui = loc
+                existing = self._records[ri]
+                if _token_total(r) > _token_total(existing):
+                    self._records[ri] = r
+                    # Mirror into the per-uuid index so per-session queries
+                    # (get_session_summary / _per_model / _latest_model) see
+                    # the corrected record too. Same uuid by construction —
+                    # one message id never spans two sessions.
+                    self._by_uuid[existing.session_uuid][ui] = r
+                    replaced += 1
+                else:
+                    deduped += 1
+            _metrics.incr("usage.record.added", n=added)
+            _metrics.incr("usage.record.deduped", n=deduped)
+            if replaced:
+                _metrics.incr("usage.record.replaced", n=replaced)
             if evicted:
                 _metrics.incr("usage.dedup.evict", n=evicted)
-            if not kept:
+            # Emit only when totals actually moved: a new record, or a
+            # replacement that raised a stored line's tokens. A batch of
+            # purely redundant duplicates leaves the UI untouched.
+            if not (added or replaced):
                 return
-            self._records.extend(kept)
             self.record_version += 1
         self.totals_changed.on_next(None)
 

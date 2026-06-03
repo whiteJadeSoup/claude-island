@@ -150,7 +150,9 @@ def _meta_from_jsonable(meta: dict[str, dict]) -> dict[str, dict]:
 def save_cache(
     *,
     records: list[UsageRecord],
-    seen_message_ids: OrderedDict[str, None],
+    # Values are (records_idx, by_uuid_idx) tuples (or None for cache-restored
+    # keys) — only .keys() is serialised here, so the value type is opaque.
+    seen_message_ids: OrderedDict[str, object],
     offsets: dict[str, int],
     session_meta: dict[str, dict],
     path: Path,
