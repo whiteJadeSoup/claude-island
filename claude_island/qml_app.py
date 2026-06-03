@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 from PySide6.QtGui import QGuiApplication
@@ -709,7 +710,6 @@ def main() -> int:
 
     snapshotter.start()
     file_watcher.start()
-    import threading
     threading.Thread(target=session_discovery.start, daemon=True).start()
     marshaler.snap_ready.emit(snapshotter.build_now())   # 首帧
 
