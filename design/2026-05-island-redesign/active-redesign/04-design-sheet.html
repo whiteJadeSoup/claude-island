@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --bg:#0a0c11; --surface:#0f131a; --ink:#edf0f4; --ink2:#b4bcc6; --dim:#838c98; --faint:#525b66;
+    --teal:#5fe0b4; --amber:#f3b95e; --gold:#efa860; --phos:#9be6bf; --opus:#f0b07a; --violet:#9a8cff; --coral:#e0795a; --cgold:#e6b96e;
+    --mono:"JetBrains Mono",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:#06080b;color:var(--ink);font-family:"Inter",system-ui,sans-serif;-webkit-font-smoothing:antialiased;
+    padding:48px;display:flex;gap:54px;align-items:flex-start;}
+  .colL{flex:0 0 auto;} .colR{flex:0 0 auto;display:flex;flex-direction:column;gap:30px;}
+  .cap{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin-bottom:13px;}
+  .cap b{color:var(--phos);font-weight:600;}
+
+  /* panel */
+  .panel{width:462px;background:linear-gradient(180deg,#0c0f15,#080a0e);border:1px solid #161c25;border-radius:22px;box-shadow:0 40px 90px -40px #000;padding:20px 18px;}
+  .phead{display:flex;align-items:center;gap:10px;padding:2px 6px 16px;}
+  .phead .brand{font-size:17px;font-weight:700;color:#f3f6f9;letter-spacing:-.01em;}
+  .phead .sp{flex:1;} .phead .hi{color:var(--dim);font-size:13px;} .phead .ic{color:var(--dim);font-size:15px;opacity:.85;}
+  .today{background:var(--surface);border:1px solid rgba(255,255,255,.05);border-radius:14px;padding:16px 17px 15px;margin-bottom:4px;}
+  .today .lab{font-size:10px;letter-spacing:.16em;font-weight:700;text-transform:uppercase;color:var(--faint);}
+  .today .toprow{display:flex;justify-content:space-between;align-items:flex-start;}
+  .today .hero{font-size:30px;font-weight:700;color:var(--gold);letter-spacing:-.01em;line-height:.95;font-feature-settings:"tnum";}
+  .today .bar{height:5px;border-radius:3px;background:#241d12;margin:13px 0 9px;overflow:hidden;}
+  .today .bar i{display:block;height:100%;width:53%;border-radius:3px;background:linear-gradient(90deg,#9a7a3e,#e0b86a);}
+  .today .qline{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;}
+  .today .qline .pct{color:#c79a52;} .today .qline .rs{color:var(--faint);}
+  .today .stats{font-family:var(--mono);font-size:12px;color:var(--ink2);margin-top:9px;line-height:1.7;}
+  .today .stats b{color:var(--ink);font-weight:600;} .today .stats .sub{color:var(--dim);}
+  .sect{display:flex;align-items:center;gap:8px;padding:15px 8px 9px;}
+  .sect .d{width:6px;height:6px;border-radius:50%;} .sect .t{font-size:10px;letter-spacing:.16em;font-weight:700;text-transform:uppercase;}
+  .sect .n{margin-left:auto;font-size:10px;font-family:var(--mono);color:var(--faint);}
+  .idle{border:1px solid rgba(255,255,255,.045);border-radius:13px;overflow:hidden;margin:0 2px;}
+  .idle .row{display:flex;align-items:center;gap:11px;padding:11px 14px;border-top:1px solid rgba(255,255,255,.04);}
+  .idle .row:first-child{border-top:none;}
+  .idle .row .b{width:5px;height:5px;border-radius:50%;background:#39414b;}
+  .idle .row .nm{flex:1;color:var(--ink2);font-size:13px;} .idle .row .ct{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--faint);}
+
+  /* active surface (containerless, elevated) */
+  .act{position:relative;width:436px;padding:12px 14px 13px 19px;border-radius:14px;
+    background:linear-gradient(100deg,color-mix(in srgb,var(--ac) 6%,transparent),color-mix(in srgb,var(--ac) 1.4%,transparent) 38%,transparent 68%);}
+  .act.inpanel{width:auto;margin:4px 2px 9px;}
+  .act .rail{position:absolute;left:7px;top:12px;bottom:13px;width:3px;border-radius:2px;background:linear-gradient(180deg,var(--ac),color-mix(in srgb,var(--ac) 4%,transparent));box-shadow:0 0 12px color-mix(in srgb,var(--ac) 52%,transparent);}
+  .act .top{position:relative;display:flex;align-items:center;gap:14px;}
+  .act .ind{width:46px;height:46px;flex:0 0 46px;filter:drop-shadow(0 0 6px color-mix(in srgb,var(--ac) 45%,transparent));}
+  .act .ind svg{width:100%;height:100%;display:block;}
+  .act .m{flex:1;min-width:0;}
+  .act .ph{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;font-weight:600;color:var(--ac);display:flex;align-items:baseline;}
+  .act .ph .el{margin-left:auto;color:#5f6873;letter-spacing:.04em;font-weight:400;}
+  .act .nm{font-family:"Bricolage Grotesque";font-weight:600;font-size:20px;letter-spacing:-.012em;color:#f0f3f6;margin-top:6px;line-height:1;}
+  .act .nm .md{font-family:var(--mono);font-size:11px;font-weight:400;color:#6b7280;}
+  .act .ctx{position:relative;margin-top:13px;display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:12px;color:#79828c;}
+  .act .ctx .cwd .dim2{color:#5b636d;} .act .ctx .cwd{color:#8b94a0;}
+  .act .ctx .br{display:inline-flex;align-items:center;gap:6px;color:#9aa3ad;}
+  .act .ctx .c{margin-left:auto;font-size:15px;color:#bf9056;font-weight:600;font-feature-settings:"tnum";}
+  .act .warn{position:relative;margin-top:11px;font-family:var(--mono);font-size:12px;color:var(--coral);display:flex;align-items:center;gap:8px;}
+  .stuckcard .rail{box-shadow:none;opacity:.6;} .stuckcard .nm{color:#c7ccd2;} .stuckcard{background:linear-gradient(100deg,rgba(224,121,90,.05),transparent 60%)!important;}
+
+  /* floating ball */
+  .pill{display:inline-flex;align-items:center;gap:9px;background:linear-gradient(180deg,#15191f,#0c0f14);border:1px solid #232a34;border-radius:999px;padding:9px 15px;box-shadow:0 18px 36px -20px #000;font-size:13px;white-space:nowrap;}
+  .pill .pd{width:8px;height:8px;border-radius:50%;flex:0 0 8px;}
+  .pill .pd.run{background:var(--teal);box-shadow:0 0 8px var(--teal);}
+  .pill .pd.idle{background:#46505c;} .pill .pd.wait{background:var(--amber);box-shadow:0 0 8px var(--amber);}
+  .pill .nm{font-weight:600;color:#eef3f7;} .pill .vb{color:var(--teal);font-family:var(--mono);font-size:12px;} .pill .vb.am{color:var(--amber);}
+  .pill .mut{color:var(--dim);font-family:var(--mono);font-size:12px;}
+  .pill .ct{color:#bf9056;font-family:var(--mono);font-size:12px;font-weight:600;}
+  .pill .spark{display:flex;align-items:flex-end;gap:1.5px;height:13px;} .pill .spark i{width:2.5px;border-radius:1px;background:var(--teal);}
+</style>
+</head>
+<body>
+<div class="colL">
+  <div class="cap">① 整体面板 · 协调后(<b>TODAY 金</b> / <b>ACTIVE 绿</b> / IDLE 静 · 无框 active 抬升)</div>
+  <div class="panel">
+    <div class="phead"><span class="brand">Claude Island</span><span class="sp"></span><span class="hi">🕐 History</span><span class="ic">⏻</span><span class="ic">⌄</span></div>
+    <div class="today">
+      <div class="toprow"><span class="lab">TODAY · ANTHROPIC</span><span class="hero">$42.39</span></div>
+      <div class="bar"><i></i></div>
+      <div class="qline"><span class="pct">53% of 5h</span><span class="rs">resets 19m</span></div>
+      <div class="stats"><b>313</b> reqs · <b>407K</b> tokens · <b>50.3M</b> cache · <b>97.4%</b> hit<br><span class="sub">↳ incl. <b>86</b> subagent reqs · $8.07</span></div>
+    </div>
+    <div class="sect"><span class="d" style="background:var(--teal);box-shadow:0 0 7px var(--teal)"></span><span class="t" style="color:var(--teal)">ACTIVE</span><span class="n">1</span></div>
+    <div class="act inpanel" style="--ac:var(--teal)">
+      <div class="rail"></div>
+      <div class="top">
+        <div class="ind"><svg viewBox="0 0 50 50"><circle cx="25" cy="25" r="20.5" fill="none" stroke="var(--teal)" stroke-opacity=".14" stroke-width="1.2"/><circle cx="25" cy="25" r="11" fill="none" stroke="var(--teal)" stroke-opacity=".10" stroke-width="6"/><circle cx="25" cy="25" r="5.5" fill="var(--teal)"/><circle cx="25" cy="25" r="5.5" fill="none" stroke="#cdf7e4" stroke-opacity=".5" stroke-width="1"/></svg></div>
+        <div class="m"><div class="ph">running<span class="el">23s</span></div><div class="nm">claude-island <span class="md">· opus 4.8</span></div></div>
+      </div>
+      <div class="ctx"><span class="cwd"><span class="dim2">~/coding-projects/</span>claude-island</span><span class="br"><svg width="12" height="13" viewBox="0 0 12 13" fill="none" stroke="#5a6168" stroke-width="1.3" stroke-linecap="round"><circle cx="3" cy="3" r="1.7"/><circle cx="3" cy="10" r="1.7"/><circle cx="9" cy="3" r="1.7"/><path d="M3 4.7v3.6"/><path d="M9 4.7c0 2.4-6 1.6-6 3.6"/></svg>master</span><span class="c">$0.41</span></div>
+    </div>
+    <div class="sect"><span class="t" style="color:var(--faint)">IDLE</span><span class="n">3</span></div>
+    <div class="idle">
+      <div class="row"><span class="b"></span><span class="nm">Improve active session interaction UI</span><span class="ct">$10</span></div>
+      <div class="row"><span class="b"></span><span class="nm">Checkout master and pull latest code</span><span class="ct">$38</span></div>
+      <div class="row"><span class="b"></span><span class="nm">marketing-site</span><span class="ct">$2</span></div>
+    </div>
+  </div>
+</div>
+<div class="colR">
+  <div>
+    <div class="cap">② ACTIVE 五态 · 同一布局,phase 换<b>指示动画 + 色 + 情绪</b></div>
+
+    <div class="act" style="--ac:var(--teal)">
+      <div class="rail"></div>
+      <div class="top"><div class="ind"><svg viewBox="0 0 50 50"><circle cx="25" cy="25" r="20.5" fill="none" stroke="var(--teal)" stroke-opacity=".14" stroke-width="1.2"/><circle cx="25" cy="25" r="11" fill="none" stroke="var(--teal)" stroke-opacity=".10" stroke-width="6"/><circle cx="25" cy="25" r="5.5" fill="var(--teal)"/><circle cx="25" cy="25" r="5.5" fill="none" stroke="#cdf7e4" stroke-opacity=".5" stroke-width="1"/></svg></div>
+        <div class="m"><div class="ph">running<span class="el">23s</span></div><div class="nm">claude-island <span class="md">· opus 4.8</span></div></div></div>
+      <div class="ctx"><span class="cwd"><span class="dim2">~/coding-projects/</span>claude-island</span><span class="br"><svg width="12" height="13" viewBox="0 0 12 13" fill="none" stroke="#5a6168" stroke-width="1.3" stroke-linecap="round"><circle cx="3" cy="3" r="1.7"/><circle cx="3" cy="10" r="1.7"/><circle cx="9" cy="3" r="1.7"/><path d="M3 4.7v3.6"/><path d="M9 4.7c0 2.4-6 1.6-6 3.6"/></svg>master</span><span class="c">$0.41</span></div>
+    </div>
+
+    <div class="act" style="--ac:var(--violet);margin-top:13px">
+      <div class="rail"></div>
+      <div class="top"><div class="ind"><svg viewBox="0 0 50 50"><g stroke="var(--violet)" stroke-opacity=".24" stroke-width="1.7" stroke-linecap="round" transform="rotate(19 25 25)"><line x1="25" y1="11" x2="25" y2="39"/><line x1="11" y1="25" x2="39" y2="25"/></g><g stroke="var(--violet)" stroke-width="2.6" stroke-linecap="round"><line x1="25" y1="6" x2="25" y2="44"/><line x1="6" y1="25" x2="44" y2="25"/></g><g stroke="var(--violet)" stroke-width="2" stroke-linecap="round"><line x1="12" y1="12" x2="38" y2="38"/><line x1="38" y1="12" x2="12" y2="38"/></g><circle cx="25" cy="25" r="2.4" fill="#d8d2ff"/></svg></div>
+        <div class="m"><div class="ph">thinking<span class="el">23s</span></div><div class="nm">claude-island <span class="md">· opus 4.8</span></div></div></div>
+      <div class="ctx"><span class="cwd"><span class="dim2">~/coding-projects/</span>claude-island</span><span class="br"><svg width="12" height="13" viewBox="0 0 12 13" fill="none" stroke="#5a6168" stroke-width="1.3" stroke-linecap="round"><circle cx="3" cy="3" r="1.7"/><circle cx="3" cy="10" r="1.7"/><circle cx="9" cy="3" r="1.7"/><path d="M3 4.7v3.6"/><path d="M9 4.7c0 2.4-6 1.6-6 3.6"/></svg>master</span><span class="c">$0.41</span></div>
+    </div>
+
+    <div class="act" style="--ac:var(--cgold);margin-top:13px">
+      <div class="rail"></div>
+      <div class="top"><div class="ind"><svg viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke="var(--cgold)" stroke-opacity=".13" stroke-width="1.3"/><circle cx="25" cy="25" r="13" fill="none" stroke="var(--cgold)" stroke-opacity=".34" stroke-width="1.6"/><circle cx="25" cy="25" r="6.5" fill="none" stroke="#f6dca6" stroke-width="2"/><g stroke="var(--cgold)" stroke-opacity=".6" stroke-width="1.5" stroke-linecap="round"><path d="M25 3.5v3.5"/><path d="M25 43v3.5"/><path d="M3.5 25h3.5"/><path d="M43 25h3.5"/></g></svg></div>
+        <div class="m"><div class="ph">compacting<span class="el">8s</span></div><div class="nm">claude-island <span class="md">· opus 4.8</span></div></div></div>
+      <div class="ctx"><span class="cwd"><span class="dim2">~/coding-projects/</span>claude-island</span><span class="br"><svg width="12" height="13" viewBox="0 0 12 13" fill="none" stroke="#5a6168" stroke-width="1.3" stroke-linecap="round"><circle cx="3" cy="3" r="1.7"/><circle cx="3" cy="10" r="1.7"/><circle cx="9" cy="3" r="1.7"/><path d="M3 4.7v3.6"/><path d="M9 4.7c0 2.4-6 1.6-6 3.6"/></svg>master</span><span class="c">$0.52</span></div>
+    </div>
+
+    <div class="act" style="--ac:var(--amber);margin-top:13px">
+      <div class="rail"></div>
+      <div class="top"><div class="ind"><svg viewBox="0 0 50 50"><circle cx="25" cy="25" r="17.5" fill="none" stroke="var(--amber)" stroke-opacity=".5" stroke-width="1.6"/><circle cx="25" cy="25" r="22" fill="none" stroke="var(--amber)" stroke-opacity=".14" stroke-width="1.2"/><rect x="23.2" y="14.5" width="3.6" height="12.5" rx="1.8" fill="var(--amber)"/><circle cx="25" cy="32.8" r="2.1" fill="var(--amber)"/></svg></div>
+        <div class="m"><div class="ph">awaiting approval<span class="el">23s</span></div><div class="nm">claude-island <span class="md">· opus 4.8</span></div></div></div>
+      <div class="ctx"><span class="cwd"><span class="dim2">~/coding-projects/</span>claude-island</span><span class="br"><svg width="12" height="13" viewBox="0 0 12 13" fill="none" stroke="#5a6168" stroke-width="1.3" stroke-linecap="round"><circle cx="3" cy="3" r="1.7"/><circle cx="3" cy="10" r="1.7"/><circle cx="9" cy="3" r="1.7"/><path d="M3 4.7v3.6"/><path d="M9 4.7c0 2.4-6 1.6-6 3.6"/></svg>master</span><span class="c">$0.41</span></div>
+    </div>
+
+    <div class="act stuckcard" style="--ac:var(--coral);margin-top:13px">
+      <div class="rail"></div>
+      <div class="top"><div class="ind"><svg viewBox="0 0 50 50"><circle cx="25" cy="25" r="19" fill="none" stroke="var(--coral)" stroke-opacity=".14" stroke-width="1.2"/><circle cx="25" cy="25" r="6" fill="none" stroke="var(--coral)" stroke-opacity=".7" stroke-width="1.8"/></svg></div>
+        <div class="m"><div class="ph">stuck<span class="el">23s</span></div><div class="nm">claude-island <span class="md">· opus 4.8</span></div></div></div>
+      <div class="warn"><span>⚠</span> 无新 token 输出 · 18s — 可能卡住,点开看终端</div>
+      <div class="ctx"><span class="cwd"><span class="dim2">~/coding-projects/</span>claude-island</span><span class="br"><svg width="12" height="13" viewBox="0 0 12 13" fill="none" stroke="#5a6168" stroke-width="1.3" stroke-linecap="round"><circle cx="3" cy="3" r="1.7"/><circle cx="3" cy="10" r="1.7"/><circle cx="9" cy="3" r="1.7"/><path d="M3 4.7v3.6"/><path d="M9 4.7c0 2.4-6 1.6-6 3.6"/></svg>master</span><span class="c">$0.41</span></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="cap">③ 悬浮球(折叠态)· 可拖动 · 审批走顶部 DecisionCard</div>
+    <div style="display:flex;flex-direction:column;gap:11px;align-items:flex-start;">
+      <span class="pill"><span class="pd run"></span><span class="nm">claude-island</span><span class="vb">running</span><span class="spark"><i style="height:4px"></i><i style="height:8px"></i><i style="height:6px"></i><i style="height:11px"></i><i style="height:9px"></i><i style="height:13px"></i><i style="height:7px"></i></span><span class="ct">$43</span></span>
+      <span class="pill"><span class="pd idle"></span><span class="mut">idle</span><span class="ct">$43.11</span></span>
+      <span class="pill" style="border-color:#5a4226;"><span class="pd wait"></span><span class="nm">claude-island</span><span class="vb am">needs you ↑</span></span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

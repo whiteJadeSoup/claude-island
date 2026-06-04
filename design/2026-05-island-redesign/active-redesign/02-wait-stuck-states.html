@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{ --teal:#5fe0b4; --amber:#e8a24c; --amber-br:#f2b463; --coral:#e0795a; --gold:#e6b96e; --mono:"JetBrains Mono",ui-monospace,monospace; }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:#0a0b0d;color:#eef2f6;font-family:"Bricolage Grotesque",system-ui,sans-serif;-webkit-font-smoothing:antialiased;
+    padding:40px;display:flex;flex-direction:column;gap:26px;align-items:flex-start;}
+  .lab{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:#7c858f;}
+  .lab b{color:#9aa3ad;font-weight:600;}
+
+  .card{position:relative;width:432px;padding:17px 24px 15px 30px;display:flex;flex-direction:column;}
+  .card .rail{position:absolute;left:0;top:15px;bottom:15px;width:3px;border-radius:2px;
+    background:linear-gradient(180deg,var(--ac),color-mix(in srgb,var(--ac) 4%,transparent));
+    box-shadow:0 0 12px color-mix(in srgb,var(--ac) 55%,transparent);}
+  .card .bloom{position:absolute;left:1%;top:8%;width:34%;height:84%;
+    background:radial-gradient(closest-side,color-mix(in srgb,var(--ac) 13%,transparent),transparent 72%);filter:blur(9px);}
+  .card .top{position:relative;display:flex;align-items:center;gap:15px;}
+  .card .ind{width:50px;height:50px;flex:0 0 50px;position:relative;}
+  .card .ind svg{width:100%;height:100%;display:block;}
+  .card .m{flex:1;min-width:0;}
+  .card .ph{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;font-weight:600;color:var(--ac);display:flex;align-items:baseline;}
+  .card .ph .el{margin-left:auto;color:#5f6873;letter-spacing:.04em;font-weight:400;}
+  .card .nm{font-family:"Bricolage Grotesque";font-weight:600;font-size:21px;letter-spacing:-.012em;color:#f0f3f6;margin-top:7px;line-height:1;}
+  .card .nm .md{font-family:var(--mono);font-size:11.5px;font-weight:400;color:#6b7280;letter-spacing:0;}
+  .card .ctx{position:relative;margin-top:14px;display:flex;align-items:center;gap:15px;font-family:var(--mono);font-size:12px;color:#79828c;}
+  .card .ctx .cwd .dim{color:#5b636d;} .card .ctx .cwd{color:#8b94a0;}
+  .card .ctx .br{display:inline-flex;align-items:center;gap:6px;color:#9aa3ad;}
+  .card .ctx .c{margin-left:auto;font-size:16px;color:#bf9056;font-weight:600;font-feature-settings:"tnum";}
+
+  /* waiting_approval — escalated */
+  .wait .ask{position:relative;margin-top:16px;display:flex;align-items:center;gap:12px;}
+  .wait .ask .q{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:12.5px;color:#cdb289;}
+  .wait .ask .q .pre{color:#a9895f;}
+  .wait .ask .q .cmd{color:#eef0f3;font-weight:500;}
+  .wait .ask .acts{flex:0 0 auto;display:flex;gap:7px;}
+  .wait .ask .acts button{font-family:"Bricolage Grotesque";font-size:12px;font-weight:600;padding:5px 13px;border-radius:8px;cursor:pointer;border:1px solid #6a563a;background:#1b1610;color:#d8c4a0;}
+  .wait .ask .acts .ap{background:var(--amber);border-color:var(--amber);color:#1c1206;}
+
+  /* stuck — cooled */
+  .stuck .warn{position:relative;margin-top:12px;font-family:var(--mono);font-size:12px;color:var(--coral);display:flex;align-items:center;gap:8px;}
+</style>
+</head>
+<body>
+<div>
+  <div class="lab" style="margin-bottom:11px;">状态 4 · <b>waiting_approval</b> — 只表示「有待批准」(升级琥珀 + ❗);Allow/Deny 在顶部专门的 DecisionCard 里</div>
+  <div class="card wait" style="--ac:var(--amber)">
+    <div class="rail"></div><div class="bloom"></div>
+    <div class="top">
+      <div class="ind" style="filter:drop-shadow(0 0 7px rgba(232,162,76,.5))">
+        <svg viewBox="0 0 50 50">
+          <circle cx="25" cy="25" r="17.5" fill="none" stroke="var(--amber)" stroke-opacity=".5" stroke-width="1.6"/>
+          <circle cx="25" cy="25" r="22" fill="none" stroke="var(--amber)" stroke-opacity=".14" stroke-width="1.2"/>
+          <rect x="23.2" y="14.5" width="3.6" height="12.5" rx="1.8" fill="var(--amber)"/>
+          <circle cx="25" cy="32.8" r="2.1" fill="var(--amber)"/>
+        </svg>
+      </div>
+      <div class="m">
+        <div class="ph">awaiting approval<span class="el">23s</span></div>
+        <div class="nm">claude-island <span class="md">· opus 4.8</span></div>
+      </div>
+    </div>
+    <div class="ctx">
+      <span class="cwd"><span class="dim">~/coding-projects/</span>claude-island</span>
+      <span class="br"><svg width="12" height="13" viewBox="0 0 12 13" fill="none" stroke="#5a6168" stroke-width="1.3" stroke-linecap="round"><circle cx="3" cy="3" r="1.7"/><circle cx="3" cy="10" r="1.7"/><circle cx="9" cy="3" r="1.7"/><path d="M3 4.7v3.6"/><path d="M9 4.7c0 2.4-6 1.6-6 3.6"/></svg>master</span>
+      <span class="c">$0.41</span>
+    </div>
+  </div>
+</div>
+<style>
+  .stuck .rail{box-shadow:none;opacity:.6;}
+  .stuck .bloom{display:none;}
+  .stuck .nm{color:#c7ccd2;}
+</style>
+<div>
+  <div class="lab" style="margin-bottom:11px;">状态 5 · <b>stuck</b> — 卡住(派生态:active 但久无输出 → 指示冻结、整体变冷)</div>
+  <div class="card stuck" style="--ac:var(--coral)">
+    <div class="rail"></div><div class="bloom"></div>
+    <div class="top">
+      <div class="ind">
+        <svg viewBox="0 0 50 50">
+          <circle cx="25" cy="25" r="19" fill="none" stroke="var(--coral)" stroke-opacity=".14" stroke-width="1.2"/>
+          <circle cx="25" cy="25" r="6" fill="none" stroke="var(--coral)" stroke-opacity=".7" stroke-width="1.8"/>
+        </svg>
+      </div>
+      <div class="m">
+        <div class="ph">stuck<span class="el">23s</span></div>
+        <div class="nm">claude-island <span class="md">· opus 4.8</span></div>
+      </div>
+    </div>
+    <div class="warn"><span>⚠</span> 无新 token 输出 · 18s — 可能卡住,点开看终端</div>
+    <div class="ctx">
+      <span class="cwd"><span class="dim">~/coding-projects/</span>claude-island</span>
+      <span class="br"><svg width="12" height="13" viewBox="0 0 12 13" fill="none" stroke="#5a6168" stroke-width="1.3" stroke-linecap="round"><circle cx="3" cy="3" r="1.7"/><circle cx="3" cy="10" r="1.7"/><circle cx="9" cy="3" r="1.7"/><path d="M3 4.7v3.6"/><path d="M9 4.7c0 2.4-6 1.6-6 3.6"/></svg>master</span>
+      <span class="c">$0.41</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --bg:#0a0c11; --surface:#0f131a; --bd:#1b212a; --ink:#edf0f4; --ink2:#b4bcc6; --dim:#838c98; --faint:#525b66;
+    --teal:#5fe0b4; --teal-d:#5fd6ac; --amber:#f3b95e; --gold:#efa860; --phos:#9be6bf; --opus:#f0b07a; --violet:#9a8cff;
+    --mono:"JetBrains Mono",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:#05070a;color:var(--ink);font-family:"Inter",system-ui,sans-serif;-webkit-font-smoothing:antialiased;
+    padding:44px;display:flex;gap:46px;align-items:flex-start;}
+  .cap{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin-bottom:13px;}
+
+  /* panel shell (matches shipped app) */
+  .panel{width:462px;background:linear-gradient(180deg,#0c0f15,#080a0e);border:1px solid #161c25;border-radius:22px;
+    box-shadow:0 40px 90px -40px #000;padding:20px 18px;}
+  .phead{display:flex;align-items:center;gap:10px;padding:2px 6px 16px;}
+  .phead .brand{font-size:17px;font-weight:700;color:#f3f6f9;letter-spacing:-.01em;}
+  .phead .sp{flex:1;} .phead .hi{color:var(--dim);font-size:13px;} .phead .ic{color:var(--dim);font-size:15px;opacity:.85;}
+
+  .today{background:var(--surface);border:1px solid rgba(255,255,255,.05);border-radius:14px;padding:16px 17px 15px;margin-bottom:4px;}
+  .today .lab{font-size:10px;letter-spacing:.16em;font-weight:700;text-transform:uppercase;color:var(--faint);}
+  .today .toprow{display:flex;justify-content:space-between;align-items:flex-start;}
+  .today .hero{font-size:30px;font-weight:700;color:var(--gold);letter-spacing:-.01em;line-height:.95;font-feature-settings:"tnum";}
+  .today .bar{height:5px;border-radius:3px;background:#172b22;margin:13px 0 9px;overflow:hidden;}
+  .today .bar i{display:block;height:100%;width:53%;border-radius:3px;background:linear-gradient(90deg,#9a7a3e,#e0b86a);}
+  .today .qline{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;}
+  .today .qline .pct{color:#c79a52;} .today .qline .rs{color:var(--faint);}
+  .today .stats{font-family:var(--mono);font-size:12px;color:var(--ink2);margin-top:9px;line-height:1.7;}
+  .today .stats b{color:var(--ink);font-weight:600;} .today .stats .sub{color:var(--dim);}
+
+  .sect{display:flex;align-items:center;gap:8px;padding:15px 8px 9px;}
+  .sect .d{width:6px;height:6px;border-radius:50%;}
+  .sect .t{font-size:10px;letter-spacing:.16em;font-weight:700;text-transform:uppercase;}
+  .sect .n{margin-left:auto;font-size:10px;font-family:var(--mono);color:var(--faint);}
+
+  /* the NEW active surface — containerless, sits on the panel */
+  .act{position:relative;padding:12px 14px 13px 19px;margin:4px 2px 9px;border-radius:14px;
+    background:linear-gradient(100deg,rgba(95,224,180,.05),rgba(95,224,180,.014) 38%,transparent 68%);}
+  .act .rail{position:absolute;left:7px;top:12px;bottom:13px;width:3px;border-radius:2px;
+    background:linear-gradient(180deg,var(--teal),rgba(95,224,180,.04));box-shadow:0 0 12px rgba(95,224,180,.5);}
+  .act .bloom{position:absolute;left:0;top:0;width:38%;height:80%;background:radial-gradient(closest-side,rgba(95,224,180,.12),transparent 72%);filter:blur(9px);}
+  .act .top{position:relative;display:flex;align-items:center;gap:14px;}
+  .act .ind{width:46px;height:46px;flex:0 0 46px;filter:drop-shadow(0 0 6px rgba(95,224,180,.45));}
+  .act .ind svg{width:100%;height:100%;display:block;}
+  .act .m{flex:1;min-width:0;}
+  .act .ph{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;font-weight:600;color:var(--teal);display:flex;align-items:baseline;}
+  .act .ph .el{margin-left:auto;color:#5f6873;letter-spacing:.04em;font-weight:400;}
+  .act .nm{font-family:"Bricolage Grotesque";font-weight:600;font-size:20px;letter-spacing:-.012em;color:#f0f3f6;margin-top:6px;line-height:1;}
+  .act .nm .md{font-family:var(--mono);font-size:11px;font-weight:400;color:#6b7280;}
+  .act .ctx{position:relative;margin-top:13px;display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:12px;color:#79828c;}
+  .act .ctx .cwd .dim2{color:#5b636d;} .act .ctx .cwd{color:#8b94a0;}
+  .act .ctx .br{display:inline-flex;align-items:center;gap:6px;color:#9aa3ad;}
+  .act .ctx .c{margin-left:auto;font-size:15px;color:#bf9056;font-weight:600;font-feature-settings:"tnum";}
+
+  /* idle list (shipped style) */
+  .idle{border:1px solid rgba(255,255,255,.045);border-radius:13px;overflow:hidden;margin:0 2px;}
+  .idle .row{display:flex;align-items:center;gap:11px;padding:11px 14px;border-top:1px solid rgba(255,255,255,.04);}
+  .idle .row:first-child{border-top:none;}
+  .idle .row .b{width:5px;height:5px;border-radius:50%;background:#39414b;}
+  .idle .row .nm{flex:1;color:var(--ink2);font-size:13px;} .idle .row .ct{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--faint);}
+</style>
+</head>
+<body>
+<div>
+  <div class="cap">整体 · 新 active 卡片放进真实面板(上接 TODAY,下接 IDLE)</div>
+  <div class="panel">
+    <div class="phead"><span class="brand">Claude Island</span><span class="sp"></span><span class="hi">🕐 History</span><span class="ic">⏻</span><span class="ic">⌄</span></div>
+
+    <div class="today">
+      <div class="toprow"><span class="lab">TODAY · ANTHROPIC</span><span class="hero">$42.39</span></div>
+      <div class="bar"><i></i></div>
+      <div class="qline"><span class="pct">53% of 5h</span><span class="rs">resets 19m</span></div>
+      <div class="stats"><b>313</b> reqs · <b>407K</b> tokens · <b>50.3M</b> cache · <b>97.4%</b> hit<br><span class="sub">↳ incl. <b>86</b> subagent reqs · $8.07</span></div>
+    </div>
+
+    <div class="sect"><span class="d" style="background:var(--teal);box-shadow:0 0 7px var(--teal)"></span><span class="t" style="color:var(--teal)">ACTIVE</span><span class="n">1</span></div>
+
+    <div class="act">
+      <div class="rail"></div><div class="bloom"></div>
+      <div class="top">
+        <div class="ind">
+          <svg viewBox="0 0 50 50">
+            <circle cx="25" cy="25" r="20.5" fill="none" stroke="var(--teal)" stroke-opacity=".14" stroke-width="1.2"/>
+            <circle cx="25" cy="25" r="11" fill="none" stroke="var(--teal)" stroke-opacity=".10" stroke-width="6"/>
+            <circle cx="25" cy="25" r="5.5" fill="var(--teal)"/>
+            <circle cx="25" cy="25" r="5.5" fill="none" stroke="#cdf7e4" stroke-opacity=".5" stroke-width="1"/>
+          </svg>
+        </div>
+        <div class="m">
+          <div class="ph">running<span class="el">23s</span></div>
+          <div class="nm">claude-island <span class="md">· opus 4.8</span></div>
+        </div>
+      </div>
+      <div class="ctx">
+        <span class="cwd"><span class="dim2">~/coding-projects/</span>claude-island</span>
+        <span class="br"><svg width="12" height="13" viewBox="0 0 12 13" fill="none" stroke="#5a6168" stroke-width="1.3" stroke-linecap="round"><circle cx="3" cy="3" r="1.7"/><circle cx="3" cy="10" r="1.7"/><circle cx="9" cy="3" r="1.7"/><path d="M3 4.7v3.6"/><path d="M9 4.7c0 2.4-6 1.6-6 3.6"/></svg>master</span>
+        <span class="c">$0.41</span>
+      </div>
+    </div>
+
+    <div class="sect"><span class="t" style="color:var(--faint)">IDLE</span><span class="n">3</span></div>
+    <div class="idle">
+      <div class="row"><span class="b"></span><span class="nm">Improve active session interaction UI</span><span class="ct">$10</span></div>
+      <div class="row"><span class="b"></span><span class="nm">Checkout master and pull latest code</span><span class="ct">$38</span></div>
+      <div class="row"><span class="b"></span><span class="nm">marketing-site</span><span class="ct">$2</span></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
