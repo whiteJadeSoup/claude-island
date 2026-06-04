@@ -13,13 +13,18 @@ Window {
     // window resize so the morph is visible at the OS level, not just inside.
     width:  islandState === "collapsed" ? 240 : 480
     height: islandState === "collapsed" ? 44  : (islandState === "decision" ? 200 : 460)
-    Behavior on width  { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
-    Behavior on height { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
+    Behavior on width  { enabled: root.animationsReady; NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
+    Behavior on height { enabled: root.animationsReady; NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
     // Held false until qml_app pushes the first snapshot AND the scene has laid
     // out, so the user never sees the empty/pre-layout first frame flash. The
     // Python side flips this once the first build is rendered.
     property bool readyToShow: false
     visible: readyToShow
+    // Entrance-animation gate. False during startup so the first settle (window
+    // size, layer opacities, quota-bar fill, data populating) snaps into place
+    // INSTANTLY with no animated "morph". qml_app flips it true a beat after the
+    // window is revealed, so subsequent LIVE state changes still animate.
+    property bool animationsReady: false
     // On macOS Qt.Tool maps to NSPanel which silently refuses to paint a
     // WA_TranslucentBackground surface — the window reports isVisible=True
     // but nothing reaches the screen.  The existing CapsuleWindow._setup_window
@@ -246,7 +251,7 @@ Window {
             // Pill content visible only in collapsed state
             opacity: root.islandState === "collapsed" ? 1.0 : 0.0
             enabled: opacity > 0.1
-            Behavior on opacity { NumberAnimation { duration: 200 } }
+            Behavior on opacity { enabled: root.animationsReady; NumberAnimation { duration: 200 } }
 
             MouseArea {
                 anchors.fill: parent
@@ -343,7 +348,7 @@ Window {
             anchors.fill: parent
             opacity: root.islandState === "decision" ? 1.0 : 0.0
             enabled: opacity > 0.1
-            Behavior on opacity { NumberAnimation { duration: 200 } }
+            Behavior on opacity { enabled: root.animationsReady; NumberAnimation { duration: 200 } }
 
             ColumnLayout {
                 anchors.fill: parent
@@ -409,7 +414,7 @@ Window {
             anchors.fill: parent
             opacity: root.islandState === "expanded" ? 1.0 : 0.0
             enabled: opacity > 0.1
-            Behavior on opacity { NumberAnimation { duration: 200 } }
+            Behavior on opacity { enabled: root.animationsReady; NumberAnimation { duration: 200 } }
 
             ColumnLayout {
                 anchors.fill: parent
@@ -1206,7 +1211,7 @@ Window {
                         // as "live"; alpha-matched to the fill colour.
                         border.color: Qt.rgba(quotaBarColor.r, quotaBarColor.g, quotaBarColor.b, 0.45)
                         border.width: 1
-                        Behavior on width { NumberAnimation { duration: 400 } }
+                        Behavior on width { enabled: root.animationsReady; NumberAnimation { duration: 400 } }
                     }
                 }
             }
