@@ -817,7 +817,7 @@ Window {
                                                 RowLayout {
                                                     Layout.fillWidth: true; spacing: 14
                                                     PhaseIndicator {
-                                                        Layout.preferredWidth: 46; Layout.preferredHeight: 46
+                                                        Layout.preferredWidth: 42; Layout.preferredHeight: 42
                                                         phase: phz
                                                         stuck: stuck
                                                         ac: ac
@@ -825,14 +825,19 @@ Window {
                                                         running: root.isActive(phz)
                                                     }
                                                     ColumnLayout {
-                                                        Layout.fillWidth: true; spacing: 6
+                                                        Layout.fillWidth: true; spacing: 5
                                                         RowLayout {
-                                                            Layout.fillWidth: true; spacing: 0
+                                                            Layout.fillWidth: true; spacing: 8
                                                             Text {
                                                                 text: Theme.phaseLabel(phz, secs)
                                                                 color: ac; font.family: Theme.fontMono
                                                                 font.pixelSize: Theme.tMicro; font.letterSpacing: 1.5
                                                                 font.bold: true; font.capitalization: Font.AllUppercase
+                                                            }
+                                                            Text {
+                                                                text: modelData.model || ""
+                                                                visible: (modelData.model || "") !== ""
+                                                                color: "#6b7280"; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta
                                                             }
                                                             Item { Layout.fillWidth: true }
                                                             Text {
@@ -841,15 +846,17 @@ Window {
                                                                 color: Theme.faint; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta
                                                             }
                                                         }
+                                                        // Session name — PLAIN text so elide works (StyledText
+                                                        // ignores elide and overflows on long custom names).
                                                         Text {
                                                             Layout.fillWidth: true
-                                                            textFormat: Text.StyledText
-                                                            text: (modelData.name || "") +
-                                                                  (modelData.model ? " <font color='#6b7280'>· " + modelData.model + "</font>" : "")
+                                                            text: modelData.name || ""
                                                             color: "#f0f3f6"
                                                             font.family: Theme.fontDisplay
                                                             font.weight: Font.DemiBold
-                                                            font.pixelSize: 20; elide: Text.ElideRight
+                                                            font.pixelSize: 18
+                                                            elide: Text.ElideRight
+                                                            maximumLineCount: 1
                                                         }
                                                     }
                                                 }
