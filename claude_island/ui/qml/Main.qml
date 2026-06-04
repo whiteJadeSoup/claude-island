@@ -126,15 +126,69 @@ Window {
         return s.phase || ""
     }
 
-    // Per-phase animated indicator for the ACTIVE card. Full Canvas version
-    // lands in commit 5B; this is a placeholder stub so 5A loads clean.
+    // Per-phase animated Canvas indicator for the ACTIVE card. The `t` driver
+    // loops continuously while running (and not stuck) so each phase paints its
+    // own motion: a pulsing dot (tool_use), a spinning compass (thinking), a
+    // breathing ring (compacting), a blinking exclamation (waiting_approval),
+    // and a static dim ring when stuck.
     component PhaseIndicator: Item {
+        id: pi
         property string phase: ""
         property bool stuck: false
         property color ac: "#5fe0b4"
         property real rate: 0
         property bool running: false
-        Rectangle { anchors.centerIn: parent; width: 11; height: 11; radius: 6; color: ac }
+        property real t: 0
+        NumberAnimation on t {
+            from: 0; to: 1; loops: Animation.Infinite
+            duration: pi.stuck ? 100000 : Math.max(700, 1800 - Math.min(1000, pi.rate/8))
+            running: pi.running && !pi.stuck
+        }
+        onTChanged: cv.requestPaint()
+        onAcChanged: cv.requestPaint()
+        onStuckChanged: cv.requestPaint()
+        onPhaseChanged: cv.requestPaint()
+        Canvas {
+            id: cv; anchors.fill: parent
+            onPaint: {
+                var c = getContext("2d"); var W = width, H = height, cx = W/2, cy = H/2
+                c.clearRect(0,0,W,H); c.lineCap = "round"; c.lineJoin = "round"
+                var col = pi.ac; c.strokeStyle = col; c.fillStyle = col
+                if (pi.stuck) {
+                    c.globalAlpha = 0.14; c.lineWidth = 1.2; c.beginPath(); c.arc(cx,cy,19,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.7;  c.lineWidth = 1.8; c.beginPath(); c.arc(cx,cy,6,0,6.2832); c.stroke()
+                    c.globalAlpha = 1; return
+                }
+                var pulse = 0.5 + 0.5*Math.sin(pi.t*6.2832)
+                if (pi.phase === "tool_use") {
+                    c.globalAlpha = 0.14; c.lineWidth = 1.2; c.beginPath(); c.arc(cx,cy,20.5,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.10; c.lineWidth = 6;   c.beginPath(); c.arc(cx,cy,11,0,6.2832); c.stroke()
+                    c.globalAlpha = 1;    c.beginPath(); c.arc(cx,cy,5+pulse*0.8,0,6.2832); c.fill()
+                } else if (pi.phase === "thinking") {
+                    c.save(); c.translate(cx,cy); c.rotate(pi.t*0.7)
+                    c.globalAlpha = 0.9; c.lineWidth = 2.6
+                    c.beginPath(); c.moveTo(0,-19); c.lineTo(0,19); c.moveTo(-19,0); c.lineTo(19,0); c.stroke()
+                    c.lineWidth = 2
+                    c.beginPath(); c.moveTo(-13,-13); c.lineTo(13,13); c.moveTo(13,-13); c.lineTo(-13,13); c.stroke()
+                    c.globalAlpha = 0.24; c.lineWidth = 1.7; c.rotate(0.33)
+                    c.beginPath(); c.moveTo(0,-14); c.lineTo(0,14); c.moveTo(-14,0); c.lineTo(14,0); c.stroke()
+                    c.restore()
+                } else if (pi.phase === "compacting") {
+                    c.globalAlpha = 0.13; c.lineWidth = 1.3; c.beginPath(); c.arc(cx,cy,20,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.34; c.lineWidth = 1.6; c.beginPath(); c.arc(cx,cy,13,0,6.2832); c.stroke()
+                    c.globalAlpha = 1;    c.lineWidth = 2;   c.beginPath(); c.arc(cx,cy,6.5,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.6; c.lineWidth = 1.5
+                    c.beginPath(); c.moveTo(cx,3.5); c.lineTo(cx,7); c.moveTo(cx,H-3.5); c.lineTo(cx,H-7)
+                    c.moveTo(3.5,cy); c.lineTo(7,cy); c.moveTo(W-3.5,cy); c.lineTo(W-7,cy); c.stroke()
+                } else if (pi.phase === "waiting_approval") {
+                    c.globalAlpha = 0.14; c.lineWidth = 1.2; c.beginPath(); c.arc(cx,cy,22,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.5;  c.lineWidth = 1.6; c.beginPath(); c.arc(cx,cy,17.5,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.55 + 0.45*pulse
+                    c.fillRect(cx-1.8,cy-10.5,3.6,12.5); c.beginPath(); c.arc(cx,cy+7.8,2.1,0,6.2832); c.fill()
+                }
+                c.globalAlpha = 1
+            }
+        }
     }
 
     // ── Island state: "expanded" | "collapsed" | "decision" ──────────────
