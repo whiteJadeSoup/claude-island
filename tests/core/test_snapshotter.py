@@ -1450,8 +1450,15 @@ class TestSnapshotterIncrementalCache:
     def _cached_snapshotter(self, *, state_version: int = 0):
         """A Snapshotter with one session and all source-version tracking
         wired (so the cache is enabled). Returns the snapshotter plus the
-        mutable version sources so a test can bump them."""
-        s = _session(pid=1, cwd="/a")
+        mutable version sources so a test can bump them.
+
+        The session is intentionally given a stale last_activity (>30 s ago)
+        so that _phase_from_pid_json resolves it to IDLE with no live state.
+        An IDLE session has seconds_since_token=None, which means
+        _has_volatile_time_field returns False and the view is cacheable.
+        """
+        stale = datetime.now(timezone.utc) - timedelta(minutes=5)
+        s = _session(pid=1, cwd="/a", last_activity=stale)
         md = FakeMetadataProvider()
         md.meta_version = 0  # read via getattr in _build_snapshot
         ur = FakeUsageRegistry()
@@ -1466,21 +1473,17 @@ class TestSnapshotterIncrementalCache:
         return snap, md, ur, holder
 
     def test_second_build_reuses_cache_when_nothing_changed(self):
-        # seconds_since_token is always non-None (falls back to last_activity),
-        # so every view is volatile — _has_volatile_time_field returns True for
-        # all views and the per-session cache is bypassed on every build.
-        # Verify that compose IS called each build (the volatile path is active)
-        # rather than asserting a cache hit that can no longer happen.
+        # Use an IDLE session (stale last_activity, no live state) so
+        # seconds_since_token is None and _has_volatile_time_field returns
+        # False.  An unchanged idle session must be served from cache — the
+        # compose function must NOT be called again on the second build.
         snap, md, ur, holder = self._cached_snapshotter()
         with self._spy_compose() as spy:
             snap.build_now()
             n1 = spy.call_count
             assert n1 == 1  # first build composes the single session once
             snap.build_now()
-            # seconds_since_token makes the view volatile → recompose expected
-            assert spy.call_count > n1, (
-                "seconds_since_token is volatile; view must recompose each build"
-            )
+            assert spy.call_count == n1, "cache hit must skip recompose"
 
     def test_meta_version_bump_invalidates_cache(self):
         snap, md, ur, holder = self._cached_snapshotter()

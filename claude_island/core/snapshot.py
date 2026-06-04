@@ -758,18 +758,18 @@ def compose_session_view(
             last_command_elapsed_s = None
 
     # Staleness: seconds since the last hook event (fresher than JSONL,
-    # fires between turns). Falls back to last_activity when no live state.
+    # fires between turns). ONLY for active phases — idle/ended views must
+    # stay cacheable (a non-None value here marks the view volatile).
     seconds_since_token: float | None = None
-    _ts = getattr(live, "last_hook_at", None) if live is not None else None
-    if _ts is None:
-        _ts = last_activity
-    if _ts is not None:
-        try:
-            seconds_since_token = (now_utc - _ts).total_seconds()
-            if seconds_since_token < 0:
-                seconds_since_token = 0.0
-        except Exception:
-            seconds_since_token = None
+    if phase.is_active():
+        _ts = getattr(live, "last_hook_at", None) if live is not None else None
+        if _ts is None:
+            _ts = last_activity
+        if _ts is not None:
+            try:
+                seconds_since_token = max(0.0, (now_utc - _ts).total_seconds())
+            except Exception:
+                seconds_since_token = None
 
     # v4c Phase 3b: rolling token-rate over the last 60s.  Cheap
     # in-memory aggregation via the per-uuid inverted index.  Wrapped
