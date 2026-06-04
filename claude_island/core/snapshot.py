@@ -604,6 +604,11 @@ def compose_session_view(
         or session.project_path.name
         or str(session.project_path)
     )
+    git_branch = (
+        meta.get("git_branch")
+        if isinstance(meta.get("git_branch"), str)
+        else None
+    )
 
     status_word = state.get("status") if isinstance(state.get("status"), str) else None
 
@@ -752,6 +757,20 @@ def compose_session_view(
         except Exception:
             last_command_elapsed_s = None
 
+    # Staleness: seconds since the last hook event (fresher than JSONL,
+    # fires between turns). Falls back to last_activity when no live state.
+    seconds_since_token: float | None = None
+    _ts = getattr(live, "last_hook_at", None) if live is not None else None
+    if _ts is None:
+        _ts = last_activity
+    if _ts is not None:
+        try:
+            seconds_since_token = (now_utc - _ts).total_seconds()
+            if seconds_since_token < 0:
+                seconds_since_token = 0.0
+        except Exception:
+            seconds_since_token = None
+
     # v4c Phase 3b: rolling token-rate over the last 60s.  Cheap
     # in-memory aggregation via the per-uuid inverted index.  Wrapped
     # in a lambda + getattr so older / test-stub UsageRegistry impls
@@ -787,6 +806,8 @@ def compose_session_view(
         tokens_per_min=tokens_per_min,
         last_command=last_command,
         last_command_elapsed_s=last_command_elapsed_s,
+        git_branch=git_branch,
+        seconds_since_token=seconds_since_token,
     )
 
 
@@ -1052,6 +1073,7 @@ def _has_volatile_time_field(v: SessionView) -> bool:
         or v.compact_elapsed_s is not None
         or v.last_command_elapsed_s is not None
         or v.tokens_per_min is not None
+        or v.seconds_since_token is not None
     )
 
 
