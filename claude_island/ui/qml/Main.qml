@@ -69,6 +69,11 @@ Window {
         return n
     }
     function quietCount() { return vmSessions.length - workingCount() }
+    function activeName() {
+        for (var i = 0; i < vmSessions.length; i++)
+            if (isActive(vmSessions[i].phase)) return vmSessions[i].name
+        return ""
+    }
     function riskColor(risk) {
         if (risk === "high")   return "#e8743b"
         if (risk === "medium") return "#d29922"
@@ -297,7 +302,9 @@ Window {
                     Layout.fillWidth: true
                     text: root.vmDecisions.length > 0
                           ? (root.vmDecisions[0].session_name + " needs you")
-                          : (root.workingCount() + " running · " + root.vmTodayCost)
+                          : (root.workingCount() === 1
+                                ? (root.activeName() + "  running · " + root.vmTodayCost)
+                                : (root.workingCount() + " running · " + root.vmTodayCost))
                     color: root.vmDecisions.length > 0 ? "#f4d0a0" : "#c8d4de"
                     font.pixelSize: 13
                     elide: Text.ElideRight
@@ -1197,10 +1204,10 @@ Window {
                         height: parent.height
                         radius: parent.radius
                         width: parent.width * Math.max(0, Math.min(100, quotaPct)) / 100
-                        color: Theme.teal
-                        // Soft teal glow — a faint teal border bleeds the fill
-                        // outward so it reads as "live" without an FBO layer.
-                        border.color: Qt.rgba(0.37, 0.82, 0.66, 0.5)
+                        color: Theme.quotaFill
+                        // Soft gold glow — frees the green channel so the active
+                        // session is the only vivid green in the panel (coherence pass).
+                        border.color: Qt.rgba(0.88, 0.72, 0.41, 0.45)
                         border.width: 1
                         Behavior on width { NumberAnimation { duration: 400 } }
                     }
@@ -1215,7 +1222,7 @@ Window {
 
                 Text {
                     text: quotaPct + "% of 5h"
-                    color: Theme.teal
+                    color: Theme.quotaFill
                     font.family: Theme.fontMono
                     font.pixelSize: Theme.tMeta
                 }
