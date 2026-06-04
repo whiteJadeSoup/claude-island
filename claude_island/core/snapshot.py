@@ -213,6 +213,18 @@ class SessionView:
     # a new prompt resets the turn. No phase invariant binds these.
     last_command: str | None = None
     last_command_elapsed_s: float | None = None
+    # ── CWD context (redesign) ──────────────────────────────────────
+    # Current git branch for this session, parsed from the transcript's
+    # ``gitBranch`` field by JsonlParser and exposed via
+    # ``get_session_metadata()``. None when the transcript has no branch
+    # row yet (e.g. non-git cwd or transcript not written). UI shows it
+    # next to the cwd in the active card's context row.
+    git_branch: str | None = None
+    # Seconds since this session's last hook event / activity, computed at
+    # build time (now - live.last_hook_at, falling back to last_activity).
+    # Drives the "stuck" derived state ("no new tokens · Ns") when an
+    # active session goes silent. None when no timestamp is available.
+    seconds_since_token: float | None = None
 
     def __post_init__(self) -> None:
         # Self-consistency invariant — guards against the UI and the

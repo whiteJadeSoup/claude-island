@@ -80,6 +80,8 @@ def _session(v: SessionView) -> dict[str, Any]:
         # to the live tool input when no persisted command exists yet.
         "command": v.last_command or v.current_tool_input or "",
         "elapsed_s": int(v.last_command_elapsed_s or v.tool_elapsed_s or 0),
+        "git_branch": v.git_branch,
+        "seconds_since_token": int(v.seconds_since_token or 0),
     }
 
 
