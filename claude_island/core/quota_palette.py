@@ -13,11 +13,11 @@ Every surface that renders quota state pulls from here. Adding a new
 surface = ``from claude_island.core.quota_palette import quota_bar_color``
 — no risk of drifting away from the canonical scheme.
 
-Threshold choice (warn=70, critical=85): 90 % only leaves ~30 min
-headroom on the 5h window before reset; 60 % triggers warn during
-normal use and reads as alarm fatigue. 70 % gives a comfortable amber
-band; 85 % leaves a 15 % critical window — long enough to defer big
-tasks, short enough to actually notice.
+Threshold choice (warn=60, critical=85): warn at 60 % gives an early
+amber heads-up (the user wants to see "watch your step" by the time
+they're past the midpoint of the 5h window); 85 % leaves a 15 %
+critical window — long enough to defer big tasks, short enough to
+actually notice.
 
 Architecture: lives in ``core/`` because it has no Qt / no platform_
 deps and is consumed by both render code and ``compute(snap)``
@@ -29,7 +29,7 @@ from typing import Literal
 
 # Threshold percentages (inclusive lower bound). A reading of exactly
 # WARN_PCT is already "warn"; exactly CRITICAL_PCT is "critical".
-WARN_PCT = 70
+WARN_PCT = 60
 CRITICAL_PCT = 85
 
 # Bar fill colours per severity. Hex strings (not Qt QColor) so this

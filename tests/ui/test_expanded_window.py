@@ -743,12 +743,11 @@ def test_period_selector_includes_5h(qtbot):
 @pytest.mark.parametrize("pct,expected_color", [
     (0.0,   "#4ade80"),   # green tier — bottom of range
     (10.0,  "#4ade80"),
-    (60.0,  "#4ade80"),   # still green — new warn boundary is 70
-    (69.0,  "#4ade80"),   # still green just below new threshold
-    (70.0,  "#facc15"),   # yellow tier — at the unified warn threshold
-    (75.0,  "#facc15"),
+    (59.0,  "#4ade80"),   # still green just below the warn threshold
+    (60.0,  "#facc15"),   # yellow tier — at the unified warn threshold (60)
+    (70.0,  "#facc15"),
     (84.0,  "#facc15"),   # still yellow just below critical threshold
-    (85.0,  "#ef4444"),   # red tier — at threshold
+    (85.0,  "#ef4444"),   # red tier — at the critical threshold (85)
     (99.0,  "#ef4444"),
     (100.0, "#ef4444"),
 ])
