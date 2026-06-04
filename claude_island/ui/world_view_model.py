@@ -6,6 +6,7 @@ from typing import Callable
 from PySide6.QtCore import QObject, Property, Signal, Slot
 
 from claude_island.core.pending_decisions import Decision, DecisionResult
+from claude_island.core.quota_palette import quota_bar_color as _quota_bar_color
 from claude_island.core.snapshot import WorldSnapshot, SessionView
 from claude_island.ui.snapshot_projection import project_snapshot, _fmt_model
 
@@ -194,6 +195,21 @@ class WorldViewModel(QObject):
         """Full quota dict for SpendPage (five_hour_pct, weekly_pct, reset times).
         Returns None when no quota data is available."""
         return self._d.get("quota")
+
+    @Property(str, notify=changed)
+    def quotaBarColor(self) -> str:
+        """5h-quota progress-bar fill colour, dispatched through the shared
+        ``core.quota_palette`` so this QML surface uses the SAME severity
+        thresholds (warn=70, critical=85) + colours as every other surface.
+        Stale data wins over any pct band. Falls back to the "ok" colour
+        when no quota snapshot is available yet."""
+        q = self._d["quota"]
+        if not q:
+            return _quota_bar_color(0, stale=False)
+        return _quota_bar_color(
+            float(q.get("five_hour_pct", 0)),
+            stale=bool(q.get("is_stale", False)),
+        )
 
     @Property("QVariantList", notify=changed)
     def recents(self):

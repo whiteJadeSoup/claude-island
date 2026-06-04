@@ -12,8 +12,7 @@ QtObject {
     readonly property color pThinking:"#9a8cff"  // thinking
     readonly property color pCompact:"#e6b96e"   // compacting
     readonly property color pWaiting:"#f3b95e"   // waiting_approval
-    readonly property color pStuck:"#e0795a"     // derived stuck
-    readonly property color quotaFill:"#e0b86a"  // TODAY quota bar (gold, was teal)
+    readonly property color quotaFill:"#e0b86a"  // TODAY quota bar fallback
     readonly property color costDim:"#bf9056"    // dimmed cost in active card
     readonly property int tDisplay:25; readonly property int tTitle:14; readonly property int tHero:15
     readonly property int tBody:13; readonly property int tMeta:11; readonly property int tMicro:10
@@ -23,19 +22,14 @@ QtObject {
     readonly property string fontUI: "Inter"
     readonly property string fontMono: "JetBrains Mono"
     readonly property string fontDisplay: "Bricolage Grotesque"
-    // staleness threshold (seconds) past which an active session reads "stuck"
-    readonly property int stuckAfterS: 18
     function phaseColor(p){ return p==="thinking" ? amber : teal }
-    function isStuck(p, secs){ return (p==="tool_use" || p==="thinking") && secs >= stuckAfterS }
-    function railColor(p, secs){
-        if (isStuck(p, secs)) return pStuck
+    function railColor(p){
         if (p==="thinking") return pThinking
         if (p==="compacting") return pCompact
         if (p==="waiting_approval") return pWaiting
         return pRunning
     }
-    function phaseLabel(p, secs){
-        if (isStuck(p, secs)) return "stuck"
+    function phaseLabel(p){
         if (p==="tool_use") return "running"
         if (p==="waiting_approval") return "awaiting approval"
         return p

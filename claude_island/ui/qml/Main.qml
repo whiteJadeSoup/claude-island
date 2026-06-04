@@ -44,6 +44,7 @@ Window {
     readonly property var vmDecisions:  (vm && vm.decisions) ? vm.decisions : []
     readonly property string vmTodayCost: vm ? vm.todayCost : "$0.00"
     readonly property int    vmQuotaPct:  vm ? vm.quotaPct  : 0
+    readonly property string vmQuotaBarColor: vm ? vm.quotaBarColor : "#4ade80"
     readonly property var vmQuota:      (vm && vm.quota) ? vm.quota : null
 
     // ── Helpers ───────────────────────────────────────────────────────────
@@ -134,24 +135,21 @@ Window {
     // Per-phase animated Canvas indicator for the ACTIVE card. The `t` driver
     // loops continuously while running (and not stuck) so each phase paints its
     // own motion: a pulsing dot (tool_use), a spinning compass (thinking), a
-    // breathing ring (compacting), a blinking exclamation (waiting_approval),
-    // and a static dim ring when stuck.
+    // breathing ring (compacting), a blinking exclamation (waiting_approval).
     component PhaseIndicator: Item {
         id: pi
         property string phase: ""
-        property bool stuck: false
         property color ac: "#5fe0b4"
         property real rate: 0
         property bool running: false
         property real t: 0
         NumberAnimation on t {
             from: 0; to: 1; loops: Animation.Infinite
-            duration: pi.stuck ? 100000 : Math.max(700, 1800 - Math.min(1000, pi.rate/8))
-            running: pi.running && !pi.stuck
+            duration: Math.max(700, 1800 - Math.min(1000, pi.rate/8))
+            running: pi.running
         }
         onTChanged: cv.requestPaint()
         onAcChanged: cv.requestPaint()
-        onStuckChanged: cv.requestPaint()
         onPhaseChanged: cv.requestPaint()
         Canvas {
             id: cv; anchors.fill: parent
@@ -159,11 +157,6 @@ Window {
                 var c = getContext("2d"); var W = width, H = height, cx = W/2, cy = H/2
                 c.clearRect(0,0,W,H); c.lineCap = "round"; c.lineJoin = "round"
                 var col = pi.ac; c.strokeStyle = col; c.fillStyle = col
-                if (pi.stuck) {
-                    c.globalAlpha = 0.14; c.lineWidth = 1.2; c.beginPath(); c.arc(cx,cy,19,0,6.2832); c.stroke()
-                    c.globalAlpha = 0.7;  c.lineWidth = 1.8; c.beginPath(); c.arc(cx,cy,6,0,6.2832); c.stroke()
-                    c.globalAlpha = 1; return
-                }
                 var pulse = 0.5 + 0.5*Math.sin(pi.t*6.2832)
                 if (pi.phase === "tool_use") {
                     c.globalAlpha = 0.14; c.lineWidth = 1.2; c.beginPath(); c.arc(cx,cy,20.5,0,6.2832); c.stroke()
@@ -590,6 +583,7 @@ Window {
                                 anchors.margins: 0
                                 todayData: root.today
                                 quotaPct: root.vmQuotaPct
+                                quotaBarColor: root.vmQuotaBarColor
                                 vmQuota: root.vmQuota
                                 collapsed: false
                             }
@@ -684,6 +678,7 @@ Window {
                                         anchors.top: parent.top
                                         todayData: root.today
                                         quotaPct: root.vmQuotaPct
+                                        quotaBarColor: root.vmQuotaBarColor
                                         vmQuota: root.vmQuota
                                         collapsed: false
                                         visible: root.vmDecisions.length === 0
@@ -780,9 +775,7 @@ Window {
                                     delegate: Item {
                                         required property var modelData
                                         readonly property string phz: modelData.phase || ""
-                                        readonly property int secs: modelData.seconds_since_token || 0
-                                        readonly property color ac: Theme.railColor(phz, secs)
-                                        readonly property bool stuck: Theme.isStuck(phz, secs)
+                                        readonly property color ac: Theme.railColor(phz)
 
                                         visible: root.isActive(phz)
                                         Layout.fillWidth: true
@@ -797,7 +790,7 @@ Window {
                                             implicitHeight: actCol.implicitHeight + 24
                                             gradient: Gradient {
                                                 orientation: Gradient.Horizontal
-                                                GradientStop { position: 0.0; color: Qt.rgba(ac.r, ac.g, ac.b, stuck ? 0.05 : 0.06) }
+                                                GradientStop { position: 0.0; color: Qt.rgba(ac.r, ac.g, ac.b, 0.06) }
                                                 GradientStop { position: 0.45; color: Qt.rgba(ac.r, ac.g, ac.b, 0.012) }
                                                 GradientStop { position: 0.75; color: "transparent" }
                                             }
@@ -807,7 +800,6 @@ Window {
                                                 anchors.top: parent.top; anchors.topMargin: 12
                                                 anchors.bottom: parent.bottom; anchors.bottomMargin: 12
                                                 width: 3; radius: 2; color: ac
-                                                opacity: stuck ? 0.6 : 1.0
                                             }
                                             ColumnLayout {
                                                 id: actCol
@@ -819,7 +811,6 @@ Window {
                                                     PhaseIndicator {
                                                         Layout.preferredWidth: 42; Layout.preferredHeight: 42
                                                         phase: phz
-                                                        stuck: stuck
                                                         ac: ac
                                                         rate: modelData.tokens_per_min || 0
                                                         running: root.isActive(phz)
@@ -829,7 +820,7 @@ Window {
                                                         RowLayout {
                                                             Layout.fillWidth: true; spacing: 8
                                                             Text {
-                                                                text: Theme.phaseLabel(phz, secs)
+                                                                text: Theme.phaseLabel(phz)
                                                                 color: ac; font.family: Theme.fontMono
                                                                 font.pixelSize: Theme.tMicro; font.letterSpacing: 1.5
                                                                 font.bold: true; font.capitalization: Font.AllUppercase
@@ -860,21 +851,15 @@ Window {
                                                         }
                                                     }
                                                 }
-                                                Text {
-                                                    Layout.fillWidth: true; Layout.topMargin: 11
-                                                    visible: stuck
-                                                    text: "⚠ no new output · " + secs + "s — open the terminal"
-                                                    color: Theme.pStuck; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta
-                                                }
                                                 RowLayout {
-                                                    Layout.fillWidth: true; Layout.topMargin: 13; spacing: 14
+                                                    Layout.fillWidth: true; Layout.topMargin: 15; spacing: 22
                                                     Text {
                                                         textFormat: Text.StyledText
                                                         text: "<font color='#5b636d'>" + root.cwdParent(modelData.cwd) + "</font>" + root.cwdLeaf(modelData.cwd)
                                                         color: "#8b94a0"; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta; elide: Text.ElideMiddle
                                                     }
                                                     RowLayout {
-                                                        spacing: 6; visible: (modelData.git_branch || "") !== ""
+                                                        spacing: 8; visible: (modelData.git_branch || "") !== ""
                                                         Canvas {
                                                             width: 12; height: 13
                                                             onPaint: {
@@ -1118,6 +1103,7 @@ Window {
         id: todayCard
         required property var todayData         // spendDetail() result dict
         required property int quotaPct          // vmQuotaPct
+        property color quotaBarColor: "#4ade80" // vm.quotaBarColor (severity-tiered)
         required property var vmQuota           // vmQuota dict or null
         property bool collapsed: false
 
@@ -1211,10 +1197,10 @@ Window {
                         height: parent.height
                         radius: parent.radius
                         width: parent.width * Math.max(0, Math.min(100, quotaPct)) / 100
-                        color: Theme.quotaFill
-                        // Soft gold glow — frees the green channel so the active
-                        // session is the only vivid green in the panel (coherence pass).
-                        border.color: Qt.rgba(0.88, 0.72, 0.41, 0.45)
+                        color: quotaBarColor
+                        // Glow bleeds the severity-tiered fill outward so it reads
+                        // as "live"; alpha-matched to the fill colour.
+                        border.color: Qt.rgba(quotaBarColor.r, quotaBarColor.g, quotaBarColor.b, 0.45)
                         border.width: 1
                         Behavior on width { NumberAnimation { duration: 400 } }
                     }
@@ -1229,7 +1215,7 @@ Window {
 
                 Text {
                     text: quotaPct + "% of 5h"
-                    color: Theme.quotaFill
+                    color: quotaBarColor
                     font.family: Theme.fontMono
                     font.pixelSize: Theme.tMeta
                 }
