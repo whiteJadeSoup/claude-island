@@ -707,11 +707,19 @@ def main() -> int:
     if not engine.rootObjects():
         print("QML failed to load", file=sys.stderr)
         return 1
+    _root_window = engine.rootObjects()[0]
 
     snapshotter.start()
     file_watcher.start()
     threading.Thread(target=session_discovery.start, daemon=True).start()
     marshaler.snap_ready.emit(snapshotter.build_now())   # 首帧
+    # The root Window starts hidden (readyToShow=false). Reveal it only after
+    # the first snapshot has propagated (the marshaler emits via a queued
+    # connection, so it lands on the next event-loop turn) AND the scene has
+    # laid out — otherwise the user sees an empty / pre-layout first frame that
+    # then visibly snaps into place. ~120 ms covers the queued push + layout.
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(120, lambda: _root_window.setProperty("readyToShow", True))
 
     # ── Quota startup + heartbeat ─────────────────────────────────────────
     # ONE-TIME startup force_refresh seeds a cold in-memory cache so the first

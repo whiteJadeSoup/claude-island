@@ -15,7 +15,11 @@ Window {
     height: islandState === "collapsed" ? 44  : (islandState === "decision" ? 200 : 460)
     Behavior on width  { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
     Behavior on height { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
-    visible: true
+    // Held false until qml_app pushes the first snapshot AND the scene has laid
+    // out, so the user never sees the empty/pre-layout first frame flash. The
+    // Python side flips this once the first build is rendered.
+    property bool readyToShow: false
+    visible: readyToShow
     // On macOS Qt.Tool maps to NSPanel which silently refuses to paint a
     // WA_TranslucentBackground surface — the window reports isVisible=True
     // but nothing reaches the screen.  The existing CapsuleWindow._setup_window
