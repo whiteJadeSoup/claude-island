@@ -109,7 +109,8 @@ class _FakeModelTotals:
         self.cost_usd = cost
 
 
-def _active_view(name, phase, cost, model="claude-opus-4-7", tpm=2600):
+def _active_view(name, phase, cost, model="claude-opus-4-7", tpm=2600,
+                 git_branch="main", secs=3):
     sess = Session(
         pid=4242,
         project_path=Path("D:/Learning/cc"),
@@ -130,6 +131,8 @@ def _active_view(name, phase, cost, model="claude-opus-4-7", tpm=2600):
         session_uuid="uuid-" + name,
         phase=phase,
         tokens_per_min=tpm,
+        git_branch=git_branch,
+        seconds_since_token=secs,
     )
 
 
@@ -225,6 +228,13 @@ def _full_snap(dormant_count: int = 1):
                     _active_view("cc-learning", SessionPhase.THINKING, 264.0),
                     _active_view("agent-prompt", SessionPhase.TOOL_USE, 12.0,
                                  model="claude-sonnet-4-6", tpm=1400),
+                    # redesign: exercise every PhaseIndicator branch + the
+                    # stuck derived state + a null branch in the active card.
+                    _active_view("compact-job", SessionPhase.COMPACTING, 3.0),
+                    _active_view("review-pr", SessionPhase.WAITING_APPROVAL, 0.5,
+                                 git_branch=None),
+                    _active_view("stuck-repo", SessionPhase.TOOL_USE, 0.36,
+                                 tpm=0, secs=22),
                     _active_view("build-mini", SessionPhase.IDLE, 0.0),
                 ),
             ),
