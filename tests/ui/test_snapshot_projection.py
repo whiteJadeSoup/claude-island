@@ -3,7 +3,7 @@ from pathlib import Path
 from claude_island.core.snapshot import WorldSnapshot, SessionGroup, SessionView
 from claude_island.core.session_phase import SessionPhase
 from claude_island.core.models import Session
-from claude_island.ui.snapshot_projection import project_snapshot, _fmt_model, _epoch_ms
+from claude_island.ui.snapshot_projection import project_snapshot, _fmt_model, _epoch_ms, _session
 
 
 def _view(name, phase, cost):
@@ -124,3 +124,48 @@ def test_fmt_model_applied_in_projection():
     )
     d = project_snapshot(snap)
     assert d["sessions"][0]["model"] == "opus-4.7"
+
+
+# ---------------------------------------------------------------------------
+# Task 1: git_branch + seconds_since_token projection
+# ---------------------------------------------------------------------------
+
+def _make_view(**overrides) -> SessionView:
+    """Minimal SessionView; overrides patch specific fields under test."""
+    sess = Session(
+        pid=1234,
+        project_path=Path("/Users/me/coding-projects/claude-island"),
+        session_uuid="uuid-1",
+        last_activity=datetime.now(timezone.utc),
+    )
+    base = dict(
+        pid=1234,
+        name="claude-island",
+        project_path=Path("/Users/me/coding-projects/claude-island"),
+        project_basename="claude-island",
+        last_activity=datetime.now(timezone.utc),
+        cost_usd=0.41,
+        is_high_cost=False,
+        latest_model="claude-opus-4-8",
+        status_word="busy",
+        session=sess,
+        session_uuid="uuid-1",
+        phase=SessionPhase.TOOL_USE,
+    )
+    base.update(overrides)
+    return SessionView(**base)
+
+
+def test_projection_includes_git_branch():
+    d = _session(_make_view(git_branch="master"))
+    assert d["git_branch"] == "master"
+
+
+def test_projection_git_branch_none_is_passed_through():
+    d = _session(_make_view(git_branch=None))
+    assert d["git_branch"] is None
+
+
+def test_projection_includes_seconds_since_token():
+    d = _session(_make_view(seconds_since_token=18.7))
+    assert d["seconds_since_token"] == 18  # int-truncated for QML

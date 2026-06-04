@@ -707,11 +707,26 @@ def main() -> int:
     if not engine.rootObjects():
         print("QML failed to load", file=sys.stderr)
         return 1
+    _root_window = engine.rootObjects()[0]
 
     snapshotter.start()
     file_watcher.start()
     threading.Thread(target=session_discovery.start, daemon=True).start()
     marshaler.snap_ready.emit(snapshotter.build_now())   # 首帧
+    # Startup-flash elimination (two parts — both required):
+    #  1. The root Window starts hidden (readyToShow=false). We reveal it only
+    #     after the first snapshot has propagated (the marshaler emits via a
+    #     queued connection, landing next event-loop turn), the async session
+    #     scan has had a beat to populate, and the scene has laid out — so the
+    #     first visible frame is already composed, not raw/empty.
+    #  2. Entrance animations stay OFF (animationsReady=false) until AFTER the
+    #     window is revealed, so the startup settle (quota bar fill 0→N%, layer
+    #     opacities, late-arriving sessions) snaps in INSTANTLY instead of
+    #     visibly animating into place. Live state changes after that still
+    #     animate. Without part 2, holding the window only delays the flash.
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(200, lambda: _root_window.setProperty("readyToShow", True))
+    QTimer.singleShot(650, lambda: _root_window.setProperty("animationsReady", True))
 
     # ── Quota startup + heartbeat ─────────────────────────────────────────
     # ONE-TIME startup force_refresh seeds a cold in-memory cache so the first

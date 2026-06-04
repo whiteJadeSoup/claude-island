@@ -13,9 +13,18 @@ Window {
     // window resize so the morph is visible at the OS level, not just inside.
     width:  islandState === "collapsed" ? 240 : 480
     height: islandState === "collapsed" ? 44  : (islandState === "decision" ? 200 : 460)
-    Behavior on width  { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
-    Behavior on height { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
-    visible: true
+    Behavior on width  { enabled: root.animationsReady; NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
+    Behavior on height { enabled: root.animationsReady; NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
+    // Held false until qml_app pushes the first snapshot AND the scene has laid
+    // out, so the user never sees the empty/pre-layout first frame flash. The
+    // Python side flips this once the first build is rendered.
+    property bool readyToShow: false
+    visible: readyToShow
+    // Entrance-animation gate. False during startup so the first settle (window
+    // size, layer opacities, quota-bar fill, data populating) snaps into place
+    // INSTANTLY with no animated "morph". qml_app flips it true a beat after the
+    // window is revealed, so subsequent LIVE state changes still animate.
+    property bool animationsReady: false
     // On macOS Qt.Tool maps to NSPanel which silently refuses to paint a
     // WA_TranslucentBackground surface — the window reports isVisible=True
     // but nothing reaches the screen.  The existing CapsuleWindow._setup_window
@@ -44,6 +53,7 @@ Window {
     readonly property var vmDecisions:  (vm && vm.decisions) ? vm.decisions : []
     readonly property string vmTodayCost: vm ? vm.todayCost : "$0.00"
     readonly property int    vmQuotaPct:  vm ? vm.quotaPct  : 0
+    readonly property string vmQuotaBarColor: vm ? vm.quotaBarColor : "#4ade80"
     readonly property var vmQuota:      (vm && vm.quota) ? vm.quota : null
 
     // ── Helpers ───────────────────────────────────────────────────────────
@@ -51,6 +61,8 @@ Window {
     function isActive(p) { return activePhases.indexOf(p) !== -1 }
     function fmtCost(n)  { return "$" + (n >= 100 ? n.toFixed(0) : n.toFixed(2)) }
     function fmtElapsed(s){ s = s || 0; return s >= 60 ? (Math.floor(s/60) + "m " + (s%60) + "s") : (s + "s") }
+    function cwdParent(p){ p = (p||""); p = p.replace(/^\/Users\/[^/]+/, "~"); var i = p.lastIndexOf("/"); return i > 0 ? p.slice(0, i+1) : "" }
+    function cwdLeaf(p){ p = (p||""); var i = p.lastIndexOf("/"); return i >= 0 ? p.slice(i+1) : p }
 
     // Format token counts: ≥1M → "X.YM", ≥1K → "XK", else raw int
     function fmtNum(n) {
@@ -67,6 +79,11 @@ Window {
         return n
     }
     function quietCount() { return vmSessions.length - workingCount() }
+    function activeName() {
+        for (var i = 0; i < vmSessions.length; i++)
+            if (isActive(vmSessions[i].phase)) return vmSessions[i].name
+        return ""
+    }
     function riskColor(risk) {
         if (risk === "high")   return "#e8743b"
         if (risk === "medium") return "#d29922"
@@ -124,6 +141,63 @@ Window {
         return s.phase || ""
     }
 
+    // Per-phase animated Canvas indicator for the ACTIVE card. The `t` driver
+    // loops continuously while running (and not stuck) so each phase paints its
+    // own motion: a pulsing dot (tool_use), a spinning compass (thinking), a
+    // breathing ring (compacting), a blinking exclamation (waiting_approval).
+    component PhaseIndicator: Item {
+        id: pi
+        property string phase: ""
+        property color ac: "#5fe0b4"
+        property real rate: 0
+        property bool running: false
+        property real t: 0
+        NumberAnimation on t {
+            from: 0; to: 1; loops: Animation.Infinite
+            duration: Math.max(700, 1800 - Math.min(1000, pi.rate/8))
+            running: pi.running
+        }
+        onTChanged: cv.requestPaint()
+        onAcChanged: cv.requestPaint()
+        onPhaseChanged: cv.requestPaint()
+        Canvas {
+            id: cv; anchors.fill: parent
+            onPaint: {
+                var c = getContext("2d"); var W = width, H = height, cx = W/2, cy = H/2
+                c.clearRect(0,0,W,H); c.lineCap = "round"; c.lineJoin = "round"
+                var col = pi.ac; c.strokeStyle = col; c.fillStyle = col
+                var pulse = 0.5 + 0.5*Math.sin(pi.t*6.2832)
+                if (pi.phase === "tool_use") {
+                    c.globalAlpha = 0.14; c.lineWidth = 1.2; c.beginPath(); c.arc(cx,cy,20.5,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.10; c.lineWidth = 6;   c.beginPath(); c.arc(cx,cy,11,0,6.2832); c.stroke()
+                    c.globalAlpha = 1;    c.beginPath(); c.arc(cx,cy,5+pulse*0.8,0,6.2832); c.fill()
+                } else if (pi.phase === "thinking") {
+                    c.save(); c.translate(cx,cy); c.rotate(pi.t*0.7)
+                    c.globalAlpha = 0.9; c.lineWidth = 2.6
+                    c.beginPath(); c.moveTo(0,-19); c.lineTo(0,19); c.moveTo(-19,0); c.lineTo(19,0); c.stroke()
+                    c.lineWidth = 2
+                    c.beginPath(); c.moveTo(-13,-13); c.lineTo(13,13); c.moveTo(13,-13); c.lineTo(-13,13); c.stroke()
+                    c.globalAlpha = 0.24; c.lineWidth = 1.7; c.rotate(0.33)
+                    c.beginPath(); c.moveTo(0,-14); c.lineTo(0,14); c.moveTo(-14,0); c.lineTo(14,0); c.stroke()
+                    c.restore()
+                } else if (pi.phase === "compacting") {
+                    c.globalAlpha = 0.13; c.lineWidth = 1.3; c.beginPath(); c.arc(cx,cy,20,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.34; c.lineWidth = 1.6; c.beginPath(); c.arc(cx,cy,13,0,6.2832); c.stroke()
+                    c.globalAlpha = 1;    c.lineWidth = 2;   c.beginPath(); c.arc(cx,cy,6.5,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.6; c.lineWidth = 1.5
+                    c.beginPath(); c.moveTo(cx,3.5); c.lineTo(cx,7); c.moveTo(cx,H-3.5); c.lineTo(cx,H-7)
+                    c.moveTo(3.5,cy); c.lineTo(7,cy); c.moveTo(W-3.5,cy); c.lineTo(W-7,cy); c.stroke()
+                } else if (pi.phase === "waiting_approval") {
+                    c.globalAlpha = 0.14; c.lineWidth = 1.2; c.beginPath(); c.arc(cx,cy,22,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.5;  c.lineWidth = 1.6; c.beginPath(); c.arc(cx,cy,17.5,0,6.2832); c.stroke()
+                    c.globalAlpha = 0.55 + 0.45*pulse
+                    c.fillRect(cx-1.8,cy-10.5,3.6,12.5); c.beginPath(); c.arc(cx,cy+7.8,2.1,0,6.2832); c.fill()
+                }
+                c.globalAlpha = 1
+            }
+        }
+    }
+
     // ── Island state: "expanded" | "collapsed" | "decision" ──────────────
     property string islandState: "expanded"
 
@@ -177,7 +251,7 @@ Window {
             // Pill content visible only in collapsed state
             opacity: root.islandState === "collapsed" ? 1.0 : 0.0
             enabled: opacity > 0.1
-            Behavior on opacity { NumberAnimation { duration: 200 } }
+            Behavior on opacity { enabled: root.animationsReady; NumberAnimation { duration: 200 } }
 
             MouseArea {
                 anchors.fill: parent
@@ -230,7 +304,9 @@ Window {
                     Layout.fillWidth: true
                     text: root.vmDecisions.length > 0
                           ? (root.vmDecisions[0].session_name + " needs you")
-                          : (root.workingCount() + " running · " + root.vmTodayCost)
+                          : (root.workingCount() === 1
+                                ? (root.activeName() + "  running · " + root.vmTodayCost)
+                                : (root.workingCount() + " running · " + root.vmTodayCost))
                     color: root.vmDecisions.length > 0 ? "#f4d0a0" : "#c8d4de"
                     font.pixelSize: 13
                     elide: Text.ElideRight
@@ -272,7 +348,7 @@ Window {
             anchors.fill: parent
             opacity: root.islandState === "decision" ? 1.0 : 0.0
             enabled: opacity > 0.1
-            Behavior on opacity { NumberAnimation { duration: 200 } }
+            Behavior on opacity { enabled: root.animationsReady; NumberAnimation { duration: 200 } }
 
             ColumnLayout {
                 anchors.fill: parent
@@ -338,7 +414,7 @@ Window {
             anchors.fill: parent
             opacity: root.islandState === "expanded" ? 1.0 : 0.0
             enabled: opacity > 0.1
-            Behavior on opacity { NumberAnimation { duration: 200 } }
+            Behavior on opacity { enabled: root.animationsReady; NumberAnimation { duration: 200 } }
 
             ColumnLayout {
                 anchors.fill: parent
@@ -516,6 +592,7 @@ Window {
                                 anchors.margins: 0
                                 todayData: root.today
                                 quotaPct: root.vmQuotaPct
+                                quotaBarColor: root.vmQuotaBarColor
                                 vmQuota: root.vmQuota
                                 collapsed: false
                             }
@@ -610,6 +687,7 @@ Window {
                                         anchors.top: parent.top
                                         todayData: root.today
                                         quotaPct: root.vmQuotaPct
+                                        quotaBarColor: root.vmQuotaBarColor
                                         vmQuota: root.vmQuota
                                         collapsed: false
                                         visible: root.vmDecisions.length === 0
@@ -705,172 +783,120 @@ Window {
                                     model: root.vmSessions
                                     delegate: Item {
                                         required property var modelData
-                                        // Only render active sessions in this band
-                                        visible: root.isActive(modelData.phase)
+                                        readonly property string phz: modelData.phase || ""
+                                        readonly property color ac: Theme.railColor(phz)
+
+                                        visible: root.isActive(phz)
                                         Layout.fillWidth: true
                                         Layout.leftMargin: 13; Layout.rightMargin: 13
-                                        Layout.bottomMargin: 6
-                                        implicitHeight: visible ? liveCard.implicitHeight : 0
+                                        Layout.topMargin: 4; Layout.bottomMargin: 9
+                                        implicitHeight: visible ? actCard.implicitHeight : 0
 
-                                        // Live Console card
                                         Rectangle {
-                                            id: liveCard
-                                            anchors.left: parent.left
-                                            anchors.right: parent.right
-                                            anchors.top: parent.top
-                                            implicitHeight: cardCol.implicitHeight + 16
+                                            id: actCard
+                                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                                             radius: 14
-                                            color: liveArea.containsMouse ? Theme.surface2 : Theme.surface
-                                            border.color: liveArea.containsMouse ? Theme.bd2 : Theme.bd
-                                            border.width: 1
-
-                                            // Left breathing glow accent — color by phase
-                                            Rectangle {
-                                                anchors.left: parent.left
-                                                anchors.top: parent.top
-                                                anchors.bottom: parent.bottom
-                                                anchors.topMargin: parent.radius
-                                                anchors.bottomMargin: parent.radius
-                                                width: 3
-                                                radius: 1
-                                                color: Theme.phaseColor(modelData.phase)
-                                                // Bug 2 fix: reference the local property directly;
-                                                // there is no id: glowAnim — glowOp lives on this Rectangle.
-                                                opacity: glowOp
-
-                                                property real glowOp: 0.7
-                                                SequentialAnimation on glowOp {
-                                                    loops: Animation.Infinite
-                                                    running: root.isActive(modelData.phase)
-                                                    NumberAnimation { to: 1.0; duration: 850; easing.type: Easing.InOutSine }
-                                                    NumberAnimation { to: 0.4; duration: 850; easing.type: Easing.InOutSine }
-                                                }
+                                            implicitHeight: actCol.implicitHeight + 24
+                                            gradient: Gradient {
+                                                orientation: Gradient.Horizontal
+                                                GradientStop { position: 0.0; color: Qt.rgba(ac.r, ac.g, ac.b, 0.06) }
+                                                GradientStop { position: 0.45; color: Qt.rgba(ac.r, ac.g, ac.b, 0.012) }
+                                                GradientStop { position: 0.75; color: "transparent" }
                                             }
-
+                                            Rectangle {
+                                                id: rail
+                                                anchors.left: parent.left; anchors.leftMargin: 4
+                                                anchors.top: parent.top; anchors.topMargin: 12
+                                                anchors.bottom: parent.bottom; anchors.bottomMargin: 12
+                                                width: 3; radius: 2; color: ac
+                                            }
                                             ColumnLayout {
-                                                id: cardCol
-                                                anchors.left: parent.left
-                                                anchors.right: parent.right
-                                                anchors.top: parent.top
-                                                anchors.topMargin: 10
-                                                anchors.leftMargin: 12
-                                                anchors.rightMargin: 12
-                                                spacing: 6
-
-                                                // ── top: name · elapsed  ……  ↗  cost ──
+                                                id: actCol
+                                                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                                anchors.leftMargin: 19; anchors.rightMargin: 16; anchors.topMargin: 12
+                                                spacing: 0
                                                 RowLayout {
-                                                    Layout.fillWidth: true; spacing: 8
-                                                    Text { text: modelData.name || ""; color: Theme.phos; font.pixelSize: Theme.tBody; font.bold: true; elide: Text.ElideRight }
-                                                    Text { text: "· " + root.fmtElapsed(modelData.elapsed_s); color: Theme.faint; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta; visible: (modelData.elapsed_s || 0) > 0 }
-                                                    Item { Layout.fillWidth: true }
-                                                    Text { text: "↗"; color: Theme.faint; font.pixelSize: 13; opacity: liveArea.containsMouse ? 1 : 0; Behavior on opacity { NumberAnimation { duration: 120 } } }
-                                                    Text { text: root.fmtCost(modelData.cost_usd); color: Theme.gold; font.family: Theme.fontMono; font.pixelSize: Theme.tBody; font.bold: true }
-                                                }
-                                                // ── hero: $ command  (blinking cursor) ──
-                                                RowLayout {
-                                                    Layout.fillWidth: true; spacing: 0
-                                                    visible: (modelData.command || "") !== ""
-                                                    Text { text: "$ "; color: Theme.phaseColor(modelData.phase); font.family: Theme.fontMono; font.pixelSize: Theme.tHero; font.weight: Font.Medium }
-                                                    Text { Layout.fillWidth: true; text: modelData.command || ""; color: "#f3f6f9"; font.family: Theme.fontMono; font.pixelSize: Theme.tHero; font.weight: Font.Medium; elide: Text.ElideRight }
-                                                    Rectangle { Layout.preferredWidth: 7; Layout.preferredHeight: 14; color: Theme.phaseColor(modelData.phase); Layout.alignment: Qt.AlignVCenter
-                                                        SequentialAnimation on opacity { loops: Animation.Infinite; running: root.isActive(modelData.phase)
-                                                            NumberAnimation { to: 0; duration: 530 } NumberAnimation { to: 1; duration: 530 } } }
-                                                }
-                                                // ── footer: phase  [waveform]  rate  model ──
-                                                RowLayout {
-                                                    Layout.fillWidth: true; spacing: 9
-                                                    Text { text: modelData.phase || ""; color: Theme.phaseColor(modelData.phase); font.family: Theme.fontMono; font.pixelSize: Theme.tMeta }
-
-                                                    // Activity waveform (#1): a glowing oscilloscope line,
-                                                    // not bars. Amplitude is driven by PHASE (tool_use loudest,
-                                                    // thinking moderate) so an active session ALWAYS shows a
-                                                    // gently flowing wave — never a flat line when the token rate
-                                                    // is 0. The rate only nudges the amplitude slightly upward.
-                                                    // A continuously-animated `flow` phase scrolls the wave so it
-                                                    // reads as alive/breathing between rate updates.
-                                                    Item {
-                                                        id: waveItem
-                                                        Layout.fillWidth: true; Layout.preferredHeight: 16
-
-                                                        property var series: modelData.rate_series || []
-                                                        property real peak: {
-                                                            var s = series
-                                                            var mx = 1
-                                                            for (var i = 0; i < s.length; i++)
-                                                                if (s[i] > mx) mx = s[i]
-                                                            return mx
-                                                        }
-                                                        // 0→1 looping phase that animates the wave's flow.
-                                                        property real flow: 0
-                                                        NumberAnimation on flow {
-                                                            from: 0; to: 1; duration: 1600
-                                                            loops: Animation.Infinite
-                                                            running: root.isActive(modelData.phase)
-                                                        }
-                                                        onFlowChanged: scope.requestPaint()
-                                                        onSeriesChanged: scope.requestPaint()
-
-                                                        Canvas {
-                                                            id: scope
-                                                            anchors.fill: parent
-                                                            property color strokeCol: Theme.phaseColor(modelData.phase)
-                                                            onStrokeColChanged: requestPaint()
-                                                            onWidthChanged: requestPaint()
-                                                            onPaint: {
-                                                                var ctx = getContext("2d")
-                                                                var w = width, h = height, mid = h * 0.52
-                                                                // Reuse the strokeCol property (which also drives repaint via
-                                                                // onStrokeColChanged) instead of recomputing the phase colour.
-                                                                var col = strokeCol
-                                                                // phase baseline amplitude (0..1): tool_use loudest, thinking moderate
-                                                                var base = (modelData.phase === "tool_use") ? 0.9 : 0.5
-                                                                // gentle rate nudge (kept small so the wave is never flat)
-                                                                var s = waveItem.series
-                                                                var peak = waveItem.peak > 0 ? waveItem.peak : 1
-                                                                var last = (s && s.length) ? s[s.length - 1] : 0
-                                                                var amp = Math.min(1.0, base + 0.25 * (last / peak))   // always >= base
-                                                                ctx.clearRect(0, 0, w, h)
-                                                                ctx.lineWidth = 1.7; ctx.lineCap = "round"; ctx.lineJoin = "round"
-                                                                ctx.strokeStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 8
-                                                                ctx.beginPath()
-                                                                var N = 72
-                                                                for (var i = 0; i < N; i++) {
-                                                                    var x = i / (N - 1) * w
-                                                                    var y = mid - amp * (h * 0.40) * Math.sin(i * 0.5 + waveItem.flow * Math.PI * 2)
-                                                                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
-                                                                }
-                                                                ctx.stroke(); ctx.shadowBlur = 0
+                                                    Layout.fillWidth: true; spacing: 14
+                                                    PhaseIndicator {
+                                                        Layout.preferredWidth: 42; Layout.preferredHeight: 42
+                                                        phase: phz
+                                                        ac: ac
+                                                        rate: modelData.tokens_per_min || 0
+                                                        running: root.isActive(phz)
+                                                    }
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true; spacing: 5
+                                                        RowLayout {
+                                                            Layout.fillWidth: true; spacing: 8
+                                                            Text {
+                                                                text: Theme.phaseLabel(phz)
+                                                                color: ac; font.family: Theme.fontMono
+                                                                font.pixelSize: Theme.tMicro; font.letterSpacing: 1.5
+                                                                font.bold: true; font.capitalization: Font.AllUppercase
+                                                            }
+                                                            Text {
+                                                                text: modelData.model || ""
+                                                                visible: (modelData.model || "") !== ""
+                                                                color: "#6b7280"; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta
+                                                            }
+                                                            Item { Layout.fillWidth: true }
+                                                            Text {
+                                                                text: root.fmtElapsed(modelData.elapsed_s)
+                                                                visible: (modelData.elapsed_s || 0) > 0
+                                                                color: Theme.faint; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta
                                                             }
                                                         }
+                                                        // Session name — PLAIN text so elide works (StyledText
+                                                        // ignores elide and overflows on long custom names).
+                                                        Text {
+                                                            Layout.fillWidth: true
+                                                            text: modelData.name || ""
+                                                            color: "#f0f3f6"
+                                                            font.family: Theme.fontDisplay
+                                                            font.weight: Font.DemiBold
+                                                            font.pixelSize: 18
+                                                            elide: Text.ElideRight
+                                                            maximumLineCount: 1
+                                                        }
                                                     }
-
-                                                    Text { visible: (modelData.tokens_per_min || 0) > 0; text: (modelData.tokens_per_min || 0) + " tk/min"; color: Theme.faint; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta }
-                                                    Rectangle {
-                                                        visible: (modelData.model || "") !== ""
-                                                        radius: 5; color: Qt.rgba(0,0,0,0.25); border.color: Theme.modelColor(modelData.model); border.width: 1
-                                                        Layout.preferredWidth: mlbl.implicitWidth + 12; Layout.preferredHeight: 18
-                                                        Text { id: mlbl; anchors.centerIn: parent; text: modelData.model || ""; color: Theme.modelColor(modelData.model); font.family: Theme.fontMono; font.pixelSize: 9; font.bold: true }
+                                                }
+                                                RowLayout {
+                                                    Layout.fillWidth: true; Layout.topMargin: 15; spacing: 22
+                                                    Text {
+                                                        textFormat: Text.StyledText
+                                                        text: "<font color='#5b636d'>" + root.cwdParent(modelData.cwd) + "</font>" + root.cwdLeaf(modelData.cwd)
+                                                        color: "#8b94a0"; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta; elide: Text.ElideMiddle
+                                                    }
+                                                    RowLayout {
+                                                        spacing: 8; visible: (modelData.git_branch || "") !== ""
+                                                        Canvas {
+                                                            width: 12; height: 13
+                                                            onPaint: {
+                                                                var c = getContext("2d"); c.clearRect(0,0,12,13)
+                                                                c.strokeStyle = "#5a6168"; c.lineWidth = 1.3; c.lineCap = "round"
+                                                                c.beginPath(); c.arc(3,3,1.7,0,6.3); c.moveTo(4.7,10); c.arc(3,10,1.7,0,6.3)
+                                                                c.moveTo(10.7,3); c.arc(9,3,1.7,0,6.3); c.stroke()
+                                                                c.beginPath(); c.moveTo(3,4.7); c.lineTo(3,8.3)
+                                                                c.moveTo(9,4.7); c.bezierCurveTo(9,7.1,3,6.3,3,8.3); c.stroke()
+                                                            }
+                                                        }
+                                                        Text { text: modelData.git_branch || ""; color: "#9aa3ad"; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta }
+                                                    }
+                                                    Item { Layout.fillWidth: true }
+                                                    Text {
+                                                        text: root.fmtCost(modelData.cost_usd)
+                                                        color: Theme.costDim; font.family: Theme.fontMono; font.bold: true; font.pixelSize: Theme.tBody
                                                     }
                                                 }
                                             }
-
                                             MouseArea {
-                                                id: liveArea
-                                                anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor
-                                                hoverEnabled: true
-                                                // Left-click: focus terminal; right-click: open detail page
+                                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor; hoverEnabled: true
                                                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                                                 onClicked: (mouse) => {
                                                     if (mouse.button === Qt.RightButton) {
-                                                        root.detailData = root.vm
-                                                            ? root.vm.sessionDetail(modelData.id)
-                                                            : {}
-                                                        // Grow the session detail out of this card.
-                                                        detailHost.open("session", liveCard)
-                                                    } else {
-                                                        if (root.vm) root.vm.focusSession(modelData.id)
-                                                    }
+                                                        root.detailData = root.vm ? root.vm.sessionDetail(modelData.id) : {}
+                                                        detailHost.open("session", actCard)
+                                                    } else if (root.vm) { root.vm.focusSession(modelData.id) }
                                                 }
                                             }
                                         }
@@ -1086,6 +1112,7 @@ Window {
         id: todayCard
         required property var todayData         // spendDetail() result dict
         required property int quotaPct          // vmQuotaPct
+        property color quotaBarColor: "#4ade80" // vm.quotaBarColor (severity-tiered)
         required property var vmQuota           // vmQuota dict or null
         property bool collapsed: false
 
@@ -1179,12 +1206,12 @@ Window {
                         height: parent.height
                         radius: parent.radius
                         width: parent.width * Math.max(0, Math.min(100, quotaPct)) / 100
-                        color: Theme.teal
-                        // Soft teal glow — a faint teal border bleeds the fill
-                        // outward so it reads as "live" without an FBO layer.
-                        border.color: Qt.rgba(0.37, 0.82, 0.66, 0.5)
+                        color: quotaBarColor
+                        // Glow bleeds the severity-tiered fill outward so it reads
+                        // as "live"; alpha-matched to the fill colour.
+                        border.color: Qt.rgba(quotaBarColor.r, quotaBarColor.g, quotaBarColor.b, 0.45)
                         border.width: 1
-                        Behavior on width { NumberAnimation { duration: 400 } }
+                        Behavior on width { enabled: root.animationsReady; NumberAnimation { duration: 400 } }
                     }
                 }
             }
@@ -1197,7 +1224,7 @@ Window {
 
                 Text {
                     text: quotaPct + "% of 5h"
-                    color: Theme.teal
+                    color: quotaBarColor
                     font.family: Theme.fontMono
                     font.pixelSize: Theme.tMeta
                 }

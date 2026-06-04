@@ -213,6 +213,18 @@ class SessionView:
     # a new prompt resets the turn. No phase invariant binds these.
     last_command: str | None = None
     last_command_elapsed_s: float | None = None
+    # ── CWD context (redesign) ──────────────────────────────────────
+    # Current git branch for this session, parsed from the transcript's
+    # ``gitBranch`` field by JsonlParser and exposed via
+    # ``get_session_metadata()``. None when the transcript has no branch
+    # row yet (e.g. non-git cwd or transcript not written). UI shows it
+    # next to the cwd in the active card's context row.
+    git_branch: str | None = None
+    # Seconds since this session's last hook event / activity, computed at
+    # build time (now - live.last_hook_at, falling back to last_activity).
+    # Drives the "stuck" derived state ("no new tokens · Ns") when an
+    # active session goes silent. None when no timestamp is available.
+    seconds_since_token: float | None = None
 
     def __post_init__(self) -> None:
         # Self-consistency invariant — guards against the UI and the
@@ -592,6 +604,11 @@ def compose_session_view(
         or session.project_path.name
         or str(session.project_path)
     )
+    git_branch = (
+        meta.get("git_branch")
+        if isinstance(meta.get("git_branch"), str)
+        else None
+    )
 
     status_word = state.get("status") if isinstance(state.get("status"), str) else None
 
@@ -740,6 +757,20 @@ def compose_session_view(
         except Exception:
             last_command_elapsed_s = None
 
+    # Staleness: seconds since the last hook event (fresher than JSONL,
+    # fires between turns). ONLY for active phases — idle/ended views must
+    # stay cacheable (a non-None value here marks the view volatile).
+    seconds_since_token: float | None = None
+    if phase.is_active():
+        _ts = getattr(live, "last_hook_at", None) if live is not None else None
+        if _ts is None:
+            _ts = last_activity
+        if _ts is not None:
+            try:
+                seconds_since_token = max(0.0, (now_utc - _ts).total_seconds())
+            except Exception:
+                seconds_since_token = None
+
     # v4c Phase 3b: rolling token-rate over the last 60s.  Cheap
     # in-memory aggregation via the per-uuid inverted index.  Wrapped
     # in a lambda + getattr so older / test-stub UsageRegistry impls
@@ -775,6 +806,8 @@ def compose_session_view(
         tokens_per_min=tokens_per_min,
         last_command=last_command,
         last_command_elapsed_s=last_command_elapsed_s,
+        git_branch=git_branch,
+        seconds_since_token=seconds_since_token,
     )
 
 
@@ -1040,6 +1073,7 @@ def _has_volatile_time_field(v: SessionView) -> bool:
         or v.compact_elapsed_s is not None
         or v.last_command_elapsed_s is not None
         or v.tokens_per_min is not None
+        or v.seconds_since_token is not None
     )
 
 
