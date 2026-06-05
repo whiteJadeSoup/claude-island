@@ -845,6 +845,13 @@ Window {
                                                                 visible: (modelData.elapsed_s || 0) > 0
                                                                 color: Theme.faint; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta
                                                             }
+                                                            // Cost lives top-right in its own slot. It used to sit in the
+                                                            // metadata row below, where a long cwd+branch over-constrained
+                                                            // the row and clipped the trailing glyph ("$7.90" → "$7.9").
+                                                            Text {
+                                                                text: root.fmtCost(modelData.cost_usd)
+                                                                color: Theme.costDim; font.family: Theme.fontMono; font.bold: true; font.pixelSize: Theme.tBody
+                                                            }
                                                         }
                                                         // Session name — PLAIN text so elide works (StyledText
                                                         // ignores elide and overflows on long custom names).
@@ -863,12 +870,23 @@ Window {
                                                 RowLayout {
                                                     Layout.fillWidth: true; Layout.topMargin: 15; spacing: 22
                                                     Text {
+                                                        // cwd is the elastic field: fillWidth lets it absorb slack and
+                                                        // ElideMiddle drops the path *middle* when tight, so the root "~"
+                                                        // and the leaf project dir (the identifying parts) always survive.
+                                                        Layout.fillWidth: true
                                                         textFormat: Text.StyledText
                                                         text: "<font color='#5b636d'>" + root.cwdParent(modelData.cwd) + "</font>" + root.cwdLeaf(modelData.cwd)
                                                         color: "#8b94a0"; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta; elide: Text.ElideMiddle
                                                     }
                                                     RowLayout {
                                                         spacing: 8; visible: (modelData.git_branch || "") !== ""
+                                                        // Branch is the lower-priority field, capped at a *fraction* of the
+                                                        // card (not a fixed px) so it stays correct if the window resizes.
+                                                        // Ref actCard.width — anchored top-down from the Window — NOT this
+                                                        // row's own width: a child maximumWidth that feeds off its parent
+                                                        // layout's width makes Qt Layouts recurse ("recursive rearrange").
+                                                        // ~42% of the card ≈ ~45% of the row; cwd (fillWidth) takes the rest.
+                                                        Layout.maximumWidth: actCard.width * 0.42
                                                         Canvas {
                                                             width: 12; height: 13
                                                             onPaint: {
@@ -880,12 +898,12 @@ Window {
                                                                 c.moveTo(9,4.7); c.bezierCurveTo(9,7.1,3,6.3,3,8.3); c.stroke()
                                                             }
                                                         }
-                                                        Text { text: modelData.git_branch || ""; color: "#9aa3ad"; font.family: Theme.fontMono; font.pixelSize: Theme.tMeta }
-                                                    }
-                                                    Item { Layout.fillWidth: true }
-                                                    Text {
-                                                        text: root.fmtCost(modelData.cost_usd)
-                                                        color: Theme.costDim; font.family: Theme.fontMono; font.bold: true; font.pixelSize: Theme.tBody
+                                                        Text {
+                                                            Layout.fillWidth: true
+                                                            text: modelData.git_branch || ""; color: "#9aa3ad"
+                                                            font.family: Theme.fontMono; font.pixelSize: Theme.tMeta
+                                                            elide: Text.ElideRight
+                                                        }
                                                     }
                                                 }
                                             }
